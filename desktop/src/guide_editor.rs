@@ -102,7 +102,7 @@ fn fade_at_to_slider(at: Option<f32>) -> f32 {
     let i = at.map_or(0, |z| {
         (1..FADE_STOPS.len())
             .min_by(|&a, &b| {
-                let d = |i: usize| FADE_STOPS[i].map_or(f32::INFINITY, |s| (s - z).abs());
+                let d = |i: usize| FADE_STOPS.get(i).copied().flatten().map_or(f32::INFINITY, |s| (s - z).abs());
                 d(a).total_cmp(&d(b))
             })
             .unwrap_or(0)
@@ -112,7 +112,7 @@ fn fade_at_to_slider(at: Option<f32>) -> f32 {
 
 fn slider_to_fade_at(v: f32) -> Option<f32> {
     let i = (v.clamp(0.0, 1.0) * (FADE_STOPS.len() - 1) as f32).round() as usize;
-    FADE_STOPS[i.min(FADE_STOPS.len() - 1)]
+    FADE_STOPS.get(i).copied().flatten()
 }
 
 /// A zoom as a percentage: whole, or to a tenth under 10%.

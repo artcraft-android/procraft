@@ -16,6 +16,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -160,6 +161,8 @@ private val OptionsTop = 57.dp
 @Composable
 fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, floating: FloatingFrame? = null) {
     var options by remember { mutableStateOf<ULong?>(null) }
+    // a layer's styles open (its options' Layer Style)
+    var styleFor by remember { mutableStateOf<ULong?>(null) }
     var blendFor by remember { mutableStateOf<ULong?>(null) }
     // blend modes opening under a layer: the rows under it go at once and the panel grows over where
     // they were; closing, it shrinks back to them and they come back a moment later. [blendAt] is
@@ -225,7 +228,11 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, 
         val open = options?.let { id -> vm.layers.firstOrNull { it.id == id }?.let { l -> rows[id]?.let { l to it } } }
         val last = remember { arrayOfNulls<Pair<LayerInfo, Rect>>(1) }
         if (open != null) last[0] = open
-        last[0]?.let { (l, row) -> LayerOptions(open != null, vm, l, row.center.y, onRename = { renaming = l.id }, onDone = { options = null }) }
+        last[0]?.let { (l, row) -> LayerOptions(open != null, vm, l, row.center.y, onRename = { renaming = l.id }, onStyle = { styleFor = l.id }, onDone = { options = null }) }
+        val styled = styleFor?.let { id -> vm.layers.firstOrNull { it.id == id }?.let { l -> rows[id]?.let { l to it } } }
+        val lastStyled = remember { arrayOfNulls<Pair<LayerInfo, Rect>>(1) }
+        if (styled != null) lastStyled[0] = styled
+        lastStyled[0]?.let { (l, row) -> LayerStyleMenu(styled != null, vm, l, row.center.y, onDone = { styleFor = null }) }
         Box {
             PanelHeader(
                 "Layers",
@@ -977,7 +984,11 @@ private fun LayerRow(
             masked -> (-2).dp
             else -> 0.dp
         }
-        Box(Modifier.padding(start = 4.dp).offset(y = shift)) { Thumb(vm, l, thumbShape, held) }
+        // an adjustment layer's thumbnail opens its settings
+        val editsAdjustment = l.adjustment != null && !l.locked
+        Box(Modifier.padding(start = 4.dp).offset(y = shift).then(if (editsAdjustment) Modifier.tap { vm.editAdjustmentLayer(l) } else Modifier)) {
+            Thumb(vm, l, thumbShape, held)
+        }
         // what the layer is, under its name (which stays in the middle): the reference layer, one
         // drawing assist is on for, a private one, a model's layer shared by its texture set's meshes
         val tag = when {
@@ -1103,7 +1114,10 @@ private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape, held: Boolean
     ) {
         // the thumbnail is what is drawn, fitted; small drawings show their pixels; a text layer's
         // is its glyph
-        if (l.text) {
+        if (l.adjustment != null) {
+            // an adjustment layer has no pixels of its own: the Adjustments glyph
+            Icon(PcIcons.Adjustments, contentDescription = null, tint = Pc.TextLayerGlyph, modifier = Modifier.size(40.dp))
+        } else if (l.text) {
             Icon(PcIcons.TextLayer, contentDescription = null, tint = Pc.TextLayerGlyph, modifier = Modifier.fillMaxSize())
         } else {
             vm.thumbnails[l.id]?.let {
@@ -1384,7 +1398,7 @@ internal fun OpacitySlider(value: Float, onChange: (Float) -> Unit, onDone: () -
  * it is left out; lock, duplicate and delete are on the row's swipe.
  */
 @Composable
-private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY: Float, onRename: () -> Unit, onDone: () -> Unit) {
+private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY: Float, onRename: () -> Unit, onStyle: () -> Unit, onDone: () -> Unit) {
     val density = LocalDensity.current
     val place = remember(rowY, density) {
         with(density) { OptionsPlace((-183).dp.roundToPx(), rowY, OptionsTop.roundToPx(), OptionsShadowRoom.roundToPx()) }
@@ -1393,10 +1407,7 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
         PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = place, onDismissRequest = onDone, properties = PopupProperties(focusable = true)) {
             // frosted over the canvas, as the library's menus are; empty (a locked group's or
             // mask's), as measured, a pill 64 tall with the frost alone, untinted
-            // adjustment layers' settings and layer styles have no Android panels yet
-            val rows = vm.layerOptions(l).filter {
-                it.option != LayerOption.ADJUSTMENT_SETTINGS && it.option != LayerOption.LAYER_STYLE
-            }
+            val rows = vm.layerOptions(l)
             // a plugin's actions for the layer, after the app's own
             val actions = remember { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.LAYER) }
             val tint = if (rows.isEmpty() && actions.isEmpty()) Color.Transparent else Pc.GlassMenu
@@ -1435,7 +1446,8 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         LayerOption.MERGE_DOWN -> { { vm.mergeDown(l) } }
                         LayerOption.COMBINE_DOWN -> { { vm.combineDown(l) } }
                         LayerOption.MERGE_MASK -> { { vm.mergeMask(l) } }
-                        LayerOption.ADJUSTMENT_SETTINGS, LayerOption.LAYER_STYLE -> { {} }
+                        LayerOption.ADJUSTMENT_SETTINGS -> { { vm.editAdjustmentLayer(l) } }
+                        LayerOption.LAYER_STYLE -> onStyle
                     }
                     Option(r.label, checked = r.switchOn, enabled = r.enabled, onClick = { act(); onDone() })
                 }
@@ -1455,6 +1467,155 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                 }
             }
             }
+        }
+    }
+}
+
+/**
+ * A layer's styles, left of the panel by its row as its options are: each style's switch, and under
+ * the one opened (a tap on its name) its colour, given the paint colour with a tap, and its sliders.
+ * Each change shows at once and is one undo step when let go. The last, Color, makes all the layer
+ * shows one colour: it has a colour and an opacity only, and takes the paint colour as it is first
+ * switched on.
+ */
+@Composable
+private fun LayerStyleMenu(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY: Float, onDone: () -> Unit) {
+    val density = LocalDensity.current
+    val width = 300.dp
+    val place = remember(rowY, density) {
+        with(density) { OptionsPlace((-183).dp.roundToPx() - (width - 194.dp).roundToPx(), rowY, OptionsTop.roundToPx(), OptionsShadowRoom.roundToPx()) }
+    }
+    val names = remember { io.github.artcraftandroid.procraft.core.layerEffectNames() }
+    var effects by remember(l.id) { mutableStateOf(vm.layerEffects(l)) }
+    var opened by remember(l.id) { mutableStateOf(effects.indexOfFirst { it.on }.coerceAtLeast(0)) }
+    // Color, the style with no size or softness
+    val colorStyle = 4
+    fun set(i: Int, done: Boolean, change: (io.github.artcraftandroid.procraft.core.LayerEffectInfo) -> io.github.artcraftandroid.procraft.core.LayerEffectInfo) {
+        val e = effects.getOrNull(i) ?: return
+        val changed = change(e)
+        effects = effects.toMutableList().also { it[i] = changed }
+        vm.setLayerEffect(l, i, changed, done)
+    }
+    MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f)) { look ->
+        PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = place, onDismissRequest = onDone, properties = PopupProperties(focusable = true)) {
+            val room = with(density) { OptionsShadowRoom.toPx() }
+            Box(
+                look.pointerInput(Unit) {
+                    detectTapGestures { p ->
+                        if (p.x < room || p.y < room || p.x > size.width - room || p.y > size.height - room) onDone()
+                    }
+                }.padding(OptionsShadowRoom).drawBehind { optionsShadow() },
+            ) {
+                Column(Modifier.width(width).clip(RoundedCornerShape(24.dp)).then(rememberFrost(24.dp)).background(Pc.GlassMenu).padding(vertical = 7.dp)) {
+                    Box(Modifier.fillMaxWidth().height(44.dp).padding(start = 19.dp), contentAlignment = Alignment.CenterStart) {
+                        Text("Layer Style", color = Pc.MenuInk, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    }
+                    effects.forEachIndexed { i, e ->
+                        val chosen = i == opened && e.on
+                        Row(
+                            Modifier.fillMaxWidth().height(44.dp).clickable { opened = i }.padding(start = 19.dp, end = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                names.getOrElse(i) { "" },
+                                color = Pc.MenuInk,
+                                fontSize = 17.sp,
+                                fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Box(
+                                Modifier.clickable {
+                                    opened = i
+                                    // Color, switched on as it started out (black, never given a
+                                    // colour): the paint colour, wanted more often than not
+                                    val fresh = i == colorStyle && !e.on && e.r == 0f && e.g == 0f && e.b == 0f
+                                    val (r, g, b) = vm.paintColourParts()
+                                    set(i, done = true) { if (fresh) it.copy(on = !it.on, r = r, g = g, b = b) else it.copy(on = !it.on) }
+                                },
+                            ) { Switch(e.on, enabled = true) }
+                        }
+                        if (chosen) StyleDetails(e, i, colorStyle, vm) { done, change -> set(i, done, change) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Style [i]'s colour (the paint colour with a tap) and its sliders. */
+@Composable
+private fun StyleDetails(
+    e: io.github.artcraftandroid.procraft.core.LayerEffectInfo,
+    i: Int,
+    colorStyle: Int,
+    vm: CanvasViewModel,
+    set: (Boolean, (io.github.artcraftandroid.procraft.core.LayerEffectInfo) -> io.github.artcraftandroid.procraft.core.LayerEffectInfo) -> Unit,
+) {
+    val size = { v: Float -> io.github.artcraftandroid.procraft.core.styleSize(v) }
+    val sizeSlider = { v: Float -> io.github.artcraftandroid.procraft.core.styleSizeSlider(v) }
+    Row(
+        Modifier.fillMaxWidth().height(44.dp).clickable {
+            val (r, g, b) = vm.paintColourParts()
+            set(true) { it.copy(r = r, g = g, b = b) }
+        }.padding(horizontal = 19.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Color", color = Pc.MenuInk, fontSize = 15.sp, modifier = Modifier.weight(1f))
+        Text("Tap for the paint color", color = Pc.MenuInk.copy(alpha = 0.55f), fontSize = 12.sp, maxLines = 1)
+        Spacer(Modifier.width(8.dp))
+        Box(
+            Modifier.size(26.dp).clip(CircleShape).background(Color(e.r.coerceIn(0f, 1f), e.g.coerceIn(0f, 1f), e.b.coerceIn(0f, 1f)))
+                .border(1.5.dp, Color.White.copy(alpha = 0.8f), CircleShape),
+        )
+    }
+    val whole = { v: Float -> "${(v * 100).roundToInt()}%" }
+    val px = { v: Float -> "${v.roundToInt()} px" }
+    if (i != colorStyle) StyleSlider("Size", sizeSlider(e.size), px(e.size)) { v, done -> set(done) { it.copy(size = size(v)) } }
+    StyleSlider("Opacity", e.opacity, whole(e.opacity)) { v, done -> set(done) { it.copy(opacity = v) } }
+    if (i != colorStyle) StyleSlider("Softness", e.softness, whole(e.softness)) { v, done -> set(done) { it.copy(softness = v) } }
+    // a drop shadow falls some way off, one way
+    if (i == 1) {
+        StyleSlider("Distance", sizeSlider(e.distance), px(e.distance)) { v, done -> set(done) { it.copy(distance = size(v)) } }
+        StyleSlider("Angle", e.angle / 360f, "${e.angle.roundToInt()}°") { v, done -> set(done) { it.copy(angle = (v * 360f).roundToInt().toFloat()) } }
+    }
+}
+
+/** A style's slider of [value] (0..1), read as [shown]: set by dragging anywhere along it, done when let go. */
+@Composable
+private fun StyleSlider(label: String, value: Float, shown: String, onChange: (Float, Boolean) -> Unit) {
+    val change by rememberUpdatedState(onChange)
+    Column(Modifier.fillMaxWidth().height(46.dp).padding(horizontal = 19.dp), verticalArrangement = Arrangement.Center) {
+        Row(Modifier.fillMaxWidth()) {
+            Text(label, color = Pc.MenuInk, fontSize = 15.sp, modifier = Modifier.weight(1f))
+            Text(shown, color = Pc.MenuInk, fontSize = 15.sp)
+        }
+        Spacer(Modifier.height(4.dp))
+        BoxWithConstraints(
+            Modifier.fillMaxWidth().height(16.dp).pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    val along = { x: Float -> (x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f) }
+                    change(along(down.position.x), false)
+                    while (true) {
+                        val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                        c.consume()
+                        if (!c.pressed) {
+                            change(along(c.position.x), true)
+                            break
+                        }
+                        change(along(c.position.x), false)
+                    }
+                }
+            },
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            val part = value.coerceIn(0f, 1f)
+            Box(Modifier.fillMaxWidth().height(3.dp).clip(CircleShape).background(Pc.SliderRest))
+            Box(Modifier.fillMaxWidth(part).height(3.dp).clip(CircleShape).background(Pc.Accent))
+            val x = (maxWidth * part).coerceIn(13.dp, (maxWidth - 13.dp).coerceAtLeast(13.dp))
+            Box(Modifier.offset(x = x - 13.dp).size(26.dp, 15.dp).clip(CircleShape).background(Color.White))
         }
     }
 }

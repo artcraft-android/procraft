@@ -11,7 +11,7 @@ use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, cubic_bezier, text};
 
 /// How long a menu takes to open or close, seconds.
-const MENU_TIME: f32 = 0.3;
+pub(crate) const MENU_TIME: f32 = 0.3;
 /// Opening, it grows from almost nothing; closing, it shrinks to this as it fades.
 const START_SCALE: f32 = 0.001;
 const END_SCALE: f32 = 0.8;

@@ -217,6 +217,12 @@ pub struct Layers {
     /// The current layer's options: whose (kept while they fade), and their coming and going.
     options: Option<u64>,
     options_menu: Menu,
+    /// A layer's styles open (its options' Layer Style): which layer's, as they were read, and the
+    /// one opened (its colour and sliders under it).
+    style_for: Option<u64>,
+    style_menu: Menu,
+    style_effects: Vec<procraft_core::LayerEffectInfo>,
+    style_open: usize,
     /// The title's menu, and Delete's question.
     title_menu: Menu,
     /// The +'s menu, while plugins add kinds of layer: a plain layer or one of each kind.
@@ -277,6 +283,11 @@ pub struct Layers {
     pub layer_filters: Vec<procraft_core::PluginLayerFilter>,
     pub filter_list: bool,
     pub filter_settings: bool,
+    /// An adjustment layer's settings asked for (its options' row, or its thumbnail tapped): its
+    /// adjustment opens on the values it keeps.
+    pub edit_adjustment: Option<u64>,
+    /// Where each row's thumbnail was last drawn (points), to tell a tap on it.
+    thumbs_at: HashMap<u64, Rect>,
     pub run_action: Option<String>,
     /// Layer Opacity asked for the current layer (two fingers tapped on its row).
     pub layer_opacity: bool,
@@ -649,7 +660,16 @@ impl Layers {
                                 }
                                 // a tap, not a slide or a hold
                                 if response.clicked() && self.press.is_none_or(|p| p.way == Way::Undecided) {
-                                    tapped = Some(l);
+                                    // an adjustment layer's thumbnail opens its settings
+                                    let on_thumb = response
+                                        .interact_pointer_pos()
+                                        .zip(self.thumbs_at.get(&l.id))
+                                        .is_some_and(|(p, thumb)| thumb.contains(p));
+                                    if on_thumb && l.adjustment.is_some() && !l.locked {
+                                        self.edit_adjustment = Some(l.id);
+                                    } else {
+                                        tapped = Some(l);
+                                    }
                                     self.swiped = None;
                                 }
                             }
@@ -744,6 +764,10 @@ impl Layers {
         if let Some(l) = self.options.and_then(|id| layers.iter().find(|l| l.id == id)) {
             let row_y = row_rects.get(&l.id).map_or(rect.center().y, |r| r.center().y);
             self.layer_options(ctx, look, session, l, rect, row_y, backdrops);
+        }
+        if let Some(l) = self.style_for.and_then(|id| layers.iter().find(|l| l.id == id)) {
+            let row_y = row_rects.get(&l.id).map_or(rect.center().y, |r| r.center().y);
+            self.layer_style(ctx, session, l, rect, row_y, backdrops);
         }
         self.title_menu(ctx, look, session, title, any_picked, backdrops);
         self.add_menu(ctx, look, session, plus, backdrops);
@@ -1559,12 +1583,7 @@ impl Layers {
         row_y: f32,
         backdrops: &mut Vec<f32>,
     ) {
-        // adjustment layers' settings and layer styles have no desktop panels yet
-        let rows: Vec<LayerOptionRow> = session
-            .layer_options(l.id)
-            .into_iter()
-            .filter(|r| !matches!(r.option, LayerOption::AdjustmentSettings | LayerOption::LayerStyle))
-            .collect();
+        let rows: Vec<LayerOptionRow> = session.layer_options(l.id);
         // a vector layer's own rows: whether it is drawn again as fine as the screen when zoomed
         // in, and (with strokes or fills picked on it) what the brush as it is set can give them;
         // how the eraser works on it is chosen in the Eraser band
@@ -1673,8 +1692,191 @@ impl Layers {
             LayerOption::MergeDown => _ = session.merge_down(l.id),
             LayerOption::CombineDown => _ = session.combine_down(l.id),
             LayerOption::MergeMask => _ = session.merge_mask(l.id),
-            LayerOption::AdjustmentSettings | LayerOption::LayerStyle => {}
+            LayerOption::AdjustmentSettings => self.edit_adjustment = Some(l.id),
+            LayerOption::LayerStyle => {
+                self.style_effects = session.layer_effects(l.id);
+                self.style_open = self.style_effects.iter().position(|e| e.on).unwrap_or(0);
+                self.style_for = Some(l.id);
+                self.style_menu.open();
+            }
         }
+    }
+
+    /// A layer's styles, left of the panel by its row as its options are: each style's switch, and
+    /// under the one opened (a tap on its name) its colour, given the paint colour with a tap, and
+    /// its sliders. Each change shows at once and is one undo step when let go. The last, Color,
+    /// makes all the layer shows one colour: it has a colour and an opacity only, and takes the
+    /// paint colour as it is first switched on.
+    #[allow(clippy::too_many_arguments)]
+    fn layer_style(
+        &mut self,
+        ctx: &egui::Context,
+        session: &CanvasSession,
+        l: &LayerInfo,
+        panel: Rect,
+        row_y: f32,
+        backdrops: &mut Vec<f32>,
+    ) {
+        use procraft_core::{LayerEffectInfo, style_size, style_size_slider};
+        const WIDTH: f32 = 300.0;
+        const ROW: f32 = 44.0;
+        const SLIDER: f32 = 46.0;
+        /// Where Color is among them: the style with no size or softness.
+        const COLOR_STYLE: usize = 4;
+        let names = procraft_core::layer_effect_names();
+        let mut effects = std::mem::take(&mut self.style_effects);
+        let mut open = self.style_open;
+        let opened = effects.get(open).is_some_and(|e| e.on);
+        let sliders = match (opened, open) {
+            (false, _) => 0.0,
+            (true, 1) => 5.0,
+            (true, COLOR_STYLE) => 1.0,
+            (true, _) => 3.0,
+        };
+        let height = ROW * (effects.len() + 1 + usize::from(opened)) as f32 + SLIDER * sliders + 14.0;
+        let screen = panel::screen(ctx);
+        let lowest = (screen.bottom() - height).max(screen.top() + OPTIONS_TOP);
+        let top = (row_y - height / 2.0).clamp(screen.top() + OPTIONS_TOP, lowest);
+        let left = panel.left() + OPTIONS_LEFT - (WIDTH - OPTIONS_WIDTH);
+        let rect = Rect::from_min_size(pos2(left, top), vec2(WIDTH, height));
+        let paint = session.color();
+        let paint = [0, 1, 2].map(|k| paint.get(k).copied().unwrap_or(0.0));
+        // the changes asked for: style, its values, kept as a step
+        let mut changes: Vec<(usize, LayerEffectInfo, bool)> = Vec::new();
+        self.style_menu.show(
+            ctx,
+            "layer style",
+            rect,
+            pos2(rect.right(), rect.center().y),
+            menu::Glass { corner: OPTIONS_CORNER, ..menu::FROSTED },
+            backdrops,
+            |ui| {
+                let ink = argb(menu::INK);
+                let mut y = rect.top() + 7.0;
+                let at = |y: f32| pos2(rect.left() + 19.0, y + ROW / 2.0);
+                text(ui.painter(), at(y), Align2::LEFT_CENTER, "Layer Style", 17.0, Weight::Bold, ink);
+                y += ROW;
+                // a slider of `value` (0..1), read as `shown`: where it was dragged to, and whether let go
+                let slider = |ui: &Ui, y: f32, label: &str, value: f32, shown: &str| -> Option<(f32, bool)> {
+                    let (l, r) = (rect.left() + 19.0, rect.right() - 19.0);
+                    let label_y = y + 4.0 + 9.0;
+                    text(ui.painter(), pos2(l, label_y), Align2::LEFT_CENTER, label, 15.0, Weight::Regular, ink);
+                    text(ui.painter(), pos2(r, label_y), Align2::RIGHT_CENTER, shown, 15.0, Weight::Regular, ink);
+                    let track = Rect::from_min_max(pos2(l, y + SLIDER - 4.0 - 16.0), pos2(r, y + SLIDER - 4.0));
+                    let response =
+                        ui.interact(track, ui.scope_id().with(("style slider", label)), Sense::click_and_drag());
+                    let held = response.is_pointer_button_down_on();
+                    let asked = response
+                        .interact_pointer_pos()
+                        .filter(|_| held || response.clicked() || response.drag_stopped())
+                        .map(|p| (((p.x - track.left()) / track.width()).clamp(0.0, 1.0), !held));
+                    let value = asked.map_or(value, |(v, _)| v).clamp(0.0, 1.0);
+                    let (cy, h) = (track.center().y, 3.0);
+                    let line = Rect::from_min_max(pos2(l, cy - h / 2.0), pos2(r, cy + h / 2.0));
+                    ui.painter().rect_filled(line, h / 2.0, argb(SLIDER_REST));
+                    let part = Rect::from_min_size(line.min, vec2(line.width() * value, h));
+                    ui.painter().rect_filled(part, h / 2.0, argb(pc::ACCENT));
+                    let knob = vec2(26.0, 15.0);
+                    let x = (l + line.width() * value).clamp(l + knob.x / 2.0, r - knob.x / 2.0);
+                    ui.painter().rect_filled(Rect::from_center_size(pos2(x, cy), knob), knob.y / 2.0, Color32::WHITE);
+                    asked
+                };
+                for (i, e) in effects.iter().enumerate() {
+                    let chosen = i == open && e.on;
+                    let row = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), ROW));
+                    let name = names.get(i).map_or("", String::as_str);
+                    let weight = if chosen { Weight::SemiBold } else { Weight::Regular };
+                    text(ui.painter(), at(y), Align2::LEFT_CENTER, name, 17.0, weight, ink);
+                    let toggle =
+                        Rect::from_min_size(pos2(row.right() - 14.0 - 63.0, row.center().y - 14.0), vec2(63.0, 28.0));
+                    crate::transform::switch(ui, toggle.min, e.on, ("layer style", i));
+                    // (the row's touch under the switch's, which takes those on it)
+                    let row_tapped = ui.interact(row, ui.scope_id().with(("style row", i)), Sense::click()).clicked();
+                    let switch =
+                        ui.interact(toggle.expand(6.0), ui.scope_id().with(("style switch", i)), Sense::click());
+                    if switch.clicked() {
+                        open = i;
+                        // Color, switched on as it started out (black, never given a colour): the
+                        // paint colour, which is the one wanted more often than not
+                        let fresh = i == COLOR_STYLE && !e.on && e.r == 0.0 && e.g == 0.0 && e.b == 0.0;
+                        let mut changed = LayerEffectInfo { on: !e.on, ..*e };
+                        if fresh {
+                            [changed.r, changed.g, changed.b] = paint;
+                        }
+                        changes.push((i, changed, true));
+                    } else if row_tapped {
+                        open = i;
+                    }
+                    y += ROW;
+                    if !chosen {
+                        continue;
+                    }
+                    // its colour: the paint colour with a tap
+                    let row = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), ROW));
+                    text(ui.painter(), at(y), Align2::LEFT_CENTER, "Color", 15.0, Weight::Regular, ink);
+                    let swatch = pos2(row.right() - 19.0 - 13.0, row.center().y);
+                    let hint = pos2(swatch.x - 13.0 - 8.0, row.center().y);
+                    let faint = ink.gamma_multiply(0.55);
+                    text(
+                        ui.painter(),
+                        hint,
+                        Align2::RIGHT_CENTER,
+                        "Click for the paint color",
+                        12.0,
+                        Weight::Regular,
+                        faint,
+                    );
+                    let colour = Color32::from_rgb((e.r * 255.0) as u8, (e.g * 255.0) as u8, (e.b * 255.0) as u8);
+                    ui.painter().circle_filled(swatch, 13.0, colour);
+                    let rim = egui::Stroke::new(1.5, Color32::WHITE.gamma_multiply(0.8));
+                    ui.painter().circle_stroke(swatch, 12.25, rim);
+                    if ui.interact(row, ui.scope_id().with(("style colour", i)), Sense::click()).clicked() {
+                        let [r, g, b] = paint;
+                        changes.push((i, LayerEffectInfo { r, g, b, ..*e }, true));
+                    }
+                    y += ROW;
+                    let whole = |v: f32| format!("{}%", (v * 100.0).round() as i32);
+                    let px = |v: f32| format!("{} px", v.round() as i32);
+                    if i != COLOR_STYLE {
+                        if let Some((v, done)) = slider(ui, y, "Size", style_size_slider(e.size), &px(e.size)) {
+                            changes.push((i, LayerEffectInfo { size: style_size(v), ..*e }, done));
+                        }
+                        y += SLIDER;
+                    }
+                    if let Some((v, done)) = slider(ui, y, "Opacity", e.opacity, &whole(e.opacity)) {
+                        changes.push((i, LayerEffectInfo { opacity: v, ..*e }, done));
+                    }
+                    y += SLIDER;
+                    if i != COLOR_STYLE {
+                        if let Some((v, done)) = slider(ui, y, "Softness", e.softness, &whole(e.softness)) {
+                            changes.push((i, LayerEffectInfo { softness: v, ..*e }, done));
+                        }
+                        y += SLIDER;
+                    }
+                    // a drop shadow falls some way off, one way
+                    if i == 1 {
+                        let distance = style_size_slider(e.distance);
+                        if let Some((v, done)) = slider(ui, y, "Distance", distance, &px(e.distance)) {
+                            changes.push((i, LayerEffectInfo { distance: style_size(v), ..*e }, done));
+                        }
+                        y += SLIDER;
+                        let angle = format!("{}°", e.angle.round() as i32);
+                        if let Some((v, done)) = slider(ui, y, "Angle", e.angle / 360.0, &angle) {
+                            changes.push((i, LayerEffectInfo { angle: (v * 360.0).round(), ..*e }, done));
+                        }
+                        y += SLIDER;
+                    }
+                }
+            },
+        );
+        for (i, e, done) in changes {
+            if let Some(slot) = effects.get_mut(i) {
+                *slot = e;
+                session.set_layer_effect(l.id, i as u32, e, done);
+            }
+        }
+        self.style_effects = effects;
+        self.style_open = open;
     }
 
     /// The blend editor under a layer's row: its opacity, read and slid, then its blend modes, the
@@ -1842,6 +2044,7 @@ impl Layers {
         let thumb =
             Rect::from_center_size(pos2(x + 4.0 + THUMB.0 / 2.0, row.center().y + shift), vec2(THUMB.0, THUMB.1));
         self.thumbnail(ui, look, session, l, thumb, version, read);
+        self.thumbs_at.insert(l.id, thumb);
         if looks.held {
             ui.painter().rect_stroke(thumb, 4, egui::Stroke::new(2.0, HELD_OUTLINE), egui::StrokeKind::Inside);
         }
@@ -2126,6 +2329,11 @@ impl Layers {
         }
         if l.text {
             look.icon_in(ui, &icons::TEXT_LAYER, rect, argb(TEXT_GLYPH));
+            return;
+        }
+        // an adjustment layer has no pixels of its own: the Adjustments glyph
+        if l.adjustment.is_some() {
+            look.icon(ui, &icons::ADJUSTMENTS, rect.center(), 40.0, argb(TEXT_GLYPH));
             return;
         }
         let stale = version.is_some_and(|v| self.thumbnails.get(&l.id).is_none_or(|(at, _)| *at != v));
@@ -2544,6 +2752,66 @@ impl Pinch {
 mod tests {
     use super::*;
     use egui::{Event, Modifiers, PointerButton, RawInput};
+
+    /// A layer's styles: Drop Shadow's switch turns it on and opens its colour and sliders under
+    /// it, and its Opacity slider clicked halfway sets it to a half, kept as the layer's.
+    #[test]
+    fn layer_style_switches_a_style_on_and_its_slider_sets_it() {
+        let session = CanvasSession::new(400, 300);
+        let l = session.layers().into_iter().find(|l| l.current).expect("a current layer");
+        assert_eq!(session.layer_effects(l.id).len(), 5, "a paint layer takes styles");
+        let ctx = egui::Context::default();
+        crate::look::install_fonts(&ctx);
+        let mut layers =
+            Layers { style_for: Some(l.id), style_effects: session.layer_effects(l.id), ..Layers::default() };
+        layers.style_menu.open();
+        let panel = Rect::from_min_max(pos2(800.0, 60.0), pos2(1180.0, 800.0));
+        let mut time = 0.0;
+        let mut frame = |layers: &mut Layers, events: Vec<Event>| {
+            time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                time: Some(time),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                layers.layer_style(ui.ctx(), &session, &l, panel, 300.0, &mut Vec::new());
+            });
+            output.textures_delta.clear();
+        };
+        let click = |at: Pos2| {
+            let press = |pressed| Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            [vec![Event::PointerMoved(at)], vec![press(true)], vec![press(false)], Vec::new()]
+        };
+        // opened, settled at its size
+        frame(&mut layers, Vec::new());
+        std::thread::sleep(std::time::Duration::from_secs_f32(menu::MENU_TIME + 0.05));
+        frame(&mut layers, Vec::new());
+        let menu = ctx.memory(|m| m.area_rect(egui::Id::unique(("layer style", "menu")))).expect("the styles' menu");
+        // under its title, a row each; Drop Shadow's switch at its end
+        let row = |k: f32| menu.top() + 7.0 + 44.0 * (1.0 + k);
+        for events in click(pos2(menu.right() - 14.0 - 31.5, row(1.0) + 22.0)) {
+            frame(&mut layers, events);
+        }
+        let shadow = session.layer_effects(l.id)[1];
+        assert!(shadow.on, "Drop Shadow on");
+        // grown round its row as the style opened: under it its colour, then Size and Opacity,
+        // Opacity's track 4 above its foot
+        let menu = ctx.memory(|m| m.area_rect(egui::Id::unique(("layer style", "menu")))).expect("the styles' menu");
+        let opacity = menu.top() + 7.0 + 44.0 * 4.0 + 46.0 + 46.0 - 4.0 - 8.0;
+        for events in click(pos2(menu.center().x, opacity)) {
+            frame(&mut layers, events);
+        }
+        let shadow = session.layer_effects(l.id)[1];
+        assert!((shadow.opacity - 0.5).abs() < 0.02, "{}", shadow.opacity);
+        assert!(!session.layer_effects(l.id)[0].on, "Outline stays off");
+    }
 
     #[test]
     fn blend_highlight_stays_centered_while_rows_move() {

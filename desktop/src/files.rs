@@ -924,6 +924,23 @@ pub fn export(
     });
 }
 
+/// The Texture Packer's `sprites`, each a PNG of its own, written into a folder the user picks, as
+/// [`export`] writes the layers' PNG files.
+pub fn export_sprites(
+    session: &Arc<CanvasSession>,
+    sprites: Vec<procraft_core::PackerSprite>,
+    card: &mut crate::export_card::ExportCard,
+) {
+    if card.busy() || sprites.is_empty() {
+        return;
+    }
+    let Some(dir) = dialog().set_title("Export sprites as PNG files").pick_folder() else { return };
+    let dir = dir.to_string_lossy().into_owned();
+    writing(session, card, "Can't export", move |session| {
+        Ok(session.texture_packer_export(dir, sprites)?.into_iter().map(PathBuf::from).collect())
+    });
+}
+
 /// Writes the file plugin export `key` makes of the artwork's layers where the user picks, as
 /// [`export`] writes the app's own.
 pub fn export_plugin(session: &Arc<CanvasSession>, key: &str, card: &mut crate::export_card::ExportCard) {
@@ -1157,7 +1174,9 @@ pub fn write_artwork(
     }
     match format {
         // ours keeps a timeline too (the folder as saved); the other app's is the package
-        Format::Procraft => s.export_artwork(a.dir.clone(), false, path, seed(), Some(crate::timelapse::for_package(&a.dir))),
+        Format::Procraft => {
+            s.export_artwork(a.dir.clone(), false, path, seed(), Some(crate::timelapse::for_package(&a.dir)))
+        }
         Format::Package => s.export_package(path, seed(), Some(crate::timelapse::for_package(&a.dir))),
         Format::Psd => s.export_psd(path),
         Format::Pdf | Format::LayersPdf => s.export_pdf(path, false, pdf_quality),

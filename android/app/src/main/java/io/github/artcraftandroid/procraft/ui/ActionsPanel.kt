@@ -69,6 +69,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.label
+import io.github.artcraftandroid.procraft.canvas.openTexturePacker
 import io.github.artcraftandroid.procraft.core.QuickAction
 import io.github.artcraftandroid.procraft.core.PluginControl
 import io.github.artcraftandroid.procraft.core.PluginFile
@@ -256,7 +257,11 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             ),
         )
         1 -> listOf(
-            listOf(Act("Crop & Resize") { vm.beginCrop() }),
+            listOf(
+                Act("Crop & Resize") { vm.beginCrop() },
+                // the canvas made a comic page the first time
+                Act("Comic panels") { vm.openComicPanels() },
+            ),
             listOf(
                 Toggle("Animation Assist", vm.animation?.pages == false) { vm.changeAnimationAssist(it) },
                 Toggle("Page Assist", vm.animation?.pages == true) { vm.changePageAssist(it) },
@@ -293,6 +298,9 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("Animated PNG") { vm.animatedExport = CanvasViewModel.Animated.PNG },
                 Act("Animated MP4") { vm.animatedExport = CanvasViewModel.Animated.MP4 },
                 Act("Animated HEVC") { vm.animatedExport = CanvasViewModel.Animated.HEVC },
+                Act("Sprite Sheet") { vm.openSpriteSheetExport() },
+                Act("Texture Packer") { vm.openTexturePacker() },
+                Act("Harmony Scene") { shareHarmonyScene(vm, context) },
             ),
         )
         3 -> listOf(

@@ -102,7 +102,7 @@ import io.github.artcraftandroid.procraft.core.ToolKind
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-private val LibraryWidth = 440.dp
+internal val LibraryWidth = 440.dp
 private val SetsWidth = 168.dp
 private val BrushHeight = 80.dp
 private val BrushGap = 8.dp
@@ -269,6 +269,11 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
         LibrariesPanel(vm, arrowX, modifier, floating)
         return
     }
+    // the Pen drawing with light: its settings in the brushes' place, under Brush | Lasso | Light
+    if (vm.drawMode == io.github.artcraftandroid.procraft.canvas.DrawMode.LIGHT) {
+        LightLibrary(vm, arrowX, modifier, floating)
+        return
+    }
     // the brushes shown, and whether each is pinned in the Recent set
     val listed = if (recent) {
         vm.recentBrushes.mapNotNull { r -> sets.getOrNull(r.set.toInt())?.brushes?.getOrNull(r.index.toInt())?.let { it to r.pinned } }
@@ -399,6 +404,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
 
     Popover(floating?.width ?: LibraryWidth, arrowX, modifier, side = if (floating != null) ArrowSide.NONE else ArrowSide.TOP) {
         floating?.let { FloatingTop(it) }
+        // how the Pen or Eraser draws, over the title
+        DrawModeBar(vm)
         val renaming = vm.renamingLibrary == vm.libraryPlace
         Box {
             PanelHeader(

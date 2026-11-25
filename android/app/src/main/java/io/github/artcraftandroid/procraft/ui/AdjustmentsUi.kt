@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.groups
 import io.github.artcraftandroid.procraft.canvas.label
+import io.github.artcraftandroid.procraft.canvas.live
 import io.github.artcraftandroid.procraft.canvas.paintable
 import io.github.artcraftandroid.procraft.canvas.swiped
 import io.github.artcraftandroid.procraft.core.Adjustment
@@ -83,14 +84,16 @@ private val HsbPanelFill get() = if (Pc.light) Color(0xF7F1F1F1) else Color(0xF7
 private val HsbLabel get() = if (Pc.light) Color(0xFF595959) else Color(0xFF808080)
 private val HsbValue get() = if (Pc.light) Color(0xFF363636) else Color(0xFFEDEDED)
 
-/** A row of the adjustments menu's groups. */
+private val MenuDisabledText get() = if (Pc.light) Color(0xFFABABAB) else Color(0xFF5E5E5E)
+
+/** A row of the adjustments menu's groups (greyed, and doing nothing, unless [enabled]). */
 @Composable
-private fun MenuRow(label: String, onTap: () -> Unit) {
+private fun MenuRow(label: String, enabled: Boolean = true, onTap: () -> Unit) {
     Box(
-        Modifier.fillMaxWidth().height(44.dp).tap(onTap).padding(start = 15.dp),
+        Modifier.fillMaxWidth().height(44.dp).tap { if (enabled) onTap() }.padding(start = 15.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
-        Text(label, color = MenuText, fontSize = 17.sp, maxLines = 1)
+        Text(label, color = if (enabled) MenuText else MenuDisabledText, fontSize = 17.sp, maxLines = 1)
     }
 }
 
@@ -129,8 +132,25 @@ fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modif
                 if (filters.isNotEmpty()) MenuGroup(filters) { filter -> MenuRow(filter.name) { vm.startPluginFilter(filter) } }
                 if (actions.isNotEmpty()) MenuGroup(actions) { action -> MenuRow(action.label) { vm.runPluginAction(action.key) } }
             } else {
+                // the adjustment chosen next goes on a layer of its own, editable
+                MenuGroup(listOf("Adjustment Layer")) { label ->
+                    Row(
+                        Modifier.fillMaxWidth().height(44.dp).tap { vm.adjustAsLayer = !vm.adjustAsLayer }.padding(start = 15.dp, end = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(label, color = MenuText, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                        if (vm.adjustAsLayer) Icon(PcIcons.Tick, contentDescription = "On", tint = Pc.Accent, modifier = Modifier.size(20.dp))
+                    }
+                }
                 for (group in Adjustment.groups) {
-                    MenuGroup(group) { a -> MenuRow(a.label) { vm.startAdjustment(a) } }
+                    MenuGroup(group) { a ->
+                        // as an adjustment layer, those that can't be one are greyed
+                        if (vm.adjustAsLayer) {
+                            MenuRow(a.label, enabled = a.live) { vm.addAdjustmentLayer(a) }
+                        } else {
+                            MenuRow(a.label) { vm.startAdjustment(a) }
+                        }
+                    }
                 }
                 if (filters.isNotEmpty() || actions.isNotEmpty()) {
                     MenuGroup(listOf("Plugins")) { label -> MenuRow(label) { showFilters = true } }
@@ -160,6 +180,8 @@ private fun <T> MenuGroup(rows: List<T>, row: @Composable (T) -> Unit) {
 @Composable
 fun AdjustmentBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     val a = vm.adjustment ?: return
+    // an adjustment layer's shows through its mask: it is never painted on
+    val paintable = a.paintable && !vm.adjustOnLayer
     Column(modifier.fillMaxWidth()) {
         Row(
             Modifier.fillMaxWidth().height(32.dp).background(ModeBar).pointerInput(a) {
@@ -172,7 +194,7 @@ fun AdjustmentBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                         if ((c.position - down.position).getDistance() > viewConfiguration.touchSlop) slid = true
                         c.consume()
                         if (!c.pressed) {
-                            if (!slid && a.paintable) vm.adjustModesOpen = !vm.adjustModesOpen
+                            if (!slid && paintable) vm.adjustModesOpen = !vm.adjustModesOpen
                             break
                         }
                     }
@@ -190,8 +212,13 @@ fun AdjustmentBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                 Spacer(Modifier.width(3.dp))
                 Text("${(vm.adjustAmount * 100).roundToInt()}%", color = ModeText, fontSize = 14.sp, maxLines = 1)
             }
+            // an adjustment layer's: said so after its name
+            if (vm.adjustOnLayer) {
+                Spacer(Modifier.width(6.dp))
+                Text("Adjustment Layer", color = ModeText, fontSize = 14.sp, maxLines = 1)
+            }
             // Layer or Pencil, for the adjustments that can be painted on
-            if (a.paintable) {
+            if (paintable) {
                 Box(Modifier.size(33.dp, 32.dp), contentAlignment = Alignment.Center) {
                     Icon(PcIcons.Disclose, contentDescription = null, tint = ModeText, modifier = Modifier.requiredSize(32.dp))
                 }

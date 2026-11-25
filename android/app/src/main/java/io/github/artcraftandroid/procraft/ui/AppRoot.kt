@@ -86,6 +86,7 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
         when {
             vm.guideEditing -> vm.closeGuideEditor(keep = false)
             vm.cropRect != null -> vm.endCrop(false)
+            vm.comicPanels.open -> vm.closeComicPanels()
             vm.lightingStudioOpen -> vm.closeLightingStudio(keep = false)
             vm.studioOpen -> vm.closeStudio(keep = false)
             vm.transformPopup != TransformPopup.NONE -> vm.transformPopup = TransformPopup.NONE
@@ -156,9 +157,11 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
                 if (!vm.barsHidden) PickingBar(Modifier.offset(y = Pc.barShown).zIndex(pickingZ), pick.fromReference)
             }
             // the bars fade out as the interface hides, and back
-            val barsShown = androidx.compose.animation.core.animateFloatAsState(if (vm.barsHidden) 0f else 1f, Motion.bars(), label = "bars").value
+            // (the Texture Packer takes the bars away while it is open)
+            val packing = vm.texturePacker != null
+            val barsShown = androidx.compose.animation.core.animateFloatAsState(if (vm.barsHidden || packing) 0f else 1f, Motion.bars(), label = "bars").value
             // with the interface hidden, a button in the top left brings it back
-            if (barsShown < 1f) {
+            if (barsShown < 1f && !packing) {
                 Box(
                     Modifier.offset(x = 20.dp).size(44.dp).graphicsLayer { alpha = 1f - barsShown }
                         .pointerInput(Unit) { detectTapGestures { if (vm.barsHidden) vm.toggleBars() } },
@@ -267,7 +270,7 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
                     }
                 }
                 androidx.compose.animation.AnimatedVisibility(
-                    vm.showSideBar && !sideGone && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
+                    vm.showSideBar && !sideGone && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && !vm.comicPanels.open && vm.textInfo == null &&
                         vm.opacityLayer == null &&
                         (vm.adjustment == null || vm.adjustPencil),
                     if (sideMoved != null) {
@@ -331,8 +334,8 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             NoticeBand(vm)
             DropBandUi(vm)
             // a full-screen page covers the timeline, as it covers the canvas; the panels open over it
-            val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
-                vm.animatedExport != null || vm.modelAnimatedExport != null
+            val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.comicPanels.open || vm.timeLapseReplaying ||
+                vm.animatedExport != null || vm.modelAnimatedExport != null || vm.spriteSheetExport
             if (!vm.barsHidden && !pageOver) AnimationBar(vm)
             // the bottom toolbars rise from below the screen, and drop away
             FloatableBottom(
@@ -492,10 +495,13 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             }
             TouchCompanion(vm)
             CropOverlay(vm)
+            vm.texturePacker?.let { TexturePackerOverlay(vm, it) }
+            ComicPanelsOverlay(vm)
             if (vm.textInfo != null) TextEditor(vm)
             RasterizePrompt(vm)
             vm.animatedExport?.let { AnimatedExport(vm, it) }
             vm.modelAnimatedExport?.let { ModelAnimatedExport(vm, it) }
+            if (vm.spriteSheetExport) SpriteSheetExport(vm)
             // full-screen pages slide up over everything, and back down
             androidx.compose.animation.AnimatedVisibility(
                 vm.canvasInfoOpen,

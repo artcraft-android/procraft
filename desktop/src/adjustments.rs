@@ -19,6 +19,7 @@ const MENU_BOTTOM_MARGIN: f32 = 25.0;
 const GROUP_FILL: Themed = Themed(0x420C0C0C, 0xFFE8E8E8);
 const GROUP_LINE: Themed = Themed(0x06FFFFFF, 0xFFE2E2E2);
 const MENU_TEXT: Themed = Themed(0xFFC5C5C5, 0xFF393939);
+const MENU_DISABLED_TEXT: Themed = Themed(0xFF5E5E5E, 0xFFABABAB);
 const MODE_BAR: Themed = Themed(0xD63B3B3B, 0xD6EEEEEE);
 const MODE_TEXT: Themed = Themed(0xFFC5C5C5, 0xFF6A6A6A);
 const MODES_FILL: Themed = Themed(0xFF7B7B7B, 0xFFFFFFFF);
@@ -69,6 +70,8 @@ pub enum Asked {
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuRow {
     Open(Adjustment),
+    /// The adjustment chosen next goes on a layer of its own (or no longer does).
+    AsLayer,
     /// The menu turns to the filters imported, or back.
     Plugins,
     Back,
@@ -101,8 +104,10 @@ fn menu_back(body: Rect) -> Rect {
     Rect::from_min_size(pos2(body.left() + 8.0, body.top() + 17.0), vec2(44.0, 34.0))
 }
 
-/// The adjustments menu hanging from its `button`, in groups: colour, blurs, effects, painting.
+/// The adjustments menu hanging from its `button`, in groups: colour, blurs, effects, painting;
+/// over them Adjustment Layer, ticked with `as_layer` (those that can't be one then greyed).
 /// Returns where it is (points) and the row tapped.
+#[allow(clippy::too_many_arguments)]
 pub fn menu(
     ctx: &egui::Context,
     look: &mut Look,
@@ -111,13 +116,17 @@ pub fn menu(
     filters: &[PluginInfo],
     actions: &[PluginAction],
     showing_filters: bool,
+    as_layer: bool,
 ) -> (Rect, Option<MenuRow>) {
     let screen = panel::screen(ctx);
     let (left, arrow_x) = panel::place(ctx, MENU_WIDTH, button.center().x);
     let top = screen.top() + pc::BAR_HEIGHT;
     let groups = menu_groups(filters, actions, showing_filters);
+    // (Adjustment Layer's own group over the adjustments)
+    let switch = if showing_filters { 0.0 } else { 44.0 + 10.0 };
     let rows: f32 = groups.iter().map(|g| g.len() as f32 * 44.0 + g.len().saturating_sub(1) as f32).sum::<f32>()
-        + 10.0 * groups.len().saturating_sub(1) as f32;
+        + 10.0 * groups.len().saturating_sub(1) as f32
+        + switch;
     let content = panel::ARROW_HEIGHT + 52.0 + 8.0 + rows + 10.0;
     let height = content.min(screen.bottom() - MENU_BOTTOM_MARGIN - top);
     let rect = Rect::from_min_size(pos2(left, top), vec2(MENU_WIDTH, height));
@@ -149,6 +158,22 @@ pub fn menu(
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                    // the adjustment chosen next goes on a layer of its own, editable
+                    if !showing_filters {
+                        let (card, _) = ui.allocate_exact_size(vec2(list.width(), 44.0), Sense::hover());
+                        ui.painter().rect_filled(card, 13, argb(GROUP_FILL));
+                        let at = pos2(card.left() + 15.0, card.center().y);
+                        let label = "Adjustment Layer";
+                        text(ui.painter(), at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(MENU_TEXT));
+                        if as_layer {
+                            let tick = pos2(card.right() - 14.0 - 10.0, card.center().y);
+                            look.icon(ui, &icons::TICK, tick, 20.0, argb(pc::ACCENT));
+                        }
+                        if ui.interact(card, ui.scope_id().with("as layer"), Sense::click()).clicked() {
+                            tapped = Some(MenuRow::AsLayer);
+                        }
+                        ui.add_space(10.0);
+                    }
                     for (k, group) in groups.iter().enumerate() {
                         if k > 0 {
                             ui.add_space(10.0);
@@ -167,7 +192,11 @@ pub fn menu(
                                 ui.painter().rect_filled(line, 0, argb(GROUP_LINE));
                             }
                             let at = pos2(row.left() + 15.0, row.center().y);
-                            text(ui.painter(), at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(MENU_TEXT));
+                            // as an adjustment layer, those that can't be one are greyed
+                            let takes =
+                                !as_layer || !matches!(tap, MenuRow::Open(a) if !procraft_core::adjustment_live(*a));
+                            let ink = argb(if takes { MENU_TEXT } else { MENU_DISABLED_TEXT });
+                            text(ui.painter(), at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, ink);
                             if ui.interact(row, ui.scope_id().with(("adjustment", k, i)), Sense::click()).clicked() {
                                 tapped = Some(tap.clone());
                             }
@@ -187,6 +216,8 @@ pub struct Adjustments {
     pub modes_open: bool,
     /// The menu has turned to the filters imported.
     pub showing_filters: bool,
+    /// The menu adds an adjustment layer rather than changing the current layer.
+    pub as_layer: bool,
     /// The effect adjustments' toolbars.
     toolbars: crate::adjust_panels::Toolbars,
 }
@@ -219,7 +250,8 @@ impl Adjustments {
         egui::Area::new(Id::unique("adjust modes button")).fixed_pos(band.min).order(Order::Foreground).show(
             ctx,
             |ui| {
-                if ui.allocate_rect(band, Sense::click()).clicked() && procraft_core::adjustment_paintable(a) {
+                let paintable = procraft_core::adjustment_paintable(a) && !shown.on_layer;
+                if ui.allocate_rect(band, Sense::click()).clicked() && paintable {
                     self.modes_open = !self.modes_open;
                 }
             },
@@ -392,12 +424,15 @@ fn bar_in(ui: &Ui, look: &mut Look, shown: &AdjustShown, a: Adjustment, band: Re
     let ink = argb(MODE_TEXT);
     let label = shown.plugin.as_ref().map_or_else(|| adjustment_label(a), |filter| filter.name.clone());
     let swiped = procraft_core::adjustment_swiped(a);
-    let paintable = procraft_core::adjustment_paintable(a);
+    // an adjustment layer's shows through its mask: it is never painted on
+    let paintable = procraft_core::adjustment_paintable(a) && !shown.on_layer;
     let amount = format!("{}%", (shown.amount * 100.0).round() as i32);
     let measure = |s: &str, size: f32, w: Weight| painter.layout_no_wrap(s.into(), w.font(size), ink).size().x;
+    const ON_LAYER: &str = "Adjustment Layer";
     let width = 33.0
         + measure(&label, 17.0, Weight::Bold)
         + if swiped { 3.0 + measure(&amount, 14.0, Weight::Regular) } else { 0.0 }
+        + if shown.on_layer { 6.0 + measure(ON_LAYER, 14.0, Weight::Regular) } else { 0.0 }
         + if paintable { 33.0 } else { 0.0 };
     let mut x = band.center().x - width / 2.0;
     look.icon(ui, icon(a), pos2(x + 16.5, band.center().y), 32.0, ink);
@@ -405,6 +440,11 @@ fn bar_in(ui: &Ui, look: &mut Look, shown: &AdjustShown, a: Adjustment, band: Re
     x = text(painter, pos2(x, band.center().y), Align2::LEFT_CENTER, &label, 17.0, Weight::Bold, ink).right();
     if swiped {
         x = text(painter, pos2(x + 3.0, band.center().y), Align2::LEFT_CENTER, &amount, 14.0, Weight::Regular, ink)
+            .right();
+    }
+    // an adjustment layer's: said so after its name
+    if shown.on_layer {
+        x = text(painter, pos2(x + 6.0, band.center().y), Align2::LEFT_CENTER, ON_LAYER, 14.0, Weight::Regular, ink)
             .right();
     }
     if paintable {
@@ -689,7 +729,7 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                let (rect, row) = menu(ui.ctx(), &mut look, button, &mut Vec::new(), &filters, &[], turned);
+                let (rect, row) = menu(ui.ctx(), &mut look, button, &mut Vec::new(), &filters, &[], turned, false);
                 at = menu_back(panel::body(rect)).center();
                 tapped = tapped.clone().or(row);
             });

@@ -142,11 +142,16 @@ private fun ToolButtons(vm: CanvasViewModel, fit: Pc.BarFit, upright: Boolean) {
     // the layers and colour panels take the highlight from the current tool while open
     val panelOpen = vm.panel == Panel.LAYERS || vm.panel == Panel.COLOR || vm.transforming || vm.selecting || vm.adjustment != null
     // painting an adjustment on (or cloning), the brush shows it
+    // the Pen as it draws: with light (a sun) on an HDR canvas, kept while another tool is up
     ToolButton(
-        if (vm.adjustPencil) PcIcons.BrushPaintedOn else PcIcons.Brush,
+        when {
+            vm.adjustPencil -> PcIcons.BrushPaintedOn
+            vm.penLight && vm.isHdr -> PcIcons.Light
+            else -> PcIcons.Brush
+        },
         "Paint",
         fit.button,
-        selected = vm.adjustPencil || (!panelOpen && vm.tool == ToolKind.PAINT),
+        selected = vm.adjustPencil || (!panelOpen && (vm.tool == ToolKind.PAINT || vm.tool == ToolKind.LIGHT)),
         onHold = { vm.toolHeld(ToolKind.PAINT) },
         upright = upright,
     ) {

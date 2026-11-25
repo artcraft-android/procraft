@@ -1,7 +1,8 @@
 //! An alert over everything, as the Android app's (ui/AlertUi.kt): the window dims as a dark glass
 //! panel fades in, settling from a little larger; in it a title (after an icon), a message, and
 //! Cancel beside the action, red when it destroys (an extra choice, blue, can sit between them,
-//! the panel widening for it). A tap beside the panel cancels.
+//! the panel widening for it). A tap beside the panel cancels. One can ask for a name too: a field
+//! under the message, Return giving the action (which waits for a name).
 
 use std::time::Instant;
 
@@ -97,7 +98,14 @@ pub struct Alert {
     asking: Option<Asking>,
     open: bool,
     since: Option<Instant>,
+    /// The name asked for, as typed (none: no field), and whether its field has had the focus.
+    field: Option<(String, bool)>,
 }
+
+/// The name field's height, and its gap above the buttons.
+const FIELD_HEIGHT: f32 = 40.0;
+const FIELD_GAP: f32 = 16.0;
+const FIELD_FILL: Themed = Themed(0xFF2D2D2D, 0xFFFFFFFF);
 
 impl Alert {
     /// Asks `title` (after `icon`), saying `message`, with Cancel and a red `action`.
@@ -129,9 +137,31 @@ impl Alert {
     }
 
     pub fn ask(&mut self, asking: Asking) {
+        self.field = None;
         self.asking = Some(asking);
         self.open = true;
         self.since = Some(Instant::now());
+    }
+
+    /// Asks for a name, `title`, with a field holding `name` to start from, Cancel and a blue
+    /// `action` (see [`Alert::typed`]).
+    pub fn ask_name(&mut self, title: &str, name: &str, action: &str) {
+        self.ask(Asking {
+            title: title.into(),
+            message: String::new(),
+            action: action.into(),
+            icon: None,
+            destructive: false,
+            extra: None,
+            first: None,
+            alone: false,
+        });
+        self.field = Some((name.to_owned(), false));
+    }
+
+    /// The name typed in its field, when it asks for one.
+    pub fn typed(&self) -> Option<&str> {
+        self.field.as_ref().map(|(typed, _)| typed.as_str())
     }
 
     pub fn is_open(&self) -> bool {
@@ -201,7 +231,8 @@ impl Alert {
         let wrapped =
             crate::look::wrapped_centred(&measure, &asking.message, 16.0, Weight::Regular, argb(INK), inner, 20.0);
         let message = if asking.message.is_empty() { 0.0 } else { wrapped.size().y };
-        let height = 21.0 + 31.0 + 13.0 + message + 27.0 + BUTTON_HEIGHT + 16.0;
+        let field = if self.field.is_some() { FIELD_HEIGHT + FIELD_GAP } else { 0.0 };
+        let height = 21.0 + 31.0 + 13.0 + message + field + 27.0 + BUTTON_HEIGHT + 16.0;
         let panel = Rect::from_center_size(screen.center(), vec2(width, height));
         let mut answer = None;
         let area = Id::unique("alert");
@@ -245,6 +276,32 @@ impl Alert {
             if !asking.message.is_empty() {
                 ui.painter().galley(pos2(panel.center().x, panel.top() + 21.0 + 31.0 + 13.0), wrapped.clone(), ink);
             }
+            // the name asked for: Return gives the action, which waits for a name
+            let mut named = true;
+            if let Some((typed, focused)) = self.field.as_mut() {
+                let top = panel.top() + 21.0 + 31.0 + 13.0 + message;
+                let rect =
+                    Rect::from_min_size(pos2(panel.left() + SIDE, top), vec2(panel.width() - SIDE * 2.0, FIELD_HEIGHT));
+                ui.painter().rect_filled(rect, 10, argb(FIELD_FILL));
+                let inner = rect.shrink2(vec2(12.0, 0.0));
+                let edit = egui::TextEdit::singleline(typed)
+                    .font(Weight::Regular.font(17.0))
+                    .text_color(ink)
+                    .frame(egui::Frame::NONE)
+                    .margin(vec2(0.0, 0.0))
+                    .align(Align2::LEFT_CENTER)
+                    .desired_width(inner.width())
+                    .char_limit(80);
+                let output = ui.put(Rect::from_center_size(inner.center(), vec2(inner.width(), 22.0)), edit);
+                if !*focused {
+                    output.request_focus();
+                    *focused = true;
+                }
+                named = !typed.trim().is_empty();
+                if named && output.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    answer = Some(Answer::Action);
+                }
+            }
             let top = panel.bottom() - 16.0 - BUTTON_HEIGHT;
             let action_fill = if asking.destructive { DESTROY_FILL } else { pc::ACCENT.into() };
             let mut choices = match &asking.first {
@@ -259,9 +316,12 @@ impl Alert {
             for (i, (label, fill, which)) in choices.into_iter().enumerate() {
                 let left = panel.left() + SIDE + (button_width + BUTTON_GAP) * i as f32;
                 let rect = Rect::from_min_size(pos2(left, top), vec2(button_width, BUTTON_HEIGHT));
-                ui.painter().rect_filled(rect, BUTTON_HEIGHT / 2.0, argb(fill));
+                // (the action waits for a name, when it asks for one)
+                let can = named || which != Answer::Action;
+                let fill = if can { argb(fill) } else { argb(fill).gamma_multiply(0.4) };
+                ui.painter().rect_filled(rect, BUTTON_HEIGHT / 2.0, fill);
                 text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, 17.0, Weight::Medium, Color32::WHITE);
-                if ui.interact(rect, ui.scope_id().with(("button", i)), Sense::click()).clicked() {
+                if ui.interact(rect, ui.scope_id().with(("button", i)), Sense::click()).clicked() && can {
                     answer = Some(which);
                 }
             }

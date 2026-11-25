@@ -157,6 +157,10 @@ fun GalleryScreen(vm: CanvasViewModel) {
     var selecting by remember { mutableStateOf(false) }
     val selected = remember { mutableStateListOf<String>() }
     var moreOpen by remember { mutableStateOf(false) }
+    // the workspaces' list open, a workspace's name being asked for, and one asked about deleting
+    var workspacesOpen by remember { mutableStateOf(false) }
+    var namingWorkspace by remember { mutableStateOf<WorkspaceNaming?>(null) }
+    var deletingWorkspace by remember { mutableStateOf<WorkspaceDeleting?>(null) }
     // Share's formats, open for these artworks
     var sharing by remember { mutableStateOf<GalleryShare?>(null) }
     // artworks waiting for their PDF's quality (several go into one, named as the share says)
@@ -273,6 +277,11 @@ fun GalleryScreen(vm: CanvasViewModel) {
             } else {
                 GalleryHeader(
                     stack = vm.openStack?.name,
+                    workspace = vm.workspace.name,
+                    onWorkspaces = {
+                        moreOpen = false
+                        workspacesOpen = !workspacesOpen
+                    },
                     fit = fit,
                     titleHeight = titleHeight,
                     onMore = { moreOpen = !moreOpen },
@@ -605,6 +614,32 @@ fun GalleryScreen(vm: CanvasViewModel) {
                 vm.newArtwork(w, h)
             }
         }
+        // the workspaces, hanging from their button in the middle of the title row
+        if (workspacesOpen) Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { workspacesOpen = false } })
+        MenuPresence(workspacesOpen && vm.openStack == null, androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)) { look ->
+            WorkspacesPanel(
+                Modifier.offset(x = (maxWidth - 300.dp) / 2, y = 60.dp).then(look),
+                workspaces = vm.workspaceList,
+                showing = vm.workspace,
+                onPick = { picked ->
+                    workspacesOpen = false
+                    endSelecting()
+                    vm.showWorkspace(picked)
+                },
+                onNew = {
+                    workspacesOpen = false
+                    namingWorkspace = WorkspaceNaming()
+                },
+                onRename = { renamed ->
+                    workspacesOpen = false
+                    namingWorkspace = WorkspaceNaming(renamed)
+                },
+                onDelete = { gone ->
+                    workspacesOpen = false
+                    deletingWorkspace = WorkspaceDeleting(gone, vm.workspaceArtworkCount(gone))
+                },
+            )
+        }
         if (moreOpen) Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { moreOpen = false } })
         // under More, kept 4 from the screen's edge: what the title row has no room for
         val morePlace = popoverPlace(250.dp, moreCentre, maxWidth, minRight = 4.dp)
@@ -782,6 +817,38 @@ fun GalleryScreen(vm: CanvasViewModel) {
         RecoveryProgress(recovery, recovered)
     }
 
+    // a workspace's name asked for (a new one's, shown at once, or another name), and one deleted
+    // with its artworks after asking
+    Alert(
+        namingWorkspace,
+        title = { n -> if (n.renamed != null) "Rename Workspace" else "New Workspace" },
+        message = { "" },
+        action = if (namingWorkspace?.renamed != null) "Rename" else "Create",
+        destructive = false,
+        field = namingWorkspace?.typed,
+        onField = { typed -> namingWorkspace = namingWorkspace?.copy(typed = typed) },
+        onCancel = { namingWorkspace = null },
+        onAction = { n ->
+            val name = n.typed.trim()
+            if (name.isNotEmpty()) {
+                if (n.renamed != null) vm.renameWorkspace(n.renamed, name) else vm.newWorkspace(name)
+                endSelecting()
+            }
+            namingWorkspace = null
+        },
+    )
+    Alert(
+        deletingWorkspace,
+        title = { d -> "Delete “${d.workspace.name}”?" },
+        message = { d -> d.message },
+        action = "Delete",
+        icon = PcIcons.Trash,
+        onCancel = { deletingWorkspace = null },
+        onAction = { d ->
+            vm.deleteWorkspace(d.workspace)
+            deletingWorkspace = null
+        },
+    )
     // deleting what Select picked (a stack with its artworks), or one swiped to
     Alert(
         deletingSelected,
@@ -850,6 +917,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
 @Composable
 private fun GalleryHeader(
     stack: String?,
+    workspace: String,
+    onWorkspaces: () -> Unit,
     fit: io.github.artcraftandroid.procraft.core.GalleryHeaderFit,
     titleHeight: Dp,
     onMore: () -> Unit,
@@ -862,7 +931,11 @@ private fun GalleryHeader(
     onImport: () -> Unit,
     onPhoto: () -> Unit,
 ) {
-    Box(Modifier.fillMaxWidth().height(55.dp)) {
+    BoxWithConstraints(Modifier.fillMaxWidth().height(55.dp)) {
+        // the workspaces are the gallery's: in a stack the middle is its name's
+        if (stack == null) {
+            WorkspaceButton(workspace, workspaceButtonRoom(maxWidth), Modifier.align(Alignment.TopCenter).padding(top = 10.dp), onWorkspaces)
+        }
         // into a stack the title changes at once; back out, the stack's name fades out as the
         // gallery's fades in
         androidx.compose.animation.AnimatedContent(

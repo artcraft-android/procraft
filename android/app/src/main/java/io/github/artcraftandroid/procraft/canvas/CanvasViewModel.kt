@@ -155,7 +155,7 @@ enum class HarmonyKind(val label: String, val turns: List<Float>) {
 enum class Screen { GALLERY, CANVAS }
 
 /** A popover over the transform toolbar. */
-enum class TransformPopup { NONE, SNAPPING, INTERPOLATION }
+enum class TransformPopup { NONE, SNAPPING, INTERPOLATION, PUPPET_MESH }
 
 /** The selection tool's ways of making a selection. */
 enum class SelectionKind(val label: String) { AUTOMATIC("Automatic"), FREEHAND("Freehand"), RECTANGLE("Rectangle"), ELLIPSE("Ellipse") }
@@ -208,7 +208,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var wideColorWindow by mutableStateOf(false)
         private set
 
-    val store = ArtworkStore(File(app.filesDir, "artworks"))
+    /** The gallery's workspaces: the first is the gallery there has always been, the others are kept beside it. */
+    val workspaces: io.github.artcraftandroid.procraft.core.Workspaces =
+        io.github.artcraftandroid.procraft.core.Workspaces.open(File(app.filesDir, "artworks").path, File(app.filesDir, "workspaces").path)
+
+    /** The workspace showing, and every one there is. */
+    var workspace by mutableStateOf(workspaces.selected())
+        private set
+    var workspaceList by mutableStateOf(workspaces.list())
+        private set
+
+    /** The artworks of the workspace showing: where new ones go too. */
+    var store by mutableStateOf(ArtworkStore(File(workspace.root)))
+        private set
     var artworks by mutableStateOf<List<Artwork>>(emptyList())
         private set
 
@@ -278,6 +290,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     var tool by mutableStateOf(ToolKind.PAINT)
+        private set
+    /** The artwork is an HDR one (chosen as it was made): the Pen can draw with light on it. */
+    var isHdr by mutableStateOf(false)
+        private set
+    /** The Pen draws with light (the light tool), on an HDR artwork; its settings, and how far past white Brighten goes. */
+    var penLight by mutableStateOf(false)
+        private set
+    var lightSettings by mutableStateOf(io.github.artcraftandroid.procraft.core.LightSettings(io.github.artcraftandroid.procraft.core.LightKind.BRIGHTEN, 0.5f))
+        private set
+    var lightLimit by mutableFloatStateOf(2f)
         private set
     var size by mutableFloatStateOf(0f)
         private set
@@ -1232,6 +1254,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var advancedMesh by mutableStateOf(transformPrefs.getBoolean(ADVANCED_MESH, false))
         private set
 
+    /** Puppet's settings (PuppetWarp.kt). */
+    val puppet = PuppetWarp(transformPrefs)
+
     /** The selection tool is open. */
     var selecting by mutableStateOf(false)
         private set
@@ -1321,6 +1346,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var adjustAmount by mutableFloatStateOf(0f)
         private set
+    /** The adjustment open is an adjustment layer's (it shows through its mask, never painted on). */
+    var adjustOnLayer by mutableStateOf(false)
+        private set
+    /** The Adjustments menu adds an adjustment layer rather than changing the current layer. */
+    var adjustAsLayer by mutableStateOf(false)
     var hue50 by mutableFloatStateOf(0.5f)
         private set
     var saturation50 by mutableFloatStateOf(0.5f)
@@ -2365,6 +2395,57 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the home screen's widget shows the artwork worked on last
         viewModelScope.launch(Dispatchers.IO) { io.github.artcraftandroid.procraft.gallery.RecentArtworkWidget.refresh(getApplication<Application>()) }
     }
+
+    /**
+     * The workspaces read again, and the one picked shown if it isn't the one showing: another was
+     * picked, or this one has a new name, or is gone. No stack stays open.
+     */
+    private fun readWorkspaces() {
+        workspaceList = workspaces.list()
+        val picked = workspaces.selected()
+        if (picked == workspace) return
+        store = ArtworkStore(File(picked.root))
+        workspace = picked
+        openStack = null
+        galleryEntries = emptyList()
+        artworks = emptyList()
+        galleryVersion++
+        refreshGallery()
+    }
+
+    fun showWorkspace(next: io.github.artcraftandroid.procraft.core.Workspace) {
+        workspaces.select(next)
+        readWorkspaces()
+    }
+
+    /** A new, empty workspace named [name], shown at once. */
+    fun newWorkspace(name: String) {
+        val made = workspaces.create(name)
+        if (made == null) {
+            message = "This workspace can't be made."
+            return
+        }
+        showWorkspace(made)
+    }
+
+    /** Runs [change] on the workspaces off the main thread once nothing is being saved in them; true when it went. */
+    private fun changingWorkspaces(change: () -> Boolean, failed: String) {
+        viewModelScope.launch {
+            while (closingSaves.get() > 0) kotlinx.coroutines.delay(100)
+            if (!withContext(Dispatchers.IO) { change() }) message = failed
+            readWorkspaces()
+        }
+    }
+
+    fun renameWorkspace(renamed: io.github.artcraftandroid.procraft.core.Workspace, name: String) =
+        changingWorkspaces({ workspaces.rename(renamed, name) != null }, "This workspace can't be renamed.")
+
+    /** [gone] deleted with every artwork in it; if it was showing, the first one shows. */
+    fun deleteWorkspace(gone: io.github.artcraftandroid.procraft.core.Workspace) =
+        changingWorkspaces({ workspaces.delete(gone); true }, "")
+
+    /** How many artworks [w] holds, those in its stacks too: what deleting it deletes. */
+    fun workspaceArtworkCount(w: io.github.artcraftandroid.procraft.core.Workspace): Int = workspaces.artworkCount(w).toInt()
 
     fun showStack(s: io.github.artcraftandroid.procraft.gallery.Stack?) {
         openStack = s
@@ -3831,6 +3912,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // Color Fill fills as the selection tool closes
         closeSelecting()
         endAdjustment(true)
+        if (texturePacker != null) closeTexturePacker()
         val s = session ?: return
         noteTime()
         keepChoices(s)
@@ -3973,6 +4055,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (now != tool) {
             feedback()
             endRecolor()
+            if (now == ToolKind.LIGHT || now == ToolKind.PAINT) penLight = now == ToolKind.LIGHT
             tool = now
             readSliders()
             currentBrush = s.currentBrush()
@@ -4293,6 +4376,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         freehand = emptyList()
         selectionOutlines = emptyList()
         tool = ToolKind.PAINT
+        // the light tool is an HDR canvas's; its settings and limit as last left
+        isHdr = s.isHdr()
+        penLight = false
+        lightSettings = s.light()
+        lightLimit = interfacePrefs.getFloat(LIGHT_LIMIT_STOPS, 2f).coerceIn(0f, HDR_LIMIT_MOST)
+        s.setLightLimit(lightLimit)
         applyColor()
         readSliders()
         refresh()
@@ -4319,6 +4408,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun select(tool: ToolKind) {
         feedback()
         endRecolor()
+        if (tool == ToolKind.PAINT || tool == ToolKind.LIGHT) penLight = tool == ToolKind.LIGHT
         session?.setTool(tool)
         this.tool = tool
         readSliders()
@@ -5292,7 +5382,56 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         select(tool)
     }
 
-    fun toolPressed(tool: ToolKind) {
+    /** The Pen's tool: the light tool while it draws with light. */
+    val penTool: ToolKind get() = if (penLight && isHdr) ToolKind.LIGHT else ToolKind.PAINT
+
+    /** The ways the current tool can draw, as the library's top offers them: none for the Smudge, Lasso only with the Lasso Fill plugin, Light only on an HDR canvas. */
+    val drawModes: List<DrawMode>
+        get() {
+            if (tool == ToolKind.SMUDGE) return emptyList()
+            val modes = mutableListOf(DrawMode.BRUSH)
+            if (lassoFills) modes += DrawMode.LASSO
+            if (tool != ToolKind.ERASE && isHdr) modes += DrawMode.LIGHT
+            return if (modes.size > 1) modes else emptyList()
+        }
+
+    /** How the current tool draws. */
+    val drawMode: DrawMode
+        get() = when (tool) {
+            ToolKind.LIGHT -> DrawMode.LIGHT
+            ToolKind.PAINT -> if (paintLasso && lassoFills) DrawMode.LASSO else DrawMode.BRUSH
+            ToolKind.ERASE -> if (eraseLasso && lassoFills) DrawMode.LASSO else DrawMode.BRUSH
+            ToolKind.SMUDGE -> DrawMode.BRUSH
+        }
+
+    /** The library's top chose how the Pen or Eraser draws. */
+    fun chooseDrawMode(mode: DrawMode) {
+        if (mode == drawMode) return
+        if (tool == ToolKind.ERASE) {
+            eraseLasso = mode == DrawMode.LASSO
+            return
+        }
+        paintLasso = mode == DrawMode.LASSO
+        select(if (mode == DrawMode.LIGHT) ToolKind.LIGHT else ToolKind.PAINT)
+    }
+
+    /** The light tool's settings changed (from its panel). */
+    fun setLight(settings: io.github.artcraftandroid.procraft.core.LightSettings) {
+        val s = session ?: return
+        s.setLight(settings)
+        lightSettings = s.light()
+    }
+
+    /** How far past white the light tool's Brighten goes (stops), kept for the artworks after. */
+    fun chooseLightLimit(stops: Float) {
+        lightLimit = stops.coerceIn(0f, HDR_LIMIT_MOST)
+        session?.setLightLimit(lightLimit)
+        interfacePrefs.edit().putFloat(LIGHT_LIMIT_STOPS, lightLimit).apply()
+    }
+
+    fun toolPressed(pressed: ToolKind) {
+        // the Pen's button picks the Pen as it draws (with light, or with paint)
+        val tool = if (pressed == ToolKind.PAINT) penTool else pressed
         // leaving a mode for a tool keeps what it made, and only picks the tool
         if (!switchModes(ModeButton.Tool)) {
             select(tool)
@@ -5329,8 +5468,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         val s = session ?: return
         val brush = currentBrush ?: return
-        if (target == tool || !switchModes(ModeButton.ToolHeld)) return
-        select(target)
+        // (the Pen's button, the Pen as it draws: with light, or with paint)
+        val taking = if (target == ToolKind.PAINT) penTool else target
+        if (taking == tool || !switchModes(ModeButton.ToolHeld)) return
+        select(taking)
         if (s.selectBrush(brush.set, brush.index)) {
             currentBrush = s.currentBrush()
             readSliders()
@@ -5339,7 +5480,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (panel == Panel.BRUSHES) panel = Panel.NONE
         showDone(
-            when (target) {
+            when (taking) {
                 ToolKind.PAINT -> "Painting"
                 ToolKind.SMUDGE -> "Smudging"
                 ToolKind.ERASE -> "Erasing"
@@ -5531,6 +5672,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             timeLapseExporting = false
         }
     }
+
+    /** Comic Panels (ui/ComicPanelsUi.kt): open or not, and the panels it outlines. */
+    val comicPanels = io.github.artcraftandroid.procraft.ui.ComicPanels()
 
     // ---- crop and resize: the shared core edits it (crates/core crop_edit.rs); these show it ----
 
@@ -7840,6 +7984,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun export(kind: Export, pdfQuality: Int = 100): List<File> =
         withExportCard("The artwork couldn't be exported.") { s -> exportFiles(s, kind, pdfQuality).takeIf { it.isNotEmpty() } }.orEmpty()
 
+    /** The Texture Packer, while it is open (canvas/TexturePacker.kt). */
+    var texturePacker by mutableStateOf<TexturePackerState?>(null)
+
+    /** The Texture Packer's [sprites], each a PNG of its own in a folder named after the artwork, written into the cache to share. */
+    suspend fun exportSprites(sprites: List<io.github.artcraftandroid.procraft.core.PackerSprite>): List<File> =
+        withExportCard("The sprites couldn't be made.") { s ->
+            withContext(Dispatchers.IO) {
+                val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
+                val folder = File(File(getApplication<Application>().cacheDir, "exports"), "$base Sprites").apply { deleteRecursively(); mkdirs() }
+                try {
+                    s.texturePackerExport(folder.path, sprites).map { File(it) }.takeIf { it.isNotEmpty() }
+                } catch (x: MobileException) {
+                    AppLog.e(TAG, "exporting the sprites", x)
+                    null
+                }
+            }
+        }.orEmpty()
+
     /** The file a plugin makes of the artwork's layers of a kind it adds ([e]), written into the cache to share. */
     suspend fun exportPlugin(e: io.github.artcraftandroid.procraft.core.PluginExport): File? =
         withExportCard("The artwork couldn't be exported.") { s ->
@@ -7862,7 +8024,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * core tells it) and a check once made: what it made, or null if it was cancelled (its result
      * left unshared) or made nothing ([failed] is then told). One export at a time.
      */
-    private suspend fun <T : Any> withExportCard(failed: String, work: suspend (CanvasSession) -> T?): T? {
+    internal suspend fun <T : Any> withExportCard(failed: String, work: suspend (CanvasSession) -> T?): T? {
         val s = session ?: return null
         if (exportShown != null || timeLapseExporting) return null
         s.resetExportProgress()
@@ -8027,6 +8189,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The animated export being set up, if any. */
     var animatedExport by mutableStateOf<Animated?>(null)
+
+    /** Share's sprite sheet export, while its screen is up (ui/SpriteSheetUi.kt). */
+    var spriteSheetExport by mutableStateOf(false)
 
     /** The artwork was opened from the gallery's Share only for [animatedExport]: closing it goes back. */
     private var exportingFromGallery = false
@@ -8505,6 +8670,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         adjustment = a.adjustment
         pluginFilter = a.plugin
         adjustAmount = a.amount
+        adjustOnLayer = a.onLayer
         adjustPencil = a.pencil
         adjustPreview = a.preview
         hue50 = a.hsb.getOrElse(0) { 0.5f }
@@ -8560,6 +8726,57 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readAdjust()
         // cloning paints with the brush: its sliders show
         if (a == Adjustment.CLONE) readSliders()
+    }
+
+    /**
+     * Adds an adjustment layer of [a] over the current layer and opens its adjustment on it: what it
+     * does changes what is below it, and stays editable.
+     */
+    fun addAdjustmentLayer(a: Adjustment) {
+        val s = session ?: return
+        // (Liquify, Clone and a plugin's filter can't be one)
+        if (!a.live) return
+        switchModes(ModeButton.Adjustment)
+        if (panel == Panel.ADJUSTMENTS) panelFading = true
+        panel = Panel.NONE
+        if (!s.adjustmentLayerAdd(a)) {
+            message = noRoom()
+            return
+        }
+        adjustModesOpen = false
+        liquifyPopup = 0
+        readAdjust()
+        refresh()
+    }
+
+    /** Layer [l]'s five styles (see `layerEffectNames`); none for a layer that takes none. */
+    fun layerEffects(l: LayerInfo): List<io.github.artcraftandroid.procraft.core.LayerEffectInfo> =
+        session?.layerEffects(l.id).orEmpty()
+
+    /** Style [index] of layer [l] set to [effect]: shown at once, one undo step when [done]. */
+    fun setLayerEffect(l: LayerInfo, index: Int, effect: io.github.artcraftandroid.procraft.core.LayerEffectInfo, done: Boolean) {
+        session?.setLayerEffect(l.id, index.toUInt(), effect, done)
+        refresh()
+    }
+
+    /** The paint colour, sRGB 0..1. */
+    fun paintColourParts(): Triple<Float, Float, Float> {
+        val rgb = colorRgb()
+        return Triple(((rgb shr 16) and 0xFF) / 255f, ((rgb shr 8) and 0xFF) / 255f, (rgb and 0xFF) / 255f)
+    }
+
+    /** Opens adjustment layer [l]'s adjustment on the values it keeps. */
+    fun editAdjustmentLayer(l: LayerInfo) {
+        val s = session ?: return
+        if (l.adjustment == null || l.locked) return
+        switchModes(ModeButton.Adjustment)
+        if (panel == Panel.ADJUSTMENTS || panel == Panel.LAYERS) panelFading = true
+        panel = Panel.NONE
+        if (s.adjustmentLayerEdit(l.id) == null) return
+        adjustModesOpen = false
+        liquifyPopup = 0
+        readAdjust()
+        refresh()
     }
 
     /**
@@ -9675,6 +9892,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.transformSetInterpolation(interpolation)
         s.transformSetPixelated(transformPixelated)
         s.transformSetGuides(guides)
+        s.transformPuppetSettings(puppet.settings)
         transformBox = s.transformBegin()
         // nothing there to move: it says so and stays out of transform
         if (transformBox == null) {
@@ -10500,6 +10718,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // undoing may put the canvas back in another profile
         refreshCanvasSpace(s)
         refreshFlags()
+        // an undo or a cut changes the panels Comic Panels outlines
+        if (comicPanels.open) comicPanels.read(s)
         refreshAnimation()
     }
 
@@ -10681,6 +10901,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val PAD_3D = "pad_3d_preview"
         const val RAPID_UNDO_DELAY = "rapid_undo_delay"
         const val LIGHT_INTERFACE = "light_interface"
+        const val LIGHT_LIMIT_STOPS = "light_limit_stops"
+        /** The most stops above white the light tool's HDR limit goes to. */
+        const val HDR_LIMIT_MOST = 5f
         const val BRUSH_CURSOR = "brush_cursor"
         const val CURSOR_SHOWS = "cursor_shows"
         const val CURSOR_STYLE = "cursor_style"

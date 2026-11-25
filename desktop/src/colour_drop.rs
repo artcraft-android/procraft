@@ -405,14 +405,24 @@ impl ColourDrop {
                 let button = vec2(if what == Band::Filling { 20.0 } else { 101.0 }, 20.0);
                 let left = band.center().x - (name + track_width + 13.0 + pill_width + button.x) / 2.0;
                 if titled {
-                    text(painter, pos2(left, band.center().y), Align2::LEFT_CENTER, "ColorDrop", 16.5, Weight::Bold, ink);
+                    text(
+                        painter,
+                        pos2(left, band.center().y),
+                        Align2::LEFT_CENTER,
+                        "ColorDrop",
+                        16.5,
+                        Weight::Bold,
+                        ink,
+                    );
                 }
                 let track = Rect::from_min_size(pos2(left + name, band.center().y - 10.0), vec2(track_width, 20.0));
                 painter.rect_filled(track, 10, argb(SEGMENT_TRACK));
                 let thumb = Rect::from_min_size(pos2(track.left() + SEGMENT * at, track.top()), vec2(SEGMENT, 20.0));
                 painter.rect_filled(thumb, 10, blue);
                 let mut all_layers = None;
-                for (i, label) in [if on_reference { "Reference" } else { "Layer" }, "All Layers"].into_iter().enumerate() {
+                for (i, label) in
+                    [if on_reference { "Reference" } else { "Layer" }, "All Layers"].into_iter().enumerate()
+                {
                     let cell =
                         Rect::from_min_size(pos2(track.left() + SEGMENT * i as f32, track.top()), vec2(SEGMENT, 20.0));
                     let colour = if i == chosen { Color32::WHITE } else { ink };

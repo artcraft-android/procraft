@@ -23,6 +23,8 @@ use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, text};
 use crate::panel;
 
+mod workspaces;
+
 pub const BACKGROUND: Themed = Themed(0xFF212121, 0xFFF0F0F0);
 /// A thumbnail's shadow, dropped below it, and the rim round it.
 const THUMB_SHADOW: Themed = Themed(0x45000000, 0x1D000000);
@@ -304,6 +306,8 @@ pub struct Gallery {
     /// flies back into a stack as it is left.
     stack_cells: HashMap<String, Rect>,
     drawn_cells: Vec<(GalleryEntry, Rect)>,
+    /// The gallery's workspaces: galleries of their own (none kept: one gallery alone).
+    workspaces: workspaces::WorkspacesShown,
 }
 
 /// A stack just left: its folder and name, its artworks and where each was, and since when.
@@ -375,8 +379,12 @@ const LIFTED: (f32, f32) = (1.07, 0.25);
 const DROPPED: (f32, f32) = (1.0, 0.25);
 
 impl Gallery {
+    /// The gallery of the workspace showing: the first is the gallery there has always been, the
+    /// others are kept beside it.
     pub fn new() -> Gallery {
-        Gallery::with_store(ArtworkStore::open(crate::files::app_dir().join("artworks").to_string_lossy().into_owned()))
+        let app = crate::files::app_dir();
+        let path = |name: &str| app.join(name).to_string_lossy().into_owned();
+        Gallery::with_workspaces(procraft_core::Workspaces::open(path("artworks"), path("workspaces")))
     }
 
     /// The gallery of the artworks kept in `store`.
@@ -434,6 +442,7 @@ impl Gallery {
             leaving_stack: None,
             stack_cells: HashMap::new(),
             drawn_cells: Vec::new(),
+            workspaces: workspaces::WorkspacesShown::default(),
         };
         gallery.refresh();
         gallery
@@ -643,6 +652,7 @@ impl Gallery {
         if self.more_open {
             asked = self.more(ctx, look, screen).or(asked);
         }
+        self.workspaces_panel(ctx, look, screen);
         if self.about {
             self.about(ctx, screen);
         }
@@ -1317,6 +1327,9 @@ impl Gallery {
                 self.about = true;
             }
         }
+        // the workspaces are the gallery's: in a stack the middle is its name's
+        self.workspace_button(ui, look, screen, top + 10.0);
+        let painter = ui.painter();
         let plus = Rect::from_min_size(pos2(screen.right() - 20.0 - 44.0, top + 10.0), vec2(44.0, 45.0));
         let capsule =
             Rect::from_min_size(pos2(screen.left() + fit.capsule_left, top + 10.0), vec2(fit.capsule_width, 45.0));

@@ -171,25 +171,27 @@ const PAGES: &[Page] = &[
         name: "Stroke path",
         icon: &icons::STUDIO_STROKE,
         icon_size: 33.0,
-        sections: &[Section {
-            title: Some("Stroke properties"),
-            controls: &[
-                slider("spacing", "Spacing"),
-                slider("spacing_jitter", "Spacing Jitter"),
-                slider("jitter_lateral", "Jitter Lateral"),
-                slider("jitter_linear", "Jitter Linear"),
-                slider("falloff", "Fall off"),
-            ],
-        },
-        // pixel art: stamps on whole pixels, hard-edged; pixel perfect also leaves the doubled
-        // pixels and L-corners out of a one-pixel line
-        Section {
-            title: Some("Pixel art"),
-            controls: &[
-                toggle("pixelated", "Pixelated"),
-                Control::Toggle("pixel_perfect", "Pixel perfect", Some(("pixelated", 1))),
-            ],
-        }],
+        sections: &[
+            Section {
+                title: Some("Stroke properties"),
+                controls: &[
+                    slider("spacing", "Spacing"),
+                    slider("spacing_jitter", "Spacing Jitter"),
+                    slider("jitter_lateral", "Jitter Lateral"),
+                    slider("jitter_linear", "Jitter Linear"),
+                    slider("falloff", "Fall off"),
+                ],
+            },
+            // pixel art: stamps on whole pixels, hard-edged; pixel perfect also leaves the doubled
+            // pixels and L-corners out of a one-pixel line
+            Section {
+                title: Some("Pixel art"),
+                controls: &[
+                    toggle("pixelated", "Pixelated"),
+                    Control::Toggle("pixel_perfect", "Pixel perfect", Some(("pixelated", 1))),
+                ],
+            },
+        ],
     },
     Page {
         name: "Stabilization",
@@ -960,8 +962,10 @@ impl Studio {
                 }
             }
             let mode = session.studio_combine_mode();
-            let name =
-                procraft_core::combine_blend_modes().into_iter().find(|m| m.id == mode).map_or(String::new(), |m| m.name);
+            let name = procraft_core::combine_blend_modes()
+                .into_iter()
+                .find(|m| m.id == mode)
+                .map_or(String::new(), |m| m.name);
             let left = pos2(row.left() + 11.0, row.center().y);
             text(ui.painter(), left, Align2::LEFT_CENTER, "Combine Mode", 17.0, Weight::Regular, argb(DIM));
             let right = pos2(row.right() - 42.0, row.center().y);
@@ -2088,7 +2092,8 @@ fn brush_preview(session: &Arc<CanvasSession>) -> Option<std::sync::mpsc::Receiv
 /// A blend mode's name, as the picker shows it (a file may give the grain a layer mode its list
 /// leaves out).
 fn blend_name(key: &str, value: f32) -> String {
-    let modes = if key == "grain_blend" { procraft_core::grain_blend_modes() } else { procraft_core::brush_blend_modes() };
+    let modes =
+        if key == "grain_blend" { procraft_core::grain_blend_modes() } else { procraft_core::brush_blend_modes() };
     let n = value.round() as u32;
     modes
         .into_iter()

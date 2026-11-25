@@ -86,6 +86,11 @@ pub enum Act {
     },
     Share(Format),
     AnimatedExport(Animated),
+    /// The frames as a sprite sheet (its screen), or as a Harmony scene, zipped.
+    SpriteSheet,
+    HarmonyScene,
+    /// The Texture Packer: the canvas's drawings, each shared as a PNG of its own.
+    TexturePacker,
     /// A model's turntable as an animation.
     ModelAnimated(Animated),
     About,
@@ -116,6 +121,7 @@ pub enum Act {
     DrawingGuide,
     EditGuide,
     Crop,
+    ComicPanels,
     Cut,
     Copy,
     CopyCanvas,
@@ -378,7 +384,11 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             ],
         ],
         1 => vec![
-            vec![Button("Crop & Resize", None, Some(Act::Crop))],
+            vec![
+                Button("Crop & Resize", None, Some(Act::Crop)),
+                // the canvas made a comic page the first time
+                Button("Comic panels", None, Some(Act::ComicPanels)),
+            ],
             vec![
                 Switch("Animation Assist", showing.animation, Some(Act::AnimationAssist)),
                 Switch("Page Assist", showing.pages, Some(Act::PageAssist)),
@@ -431,6 +441,9 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 Button("Animated PNG", None, Some(Act::AnimatedExport(Animated::Png))),
                 Button("Animated MP4", None, Some(Act::AnimatedExport(Animated::Mp4))),
                 Button("Animated HEVC", None, Some(Act::AnimatedExport(Animated::Hevc))),
+                Button("Sprite Sheet", None, Some(Act::SpriteSheet)),
+                Button("Texture Packer", None, Some(Act::TexturePacker)),
+                Button("Harmony Scene", None, Some(Act::HarmonyScene)),
             ],
         ],
         3 => vec![
