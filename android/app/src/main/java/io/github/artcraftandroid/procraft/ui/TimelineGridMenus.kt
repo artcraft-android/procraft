@@ -157,6 +157,7 @@ internal fun GridMenus(
     width: Float,
     room: Float,
     onPhoto: () -> Unit,
+    onVideo: () -> Unit,
     onFile: () -> Unit,
 ) {
     val close = { grid.closeMenus(tool) }
@@ -168,7 +169,7 @@ internal fun GridMenus(
     Box(Modifier.width(width.dp).padding(bottom = 8.dp)) {
         when {
             // over the `+` it was opened from
-            grid.adding -> GridMenuPlace(width - 41f, first = ADD_CARD, trailing = true) { GridAddMenu(onPhoto, onFile, close) }
+            grid.adding -> GridMenuPlace(width - 41f, first = ADD_CARD, trailing = true) { GridAddMenu(tool.media.bringing, onPhoto, onVideo, onFile, close) }
             emptyMenu != null -> tool.tracks.firstOrNull { it.id == emptyMenu.track }?.let { track ->
                 GridMenuPlace(emptyMenu.x) { GridEmptyMenu(vm, tool, track, emptyMenu.frame, room, close) }
             }
@@ -331,22 +332,26 @@ private fun GridPickedMenu(tool: TimelineTool, ids: List<ULong>, close: () -> Un
 }
 
 /** What a block's menu has open beside it. */
-private enum class BlockBeside { HIGHLIGHT, BLEND, MASK, CYCLE, OPTIONS }
+private enum class BlockBeside { HIGHLIGHT, BLEND, MASK, SIZE, SLIP, CYCLE, OPTIONS }
 
 /**
  * The menu of a block that isn't a drawing (a group, a sound, a video): cut, copy, paste and
- * duplicate; its own opacity, name, highlight colour, blend mode and mask; a group's folding,
- * cycle and ungrouping; its keys (the keys' own card); out of the group it is in; turning it off,
- * splitting it at the playhead, a copy after it, lasting through the empty frames after it; its
- * track's options; deleting it. (A sound's level and mute, and a video's sound, size, timing track
- * and slip, wait for the media to come to Android.)
+ * duplicate; its own opacity (a sound's level, its keys and mute), name, highlight colour, blend
+ * mode and mask; a video's sound taken out, its timing track and size (TimelineGridMedia.kt); the
+ * part of its file a sound or video plays; a group's folding, cycle and ungrouping; its keys (the
+ * keys' own card); out of the group it is in; turning it off, splitting it at the playhead, a copy
+ * after it, lasting through the empty frames after it; its track's options; deleting it.
  */
 @Composable
 private fun GridBlockMenu(vm: CanvasViewModel, tool: TimelineTool, track: TimelineTrackInfo, clip: TimelineClipInfo, room: Float, close: () -> Unit) {
     var beside by remember(clip.id) { mutableStateOf<BlockBeside?>(null) }
     val locked = tool.held(track)
     val sound = clip.kind == TimelineClipKind.AUDIO
+    val video = clip.kind == TimelineClipKind.VIDEO
     val group = clip.kind == TimelineClipKind.GROUP
+    // (read again after each change)
+    tool.revision
+    val media = if (group) null else tool.media.clip(clip.id)
     val ids = listOf(clip.id)
     val moves = tool.groupOf(track.id) != 0uL
     // whether the playhead is inside the block (past its first frame), where it can be split
@@ -365,7 +370,11 @@ private fun GridBlockMenu(vm: CanvasViewModel, tool: TimelineTool, track: Timeli
                     duplicate = if (locked || group) null else ({ close(); tool.duplicateFrames(ids) }),
                 )
                 GridMenuLine()
-                if (!sound) GridMenuSlider("Opacity", clip.opacity) { v, done -> tool.setClipOpacity(clip.id, v, done) }
+                if (sound) {
+                    media?.let { GridSoundRows(tool, clip, it, locked) }
+                } else {
+                    GridMenuSlider("Opacity", clip.opacity) { v, done -> tool.setClipOpacity(clip.id, v, done) }
+                }
                 GridRenameRow(clip.name) { tool.renameClip(clip.id, it) }
                 GridMenuRow(GridIcons.Highlight, "Highlight", chevron = true, lit = beside == BlockBeside.HIGHLIGHT) { opens(BlockBeside.HIGHLIGHT) }
                 if (!sound) {
@@ -373,6 +382,8 @@ private fun GridBlockMenu(vm: CanvasViewModel, tool: TimelineTool, track: Timeli
                     GridMenuRow(GridIcons.Mask, "Mask", chevron = true, lit = beside == BlockBeside.MASK) { opens(BlockBeside.MASK) }
                 }
                 GridMenuLine()
+                if (video && media != null) GridVideoRows(tool, clip, media, locked, close, beside == BlockBeside.SIZE) { opens(BlockBeside.SIZE) }
+                if (media != null) GridMenuRow(GridIcons.Flip, "Slip", chevron = true, lit = beside == BlockBeside.SLIP) { opens(BlockBeside.SLIP) }
                 if (group) {
                     val open = tool.unfolded(clip.id)
                     GridMenuRow(PcIcons.Layers, if (open) "Collapse group" else "Expand group") { tool.fold(clip.id, open) }
@@ -404,6 +415,8 @@ private fun GridBlockMenu(vm: CanvasViewModel, tool: TimelineTool, track: Timeli
             BlockBeside.HIGHLIGHT -> GridHighlightCard(clip.label) { tool.setClipLabel(clip.id, it) }
             BlockBeside.BLEND -> GridBlendCard(vm, clip.blend, room) { tool.setClipBlend(clip.id, it) }
             BlockBeside.MASK -> GridMaskCard(clip.mask) { tool.setClipMask(clip.id, it) }
+            BlockBeside.SIZE -> media?.let { GridVideoSizeCard(vm, tool, clip, it) }
+            BlockBeside.SLIP -> media?.let { GridSlipCard(tool, clip, it) }
             BlockBeside.CYCLE -> GridCycleCard(tool, clip)
             BlockBeside.OPTIONS -> GridTrackMenu(vm, tool, track, room, close)
             null -> {}
@@ -509,29 +522,20 @@ private fun GridFlapMenu(tool: TimelineTool, info: TimelineInfo, close: () -> Un
     }
 }
 
-/** The card `+` held opens: a picture from the photo picker or from a file, as a new frame at the playhead. (A video or a sound waits for the media to come to Android.) */
+/** The card `+` held opens: a picture or a video from the photo picker, or a sound, a picture or a video from a file, at the playhead. While a file is being brought in ([busy]), no other is. */
 @Composable
-private fun GridAddMenu(onPhoto: () -> Unit, onFile: () -> Unit, close: () -> Unit) {
+private fun GridAddMenu(busy: Boolean, onPhoto: () -> Unit, onVideo: () -> Unit, onFile: () -> Unit, close: () -> Unit) {
     GridCard(ADD_CARD) {
-        Text("Add new", color = Grid.InkBright, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 12.dp))
-        Column(
-            Modifier.padding(horizontal = 10.dp).fillMaxWidth().height(92.dp).clip(RoundedCornerShape(18.dp)).background(Grid.InkBright.copy(alpha = 0.08f))
-                .clickable { close(); onPhoto() }
-                .semantics {
-                    role = Role.Button
-                    contentDescription = "Photo"
-                },
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Icon(GridIcons.Photo, contentDescription = null, tint = Pc.Accent, modifier = Modifier.size(36.dp))
-            Spacer(Modifier.height(8.dp))
-            Text("Photo", color = Grid.InkBright, fontSize = 16.sp)
+        Text(if (busy) "Bringing in…" else "Add new", color = Grid.InkBright, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 12.dp))
+        Row(Modifier.padding(horizontal = 10.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            GridAddTile(GridIcons.Photo, "Photo", dim = false) { close(); onPhoto() }
+            GridAddTile(GridIcons.Video, "Video", dim = busy) { close(); onVideo() }
         }
+        val ink = if (busy) Grid.InkDim else Grid.InkBright
         Row(
             Modifier.padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 4.dp).fillMaxWidth().height(46.dp).clip(RoundedCornerShape(14.dp))
                 .background(Grid.InkBright.copy(alpha = 0.08f))
-                .clickable { close(); onFile() }
+                .clickable(enabled = !busy) { close(); onFile() }
                 .semantics {
                     role = Role.Button
                     contentDescription = "File"
@@ -539,9 +543,28 @@ private fun GridAddMenu(onPhoto: () -> Unit, onFile: () -> Unit, close: () -> Un
                 .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("File", color = Grid.InkBright, fontSize = 16.sp, modifier = Modifier.weight(1f))
-            Icon(GridIcons.File, contentDescription = null, tint = Grid.InkBright, modifier = Modifier.size(24.dp))
+            Text("File", color = ink, fontSize = 16.sp, modifier = Modifier.weight(1f))
+            Icon(GridIcons.File, contentDescription = null, tint = ink, modifier = Modifier.size(24.dp))
         }
+    }
+}
+
+/** One of Add new's tiles: its glyph over its name, dimmed where it can't be used. */
+@Composable
+private fun RowScope.GridAddTile(icon: ImageVector, label: String, dim: Boolean, action: () -> Unit) {
+    Column(
+        Modifier.weight(1f).height(92.dp).clip(RoundedCornerShape(18.dp)).background(Grid.InkBright.copy(alpha = 0.08f))
+            .clickable(enabled = !dim, onClick = action)
+            .semantics {
+                role = Role.Button
+                contentDescription = label
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Icon(icon, contentDescription = null, tint = if (dim) Grid.InkDim else Pc.Accent, modifier = Modifier.size(36.dp))
+        Spacer(Modifier.height(8.dp))
+        Text(label, color = if (dim) Grid.InkDim else Grid.InkBright, fontSize = 16.sp)
     }
 }
 
@@ -613,7 +636,7 @@ internal fun GridMenuRow(icon: ImageVector?, label: String, tint: Color? = null,
 
 /** One of a list to choose from, the one chosen ticked: a colour's [swatch] before its name, or the "none" ring. */
 @Composable
-private fun GridChoiceRow(label: String, swatch: Color? = null, none: Boolean = false, chosen: Boolean, action: () -> Unit) {
+internal fun GridChoiceRow(label: String, swatch: Color? = null, none: Boolean = false, chosen: Boolean, action: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().height(34.dp).clickable(role = Role.Button, onClick = action).padding(horizontal = 16.dp)
             .semantics { if (chosen) contentDescription = "$label, chosen" },
@@ -656,9 +679,9 @@ private fun RowScope.GridTool(icon: ImageVector, label: String, action: (() -> U
     }
 }
 
-/** A slider in a menu: its name and value over a thin track, dragged or tapped anywhere along it; [changed] says whether it was let go there. */
+/** A slider in a menu: its name and value (as a percentage, or as [text] says it) over a thin track, dragged or tapped anywhere along it; [changed] says whether it was let go there. */
 @Composable
-private fun GridMenuSlider(label: String, value: Float, changed: (Float, Boolean) -> Unit) {
+internal fun GridMenuSlider(label: String, value: Float, text: ((Float) -> String)? = null, changed: (Float, Boolean) -> Unit) {
     var live by remember { mutableStateOf<Float?>(null) }
     val shown = live ?: value
     val change by rememberUpdatedState(changed)
@@ -667,7 +690,7 @@ private fun GridMenuSlider(label: String, value: Float, changed: (Float, Boolean
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 2.dp)) {
         Row(Modifier.fillMaxWidth()) {
             Text(label, color = Grid.InkBright, fontSize = 15.sp, modifier = Modifier.weight(1f), maxLines = 1)
-            Text("${(shown * 100f).roundToInt()} %", color = Grid.InkBright, fontSize = 15.sp, maxLines = 1)
+            Text(text?.invoke(shown) ?: "${(shown * 100f).roundToInt()} %", color = Grid.InkBright, fontSize = 15.sp, maxLines = 1)
         }
         Spacer(Modifier.height(4.dp))
         Box(

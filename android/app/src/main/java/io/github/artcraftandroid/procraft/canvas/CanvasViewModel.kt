@@ -4310,6 +4310,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun start(s: CanvasSession, dir: File, brushesLoaded: Boolean = false) {
         // Gradient Map maps by the library
         s.useGradients(gradientLibrary)
+        // video clips' pictures, read here
+        s.setVideoFrames(VideoFrameReader)
         // the canvas's colours are P3 or sRGB numbers: the colour panel and swatches follow
         refreshCanvasSpace(s)
         s.setSelectionVisibility(selectionVisibility)
@@ -8275,7 +8277,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                         } finally {
                             frame.recycle()
                         }
-                        if (!ok) return@withContext null
+                        // the timeline's sounds under it
+                        if (!ok || !MediaExport.addSounds(file, s, fps, timeline.media.bank)) return@withContext null
                     }
                 }
                 file

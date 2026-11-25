@@ -120,6 +120,9 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
     /** Perform's take (TimelinePerform.kt). */
     val perform = TimelinePerform(vm)
 
+    /** Its sounds and videos (TimelineMedia.kt). */
+    val media = TimelineMedia(this)
+
     /** The tracks, bottom first. */
     val tracks: List<TimelineTrackInfo> get() = rows.map { it.track }
 
@@ -292,6 +295,7 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
     /** Scrubbing: frame [frame] shows as it plays. */
     fun scrub(frame: UInt) {
         if (shownFrame == null) stopPlaying()
+        if (shownFrame != frame) media.blip(frame)
         shownFrame = frame
         session?.setTimelinePlaying(frame)
     }
@@ -317,6 +321,7 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
         if (to == frame.toInt()) return
         picked = null
         goTo(to.toUInt())
+        media.blip(to.toUInt())
     }
 
     /** The playhead to the start of the drawing before or after it on the track drawn on (a group counts as a drawing; sounds and videos don't). */
@@ -325,7 +330,10 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
         val at = frame
         val starts = clips.filter { it.kind != TimelineClipKind.AUDIO && it.kind != TimelineClipKind.VIDEO }.map { it.start }
         val next = if (by > 0) starts.filter { it > at }.minOrNull() else starts.filter { it < at }.maxOrNull()
-        if (next != null) goTo(next)
+        if (next != null) {
+            goTo(next)
+            media.blip(next)
+        }
     }
 
     /** A new drawing at the playhead on the track drawn on, the ones after it moving along. */
@@ -382,8 +390,8 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
         playing = vm.viewModelScope.launch {
             var at = if (here in range) here else range.first
             var step = 1
-            // each frame on time by the clock
-            var due = System.nanoTime()
+            // each frame on time by the clock, so the sounds stay with the pictures
+            var due = System.nanoTime() + seconds(media.play(at))
             while (isActive) {
                 val now = info ?: return@launch
                 shownFrame = at
@@ -396,6 +404,7 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
                     stopPlaying(stay = true)
                     return@launch
                 }
+                due += seconds(media.follow(at, next.at, next.step))
                 at = next.at
                 step = next.step
             }
@@ -409,6 +418,7 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
         playing = null
         isPlaying = false
         playHeld = null
+        media.stop()
         if (shownFrame != null) {
             shownFrame = null
             session?.setTimelinePlaying(null)
@@ -416,6 +426,8 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
         if (stay && at != null) goTo(at)
         job?.cancel()
     }
+
+    private fun seconds(s: Double): Long = (s * 1_000_000_000L).toLong()
 
     companion object {
         /** How far past the timeline's last frame the playhead may rest (the core's `PAST_END`). */

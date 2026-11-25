@@ -82,6 +82,9 @@ internal object GridIcons {
     val Photo by lazy {
         icon("grid-photo", Part(PICTURE, 1.7f), Part("M4 16L8.6 11.6L12 14.6L14.8 12.4L20 16.6", 1.7f), Part("M15.8 8A1.3 1.3 0 1 0 15.8 10.6A1.3 1.3 0 1 0 15.8 8z", 0f, fill = true))
     }
+    val Video by lazy {
+        icon("grid-video", Part(PICTURE, 1.7f), Part("M7 8.7H7.01M10.3 8.7H10.31M13.7 8.7H13.71M17 8.7H17.01M7 15.3H7.01M10.3 15.3H10.31M13.7 15.3H13.71M17 15.3H17.01", 1.7f))
+    }
     val File by lazy {
         icon("grid-file", Part("M3.5 7.5A2 2 0 0 1 5.5 5.5H9.3L11.3 7.8H18.5A2 2 0 0 1 20.5 9.8V16.5A2 2 0 0 1 18.5 18.5H5.5A2 2 0 0 1 3.5 16.5z", 1.7f), Part("M3.8 11H20.2", 1.7f))
     }
