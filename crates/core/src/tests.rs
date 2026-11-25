@@ -23966,6 +23966,38 @@ fn easings_and_motion_paths_through_the_session() {
     assert_eq!(s.timeline_motion_path(clip).unwrap().keys[0].handles, None);
 }
 
+/// The editor's view of an easing and the engine's easing it is go back and forth unchanged, for
+/// every kind, repeated, looping and backwards (the desktop app's editor edits the engine's).
+#[test]
+fn an_easing_spec_and_the_engine_easing_go_back_and_forth() {
+    use crate::{EasingKind, EasingSpec, default_easing};
+    use procraft_engine::timeline::Easing;
+    let kinds = [
+        EasingKind::Linear,
+        EasingKind::Hold,
+        EasingKind::Smooth,
+        EasingKind::CubicBezier,
+        EasingKind::Curve,
+        EasingKind::Bounce,
+        EasingKind::Elastic,
+        EasingKind::Steps,
+        EasingKind::ElasticSteps,
+        EasingKind::Cyclic,
+        EasingKind::Random,
+    ];
+    for kind in kinds {
+        for (repeats, looping, reversed) in [(1, false, false), (3, true, false), (2, false, true)] {
+            let spec = EasingSpec { repeats, looping, reversed, ..default_easing(kind) };
+            assert_eq!(EasingSpec::of(&spec.easing()), spec, "{kind:?}");
+        }
+    }
+    let curve = Easing::Curve(vec![[0.0, 0.0], [0.5, 1.2], [1.0, 1.0]]);
+    assert_eq!(EasingSpec::of(&curve).easing(), curve);
+    let bezier = Easing::CubicBezier([0.1, -0.2], [0.7, 1.3]);
+    assert_eq!(EasingSpec::of(&bezier).params, vec![0.1, -0.2, 0.7, 1.3]);
+    assert_eq!(EasingSpec::of(&bezier).easing(), bezier);
+}
+
 /// A canvas of four drawings on a timeline's one track (empty layers, each held a frame), shown as
 /// every track.
 fn four_drawings() -> Option<std::sync::Arc<CanvasSession>> {
