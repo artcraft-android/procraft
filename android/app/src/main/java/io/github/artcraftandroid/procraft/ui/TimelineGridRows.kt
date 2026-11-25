@@ -1,5 +1,6 @@
 package io.github.artcraftandroid.procraft.ui
 
+import io.github.artcraftandroid.procraft.canvas.KeyLaneRow
 import io.github.artcraftandroid.procraft.core.TimelineRow
 import io.github.artcraftandroid.procraft.core.TimelineTrackInfo
 import kotlin.math.abs
@@ -67,6 +68,8 @@ internal data class GridRow(
     /** Its top edge among all the rows, and its height. */
     val y: Float = 0f,
     val height: Float = 0f,
+    /** A row of keys under its tracks' row, not of frames: one kind of key (moved, scaled…, or a sound's level) of each of its tracks whose keys are out. */
+    val lanes: List<KeyLaneRow> = emptyList(),
 ) {
     /** The segment whose frames [frame] is among; where it is among none's, the nearest's. */
     fun segment(frame: Int): GridSegment =
@@ -77,12 +80,15 @@ internal data class GridRow(
     /** The track whose frames [frame] is among; where it is among none's, the nearest's. */
     fun track(frame: Int): TimelineTrackInfo = segment(frame).track
 
-    /** Whether [frame] is one of a track's on it. */
-    fun has(frame: Int): Boolean = segments.any { frame >= it.start && frame < it.end }
+    /** Whether [frame] is one of a track's on it (a row of keys has no frames). */
+    fun has(frame: Int): Boolean = lanes.isEmpty() && segments.any { frame >= it.start && frame < it.end }
 }
 
-/** The grid's rows, top first, each where it stands. */
-internal class GridRows(rows: List<TimelineRow>, sizes: GridSizes) {
+/** How tall a row of keys is before the grid is zoomed out. */
+private const val KEYS_HEIGHT = 28f
+
+/** The grid's rows, top first, each where it stands; [keys] gives the rows of keys that are out under a track. */
+internal class GridRows(rows: List<TimelineRow>, sizes: GridSizes, keys: (TimelineTrackInfo) -> List<KeyLaneRow> = { emptyList() }) {
     val list: List<GridRow>
 
     /** How tall they all are together. */
@@ -94,6 +100,16 @@ internal class GridRows(rows: List<TimelineRow>, sizes: GridSizes) {
         for (row in level(rows, 0, emptyList())) {
             out.add(row.copy(y = y, height = sizes.rowHeight))
             y += sizes.rowHeight
+            // its tracks' rows of keys: one row for each kind any of them has (the tracks of
+            // several groups sharing the row share those too)
+            val lanes = row.segments.flatMap { keys(it.track) }
+            for (kind in KeyLaneRow.Kinds) {
+                val these = lanes.filter { it.sameKind(kind) }
+                if (these.isEmpty()) continue
+                val h = maxOf((KEYS_HEIGHT * sizes.rowScale).roundToInt().toFloat(), 16f)
+                out.add(GridRow(row.segments, row.depth, y, h, these))
+                y += h
+            }
         }
         list = out
         height = y
@@ -112,11 +128,11 @@ internal class GridRows(rows: List<TimelineRow>, sizes: GridSizes) {
     /** The row track [id] is on. */
     fun indexOf(id: ULong?): Int? {
         id ?: return null
-        return list.indexOfFirst { r -> r.segments.any { it.track.id == id } }.takeIf { it >= 0 }
+        return list.indexOfFirst { r -> r.lanes.isEmpty() && r.segments.any { it.track.id == id } }.takeIf { it >= 0 }
     }
 
     /** Every track on the rows, with its row, top first. */
-    val tracks: List<Pair<Int, TimelineTrackInfo>> get() = list.flatMapIndexed { r, row -> row.segments.map { r to it.track } }
+    val tracks: List<Pair<Int, TimelineTrackInfo>> get() = list.flatMapIndexed { r, row -> if (row.lanes.isEmpty()) row.segments.map { r to it.track } else emptyList() }
 
     /** The bottom of the last row that has a track inside group [id]: how far down the group's own rows go. None where it has none showing. */
     fun bottomOfGroup(id: ULong): Float? = list.lastOrNull { r -> r.segments.any { id in it.groups } }?.let { it.y + it.height }

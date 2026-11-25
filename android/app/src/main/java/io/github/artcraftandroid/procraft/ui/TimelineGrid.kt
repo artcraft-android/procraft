@@ -84,6 +84,8 @@ import androidx.compose.ui.unit.min
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.TimelineTool
+import io.github.artcraftandroid.procraft.canvas.keyRows
+import io.github.artcraftandroid.procraft.canvas.keyed
 import io.github.artcraftandroid.procraft.core.TimelineClipInfo
 import io.github.artcraftandroid.procraft.core.TimelineClipKind
 import io.github.artcraftandroid.procraft.core.TimelineInfo
@@ -140,8 +142,11 @@ internal object Grid {
 /** A colour the core gives as 0xRRGGBB. */
 internal fun rgb(packed: UInt): Color = Color(0xFF000000.toInt() or packed.toInt())
 
-/** What a finger down on the frames is doing. */
-private enum class GridTouch { UNDECIDED, SCROLL, PAN }
+/** What a finger down on the frames is doing: also, held still on a key (its menu open), dragging keys on from that hold, or a grip beside the keys picked (TimelineGridKeys.kt). */
+private enum class GridTouch { UNDECIDED, SCROLL, PAN, HELD, KEYS, STRETCH }
+
+/** How long a finger is held still for a hold. */
+private const val HOLD_MS = 400L
 
 /** What the grid shows that isn't the timeline's own: where it is scrolled to while dragged, and how far its rows are scrolled up. */
 @Stable
@@ -154,6 +159,9 @@ internal class GridState {
 
     /** Its cells' and rows' sizes (it doesn't zoom yet). */
     val sizes = GridSizes()
+
+    /** The key menu open, the key held, the keys being stretched (TimelineGridKeys.kt). */
+    val keys = GridKeyState()
 
     /** A finger is dragging the frames sideways: the settling of the last drag leaves them be. */
     var scrolling = false
@@ -187,8 +195,11 @@ fun BoxScope.TimelineGridBar(vm: CanvasViewModel) {
     BoxWithConstraints(Modifier.align(Alignment.BottomCenter).fillMaxSize()) {
         val width = min(maxWidth - 32.dp, 1180.dp)
         val sizes = grid.sizes
-        // top first; the core's order is bottom first
-        val rows = remember(tool.rows, sizes) { GridRows(tool.rows.reversed(), sizes) }
+        // top first; the core's order is bottom first; under each track whose keys are out, its rows of keys
+        val keyTracks = tool.gridKeyTracks
+        val rows = remember(tool.rows, sizes, tool.keys, tool.lanes.volumeKeys, keyTracks) {
+            GridRows(tool.rows.reversed(), sizes) { t -> if (t.id in keyTracks) tool.keyRows(t) else emptyList() }
+        }
         val all = maxOf(rows.height, sizes.rowHeight)
         val most = maxOf(floor(maxHeight.value * 0.5f - Grid.HeaderHeight.value - Grid.RulerHeight.value - 12f), sizes.rowHeight)
         val shown = minOf(all, most)
@@ -210,6 +221,8 @@ fun BoxScope.TimelineGridBar(vm: CanvasViewModel) {
             GridBody(vm, tool, info, grid, rows, width, shown.dp)
             Spacer(Modifier.height(9.dp))
         }
+        // a key's menu, or a block's Keys card, standing on the bar
+        GridKeyCards(vm, grid.keys, maxWidth, width, lift = vm.timelineSettingsLift - 2.dp, room = maxHeight - vm.timelineSettingsLift - 70.dp)
     }
 }
 
@@ -227,6 +240,25 @@ private fun GridHeader(vm: CanvasViewModel, tool: TimelineTool) {
         ) {
             Text(if (tool.isPlaying) "Pause" else "Play", color = Grid.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
+        // with Animate on: a take armed, which the next touch on the canvas starts (a record
+        // light, ringed while a take is armed)
+        if (tool.autokey) {
+            Box(
+                Modifier.size(40.dp)
+                    .semantics {
+                        role = Role.Button
+                        contentDescription = "Perform"
+                    }
+                    .clickable(remember { MutableInteractionSource() }, indication = null) {
+                        tool.stopPlaying()
+                        tool.performArmed = !tool.performArmed
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(Modifier.size(15.dp).clip(CircleShape).background(AutokeyRed))
+                if (tool.performArmed) Box(Modifier.size(25.dp).border(2.dp, AutokeyRed, CircleShape))
+            }
+        }
         // tapped, a frame back or on; held, to the drawing before or after on the chosen track
         Spacer(Modifier.width(18.dp))
         GridIconButton(PcIcons.ChevronLeft, 21.dp, name = "Previous Frame", held = { tool.stepDrawing(-1) }) { tool.stepFrame(-1) }
@@ -235,6 +267,8 @@ private fun GridHeader(vm: CanvasViewModel, tool: TimelineTool) {
         GridIconButton(PcIcons.GridSettings, 27.dp, on = vm.timelineSettingsOpen, name = "Timeline Settings") {
             if (vm.timelineSettingsOpen) vm.closeTimelineSettings() else tool.openSettings()
         }
+        // Animate: the transform tool keys what is under the playhead where it is put
+        GridIconButton(KeyGlyphs.Key, 27.dp, on = tool.autokey, name = "Animate") { vm.setAutokey(!tool.autokey) }
         GridIconButton(PcIcons.GridTrack, 27.dp, name = "Add Track") { tool.addTrack() }
         GridIconButton(PcIcons.Add, 38.dp, name = "Add Frame") { tool.addDrawing() }
     }
@@ -360,6 +394,7 @@ private fun Modifier.gridTouches(
     place: () -> GridPlace,
     ruler: Boolean,
     labels: Float,
+    keys: GridKeyTouch? = null,
     tapped: (Offset) -> Unit,
 ): Modifier = pointerInput(ruler, labels) {
     val d = density
@@ -375,6 +410,11 @@ private fun Modifier.gridTouches(
             return@awaitEachGesture
         }
         var touch = GridTouch.UNDECIDED
+        // down on a grip beside the keys picked: they stretch about the far end
+        if (keys?.grip(start) == true) touch = GridTouch.STRETCH
+        // (held still this long, a key's menu opens)
+        val holdAt = System.currentTimeMillis() + HOLD_MS
+        var holdAsked = keys == null
         val p0 = place()
         grid.scrollFrom = grid.dragged ?: tool.frame.toFloat()
         val panFrom = p0.scroll
@@ -384,7 +424,17 @@ private fun Modifier.gridTouches(
         var lifted = false
         try {
             while (true) {
-                val event = awaitPointerEvent()
+                val event = if (!holdAsked && touch == GridTouch.UNDECIDED) {
+                    withTimeoutOrNull(maxOf(holdAt - System.currentTimeMillis(), 1L)) { awaitPointerEvent() }
+                } else {
+                    awaitPointerEvent()
+                }
+                if (event == null) {
+                    // held still: on a key, its menu
+                    holdAsked = true
+                    if (keys?.hold(start) == true) touch = GridTouch.HELD
+                    continue
+                }
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 lastChange = change
                 if (!change.pressed) {
@@ -407,6 +457,13 @@ private fun Modifier.gridTouches(
                     }
                     GridTouch.SCROLL -> grid.scrolled(moved.x, p0.last, tool)
                     GridTouch.PAN -> grid.rowsOffset = (panFrom - moved.y).coerceIn(0f, p0.over)
+                    // dragged on from a hold on a key: it and the keys picked go along its row
+                    GridTouch.HELD -> if (hypot(moved.x, moved.y) > 8f) {
+                        touch = GridTouch.KEYS
+                        keys?.dragged(moved.x)
+                    }
+                    GridTouch.KEYS -> keys?.dragged(moved.x)
+                    GridTouch.STRETCH -> keys?.stretched(moved.x)
                 }
                 change.consume()
             }
@@ -428,6 +485,8 @@ private fun Modifier.gridTouches(
                     }
                 }
                 GridTouch.PAN -> {}
+                GridTouch.HELD -> keys?.letGo()
+                GridTouch.KEYS, GridTouch.STRETCH -> keys?.ended(lifted)
             }
             if (lifted) lastChange.consume()
         }
@@ -497,6 +556,8 @@ private fun GridTracks(
     val latest by rememberUpdatedState(place)
     // (the touches' handler stays as it began: what a tap reads is read as it is now)
     val onTap by rememberUpdatedState<(Offset) -> Unit> { at -> tapped(tool, info, rows, place, sz, at) }
+    val latestRows by rememberUpdatedState(rows)
+    val keyTouch = remember(tool, grid) { GridKeyTouch(tool, grid.keys, { latestRows }, { latest }, { grid.sizes }) }
     val scope = rememberCoroutineScope()
     val all = maxOf(rows.height, sz.rowHeight)
     val chosenRow = rows.indexOf(info.track)
@@ -507,9 +568,13 @@ private fun GridTracks(
     val line = Grid.Line
     Box(
         Modifier.size(width, height).clipToBounds()
-            .gridTouches(tool, grid, scope, { latest }, ruler = false, labels = labels) { at -> onTap(at) },
+            .gridTouches(tool, grid, scope, { latest }, ruler = false, labels = labels, keys = keyTouch) { at ->
+                // (a tap on a row of keys is the keys')
+                if (!keyTouch.tapped(at)) onTap(at)
+            },
     ) {
         GridCells(vm, tool, rows, place, lo, hi, sz, labels, Modifier.fillMaxSize())
+        GridKeyRows(tool, rows, place, lo, hi, sz, labels, Modifier.fillMaxSize())
         Canvas(Modifier.fillMaxSize()) {
             val d = density
             val dy = (place.inset - place.scroll) * d
@@ -540,7 +605,11 @@ private fun GridTracks(
         for (r in rows.list) {
             val t = r.track(tool.frame.toInt())
             Box(Modifier.offset(y = (r.y + place.inset - place.scroll).dp).height(r.height.dp)) {
-                GridTrackLabel(tool, t, chosen = t.id == info.track, height = r.height, depth = r.depth, labels = labels)
+                if (r.lanes.isNotEmpty()) {
+                    GridKeyLabel(tool, r.lanes, r.depth)
+                } else {
+                    GridTrackLabel(tool, t, chosen = t.id == info.track, height = r.height, depth = r.depth, labels = labels)
+                }
             }
         }
     }
@@ -591,7 +660,7 @@ private fun GridTrackLabel(tool: TimelineTool, track: TimelineTrackInfo, chosen:
                 .background(label ?: if (chosen) Grid.Capsule else Color.Transparent)
                 .then(if (chosen && label != null) Modifier.border(1.5.dp, Grid.InkBright.copy(alpha = 0.75f), capsule) else Modifier)
                 .clickable(remember { MutableInteractionSource() }, indication = null) { tool.selectTrack(track.id) }
-                .padding(start = 6.dp, end = 14.dp),
+                .padding(start = 6.dp, end = if (tool.keyed(track)) 6.dp else 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -602,6 +671,8 @@ private fun GridTrackLabel(tool: TimelineTool, track: TimelineTrackInfo, chosen:
             ) { TrackCheck(!track.hidden, fill) }
             Text(track.name, color = text, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             if (track.locked) Icon(PcIcons.Lock, contentDescription = "Locked", tint = text, modifier = Modifier.size(14.dp))
+            // its blocks have keys: their rows put out under it, or away
+            if (tool.keyed(track)) GridKeysChevron(tool, track, text)
         }
     }
 }

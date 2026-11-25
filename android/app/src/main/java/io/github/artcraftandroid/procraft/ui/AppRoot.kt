@@ -152,6 +152,11 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             if (vm.transforming) TransformOverlay(vm)
             // (and the Paint or Erase tool's lasso shapes as they are drawn)
             if (vm.selecting || vm.lassoToolOn) SelectionOverlay(vm, Pc.barShown)
+            // on a timeline: the frame the transform keys; the motion path of the block under the
+            // playhead; and a move about to be performed, which takes the next touch on the canvas
+            if (vm.transforming) AutokeyBadge(vm)
+            MotionPathOverlay(vm)
+            PerformOverlay(vm)
             vm.picking?.let { pick ->
                 val pickingZ = if (pick.fromReference) 1f else 0f
                 Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))
@@ -344,12 +349,15 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             }
             // the timeline's settings card, over the canvas and its bars
             if (vm.timelineSettingsOpen && !pageOver) TimelineSettingsCard(vm)
-            // the bottom toolbars rise from below the screen, and drop away
+            // the bottom toolbars rise from below the screen, and drop away; the transform's stands
+            // over the timeline's bar (whose top is the settings card's lift)
+            val overTimeline = if (vm.timelineSettingsLift > 0.dp) vm.timelineSettingsLift - 16.dp else 0.dp
             FloatableBottom(
                 vm,
                 io.github.artcraftandroid.procraft.core.LayoutPiece.TRANSFORM,
                 vm.transforming && !vm.barsHidden,
-                goesWith = { if (vm.transforming && !vm.barsHidden) TransformPopover(vm, maxWidth, maxHeight) },
+                lift = 25.dp + overTimeline,
+                goesWith = { if (vm.transforming && !vm.barsHidden) TransformPopover(vm, maxWidth, maxHeight - overTimeline) },
             ) { TransformToolbar(vm, maxWidth) }
             BrushCursor(vm)
             // the Reference window floats over the bars and the canvas's own marks; the panels,
