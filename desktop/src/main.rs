@@ -73,6 +73,7 @@ mod texture_packer;
 mod textures;
 mod timelapse;
 mod timeline;
+mod timeline_settings;
 mod tool_header;
 mod touch_keyboard;
 mod transform;

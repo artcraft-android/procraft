@@ -44,6 +44,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
@@ -192,8 +193,12 @@ fun BoxScope.TimelineGridBar(vm: CanvasViewModel) {
         val most = maxOf(floor(maxHeight.value * 0.5f - Grid.HeaderHeight.value - Grid.RulerHeight.value - 12f), sizes.rowHeight)
         val shown = minOf(all, most)
         val shape = RoundedCornerShape(28.dp)
+        // the settings' card stands on the bar, clear of it
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.timelineSettingsLift = 0.dp } }
         Column(
             Modifier.align(Alignment.BottomCenter).padding(bottom = 19.dp).width(width)
+                .onSizeChanged { vm.timelineSettingsLift = 19.dp + with(density) { it.height.toDp() } + 10.dp }
                 .shadow(16.dp, shape)
                 .clip(shape)
                 .background(Grid.Panel)
@@ -227,8 +232,8 @@ private fun GridHeader(vm: CanvasViewModel, tool: TimelineTool) {
         GridIconButton(PcIcons.ChevronLeft, 21.dp, name = "Previous Frame", held = { tool.stepDrawing(-1) }) { tool.stepFrame(-1) }
         GridIconButton(PcIcons.ChevronRight, 21.dp, name = "Next Frame", held = { tool.stepDrawing(1) }) { tool.stepFrame(1) }
         Spacer(Modifier.weight(1f))
-        GridIconButton(PcIcons.GridSettings, 27.dp, on = vm.timelineSettingsAsked, name = "Timeline Settings") {
-            if (vm.timelineSettingsAsked) vm.timelineSettingsAsked = false else tool.openSettings()
+        GridIconButton(PcIcons.GridSettings, 27.dp, on = vm.timelineSettingsOpen, name = "Timeline Settings") {
+            if (vm.timelineSettingsOpen) vm.closeTimelineSettings() else tool.openSettings()
         }
         GridIconButton(PcIcons.GridTrack, 27.dp, name = "Add Track") { tool.addTrack() }
         GridIconButton(PcIcons.Add, 38.dp, name = "Add Frame") { tool.addDrawing() }

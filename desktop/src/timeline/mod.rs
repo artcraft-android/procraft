@@ -36,6 +36,8 @@ pub struct TimelineGrid {
     /// The settings button (or Actions → Timeline Settings) was tapped: the settings' card is
     /// wanted. The app takes it.
     pub settings_asked: bool,
+    /// Where the settings button was last drawn (window points): the card stands over it.
+    pub settings_button: Option<egui::Rect>,
     /// The canvas it read (its address), the number of the panel's last reading, and the edits
     /// and timeline it was read at.
     session: usize,
@@ -276,7 +278,7 @@ impl TimelineGrid {
     }
 
     /// Playing stops; with `stay`, the playhead stays on the frame it stopped on.
-    fn stop(&mut self, session: &CanvasSession, stay: bool) {
+    pub(crate) fn stop(&mut self, session: &CanvasSession, stay: bool) {
         let Some(p) = self.playing.take() else { return };
         session.set_timeline_playing(None);
         if stay {

@@ -136,7 +136,7 @@ class TimelineTool internal constructor(private val vm: CanvasViewModel) {
         }
         if (info == null) {
             stopPlaying()
-            if (vm.timelineSettingsAsked) vm.timelineSettingsAsked = false
+            if (vm.timelineSettingsOpen) vm.closeTimelineSettings()
             return
         }
         readThumbnails(s)
@@ -193,15 +193,14 @@ class TimelineTool internal constructor(private val vm: CanvasViewModel) {
         vm.stopPlaying()
         val s = session ?: return
         if (on) s.startTimeline() else s.stopTimeline()
-        if (!on) vm.timelineSettingsAsked = false
+        if (!on) vm.closeTimelineSettings()
         vm.refresh()
     }
 
     /** The timeline's settings asked for (Actions → Canvas → Timeline Settings, or the grid's header): their card opens over the bar. */
     fun openSettings() {
-        vm.closePanels()
         stopPlaying()
-        vm.timelineSettingsAsked = true
+        vm.openTimelineSettings()
     }
 
     /** Draws on frame [frame] (playing stops): a layer of the drawing there becomes current. It may be an empty frame a little past the timeline's end, which the grid shows. */
@@ -285,7 +284,7 @@ class TimelineTool internal constructor(private val vm: CanvasViewModel) {
         val first = info ?: return
         if (first.duration == 0u) return
         val s = session ?: return
-        vm.timelineSettingsAsked = false
+        vm.closeTimelineSettings()
         // the frames the grid shows are the ones played; with none of the timeline's in sight (the
         // playhead resting past its end), those showing from its first frame
         var here = frame

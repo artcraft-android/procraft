@@ -22,6 +22,7 @@ mod gaps;
 mod groups_inline;
 mod key_lanes;
 mod menus;
+pub use menus::TimelineOnion;
 mod moves;
 pub(crate) mod panel;
 mod perform;

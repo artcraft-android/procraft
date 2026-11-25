@@ -349,6 +349,8 @@ pub use timelapse::{
     SegmentPlan, TIME_LAPSE_FPS, TimeLapse, TimeLapseSettings, time_lapse_bits_per_pixel, time_lapse_picks,
     time_lapse_setting_names, time_lapse_side,
 };
+// (the desktop's timeline settings card)
+pub use timeline::{TimelineOnion, TimelineSettings};
 pub use touch::{
     COMPANION_ZOOM_DISTANCE, CompanionMode, Fill, GestureAction, HoverCursor, LOUPE_LIFT, PenHover, PenPreferred,
     SelectKind, SelectTouch, SqueezePhase, TouchCommand, TouchMove, TouchSettings, TransformTouch,

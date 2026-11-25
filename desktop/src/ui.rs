@@ -188,6 +188,9 @@ pub struct Interface {
     gesture_controls: crate::gesture_controls::GestureControls,
     /// Canvas information, while it is open.
     canvas_info: Option<crate::canvas_info::CanvasInfo>,
+    /// The timeline's settings card (Actions → Canvas → Timeline Settings): the timeline's grid
+    /// opens it with its `toggle`, its `anchor` set to the button's rect.
+    pub timeline_settings: crate::timeline_settings::TimelineSettingsCard,
     /// The reference window.
     reference: crate::reference::Reference,
     /// The Reference windows opened besides the artwork's own, while a plugin lets more be open.
@@ -337,6 +340,7 @@ impl Interface {
             gestures: procraft_core::GestureSettings::new(crate::files::kept_gestures()),
             gesture_controls: crate::gesture_controls::GestureControls::default(),
             canvas_info: None,
+            timeline_settings: crate::timeline_settings::TimelineSettingsCard::default(),
             reference: crate::reference::Reference::default(),
             more_references: Vec::new(),
             crop: crate::crop::Crop::default(),
@@ -1278,6 +1282,11 @@ impl Interface {
             if let Some(said) = self.timeline.show(&ctx, &mut self.look, session) {
                 self.overlays.notice(said, true);
             }
+            // the grid's settings button: the settings' card over it, or put away
+            if std::mem::take(&mut self.timeline.settings_asked) {
+                self.timeline_settings.anchor = self.timeline.settings_button;
+                self.timeline_settings.toggle();
+            }
         } else {
             self.animation.reset(session);
             self.timeline.reset(session);
@@ -1326,6 +1335,18 @@ impl Interface {
                     self.canvas_info = None;
                 }
                 Some(_) => self.canvas_info = None,
+                None => {}
+            }
+        }
+        // the timeline's settings, over the canvas (a full-screen page covers them)
+        if self.canvas_shown() {
+            use crate::timeline_settings::Said;
+            match self.timeline_settings.show(&ctx, &mut self.look, session, &mut self.prefs) {
+                Some(Said::Crop) => {
+                    self.open = None;
+                    self.crop.begin(session);
+                }
+                Some(Said::Prefs) => self.prefs.keep(),
                 None => {}
             }
         }
@@ -3412,11 +3433,6 @@ impl Interface {
                 self.animation.reset(session);
                 self.timeline.set_on(session, !crate::timeline::TimelineGrid::on(session));
             }
-            // (the settings' card is the app's to open)
-            Some(Act::TimelineSettings) => {
-                self.open = None;
-                self.timeline.settings_asked = true;
-            }
             Some(Act::Licences) => self.licences = true,
             Some(Act::Shortcuts) => {
                 self.open = None;
@@ -3486,6 +3502,13 @@ impl Interface {
                 if !self.comic_panels.begin(session) {
                     self.overlays.notice(crate::comic_panels::CANNOT, true);
                 }
+            }
+            Some(Act::TimelineSettings) => {
+                self.open = None;
+                // (nothing plays on while its rate, length or playing change)
+                self.timeline.stop(session, false);
+                self.timeline_settings.anchor = self.timeline.settings_button;
+                self.timeline_settings.open();
             }
             Some(Act::CanvasInfo) => {
                 self.open = None;
@@ -3896,6 +3919,7 @@ impl Interface {
                 || self.background_pick.is_some())
                 && self.colours.takes_keys())
             || self.animation.takes_keys()
+            || self.timeline_settings.takes_keys()
             // (the Texture Packer's picture stays as it opened: the canvas isn't changed under it)
             || self.texture_packer.is_some()
     }
@@ -5496,5 +5520,123 @@ mod tests {
         let at = pos2(moved.center().x - 100.0, moved.center().y + 60.0);
         w.pen_stroke(at, at + vec2(150.0, 0.0), 12);
         assert!(w.painted() > painted, "painted again");
+    }
+
+    /// Actions → Canvas → Timeline Settings, dimmed off a timeline, opens the timeline's settings
+    /// card on one: Frames per second's named rates (the timing kept), the length typed on the
+    /// card's keys and fitted to the frames, the onion skins turned off and on again, the side
+    /// after's count and tint; a press elsewhere closes it.
+    #[test]
+    fn timeline_settings_open_from_actions_and_change_the_timeline() {
+        use crate::timeline_settings::{self as ts, Beside, Tab};
+        let Some(mut w) = Window::open(vec2(1180.0, 900.0), false) else { return };
+        w.stroke();
+        w.ui.prefs.actions_tab = 1;
+        // the Canvas tab's rows: Crop & Resize and Comic panels (89), 20 apart from Animation
+        // Assist, Page Assist and Timeline (135), then Timeline Settings
+        let row = |w: &mut Window| {
+            w.ui.open = Some(Popover::Actions);
+            for _ in 0..30 {
+                w.frame();
+            }
+            let id = egui::Id::unique("actions panel");
+            let (panel, _) = w.area_shown(egui::Order::Foreground, id).expect("the Actions panel");
+            let body = crate::panel::body(panel);
+            pos2(body.center().x, body.top() + 136.0 + 89.0 + 20.0 + 135.0 + 22.0)
+        };
+        let at = row(&mut w);
+        w.click(at);
+        assert!(!w.ui.timeline_settings.is_open(), "dimmed off a timeline");
+        assert!(w.session.start_timeline());
+        w.ui.open = None;
+        w.frame();
+        let at = row(&mut w);
+        w.click(at);
+        assert!(w.ui.timeline_settings.is_open());
+        assert_eq!(w.ui.open, None, "the panel goes as it opens");
+        w.frame();
+        // where the card and what is beside it stand (their areas' rects take in more than them)
+        let window = Rect::from_min_size(Pos2::ZERO, w.size);
+        let shown = |w: &Window, _: &str| w.ui.timeline_settings.placed(window).1;
+        let (card, _, content) = w.ui.timeline_settings.placed(window);
+        let (left, top, x) = (card.left() + ts::INSET, card.top() + ts::TITLE_BAND, card.center().x);
+        let width = ts::WIDTH - 2.0 * ts::INSET;
+        let before = w.session.timeline_info().expect("a timeline");
+        // Frames per second: a faster rate by name, every frame moved to keep the timing
+        w.click(pos2(x, top + ts::ROW / 2.0));
+        assert_eq!(w.ui.timeline_settings.beside(), Some(Beside::Rates));
+        w.frame();
+        let (i, fps) = ts::FRAME_RATES
+            .iter()
+            .enumerate()
+            .find_map(|(i, (_, fps))| (*fps > before.fps).then_some((i, *fps)))
+            .expect("a faster rate");
+        let rates = shown(&w, "timeline settings beside").expect("the rates");
+        let named = rates.top() + ts::BESIDE_MARGIN + ts::CUSTOM_ROW + 1.0 + ts::RATE_ROW * (i as f32 + 0.5);
+        w.click(pos2(rates.center().x, named));
+        let info = w.session.timeline_info().expect("a timeline");
+        assert_eq!(info.fps, fps);
+        assert!(
+            (info.duration * before.fps).abs_diff(before.duration * fps) <= fps,
+            "as long in time: {} at {} from {} at {}",
+            info.duration,
+            fps,
+            before.duration,
+            before.fps
+        );
+        // Duration: 30 typed on its keys and Set; then fitted to the frames
+        let duration = pos2(x, top + ts::ROW + ts::BARE_SLIDER + ts::ROW / 2.0);
+        w.click(duration);
+        assert_eq!(w.ui.timeline_settings.beside(), Some(Beside::Length));
+        w.frame();
+        let keys = shown(&w, "timeline settings beside").expect("the keys").shrink(ts::BESIDE_MARGIN);
+        let key_width = (keys.width() - 4.0 - 2.0 * ts::KEY_GAP) / 3.0;
+        let key = |r: usize, c: usize| {
+            let y = keys.top() + ts::NUMBER_LINE + ts::KEY_GAP + (ts::KEY + ts::KEY_GAP) * r as f32 + ts::KEY / 2.0;
+            pos2(keys.left() + 2.0 + (key_width + ts::KEY_GAP) * c as f32 + key_width / 2.0, y)
+        };
+        for (r, c) in [(2, 2), (3, 0), (3, 2)] {
+            w.click(key(r, c));
+        }
+        assert_eq!(w.session.timeline_info().map(|i| i.duration), Some(30));
+        assert_eq!(w.ui.timeline_settings.beside(), None, "the keys go once it is set");
+        w.click(duration);
+        w.frame();
+        let keys = shown(&w, "timeline settings beside").expect("the keys").shrink(ts::BESIDE_MARGIN);
+        w.click(pos2(keys.center().x, keys.top() + ts::keypad_height() + 1.0 + ts::KEY / 2.0));
+        let end = w.session.timeline_content_end();
+        assert!(end > 0 && end != 30, "{end}");
+        assert_eq!(w.session.timeline_info().map(|i| i.duration), Some(end), "fitted to the frames");
+        // Onion: turned off, and back on as it was
+        let tab =
+            |t: usize| pos2(card.left() + 8.0 + (ts::WIDTH - 16.0) / 4.0 * (t as f32 + 0.5), top + content + 20.0);
+        w.click(tab(1));
+        assert_eq!(w.ui.timeline_settings.tab(), Tab::Onion);
+        let onion = w.session.timeline_onion().expect("onion skins");
+        w.click(pos2(x, top + ts::ROW / 2.0));
+        let off = w.session.timeline_onion().expect("onion skins");
+        if onion.before > 0 || onion.after > 0 {
+            assert_eq!((off.before, off.after), (0, 0));
+            w.click(pos2(x, top + ts::ROW / 2.0));
+            let again = w.session.timeline_onion().expect("onion skins");
+            assert_eq!((again.before, again.after), (onion.before, onion.after));
+        } else {
+            assert_eq!((off.before, off.after), (1, 1));
+        }
+        // Forwards: half its most skins, and tinted
+        let half = (width - 4.0) / 2.0;
+        w.click(pos2(left + half + 4.0 + half / 2.0, top + ts::ROW + ts::SECTION_GAP + ts::SIDES / 2.0));
+        let sliders = top + ts::ROW + ts::SECTION_GAP + ts::SIDES + ts::SECTION_GAP;
+        w.click(pos2(left + 16.0 + (width - 32.0) / 2.0, sliders + ts::SLIDERS_TOP + 38.5));
+        let set = w.session.timeline_onion().expect("onion skins");
+        assert_eq!(set.after, ts::MOST_SKINS / 2);
+        let tint = sliders + ts::sliders_height(2) + ts::SECTION_GAP + ts::ROW / 2.0;
+        w.click(pos2(x, tint));
+        let tinted = w.session.timeline_onion().expect("onion skins");
+        assert_eq!(tinted.after_color, if set.after_color == 0 { 0x339933 } else { 0 });
+        assert_eq!(tinted.before_color, set.before_color, "the other side as it was");
+        // a press elsewhere closes it
+        w.click(pos2(40.0, 450.0));
+        assert!(!w.ui.timeline_settings.is_open());
     }
 }

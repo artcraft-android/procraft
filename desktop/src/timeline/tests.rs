@@ -167,12 +167,12 @@ fn the_header_adds_a_frame_and_a_track_and_a_tap_chooses_a_track() {
     settle(&mut w);
     assert_eq!(info(&w).track, Some(new));
     assert_eq!(info(&w).frame, 0, "the playhead stays");
-    // the settings button asks for the settings, as Actions' Timeline Settings does
+    // the settings button opens the settings' card, as Actions' Timeline Settings does
     button(&mut w, "Settings");
-    assert!(w.ui.timeline.settings_asked);
-    w.ui.timeline.settings_asked = false;
+    assert!(w.ui.timeline_settings.is_open());
+    w.ui.timeline_settings.close();
     actions_row(&mut w, "Timeline Settings");
-    assert!(w.ui.timeline.settings_asked);
+    assert!(w.ui.timeline_settings.is_open());
 }
 
 /// The frames dragged sideways scrub under the playhead (each frame shown as it passes, not yet

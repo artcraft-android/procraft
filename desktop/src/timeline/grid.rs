@@ -326,6 +326,7 @@ impl TimelineGrid {
         look.icon(ui, &icons::CHEVRON_LEFT, back.center(), 21.0, tint(Button::Back));
         look.icon(ui, &icons::CHEVRON_RIGHT, on.center(), 21.0, tint(Button::On));
         settings_glyph(painter, settings.center(), tint(Button::Settings));
+        self.settings_button = Some(settings);
         track_glyph(painter, track.center(), tint(Button::Track));
         look.icon(ui, &icons::ADD, add.center(), 38.0, tint(Button::Add));
         let mut said = None;
