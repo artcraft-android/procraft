@@ -848,7 +848,7 @@ private fun GridKeypad(unit: String, from: Int, most: Int, note: ((Int) -> Strin
                     Box(
                         Modifier.weight(1f).height(40.dp).clip(CircleShape).background(fill).clickable(role = Role.Button) {
                             when (key) {
-                                "Set" -> if (valid) number?.let(set)
+                                "Set" -> if (valid && number != null) set(number)
                                 "⌫" -> typed = typed.dropLast(1)
                                 // no more than six, none starting with 0
                                 else -> if (typed.length < 6 && !(typed.isEmpty() && key == "0")) typed += key
