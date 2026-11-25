@@ -136,30 +136,6 @@ pub fn set_gpu_record_folder(dir: String, build: String) {
     *RECORD_FOLDER.lock().unwrap_or_else(PoisonError::into_inner) = Some((PathBuf::from(dir), build));
 }
 
-/// The iPad app's log: to the standard error, which Xcode's console shows (and `simctl launch
-/// --console`). Without it nothing the core logs there is seen: how long the device, the
-/// pipelines and a canvas took to make among it.
-#[cfg(target_os = "ios")]
-struct ToStandardError;
-
-#[cfg(target_os = "ios")]
-impl log::Log for ToStandardError {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        // ours at info; of the rest (wgpu's, naga's) only errors: wgpu warns at each start of what
-        // the simulator's GPU lacks, a screenful
-        let level = if metadata.target().starts_with("procraft") { log::Level::Info } else { log::Level::Error };
-        metadata.level() <= level
-    }
-
-    fn log(&self, record: &log::Record<'_>) {
-        if self.enabled(record.metadata()) {
-            eprintln!("ProCraft core: [{}] {}", record.level(), record.args());
-        }
-    }
-
-    fn flush(&self) {}
-}
-
 /// The log, to Android's (tag "procraft") and to the app's log file once that has begun (see
 /// `app_log`), with a panic's message and place in it (the platform drops what the standard error
 /// says); once. On the iPad, to the file alone: the app's share of the system's log is its own.

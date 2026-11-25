@@ -565,7 +565,6 @@ final class CanvasModel {
             shownSet = Int(current.set)
         }
         readSliders()
-        readModel()
         refresh()
         pushSecondary()
         // a model is lit, and its meshes read, as it opens

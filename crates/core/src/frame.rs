@@ -246,7 +246,7 @@ impl State {
                 Some(sharp) => (&mut sharp.canvas, &mut sharp.doc, sharp.to_screen),
                 None => (canvas, &mut self.doc, to_screen),
             };
-            let look = (canvas.has_selection() && banded).then_some(selection_shown);
+            let look = canvas_selection.filter(|_| canvas.has_selection() && banded);
             canvas.render(
                 gpu,
                 doc,

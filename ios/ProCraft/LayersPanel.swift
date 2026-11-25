@@ -484,7 +484,6 @@ struct LayersPanel: View {
                     .animation(Motion.rowMove, value: ids)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 12)
-                    .background(ListFinder { ui.list = $0 })
                     .background {
                         GeometryReader { rows in
                             Color.clear
@@ -636,7 +635,7 @@ private struct LayerItem: View {
         }
         VStack(spacing: 0) {
             LayerSwipe(
-                model: model, layer: l, open: ui.swiped == l.id, slide: ui.slid == l.id ? ui.slidBy : nil,
+                model: model, layer: l, open: ui.swiped == l.id, enabled: ui.dragId == nil,
                 onOpen: { ui.swiped = $0 ? l.id : nil },
                 onPick: { model.pickLayer(l) }
             ) {
@@ -741,13 +740,14 @@ private struct LayerSwipe<Content: View>: View {
     let model: CanvasModel
     let layer: LayerInfo
     let open: Bool
-    /// How far a finger has slid along the row, while one does (the panel's `RowTouches` tell).
-    let slide: CGFloat?
+    let enabled: Bool
     let onOpen: (Bool) -> Void
     let onPick: () -> Void
     @ViewBuilder let content: () -> Content
 
     @State private var offset: CGFloat = 0
+    /// The touch is going along the row, not down the list.
+    @State private var sliding = false
 
     /// How far it slides open: 6 past the buttons.
     private var reach: CGFloat {
@@ -792,29 +792,39 @@ private struct LayerSwipe<Content: View>: View {
             }
             content()
                 .offset(x: offset)
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 14)
+                        .onChanged { drag in
+                            guard enabled else { return }
+                            if !sliding, abs(drag.translation.width) > abs(drag.translation.height) {
+                                sliding = true
+                            }
+                            if sliding {
+                                // closed, it goes right as far as picking takes
+                                offset = min(max((open ? -reach : 0) + drag.translation.width, -reach), open ? 0 : pickReach)
+                            }
+                        }
+                        .onEnded { _ in
+                            guard sliding else { return }
+                            sliding = false
+                            if offset > pickReach / 2 {
+                                onPick()
+                                withAnimation(Motion.swipeSettle) { offset = 0 }
+                                return
+                            }
+                            let opened = offset < -reach / 2
+                            if opened == open {
+                                withAnimation(Motion.swipeSettle) { offset = open ? -reach : 0 }
+                            } else {
+                                onOpen(opened)
+                            }
+                        }
+                )
         }
         // the list only clips top and bottom; a slid row stops at its edge
         .clipped()
         .onChange(of: open, initial: true) { _, now in
             withAnimation(Motion.swipeSettle) { offset = now ? -reach : 0 }
-        }
-        .onChange(of: slide) { _, now in
-            if let now {
-                // closed, it goes right as far as picking takes
-                offset = min(max((open ? -reach : 0) + now, -reach), open ? 0 : pickReach)
-                return
-            }
-            if offset > pickReach / 2 {
-                onPick()
-                withAnimation(Motion.swipeSettle) { offset = 0 }
-                return
-            }
-            let opened = offset < -reach / 2
-            if opened == open {
-                withAnimation(Motion.swipeSettle) { offset = open ? -reach : 0 }
-            } else {
-                onOpen(opened)
-            }
         }
     }
 }

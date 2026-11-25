@@ -62,6 +62,36 @@ private extension GalleryEntry {
     }
 }
 
+/// What a dragged item can come as. Another app's item often comes in several forms at once (an
+/// artwork as its own file and as a picture of it): which is taken goes by where it is dropped.
+enum DroppedForm {
+    case brushes, palette, artwork, picture, other
+
+    /// The form a type's files are, by the extensions its files have (and, for an app's own types
+    /// that say none, by its name).
+    init(type identifier: String) {
+        let type = UTType(identifier)
+        let extensions = Set((type?.tags[.filenameExtension] ?? []).map { $0.lowercased() })
+        let named = identifier.lowercased()
+        if !extensions.isDisjoint(with: droppedBrushExtensions) || named.contains("brush") {
+            self = .brushes
+        } else if !extensions.isDisjoint(with: droppedPaletteExtensions) || named.contains("swatches") {
+            self = .palette
+        } else if !extensions.isDisjoint(with: droppedArtworkExtensions) || named.contains("procreate") || type?.conforms(to: .pdf) == true {
+            self = .artwork
+        } else if type?.conforms(to: .image) == true {
+            self = .picture
+        } else {
+            self = .other
+        }
+    }
+}
+
+let droppedBrushExtensions: Set<String> = ["brush", "brushset", "abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut"]
+let droppedPaletteExtensions: Set<String> = ["swatches", "aco", "ase"]
+/// Artworks with their layers: ours, other apps', and what is brought in as one.
+let droppedArtworkExtensions: Set<String> = ["procraft", "procreate", "psd", "psb"]
+
 /// A copy of a dropped file, which goes when its reader returns: in a folder of its own, as two may
 /// have one name. A name without an extension takes its `type`'s, as what reads it goes by it.
 private func keepDropped(_ url: URL, in folder: URL, type: String) -> URL? {

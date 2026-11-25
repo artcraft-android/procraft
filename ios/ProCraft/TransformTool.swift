@@ -583,15 +583,15 @@ struct TransformToolbar: View {
                     tool.popup = popup == .snapping ? .none : .snapping
                 }
             }
-            ToolbarButton(icon: PcIcons.flipHorizontal, label: "Flip Horizontal", width: w, iconSize: 50, labelSize: long) { tool.apply(.flipHorizontal) }
-            ToolbarButton(icon: PcIcons.flipVertical, label: "Flip Vertical", width: w, iconSize: 50, labelSize: long) { tool.apply(.flipVertical) }
+            ToolbarButton(icon: PcIcons.flipHorizontal, label: "Flip Horizontal", width: w, iconSize: 50) { tool.apply(.flipHorizontal) }
+            ToolbarButton(icon: PcIcons.flipVertical, label: "Flip Vertical", width: w, iconSize: 50) { tool.apply(.flipVertical) }
             if tool.kind == .puppet {
                 ToolbarButton(icon: PcIcons.trash, label: "Delete Pin", width: w, iconSize: 26) { tool.deletePin() }
                     .opacity((tool.box?.selectedPin ?? -1) >= 0 ? 1 : 0.45)
             } else {
                 ToolbarButton(icon: PcIcons.rotate45, label: "Rotate 45°", width: w, iconSize: 44) { tool.apply(.rotate45) }
             }
-            ToolbarButton(icon: PcIcons.fitToCanvas, label: "Fit to Canvas", width: w, iconSize: 35, labelSize: long) { tool.apply(.fitToCanvas) }
+            ToolbarButton(icon: PcIcons.fitToCanvas, label: "Fit to Canvas", width: w, iconSize: 35) { tool.apply(.fitToCanvas) }
             ToolbarButton(
                 icon: PcIcons.interpolation, label: tool.pixelated ? "Pixelated" : interpolationName(tool.interpolation, short: true),
                 active: popup == .interpolation, width: w, iconSize: 44

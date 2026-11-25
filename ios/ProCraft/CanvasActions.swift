@@ -176,30 +176,6 @@ extension CanvasModel {
             }
             do {
                 switch kind {
-                case .modelArtwork:
-                    let out = dir.appendingPathComponent(exportFileName(name: session.name(), package: true) + ".procraft")
-                    try session.exportModelArtwork(dir: artworkDir, path: out.path)
-                    return [out]
-                case .modelUsdz:
-                    try session.exportModelUsdz(path: file(".usdz").path)
-                    return [file(".usdz")]
-                case .modelObj:
-                    try session.exportModelObj(path: file(".zip").path)
-                    return [file(".zip")]
-                case .modelJpeg:
-                    try session.exportModelJpeg(path: file(".jpg").path)
-                    return [file(".jpg")]
-                case .modelPng:
-                    try session.exportModelRender(path: file(".png").path, transparent: false)
-                    return [file(".png")]
-                case .modelTiff:
-                    try session.exportModelTiff(path: file(".tif").path)
-                    return [file(".tif")]
-                case .modelTextures:
-                    let folder = dir.appendingPathComponent(base)
-                    try? FileManager.default.removeItem(at: folder)
-                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                    return try session.exportModelTextures(dir: folder.path).map { URL(fileURLWithPath: $0) }
                 case .psd:
                     try session.exportPsd(path: file(".psd").path)
                     return [file(".psd")]

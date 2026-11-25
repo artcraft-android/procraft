@@ -392,45 +392,6 @@ struct PluginAlerts: View {
 
 extension CanvasModel {
     /// The session goes by the plugins that reach a canvas.
-    /// A plugin's action `key` run on the artwork, off the main thread (it may take seconds): the
-    /// panels close so what it does shows, and what it says, or its stopping, is told.
-    func runPluginAction(_ key: String) {
-        closePanels()
-        let session = session
-        let plugins = PluginsModel.shared.store
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            _ = plugins.runAction(key: key, session: session)
-            let panel = plugins.panel()
-            DispatchQueue.main.async { self?.pluginAnswered(panel) }
-        }
-    }
-
-    /// Row `row` of the plugin's panel touched with `value`: told to the plugin off the main thread,
-    /// and the panel shown as it answers (or closed).
-    func touchPluginPanel(_ row: Int, _ value: Float) {
-        let session = session
-        let plugins = PluginsModel.shared.store
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            _ = plugins.panelTouched(row: UInt32(row), value: value, session: session)
-            let panel = plugins.panel()
-            DispatchQueue.main.async { self?.pluginAnswered(panel) }
-        }
-    }
-
-    func closePluginPanel() {
-        PluginsModel.shared.store.closePanel()
-        pluginPanel = nil
-    }
-
-    private func pluginAnswered(_ panel: PluginPanel?) {
-        pluginPanel = panel
-        if let failure = session.takeFailure() {
-            showNotice(failure, warning: true)
-        }
-        PluginsModel.shared.read()
-        refresh()
-    }
-
     func applyPlugins() {
         let plugins = PluginsModel.shared.store
         session.usePlugins(plugins: plugins)

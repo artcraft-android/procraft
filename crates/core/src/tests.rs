@@ -6226,7 +6226,7 @@ fn lasso_fill_fills_each_shape_on_its_own_as_one_undo_step() {
     let dir = std::env::temp_dir().join(format!("procraft-lasso-fill-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
-    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
     assert_eq!(plugins.install(file.to_vec()), None);
     s.use_plugins(std::sync::Arc::clone(&plugins));
     assert!(!plugins.lasso_fills(), "imported, it's off");
@@ -6255,7 +6255,7 @@ fn lasso_fill_fills_each_shape_on_its_own_as_one_undo_step() {
     assert_eq!(pixel(&s, 25, 25), [255, 255, 255, 255]);
     s.set_touch_selecting(None);
     // on, shapes fill
-    assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+    assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
     assert!(plugins.lasso_fills());
     s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
     let out = lasso(&s, 10.0, 10.0, 40.0, 40.0, 1.0);
@@ -6377,10 +6377,10 @@ fn a_lasso_s_fill_shows_as_it_will_land_soft_edged_and_overlapping_alike() {
     let dir = std::env::temp_dir().join(format!("procraft-lasso-soft-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
-    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
     assert_eq!(plugins.install(file.to_vec()), None);
     s.use_plugins(std::sync::Arc::clone(&plugins));
-    assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+    assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
     s.set_brush_opacity(1.0);
     s.set_color(0.0, 0.0, 0.0);
     s.set_lasso_preview_opacity(1.0);
@@ -6443,10 +6443,10 @@ fn a_lasso_s_fill_shows_on_the_canvas_as_it_is_drawn() {
     let dir = std::env::temp_dir().join(format!("procraft-lasso-preview-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
-    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
     assert_eq!(plugins.install(file.to_vec()), None);
     s.use_plugins(std::sync::Arc::clone(&plugins));
-    assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+    assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
     s.set_brush_size(0.3);
     s.set_brush_opacity(1.0);
     s.set_color(1.0, 0.0, 0.0);
@@ -6565,7 +6565,7 @@ fn lasso_outline_fills_what_a_paint_stroke_goes_round_under_it_in_its_step() {
     let dir = std::env::temp_dir().join(format!("procraft-lasso-outline-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
-    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
     assert_eq!(plugins.install(file.to_vec()), None);
     s.use_plugins(std::sync::Arc::clone(&plugins));
     round(&s, 20.0, 20.0, 80.0, 80.0, 0.0);
@@ -6574,7 +6574,7 @@ fn lasso_outline_fills_what_a_paint_stroke_goes_round_under_it_in_its_step() {
     s.undo();
     assert_eq!(pixel(&s, 50, 20), white);
     // on: the stroke's colour fills what it went round, and nothing outside
-    assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+    assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
     round(&s, 20.0, 20.0, 80.0, 80.0, 1000.0);
     assert_eq!(pixel(&s, 50, 50), [255, 0, 0, 255]);
     assert_eq!(pixel(&s, 5, 5), white);
@@ -6644,10 +6644,10 @@ fn lasso_outline_on_a_vector_layer_keeps_its_fill_as_a_shape_under_the_stroke() 
     let dir = std::env::temp_dir().join(format!("procraft-lasso-outline-vector-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
-    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
     assert_eq!(plugins.install(file.to_vec()), None);
     s.use_plugins(std::sync::Arc::clone(&plugins));
-    assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+    assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
     let layer = s.add_vector_layer();
     s.set_brush_size(0.3);
     s.set_brush_opacity(1.0);

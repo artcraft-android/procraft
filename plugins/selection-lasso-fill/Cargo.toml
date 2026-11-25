@@ -1,5 +1,5 @@
 [package]
-name = "lasso-fill"
+name = "selection-lasso-fill"
 version = "1.0.0"
 edition = "2024"
 publish = false

@@ -3880,6 +3880,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "the Vector layers plugin doesn't come with this app: its vector layers are the core's own"]
     fn the_vector_layers_plugin_fills_the_largest_picture_well_within_a_layer_call_s_steps() {
         // the largest picture a dropped colour comes with, 2048 square: a ring of lines 4 wide round
         // its middle with a gap 4 wide in its top (closed by the card's 6), and 300 short strokes

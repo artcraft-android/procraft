@@ -45,6 +45,8 @@ extension CanvasModel {
     /// others picked takes them along, in their order (the shared core decides).
     func moveNextTo(_ l: LayerInfo, _ target: LayerInfo, above: Bool) {
         _ = session.dropRow(id: l.id, place: above ? .above(target: target.id) : .below(target: target.id))
+    }
+
     /// Where `l`, dragged with what goes with it, lands if let go with its middle at `y`: `rows`
     /// are the panel's rows where they are on the screen, `held` the row held over a moment, if
     /// any (the shared core decides).

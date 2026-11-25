@@ -1383,6 +1383,7 @@ enum Gallery {
     /// The store reads `workspace` from now on, on the main thread.
     static func show(_ workspace: Workspace) {
         store = ArtworkStore.open(root: workspace.root)
+    }
 
     /// Where the artworks being opened are noted until each shows, outside the gallery: one whose
     /// opening ended the app is asked about when next picked.

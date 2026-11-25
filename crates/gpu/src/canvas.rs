@@ -3850,6 +3850,10 @@ pub struct Canvas {
     /// tests.
     synthesis_due: IRect,
     joins_synthesis: bool,
+    /// A dual brush's second's tip (laid ahead, taken off again) is under way in the work laid so
+    /// far, which a render may stop partway through: its stamps aren't the second's for its marks
+    /// (see `second_marks.rs`).
+    in_second_tip: bool,
     /// How long a render that shows the canvas lays a stroke laid again as it ends (see
     /// [`RELAY_AT_ONCE`]), and whether one is being laid over several (the picture held meanwhile).
     relay_at_once: std::time::Duration,
@@ -4369,6 +4373,7 @@ impl Canvas {
             second_unsynthesized: IRect::EMPTY,
             synthesis_due: IRect::EMPTY,
             joins_synthesis: true,
+            in_second_tip: false,
             relay_at_once: RELAY_AT_ONCE,
             relaying: false,
             relay_sent: None,
@@ -5167,9 +5172,11 @@ impl Canvas {
 
     /// Whether the open stroke can show a tip (see [`Canvas::set_tip`]): one built up in the
     /// stroke texture, not painted in place or onto an adjustment. A dual brush's shows its
-    /// second's tip with it ([`Canvas::set_second_tip`]), to cut it.
+    /// second's tip with it ([`Canvas::set_second_tip`]), to cut it; but not one whose parts are
+    /// carried from lot to lot (see [`Carried`]): what a tip laid would stay in their full floats
+    /// once it was taken off.
     pub fn shows_tip(&self) -> bool {
-        self.active.is_some_and(|a| !a.pencil && !a.style.in_place())
+        self.active.is_some_and(|a| !a.pencil && !a.style.in_place()) && !self.carries(false) && !self.carries(true)
     }
 
     /// The open stroke's tip, drawn over it until the next stamps or tip: its last stamps as
@@ -5186,7 +5193,12 @@ impl Canvas {
         // (measured, it counts where the stroke reaches, as drawn)
         let bounds = self.push_stamps(stamps, false);
         self.ribbon = ribbon;
-        if bounds.is_empty() || self.measuring {
+        if self.measuring {
+            return;
+        }
+        // (off the canvas: nothing to take off again, so nothing laid, else it stayed for good)
+        if bounds.is_empty() {
+            self.ops.truncate(at);
             return;
         }
         self.ops.insert(at, Op::SaveTip { rect: bounds, second: false });
@@ -5206,7 +5218,13 @@ impl Canvas {
         }
         let at = self.ops.len();
         let bounds = self.push_stamps_to(stamps, false, true);
-        if bounds.is_empty() || self.measuring {
+        if self.measuring {
+            return;
+        }
+        // (off the canvas: nothing to take off again, so nothing laid, else its stamps were taken
+        // for the second's own)
+        if bounds.is_empty() {
+            self.ops.truncate(at);
             return;
         }
         self.ops.insert(at, Op::SaveTip { rect: bounds, second: true });
@@ -8078,9 +8096,12 @@ impl Canvas {
         let full = self.full();
         let mut ops = ops.into_iter();
         while let Some(op) = ops.next() {
-            // (what the paint's next stamps don't take with them is put together before other work)
+            // (what the paint's next stamps don't take with them is put together before other work;
+            // the second's own, and its tip put on and taken off, go with them too)
             let joins = matches!(&op, Op::Stamps { second: false, pencil: false, clear: false, style, .. }
-                if style.in_place());
+                if style.in_place())
+                || matches!(&op, Op::Stamps { second: true, clear: false, .. }
+                    | Op::SaveTip { second: true, .. } | Op::Untip { second: true, .. });
             if !joins {
                 self.synthesize_due(gpu, &mut encoder, &mut smudge_uniforms);
             }
@@ -8300,7 +8321,7 @@ impl Canvas {
                     if second && clear {
                         self.second_cleared();
                     }
-                    if second {
+                    if second && !self.in_second_tip {
                         self.mark_second(
                             device,
                             &mut encoder,
@@ -8462,6 +8483,7 @@ impl Canvas {
                     self.clear_built_up(&mut encoder, &self.stroke);
                 }
                 Op::SaveTip { rect, second } => {
+                    self.in_second_tip |= second;
                     let (width, height) = (rect.width(), rect.height());
                     let kept = if second { &mut self.second_tip_backup } else { &mut self.tip_backup };
                     let roomy = kept.as_ref().is_some_and(|b| b.width() >= width && b.height() >= height);
@@ -8490,6 +8512,7 @@ impl Canvas {
                     }
                 }
                 Op::Untip { rect, second } => {
+                    self.in_second_tip &= !second;
                     let (to, backup) = if second {
                         (self.second_stroke.get(device).0, &self.second_tip_backup)
                     } else {
@@ -8504,7 +8527,11 @@ impl Canvas {
                     }
                     // a dual brush's paint laid in place: put together again without the tip
                     if second && self.smudge.as_ref().is_some_and(|s| s.apart.is_some()) {
-                        self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, rect);
+                        if self.joins_synthesis {
+                            self.synthesis_due = self.synthesis_due.union(rect);
+                        } else {
+                            self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, rect);
+                        }
                     }
                     if !second {
                         self.untip_built_up(&mut encoder, rect);
@@ -16224,7 +16251,8 @@ fn drop_superseded_stamps(ops: &mut Vec<Op>, layer: LayerId) {
     while let Some(op) = ops.last() {
         let superseded = match op {
             Op::Stamps { second: false, pencil: false, layer: on, .. } => *on == layer,
-            Op::SaveTip { .. } | Op::Untip { .. } => true,
+            // (a dual brush's second's tip isn't: its stamps stay, so its putting on and taking off do)
+            Op::SaveTip { second: false, .. } | Op::Untip { second: false, .. } => true,
             _ => false,
         };
         if !superseded {

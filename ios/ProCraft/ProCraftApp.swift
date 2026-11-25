@@ -285,7 +285,15 @@ struct RootView: View {
                 open.onClose()
             }
         #if DEBUG
-        .task { ScreenCapture.start { OpenCanvas.shared.show($0) } }
+        .task {
+            ScreenCapture.start { model in
+                if let model {
+                    OpenCanvas.shared.show(model)
+                } else {
+                    OpenCanvas.shared.close()
+                }
+            }
+        }
         #endif
     }
 }
@@ -1365,7 +1373,7 @@ enum ScreenCapture {
                 model.actionsTab = name == "actions-share" ? 2 : 3
                 model.toggle(.actions)
             case "flat":
-                model.setModelFlat(true)
+                model.scene.setFlat(true)
             default:
                 break
             }

@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "lasso-fill"
+name = "selection-lasso-fill"
 version = "1.0.0"
 dependencies = [
  "procraft-plugin-kit",

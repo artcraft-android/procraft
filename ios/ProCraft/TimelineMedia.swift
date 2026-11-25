@@ -481,23 +481,3 @@ final class SoundPlayer {
     }
 }
 
-/// A video from the Photos library, copied out to a file of its own: in a folder of its own in
-/// the temporary folder, under the name Photos gave it (the file handed over goes away once it
-/// has been received).
-struct PickedMovie: Transferable {
-    let url: URL
-
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(contentType: .movie) { movie in
-            SentTransferredFile(movie.url)
-        } importing: { received in
-            let folder = FileManager.default.temporaryDirectory
-                .appendingPathComponent("PhotosVideos", isDirectory: true)
-                .appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let to = folder.appendingPathComponent(received.file.lastPathComponent)
-            try FileManager.default.copyItem(at: received.file, to: to)
-            return PickedMovie(url: to)
-        }
-    }
-}

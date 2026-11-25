@@ -239,26 +239,52 @@ extension CanvasModel {
             guard (try? FileManager.default.copyItem(at: file, to: kept)) != nil else { continue }
             PluginsModel.shared.offer(kept) { [weak self] in self?.showNotice($0, warning: true) }
         }
-        // pictures on layers, a video's frames on the timeline
+        // pictures on layers, a video's frames on the timeline (the folder kept until they are read)
+        let inserting = DispatchGroup()
         let inserted = (sorted[.picture] ?? []) + (sorted[.movie] ?? [])
         if !inserted.isEmpty {
             if transforming {
                 endTransform(commit: true)
             }
             closePanels()
-            gone.enter()
-            insertDropped(inserted[...], transform: inserted.count == 1) { gone.leave() }
+            inserting.enter()
+            insertDropped(inserted[...], transform: inserted.count == 1) { inserting.leave() }
         }
         let artworks = sorted[.artwork] ?? []
         // the brushes read first, the folder there until they are
         importBrushes(from: sorted[.brushes] ?? []) { [weak self] in
-            DispatchQueue.main.async {
+            inserting.notify(queue: .main) {
                 guard let self, !artworks.isEmpty else {
                     DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: folder) }
                     return
                 }
                 self.onClose()
                 GalleryModel.shared.importDropped(artworks, from: folder)
+            }
+        }
+    }
+
+    /// Dropped pictures and videos in, one after another (a video's frames read before the next),
+    /// until one can't come in; then `done`.
+    private func insertDropped(_ files: ArraySlice<URL>, transform: Bool, done: @escaping () -> Void) {
+        guard let file = files.first else {
+            done()
+            return
+        }
+        let rest = files.dropFirst()
+        guard file.isMovie else {
+            if insertPicture(try? Data(contentsOf: file), name: file.lastPathComponent, isPrivate: false, transform: transform) {
+                insertDropped(rest, transform: transform, done: done)
+            } else {
+                done()
+            }
+            return
+        }
+        insertVideo(file, isPrivate: false) { [weak self] came in
+            if came, let self {
+                self.insertDropped(rest, transform: transform, done: done)
+            } else {
+                done()
             }
         }
     }
@@ -306,30 +332,6 @@ enum DroppedKind {
         }
     }
 
-    /// Dropped pictures and videos in, one after another (a video's frames read before the next),
-    /// until one can't come in; then `done`.
-    private func insertDropped(_ files: ArraySlice<URL>, transform: Bool, done: @escaping () -> Void) {
-        guard let file = files.first else {
-            done()
-            return
-        }
-        let rest = files.dropFirst()
-        guard file.isMovie else {
-            if insertPicture(try? Data(contentsOf: file), name: file.lastPathComponent, isPrivate: false, transform: transform) {
-                insertDropped(rest, transform: transform, done: done)
-            } else {
-                done()
-            }
-            return
-        }
-        insertVideo(file, isPrivate: false) { [weak self] came in
-            if came, let self {
-                self.insertDropped(rest, transform: transform, done: done)
-            } else {
-                done()
-            }
-        }
-    }
 }
 
 /// The canvas's keyboard shortcuts as the system lists them while ⌘ is held: the shared shortcuts

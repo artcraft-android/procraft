@@ -233,6 +233,7 @@ pub use floating::{
 };
 pub use folders::{FOLDER_UNREACHABLE, FolderAccess, FolderBroughtIn, FolderEntry, FolderError, PlainFolderAccess};
 pub use frame::{configure, screen_profile};
+pub use frame_exports::{HarmonyMade, SheetLayout, SpriteSheetChoices, SpriteSheetMade};
 pub use gallery::{
     ArtworkStore, DragRest, GALLERY_MORE_ALONE, GALLERY_SPRING_MS, GalleryAction, GalleryArtwork, GalleryButton,
     GalleryEntry, GalleryHeaderFit, GalleryPick, ZipKind, gallery_columns, gallery_header_fit, gallery_pick,
@@ -337,6 +338,7 @@ pub use text_draw::{
     text_index_from_utf16, text_index_to_utf16, text_styles, text_typefaces,
 };
 pub use text_runs::TextStyleChange;
+pub use texture_packer::{PackerBox, PackerSprite};
 pub use timelapse::{
     SegmentPlan, TIME_LAPSE_FPS, TimeLapse, TimeLapseSettings, time_lapse_bits_per_pixel, time_lapse_picks,
     time_lapse_setting_names, time_lapse_side,
@@ -1786,6 +1788,9 @@ fn second_samples(
     }
     if second.shows_tip() {
         let (kept, tip) = second.add_tipped(samples);
+        // (those kept are drawn for good once they no longer change, the turn of its first stamps
+        // among them: none is laid again)
+        let _ = second.take_turned();
         canvas.add_second_stamps(&guide::mirrored(guide, &kept));
         return guide::mirrored(guide, &tip).into_owned();
     }
@@ -1877,14 +1882,9 @@ impl State {
         let predicted = std::mem::take(&mut self.ahead_of);
         let (Some(builder), Some(canvas)) = (self.stroke.as_mut(), self.canvas.as_mut()) else { return };
         let guide = self.doc.stroke_guide();
-        // a dual brush's second runs ahead with it
+        // a dual brush's second runs ahead with it (after the stroke's own: that takes this off)
         let second_tip =
             self.second.as_deref_mut().and_then(|second| second_ahead(canvas, second, &predicted, &guide));
-        if let Some(second_tip) = &second_tip {
-            canvas.set_second_tip(second_tip);
-        }
-        // a dual brush's second runs ahead with it (after the stroke's own: that takes this off)
-        let second_tip = self.second.as_mut().and_then(|second| second_ahead(canvas, second, &[], &guide));
         if canvas.shows_tip() && builder.shows_tip() {
             // a stroke shown with its tip ends it where the input is predicted to go
             let tip = if predicted.is_empty() { builder.tip_now() } else { builder.preview_tip(&predicted) };
@@ -2515,6 +2515,9 @@ impl CanvasSession {
         name: String,
         pixels: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
     ) -> Arc<CanvasSession> {
+        // (a test's ending as the session is built goes off on this thread, whose it is)
+        #[cfg(test)]
+        open_marks::tests::while_building();
         on_roomy_stack(move || CanvasSession::with_document_here(doc, name, pixels))
     }
 
@@ -2523,8 +2526,6 @@ impl CanvasSession {
         name: String,
         pixels: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
     ) -> Arc<CanvasSession> {
-        #[cfg(test)]
-        open_marks::tests::while_building();
         device::start_log();
         let shipped = stock_library::shipped();
         let shelf = brush_library::LibrarySet::shipped(&shipped);

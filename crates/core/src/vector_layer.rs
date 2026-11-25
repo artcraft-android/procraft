@@ -4005,10 +4005,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("procraft-lasso-sharp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "lasso-fill").unwrap();
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
         assert_eq!(plugins.install(file.to_vec()), None);
         s.use_plugins(Arc::clone(&plugins));
-        assert!(plugins.set_on("io.github.artcraftandroid.lasso-fill".to_owned(), true));
+        assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
         s.shared.lock().view = View::centred(Vec2::new(150.0, 150.0), 2.0, 0.0, (300, 300));
         s.set_vector_crisp(true);
         frame(&s);

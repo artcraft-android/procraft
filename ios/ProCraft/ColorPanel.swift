@@ -779,7 +779,7 @@ private struct ModelClassicPicker: View {
         VStack(spacing: 0) {
             // a plugin's: its picker, or a triangle, in the square's place
             if PluginsModel.shared.colourTriangle || PluginsModel.shared.pickerOn {
-                PluginPicker(c: c, side: compact ? 248 : min(344, square))
+                PluginPicker(c: m.c, side: compact ? 248 : min(344, square))
                     .frame(width: across, height: down)
                     .padding(.horizontal, compact ? 6 : 16)
             } else {

@@ -15,7 +15,7 @@ private let buttonGap: CGFloat = 19
 /// Where a capital's middle sits below the top of its line, as a fraction of the font size.
 private let capMiddle: CGFloat = 0.6056
 /// A line's height, as a fraction of the font size.
-private let lineHeight: CGFloat = 1.193
+private let labelLineHeight: CGFloat = 1.193
 
 /// The toolbars' and their popovers' colours: translucent, #282828 to #252525 over white, #212121 to
 /// #1e1e1e over the surround; light, #f2f2f2 with a white track, dark labels, and grey ones for what
@@ -184,7 +184,7 @@ struct ToolbarButton: View {
                 .foregroundStyle(enabled ? ToolbarInk.buttonText : ToolbarInk.buttonDimmed)
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
-                .frame(width: width - 1.5, height: labelSize * lineHeight)
+                .frame(width: width - 1.5, height: labelSize * labelLineHeight)
                 .offset(y: 50 - labelSize * capMiddle)
         }
         .frame(width: width, height: buttonHeight, alignment: .top)

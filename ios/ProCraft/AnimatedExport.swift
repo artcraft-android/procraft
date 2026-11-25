@@ -692,6 +692,9 @@ private struct CountLine: View {
             .frame(width: 44, height: 32)
             .contentShape(Rectangle())
             .onTapGesture { if enabled { action() } }
+    }
+}
+
 private var choiceFill: Color { Look.shared.light ? Color(argb: 0xFFE3_E3E3) : Color(argb: 0xFF2E_2E2E) }
 private var sliderTrack: Color { Look.shared.light ? Color(argb: 0xFFDD_DDDD) : Color(argb: 0xFF3E_3E3E) }
 

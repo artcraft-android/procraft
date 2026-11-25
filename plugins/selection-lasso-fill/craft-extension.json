@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "id": "io.github.artcraftandroid.lasso-fill",
+  "id": "io.github.artcraftandroid.selection-lasso-fill",
   "name": "Lasso Fill",
   "version": "1.0.0",
   "holds": ["hooks"],

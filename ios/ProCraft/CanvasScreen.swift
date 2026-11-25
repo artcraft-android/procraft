@@ -302,6 +302,7 @@ struct CanvasScreen: View {
                 if let packer = model.texturePacker {
                     TexturePackerOverlay(model: model, state: packer, screen: screen.size)
                         .transition(.opacity)
+                }
                 if let format = model.scene.animatedExport {
                     ModelAnimatedExport(model: model, format: format)
                         .transition(.move(edge: .bottom))

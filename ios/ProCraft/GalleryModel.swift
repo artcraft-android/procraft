@@ -290,7 +290,7 @@ final class GalleryModel {
     func takeOutOfStack(_ entry: GalleryEntry) {
         guard openStack != nil else { return }
         let root = Gallery.store.root()
-        changing { Gallery.store.moveEntry(dir: entry.dir, to: 0, into: root) }
+        changing { $0.moveEntry(dir: entry.dir, to: 0, into: root) }
     }
 
     /// An artwork dropped onto `onto` in the gallery: with an artwork it makes a stack, this one
@@ -331,18 +331,18 @@ final class GalleryModel {
     /// stack picked takes in the rest, keeping its name; with none picked, a new stack.
     func stackPicked(_ dirs: [String]) {
         guard dirs.count >= 2, openStack == nil else { return }
-        changing { _ = Gallery.store.stackPicked(dirs: dirs) }
+        changing { _ = $0.stackPicked(dirs: dirs) }
     }
 
     /// The entries in `dirs` deleted, a stack with every artwork in it.
     func delete(dirs: [String]) {
-        changing { dirs.forEach { Gallery.store.delete(dir: $0) } }
+        changing { store in dirs.forEach { store.delete(dir: $0) } }
     }
 
     /// Each of the entries in `dirs` duplicated right after itself, a stack with a copy of each of
     /// its artworks.
     func duplicate(dirs: [String]) {
-        changing { dirs.forEach { _ = Gallery.store.duplicate(dir: $0) } }
+        changing { store in dirs.forEach { _ = store.duplicate(dir: $0) } }
     }
 
     func renameStack(_ dir: String, _ name: String) {

@@ -169,10 +169,6 @@ final class PluginsModel {
     func read() {
         plugins = store.plugins()
         // what the plugins change in how the interface looks, and what it offers
-        let accent = store.accentColour()
-        if Look.shared.accent != accent {
-            Look.shared.accent = accent
-        }
         tweens = store.tweens()
         colourTriangle = store.colourTriangle()
         pickerOn = store.pickerOn()

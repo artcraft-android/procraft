@@ -6315,9 +6315,10 @@ mod tests {
                 assert!(same_value(&got, value), "{id} off: {now}: {got}, not {value}");
             }
         }
-        // fourteen in all, each off as the app comes
+        // all the app comes with (upstream's fourteen, less Vector layers, and this app's own two),
+        // each off as the app comes
         let plugins = app_at(&dir);
-        assert_eq!(plugins.plugins().len(), 14);
+        assert_eq!(plugins.plugins().len(), crate::bundled::BUNDLED.len());
         assert!(plugins.plugins().iter().all(|p| !p.on));
         let _ = std::fs::remove_dir_all(&dir);
     }

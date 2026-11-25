@@ -879,7 +879,6 @@ private struct SearchScroll: UIViewRepresentable {
             }
             guard let found = under as? UIScrollView, found !== list else { return }
             list = found
-            ui?.lists.add(found)
             last = found.contentOffset.y
             watch = found.observe(\.contentOffset, options: [.new]) { [weak self] list, _ in
                 MainActor.assumeIsolated { self?.moved(list) }
@@ -1088,8 +1087,6 @@ private struct SwipeAction: Identifiable {
 /// menu up, or it dragged on from there), it stays where it is.
 private struct SwipeRow<Content: View>: View {
     let open: Bool
-    /// How far a finger has slid along the row, while one does (the library's `RowTouches` tell).
-    let slide: CGFloat?
     let onOpen: (Bool) -> Void
     let actions: [SwipeAction]
     var onPick: (() -> Void)?
@@ -1098,6 +1095,8 @@ private struct SwipeRow<Content: View>: View {
 
     @State private var width: CGFloat = 0
     @State private var offset: CGFloat = 0
+    /// The touch is going along the row, not down the list.
+    @State private var sliding = false
 
     private var rest: CGFloat {
         open ? -width : 0
@@ -1167,23 +1166,6 @@ private struct SwipeRow<Content: View>: View {
         .clipped()
         .onChange(of: open) { _, _ in
             withAnimation(Motion.swipeSettle) { offset = rest }
-        }
-        .onChange(of: slide) { _, now in
-            let reach = onPick == nil || open ? 0 : pickReach
-            if let now {
-                offset = min(max(rest + now, -width), reach)
-                return
-            }
-            if reach > 0, offset > reach / 2 {
-                onPick?()
-            }
-            // let go: open past a third of the way, else back
-            let opened = offset < -width / 3
-            if opened == open {
-                withAnimation(Motion.swipeSettle) { offset = rest }
-            } else {
-                onOpen(opened)
-            }
         }
     }
 }

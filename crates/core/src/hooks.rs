@@ -1541,8 +1541,14 @@ pub(crate) mod tests {
 
     #[test]
     fn the_plugins_that_come_with_the_app_and_only_answer_answer_from_their_own_code() {
-        const ANSWERING: [&str; 5] =
-            ["colour-tools", "edit-layout", "interface-look", "layer-toolbox", "radial-segments"];
+        const ANSWERING: [&str; 6] = [
+            "colour-tools",
+            "edit-layout",
+            "interface-look",
+            "layer-toolbox",
+            "radial-segments",
+            "selection-lasso-fill",
+        ];
         let dir = store("answering");
         let plugins = Plugins::with_store(dir.clone());
         let hooks = plugins.hooks();
@@ -1568,15 +1574,15 @@ pub(crate) mod tests {
         for name in ANSWERING {
             assert!(plugins.set_on(id(name), true), "{name}");
         }
-        // each waits for its feature and its switch, and radial symmetry makes eight until its
-        // slider moves
-        assert_eq!(said(&hooks), ([false; 6], Some(8)));
+        // each waits for its feature and its switch (Lasso Fill has none: on, it is offered), and
+        // radial symmetry makes eight until its slider moves
+        assert_eq!(said(&hooks), ([false, false, false, false, false, true], Some(8)));
         for (name, feature) in
             [("colour-tools", "colordrop"), ("interface-look", "interface"), ("layer-toolbox", "layer_tools")]
         {
             assert!(plugins.set_switch(format!("{}.{feature}", id(name)), true), "{feature}");
         }
-        assert_eq!(said(&hooks), ([false; 6], Some(8)));
+        assert_eq!(said(&hooks), ([false, false, false, false, false, true], Some(8)));
         // (the eyedropper's kept under the setting the app had before it was a plugin)
         assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
         assert_eq!(said(&hooks), ([true, false, false, false, false, true], Some(8)));

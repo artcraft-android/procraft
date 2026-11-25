@@ -314,9 +314,6 @@ struct ActionsPanel: View {
 
     /// The shown tab's groups of rows.
     private func groups() -> [[ActionRow]] {
-        if model.modelOpen, model.actionsTab <= 3 {
-            return modelGroups()
-        }
         let settings = AppSettings.shared
         let undoRange = AppSettings.rapidUndoRange
         if model.scene.open, tab <= 3 {
