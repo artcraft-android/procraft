@@ -206,6 +206,22 @@
 //!   and `procraft_brush_end(stroke: i32) -> i32` ends it, each answering how many dabs are at out;
 //!   if it has it, `procraft_brush_under(stroke: i32, len: i32) -> i32` takes the colours under the
 //!   dabs it asked about.
+//! - For exports of the animation (interface 23, its manifest's `exports`; see `plugin_exports.rs`):
+//!   `procraft_export_in(len: i32) -> i32` says where `len` bytes go and `procraft_export_out() ->
+//!   i32` where its plan is; `procraft_export_begin(export: i32, len: i32) -> i32` begins one, told
+//!   the artwork (below 0: it makes nothing), `procraft_export_picture(len: i32) -> i32` takes each
+//!   picture drawn (the number it keeps it by, below 0: left), and `procraft_export_finish() -> i32`
+//!   gives its plan's length (below 0: nothing).
+//! - For mesh warps (interface 24, its manifest's `warps`; see `plugin_warps.rs`):
+//!   `procraft_warp_in(len: i32) -> i32` says where `len` bytes go and `procraft_warp_out() -> i32`
+//!   where an answer is; `procraft_warp_mesh(warp: i32, len: i32) -> i32` lays a mesh over what is
+//!   painted, told it (its answer's length, below 0: none), and `procraft_warp_bend(len: i32) ->
+//!   i32` bends the mesh it laid last by the pins told (its answer's length, below 0: none).
+//! - For tools (interface 24, its manifest's `tools`; see `plugin_tools.rs`): `procraft_tool_in(len:
+//!   i32) -> i32` says where `len` bytes go and `procraft_tool_out() -> i32` where an answer is;
+//!   `procraft_tool_touch(tool: i32, len: i32) -> i32` takes what happened with its tool (opened, a
+//!   touch, the artwork changed) and answers what to show and the edits to make (its answer's
+//!   length, below 0: nothing).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
@@ -374,6 +390,38 @@ const LAYER_EDIT: &str = "procraft_layer_edit";
 const LAYER_FILL: &str = "procraft_layer_fill";
 const LAYER_EXPORT: &str = "procraft_layer_export";
 const LAYER_HIT: &str = "procraft_layer_hit";
+const EXPORT_IN: &str = "procraft_export_in";
+const EXPORT_OUT: &str = "procraft_export_out";
+const EXPORT_BEGIN: &str = "procraft_export_begin";
+const EXPORT_PICTURE: &str = "procraft_export_picture";
+const EXPORT_FINISH: &str = "procraft_export_finish";
+/// What an export may spend and take on a call: the artwork told it, each picture, and its plan.
+const EXPORT_FUEL: u64 = 2_000_000_000;
+const MOST_EXPORT_TIME: Duration = Duration::from_secs(30);
+/// The most an export's record may be, either way: its plan holds the files it writes itself.
+pub(crate) const MOST_EXPORT_BYTES: usize = 64 << 20;
+const WARP_IN: &str = "procraft_warp_in";
+const WARP_OUT: &str = "procraft_warp_out";
+const WARP_MESH: &str = "procraft_warp_mesh";
+const WARP_BEND: &str = "procraft_warp_bend";
+/// What laying a warp's mesh may spend and take: once as a transform starts, or its settings
+/// change.
+const WARP_MESH_FUEL: u64 = 4_000_000_000;
+const MOST_WARP_MESH_TIME: Duration = Duration::from_secs(10);
+/// What bending it may spend and take: a drag's every frame, and when pins are put or taken away,
+/// readying the solve again.
+const WARP_BEND_FUEL: u64 = 2_000_000_000;
+const MOST_WARP_BEND_TIME: Duration = Duration::from_secs(4);
+/// The most a warp's answer may be: a mesh's points and triangles.
+pub(crate) const MOST_WARP_BYTES: usize = 64 << 20;
+const TOOL_IN: &str = "procraft_tool_in";
+const TOOL_OUT: &str = "procraft_tool_out";
+const TOOL_TOUCH: &str = "procraft_tool_touch";
+/// What a tool's call may spend and take: it comes with each move of a touch.
+const TOOL_FUEL: u64 = 200_000_000;
+const MOST_TOOL_TIME: Duration = Duration::from_secs(1);
+/// The most a tool's answer may be: what it shows and its edits.
+pub(crate) const MOST_TOOL_BYTES: usize = 4 << 20;
 const BRUSH_IN: &str = "procraft_brush_in";
 const BRUSH_OUT: &str = "procraft_brush_out";
 const BRUSH_IMPORT: &str = "procraft_brush_import";
@@ -511,6 +559,15 @@ pub(crate) enum Hook {
     LassoFill,
     /// How strongly a stroke shows while it is drawn, short of how it is kept.
     StrokePreviewOpacity,
+    /// Files made of the animation for Share (interface 23, `plugin_exports.rs`): not named in
+    /// `hooks`, but on it whenever its manifest lists `exports`.
+    Exports,
+    /// Meshes laid over what is painted and bent by pins (interface 24, `plugin_warps.rs`): not
+    /// named in `hooks`, but on it whenever its manifest lists `warps`.
+    Warps,
+    /// Tools whose touches it takes, answering with edits to the layers (interface 24,
+    /// `plugin_tools.rs`): not named in `hooks`, but on it whenever its manifest lists `tools`.
+    Tools,
 }
 
 impl Hook {
@@ -579,6 +636,9 @@ impl Hook {
             Hook::LassoFill => "This plugin can fill or erase the shapes you draw with a lasso.",
             Hook::OpacityTogether => "This plugin can change the opacity of all the layers you've picked at once.",
             Hook::StrokePreviewOpacity => "This plugin can change how strongly a stroke shows while you draw it.",
+            Hook::Exports => "This plugin can make files of your animation's frames, for Share.",
+            Hook::Warps => "This plugin can bend what you transform by pins put on it.",
+            Hook::Tools => "This plugin can add a tool that changes your artwork's layers as you use it.",
             Hook::RandomiseBrush => "This plugin can set a brush's settings at random in the brush studio.",
             Hook::ColourTriangle => "This plugin can change how the colour panel's Classic picker looks.",
             Hook::QuickshapeCurve => "This plugin can make QuickShape snap strokes to curves.",
@@ -663,6 +723,30 @@ impl Hook {
             Hook::LassoFill => exports(module, LASSO_FILL, &[], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::StrokePreviewOpacity => exports(module, STROKE_PREVIEW_OPACITY, &[ValType::I32], &[ValType::F32]),
+            Hook::Exports => {
+                use ValType::I32;
+                exports(module, EXPORT_IN, &[I32], &[I32])
+                    && exports(module, EXPORT_OUT, &[], &[I32])
+                    && exports(module, EXPORT_BEGIN, &[I32, I32], &[I32])
+                    && exports(module, EXPORT_PICTURE, &[I32], &[I32])
+                    && exports(module, EXPORT_FINISH, &[], &[I32])
+                    && has_memory(module)
+            }
+            Hook::Warps => {
+                use ValType::I32;
+                exports(module, WARP_IN, &[I32], &[I32])
+                    && exports(module, WARP_OUT, &[], &[I32])
+                    && exports(module, WARP_MESH, &[I32, I32], &[I32])
+                    && exports(module, WARP_BEND, &[I32], &[I32])
+                    && has_memory(module)
+            }
+            Hook::Tools => {
+                use ValType::I32;
+                exports(module, TOOL_IN, &[I32], &[I32])
+                    && exports(module, TOOL_OUT, &[], &[I32])
+                    && exports(module, TOOL_TOUCH, &[I32, I32], &[I32])
+                    && has_memory(module)
+            }
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
             Hook::StrokeKept | Hook::LayerAdded => exports(module, EVENT, &[ValType::I32], &[ValType::I32]),
@@ -785,7 +869,7 @@ fn stop_of(error: &wasmi::Error) -> Stop {
 
 /// The most memory a plugin on `hooks` may ask for.
 fn memory_on(hooks: &[Hook]) -> usize {
-    if hooks.contains(&Hook::Layers) || hooks.contains(&Hook::Brushes) {
+    if [Hook::Layers, Hook::Brushes, Hook::Exports, Hook::Warps].iter().any(|h| hooks.contains(h)) {
         MOST_LAYER_MEMORY
     } else if hooks.contains(&Hook::Inbetween) {
         MOST_BETWEEN_MEMORY
@@ -997,7 +1081,31 @@ struct LayerCalls {
     hit: Option<TypedFunc<i32, i32>>,
 }
 
+/// A mesh warp's calls (interface 24).
+struct WarpCalls {
+    input: TypedFunc<i32, i32>,
+    out: TypedFunc<(), i32>,
+    mesh: TypedFunc<(i32, i32), i32>,
+    bend: TypedFunc<i32, i32>,
+}
+
+/// A tool's calls (interface 24).
+struct ToolCalls {
+    input: TypedFunc<i32, i32>,
+    out: TypedFunc<(), i32>,
+    touch: TypedFunc<(i32, i32), i32>,
+}
+
 /// What a plugin's own brush engines are reached through (`plugin_brushes.rs`).
+/// An exporter's calls (interface 23).
+struct ExportCalls {
+    input: TypedFunc<i32, i32>,
+    out: TypedFunc<(), i32>,
+    begin: TypedFunc<(i32, i32), i32>,
+    picture: TypedFunc<i32, i32>,
+    finish: TypedFunc<(), i32>,
+}
+
 struct BrushCalls {
     input: TypedFunc<i32, i32>,
     out: TypedFunc<(), i32>,
@@ -1191,6 +1299,11 @@ pub(crate) struct Running {
     canvas: Option<CanvasCalls>,
     layers: Option<LayerCalls>,
     brushes: Option<BrushCalls>,
+    /// Its exporter's calls (interface 23), if it has them.
+    exporter: Option<ExportCalls>,
+    /// Its mesh warp's and tool's calls (interface 24), if it has them.
+    warp: Option<WarpCalls>,
+    tool: Option<ToolCalls>,
     key_buffer: Option<TypedFunc<i32, i32>>,
     key_shortcut: Option<TypedFunc<i32, i64>>,
     key_shortcut_keys: Option<TypedFunc<i32, i64>>,
@@ -1393,6 +1506,30 @@ impl Running {
                     hit: instance.get_typed_func(&store, LAYER_HIT).ok(),
                 })
             })();
+            let exporter = (|| {
+                Some(ExportCalls {
+                    input: instance.get_typed_func(&store, EXPORT_IN).ok()?,
+                    out: instance.get_typed_func(&store, EXPORT_OUT).ok()?,
+                    begin: instance.get_typed_func(&store, EXPORT_BEGIN).ok()?,
+                    picture: instance.get_typed_func(&store, EXPORT_PICTURE).ok()?,
+                    finish: instance.get_typed_func(&store, EXPORT_FINISH).ok()?,
+                })
+            })();
+            let warp = (|| {
+                Some(WarpCalls {
+                    input: instance.get_typed_func(&store, WARP_IN).ok()?,
+                    out: instance.get_typed_func(&store, WARP_OUT).ok()?,
+                    mesh: instance.get_typed_func(&store, WARP_MESH).ok()?,
+                    bend: instance.get_typed_func(&store, WARP_BEND).ok()?,
+                })
+            })();
+            let tool = (|| {
+                Some(ToolCalls {
+                    input: instance.get_typed_func(&store, TOOL_IN).ok()?,
+                    out: instance.get_typed_func(&store, TOOL_OUT).ok()?,
+                    touch: instance.get_typed_func(&store, TOOL_TOUCH).ok()?,
+                })
+            })();
             let brushes = (|| {
                 Some(BrushCalls {
                     input: instance.get_typed_func(&store, BRUSH_IN).ok()?,
@@ -1476,6 +1613,9 @@ impl Running {
                 canvas,
                 layers,
                 brushes,
+                exporter,
+                warp,
+                tool,
                 key_buffer,
                 key_shortcut,
                 key_shortcut_keys,
@@ -2071,6 +2211,127 @@ impl Running {
     /// Whether it says which item is at a point.
     pub(crate) fn layer_hits(&self) -> bool {
         self.layers.as_ref().is_some_and(|calls| calls.hit.is_some())
+    }
+
+    /// `bytes` handed to its warp, then `call` on their length; its answer, read from where it
+    /// says it is, if it gave one of at most [`MOST_WARP_BYTES`].
+    fn warp_call(
+        &mut self,
+        bytes: &[u8],
+        fuel: u64,
+        time: Duration,
+        call: impl FnOnce(&mut Store<Host>, &WarpCalls, i32, &mut u64, Instant) -> Result<i32, Stop>,
+    ) -> Result<Option<Vec<u8>>, Stop> {
+        let (mut left, until) = (fuel, Instant::now() + time);
+        let Running { store, warp, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (warp.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let len = i32::try_from(bytes.len()).map_err(|_| Stop::Nonsense)?;
+        guarded(|| {
+            let at = usize::try_from(long_call(store, &calls.input, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            memory.write(&mut *store, at, bytes).map_err(|_| Stop::Nonsense)?;
+            let made = call(store, calls, len, &mut left, until)?;
+            let Ok(made) = usize::try_from(made) else { return Ok(None) };
+            if made > MOST_WARP_BYTES {
+                return Err(Stop::Nonsense);
+            }
+            let at = usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let mut out = vec![0_u8; made];
+            memory.read(&*store, at, &mut out).map_err(|_| Stop::Nonsense)?;
+            Ok(Some(out))
+        })
+    }
+
+    /// The mesh its warp `warp` (by its place in the manifest's `warps`) lays over what `outline`
+    /// (a record, `plugin_warps.rs`) tells is painted, as a record; none if it lays none.
+    pub(crate) fn warp_mesh(&mut self, warp: u32, outline: &[u8]) -> Result<Option<Vec<u8>>, Stop> {
+        let warp = i32::try_from(warp).map_err(|_| Stop::Nonsense)?;
+        self.warp_call(outline, WARP_MESH_FUEL, MOST_WARP_MESH_TIME, |store, calls, len, left, until| {
+            long_call(store, &calls.mesh, (warp, len), left, until)
+        })
+    }
+
+    /// The mesh it laid last bent by the pins `pins` (a record) tells, as a record; none if it
+    /// can't.
+    pub(crate) fn warp_bend(&mut self, pins: &[u8]) -> Result<Option<Vec<u8>>, Stop> {
+        self.warp_call(pins, WARP_BEND_FUEL, MOST_WARP_BEND_TIME, |store, calls, len, left, until| {
+            long_call(store, &calls.bend, len, left, until)
+        })
+    }
+
+    /// What its tool `tool` (by its place in the manifest's `tools`) answers to `told` (a record,
+    /// `plugin_tools.rs`); none if it answers nothing.
+    pub(crate) fn tool_touch(&mut self, tool: u32, told: &[u8]) -> Result<Option<Vec<u8>>, Stop> {
+        let (mut left, until) = (TOOL_FUEL, Instant::now() + MOST_TOOL_TIME);
+        let Running { store, tool: calls, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (calls.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let tool = i32::try_from(tool).map_err(|_| Stop::Nonsense)?;
+        let len = i32::try_from(told.len()).map_err(|_| Stop::Nonsense)?;
+        guarded(|| {
+            let at = usize::try_from(long_call(store, &calls.input, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            memory.write(&mut *store, at, told).map_err(|_| Stop::Nonsense)?;
+            let made = long_call(store, &calls.touch, (tool, len), &mut left, until)?;
+            let Ok(made) = usize::try_from(made) else { return Ok(None) };
+            if made > MOST_TOOL_BYTES {
+                return Err(Stop::Nonsense);
+            }
+            let at = usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let mut out = vec![0_u8; made];
+            memory.read(&*store, at, &mut out).map_err(|_| Stop::Nonsense)?;
+            Ok(Some(out))
+        })
+    }
+
+    /// `bytes` written where its exporter takes what it is handed: their length.
+    fn export_in(&mut self, bytes: &[u8], left: &mut u64, until: Instant) -> Result<i32, Stop> {
+        let Running { store, exporter, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (exporter.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        let len = i32::try_from(bytes.len()).map_err(|_| Stop::Nonsense)?;
+        guarded(|| {
+            let at = usize::try_from(long_call(store, &calls.input, len, left, until)?).map_err(|_| Stop::Nonsense)?;
+            memory.write(&mut *store, at, bytes).map_err(|_| Stop::Nonsense)?;
+            Ok(len)
+        })
+    }
+
+    /// Its export `export` (by its place in the manifest's `exports`) begun on the artwork
+    /// `artwork` (a record, `plugin_exports.rs`): whether it will make it.
+    pub(crate) fn export_begin(&mut self, export: u32, artwork: &[u8]) -> Result<bool, Stop> {
+        let (mut left, until) = (EXPORT_FUEL, Instant::now() + MOST_EXPORT_TIME);
+        let len = self.export_in(artwork, &mut left, until)?;
+        let export = i32::try_from(export).map_err(|_| Stop::Nonsense)?;
+        let Running { store, exporter, .. } = self;
+        let Some(calls) = exporter.as_ref() else { return Err(Stop::Damaged) };
+        guarded(|| long_call(store, &calls.begin, (export, len), &mut left, until)).map(|answer| answer >= 0)
+    }
+
+    /// A picture the export's artwork was drawn into (a record): the number it keeps it by, or
+    /// none if it leaves it.
+    pub(crate) fn export_picture(&mut self, picture: &[u8]) -> Result<Option<u32>, Stop> {
+        let (mut left, until) = (EXPORT_FUEL, Instant::now() + MOST_EXPORT_TIME);
+        let len = self.export_in(picture, &mut left, until)?;
+        let Running { store, exporter, .. } = self;
+        let Some(calls) = exporter.as_ref() else { return Err(Stop::Damaged) };
+        let answer = guarded(|| long_call(store, &calls.picture, len, &mut left, until))?;
+        Ok(u32::try_from(answer).ok())
+    }
+
+    /// The export's plan (a record), once every picture is in; none if it makes nothing.
+    pub(crate) fn export_finish(&mut self) -> Result<Option<Vec<u8>>, Stop> {
+        let (mut left, until) = (EXPORT_FUEL, Instant::now() + MOST_EXPORT_TIME);
+        let Running { store, exporter, memory, .. } = self;
+        let (Some(calls), Some(memory)) = (exporter.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
+        guarded(|| {
+            let made = long_call(store, &calls.finish, (), &mut left, until)?;
+            let Ok(bytes) = usize::try_from(made) else { return Ok(None) };
+            if bytes > MOST_EXPORT_BYTES {
+                return Err(Stop::Nonsense);
+            }
+            let at =
+                usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let mut out = vec![0_u8; bytes];
+            memory.read(&*store, at, &mut out).map_err(|_| Stop::Nonsense)?;
+            Ok(Some(out))
+        })
     }
 
     /// The file it makes of the layers `request` hands it (a record), at most `most` bytes: none if

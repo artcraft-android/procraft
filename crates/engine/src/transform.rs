@@ -9,14 +9,15 @@
 //! A warp lays a 4 × 4 mesh (`warp.rs`) over the content; once there is one it places the content,
 //! and the box is its corners.
 //!
-//! A puppet (`puppet.rs`) lays a mesh of triangles over the painted pixels and bends it by pins.
+//! A puppet (`puppet.rs`) has a mesh of triangles over the painted pixels, laid and bent by pins by
+//! a plugin's mesh warp.
 //! It bends the content where it is in the source rectangle, before the box places it: the box's
 //! handles still move, turn and scale the puppet as a whole.
 
 use std::sync::{Arc, Mutex};
 
 use crate::geom::{Affine, Homography, Vec2};
-use crate::puppet::{self, PuppetFrame, PuppetMesh, Solver};
+use crate::puppet::{self, Bends, PuppetFrame, PuppetMesh};
 use crate::warp::{self, Mesh};
 
 /// How the box's handles change the content.
@@ -124,11 +125,13 @@ impl Bend {
     }
 }
 
-/// An open puppet: its mesh, whether new pins turn as it bends, the pin chosen, and what was last
-/// worked out for it (shared by the transform's copies, keyed by what it was worked out for).
+/// An open puppet: its mesh and what bends it, whether new pins turn as it bends, the pin chosen,
+/// and what was last worked out for it (shared by the transform's copies, keyed by what it was
+/// worked out for).
 #[derive(Clone, Debug)]
 struct PuppetRig {
     mesh: Arc<PuppetMesh>,
+    bends: Arc<dyn Bends>,
     auto_rotate: bool,
     selected: Option<usize>,
     worked: Arc<Mutex<Worked>>,
@@ -136,7 +139,6 @@ struct PuppetRig {
 
 #[derive(Debug, Default)]
 struct Worked {
-    solver: Option<Arc<Solver>>,
     /// The pins and content quad the frame is for, the frame, and each pin as shown (canvas
     /// point and angle).
     frame: Option<(Vec<PuppetPin>, Quad, Arc<PuppetFrame>, Vec<(Vec2, f32)>)>,
@@ -919,15 +921,15 @@ fn carry(p: &Placement, frame: Quad) -> Option<Quad> {
 
 /// A puppet: its mesh laid over the content, pins put on it, moved and turned.
 impl Transform {
-    /// Lays a puppet's mesh over the content, its pins (if it has any) laid again on it where they
-    /// are at rest. A warp goes, as a step of its own: the two don't bend together.
-    pub fn start_puppet(&mut self, mesh: PuppetMesh) {
+    /// Lays a puppet's mesh over the content, bent by `bends`, its pins (if it has any) laid again
+    /// on it where they are at rest. A warp goes, as a step of its own: the two don't bend together.
+    pub fn start_puppet(&mut self, mesh: PuppetMesh, bends: Arc<dyn Bends>) {
         if self.now.warp.is_some() {
             self.change(|p| Some(Placement { warp: None, ..p.clone() }));
         }
         let (auto_rotate, selected) = self.puppet.as_ref().map_or((true, None), |r| (r.auto_rotate, r.selected));
-        self.puppet =
-            Some(PuppetRig { mesh: Arc::new(mesh), auto_rotate, selected, worked: Arc::new(Mutex::new(Worked::default())) });
+        let worked = Arc::new(Mutex::new(Worked::default()));
+        self.puppet = Some(PuppetRig { mesh: Arc::new(mesh), bends, auto_rotate, selected, worked });
     }
 
     /// Whether a puppet's mesh is laid.
@@ -1054,12 +1056,11 @@ impl Transform {
             })
             .collect();
         let bound: Vec<puppet::Pin> = laid.iter().map(|(_, p)| *p).collect();
-        let solver = match &worked.solver {
-            Some(s) if s.fits(&bound) => s.clone(),
-            _ => Arc::new(Solver::new(&rig.mesh, &bound)),
-        };
-        worked.solver = Some(solver.clone());
-        let bent = solver.solve(&rig.mesh, &bound);
+        // what can't be bent shows at rest
+        let bent = rig.bends.bend(&rig.mesh, &bound).unwrap_or_else(|| puppet::Bent {
+            verts: rig.mesh.rest().to_vec(),
+            angles: bound.iter().map(|p| p.angle.unwrap_or(0.0)).collect(),
+        });
         let mut shown: Vec<(Vec2, f32)> =
             pins.iter().map(|p| (place.apply(p.at).unwrap_or(p.at), self.shown_angle(p.angle.unwrap_or(0.0)))).collect();
         for ((k, _), angle) in laid.iter().zip(&bent.angles) {
@@ -1593,11 +1594,12 @@ mod tests {
         assert!(quad_close(t.content(), rect(10.4, 20.0, 100.0, 200.0)));
     }
 
-    /// A transform of a bar 200 × 40 at (100, 100), its puppet's mesh laid.
+    /// A transform of a bar 200 × 40 at (100, 100), its puppet's mesh laid, bent whole (see
+    /// [`puppet::tests::Whole`]: the plugin's own bend is tested with the plugin).
     fn puppet() -> Transform {
         let mut t = Transform::new(100.0, 100.0, 200.0, 40.0, Vec::new());
-        let mesh = PuppetMesh::build(&[255u8; 200 * 40], 200, Vec2::new(100.0, 100.0), puppet::MeshSettings::default());
-        t.start_puppet(mesh.unwrap());
+        let mesh = puppet::tests::grid(100.0, 100.0, 200.0, 40.0, 10.0);
+        t.start_puppet(mesh, Arc::new(puppet::tests::Whole));
         t
     }
 

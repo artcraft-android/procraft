@@ -296,7 +296,7 @@ impl State {
         if path.len() < 3 {
             return RegionOf { outlines: Vec::new(), width, height, selection };
         }
-        let guide = self.doc.stroke_guide();
+        let guide = crate::guide::stroke_guide(&self.doc, self.guide_paused);
         let copied: Vec<Vec<(Vec2, f32, bool)>> = path.iter().map(|p| guide.copies(*p)).collect();
         let count = copied.iter().map(Vec::len).min().unwrap_or(0);
         let mut outlines = vec![path.to_vec()];

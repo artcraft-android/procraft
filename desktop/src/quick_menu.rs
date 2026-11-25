@@ -105,6 +105,9 @@ pub struct QuickMenu {
     /// The menu being renamed (its row, the active one, tapped again): what is typed, and whether
     /// the field has had the focus yet.
     renaming: Option<(usize, String, bool)>,
+    /// The app's own features hidden (their built-in plugins off): their actions aren't listed, and
+    /// a button set to one shows and does no action.
+    pub hidden: Vec<procraft_core::Feature>,
 }
 
 impl Default for QuickMenu {
@@ -129,6 +132,7 @@ impl Default for QuickMenu {
             marked: None,
             swipe: None,
             renaming: None,
+            hidden: Vec::new(),
         }
     }
 }
@@ -264,7 +268,8 @@ impl QuickMenu {
                 let edge = Stroke::new(1.0, fade(BUTTON_EDGE));
                 ui.painter().rect_stroke(button, BUTTON.1 / 2.0, edge, egui::StrokeKind::Inside);
                 let brush = brushes.get(i).cloned().flatten();
-                let label = brush.as_ref().map_or_else(|| quick_action_label(action), |b| b.name.clone());
+                let shown = if crate::builtins::action(&self.hidden, action) { action } else { QuickAction::None };
+                let label = brush.as_ref().map_or_else(|| quick_action_label(shown), |b| b.name.clone());
                 // on one line, cut by the pill where it is too long (from its left)
                 let painter = ui.painter().with_clip_rect(button.intersect(ui.clip_rect()));
                 let (at, align) = if crate::look::text_width(&painter, &label, 16.0, Weight::SemiBold) > button.width()
@@ -382,6 +387,7 @@ impl QuickMenu {
         let rows: Vec<(String, bool, Tap)> = match self.page {
             Page::Actions => quick_actions_listed()
                 .into_iter()
+                .filter(|row| row.is_none_or(|a| crate::builtins::action(&self.hidden, a)))
                 .map(|row| match row {
                     None => ("Adjustments".to_owned(), true, Tap::Go(Page::Adjustments)),
                     Some(QuickAction::Brushes) => {
@@ -391,7 +397,11 @@ impl QuickMenu {
                 })
                 .collect(),
             Page::Adjustments => {
-                quick_adjustments_listed().into_iter().map(|a| (quick_action_label(a), false, Tap::Action(a))).collect()
+                quick_adjustments_listed()
+                    .into_iter()
+                    .filter(|&a| crate::builtins::action(&self.hidden, a))
+                    .map(|a| (quick_action_label(a), false, Tap::Action(a)))
+                    .collect()
             }
             Page::BrushSets => {
                 sets.iter().enumerate().map(|(s, set)| (set.name.clone(), true, Tap::Go(Page::Brushes(s)))).collect()
@@ -401,8 +411,17 @@ impl QuickMenu {
             }),
         };
         let chosen = match self.page {
-            Page::Actions => quick_actions_listed().iter().position(|&r| r == Some(current)),
-            Page::Adjustments => Some(quick_adjustments_listed().iter().position(|&a| a == current).unwrap_or(0)),
+            Page::Actions => quick_actions_listed()
+                .into_iter()
+                .filter(|row| row.is_none_or(|a| crate::builtins::action(&self.hidden, a)))
+                .position(|r| r == Some(current)),
+            Page::Adjustments => Some(
+                quick_adjustments_listed()
+                    .into_iter()
+                    .filter(|&a| crate::builtins::action(&self.hidden, a))
+                    .position(|a| a == current)
+                    .unwrap_or(0),
+            ),
             Page::BrushSets => Some(brush.as_ref().map_or(0, |b| b.set as usize)),
             Page::Brushes(s) => Some(brush.as_ref().filter(|b| b.set as usize == s).map_or(0, |b| b.index as usize)),
         };

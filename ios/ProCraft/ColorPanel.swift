@@ -284,7 +284,7 @@ struct ColorPanel: View {
             header
             picker(c, short: short)
             // an HDR artwork's paint can be lit above white
-            if background == nil, model.colorMode != .palettes, model.isHdr {
+            if background == nil, model.colorMode != .palettes, model.isHdr, PluginsModel.shared.has(.hdrColour) {
                 ColorLightRow(model: model)
             }
             if model.colorMode != .palettes {
@@ -292,7 +292,8 @@ struct ColorPanel: View {
                     ShortBottom(model: model, c: c, ui: ui)
                 } else {
                     HistoryBlock(model: model, c: c)
-                    if model.palettes.indices.contains(model.defaultPalette) {
+                    // the default palette's swatches while the Palettes plugin is on
+                    if PluginsModel.shared.has(.palettes), model.palettes.indices.contains(model.defaultPalette) {
                         let p = model.palettes[model.defaultPalette]
                         Text(verbatim: p.name)
                             .font(.system(size: 14, weight: .semibold))
@@ -2269,7 +2270,7 @@ private struct ModeTabs: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(ColorMode.allCases, id: \.self) { mode in
+            ForEach(ColorMode.shown, id: \.self) { mode in
                 Button { model.colorMode = mode } label: { EmptyView() }
                     .buttonStyle(ModeTabStyle(mode: mode, selected: model.colorMode == mode))
             }
@@ -2395,7 +2396,7 @@ private struct CompactTabs: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(ColorMode.allCases, id: \.self) { m in
+            ForEach(ColorMode.shown, id: \.self) { m in
                 // the tabs' 36-unit glyphs, a little smaller here
                 PcIconView(m.icon, size: 33, color: m == mode ? Pc.accent : Pc.panelTitle)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

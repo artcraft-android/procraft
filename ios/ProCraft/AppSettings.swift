@@ -210,7 +210,9 @@ final class Gestures {
     /// The settings as the canvas's touches take them.
     func touchSettings() -> TouchSettings {
         _ = changes
-        return core.touchSettings(rapidUndoMs: Double(AppSettings.shared.rapidUndoDelay) * 1000)
+        // less QuickShape and assisted drawing while their built-in plugins are off
+        let settings = core.touchSettings(rapidUndoMs: Double(AppSettings.shared.rapidUndoDelay) * 1000)
+        return PluginsModel.shared.store.touchSettingsShown(settings: settings)
     }
 
     private func keep() {

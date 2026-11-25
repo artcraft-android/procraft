@@ -1,22 +1,31 @@
 import AVFoundation
 
-// A Harmony scene's sounds: Harmony reads WAV and AIFF, so each other sound the timeline plays
-// (an m4a, a caf, an mp3) is copied as WAV first, for the core to put in the scene.
+// Sounds for a plugin's export that takes them (a Harmony scene): it reads WAV and AIFF, so each
+// other sound the timeline plays (an m4a, a caf, an mp3) is copied as WAV first, for the core to
+// hand over.
 
-enum HarmonyExport {
-    /// `session`'s animation as a Harmony scene zipped at `url`. Slow: off the main thread.
-    static func export(_ session: CanvasSession, to url: URL) throws -> HarmonyMade {
+enum SoundCopies {
+    /// A WAV copy of each sound file at `paths`, in a folder of their own: each path to its
+    /// copy, those that couldn't be read left out. Slow: off the main thread.
+    static func wavCopies(_ paths: [String]) -> [String: String] {
+        guard !paths.isEmpty else { return [:] }
         let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("harmony-sounds-" + UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: folder) }
+            .appendingPathComponent("sound-copies-" + UUID().uuidString, isDirectory: true)
         var wav: [String: String] = [:]
-        for path in session.harmonySoundsToConvert() {
+        for path in paths {
             let out = folder.appendingPathComponent("\(wav.count).wav")
             if wavCopy(of: URL(fileURLWithPath: path), to: out) {
                 wav[path] = out.path
             }
         }
-        return try session.exportHarmony(path: url.path, wav: wav)
+        return wav
+    }
+
+    /// The copies `wav` made, and their folder, let go.
+    static func forget(_ wav: [String: String]) {
+        for copy in Set(wav.values.map { URL(fileURLWithPath: $0).deletingLastPathComponent() }) {
+            try? FileManager.default.removeItem(at: copy)
+        }
     }
 
     /// The sound at `source` written at `url` as 16-bit WAV, as it is otherwise (its rate and

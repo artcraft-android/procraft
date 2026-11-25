@@ -3,7 +3,6 @@
 
 use procraft_engine::document::{Document, Layer, LayerId, LayerKind};
 use procraft_engine::geom::{Affine, Homography, IRect, Vec2};
-use procraft_engine::puppet::{self, PuppetMesh};
 use procraft_engine::transform::{Bend, Guides, Handle, Transform, TransformMode, convex_hull};
 use procraft_engine::warp;
 use procraft_gpu::Resample;
@@ -111,24 +110,26 @@ pub struct PuppetSettings {
 
 impl Default for PuppetSettings {
     fn default() -> PuppetSettings {
-        let mesh = puppet::MeshSettings::default();
-        PuppetSettings { expansion: mesh.expansion, density: mesh.density, auto_rotate: true }
+        PuppetSettings { expansion: 4.0, density: 40, auto_rotate: true }
     }
 }
 
-impl From<PuppetSettings> for puppet::MeshSettings {
-    fn from(s: PuppetSettings) -> puppet::MeshSettings {
-        puppet::MeshSettings { expansion: s.expansion, density: s.density }
+impl PuppetSettings {
+    /// How the mesh is laid, as the plugin is told (pins turning is the app's).
+    fn laid(self) -> (u32, u32) {
+        (self.expansion.to_bits(), self.density)
     }
 }
 
 /// The furthest a puppet's mesh reaches past what is painted (canvas pixels).
-const PUPPET_EXPANSION_MAX: f32 = puppet::EXPANSION_MAX;
+const PUPPET_EXPANSION_MAX: f32 = 64.0;
+/// The fewest and most triangles across a puppet's mesh Transform offers.
+const PUPPET_DENSITY_RANGE: (u32, u32) = (12, 80);
 
 /// The fewest and most triangles across a puppet's mesh.
 #[uniffi::export]
 pub fn puppet_density_range() -> Vec<u32> {
-    vec![puppet::DENSITY_RANGE.0, puppet::DENSITY_RANGE.1]
+    vec![PUPPET_DENSITY_RANGE.0, PUPPET_DENSITY_RANGE.1]
 }
 
 /// The furthest a puppet's mesh reaches past what is painted (canvas pixels).
@@ -490,7 +491,7 @@ impl State {
 
     /// Redraws the layer with the content where the transform has it now, from the pixels it
     /// began with (however many changes it has had, each pixel is filtered once).
-    fn show_transform(&mut self) {
+    pub(crate) fn show_transform(&mut self) {
         if self.posing() {
             self.autokey_show();
             return;
@@ -586,13 +587,14 @@ impl State {
         self.view?.screen_to_canvas(Vec2::new(x, y)).filter(|p| p.is_finite())
     }
 
-    /// Lays the open transform's puppet mesh over what it took up, as the puppet's settings say.
-    fn lay_puppet(&mut self) {
-        let Some((area, alpha)) = self.transform_alpha.as_ref() else { return };
-        let origin = Vec2::new(area.x0 as f32, area.y0 as f32);
-        let mesh = PuppetMesh::build(alpha, area.width() as usize, origin, self.puppet_settings.into());
+    /// Lays the open transform's puppet mesh over what it took up, as the puppet's settings say,
+    /// by the plugin's mesh warp: none without one.
+    pub(crate) fn lay_puppet(&mut self) {
+        let (Some((area, alpha)), Some(warp)) = (self.transform_alpha.as_ref(), self.mesh_warp()) else { return };
+        let PuppetSettings { expansion, density, .. } = self.puppet_settings;
+        let mesh = warp.lay(*area, alpha, expansion.clamp(0.0, PUPPET_EXPANSION_MAX), density);
         if let (Some(mesh), Some(t)) = (mesh, self.transform.as_mut()) {
-            t.start_puppet(mesh);
+            t.start_puppet(mesh, warp);
             if t.puppet_auto_rotate() != self.puppet_settings.auto_rotate {
                 t.set_puppet_auto_rotate(self.puppet_settings.auto_rotate);
             }
@@ -1012,7 +1014,7 @@ impl CanvasSession {
         if settings.auto_rotate != t.puppet_auto_rotate() {
             t.set_puppet_auto_rotate(settings.auto_rotate);
         }
-        if puppet::MeshSettings::from(was) != puppet::MeshSettings::from(settings) {
+        if was.laid() != settings.laid() {
             st.lay_puppet();
         }
         st.show_transform();

@@ -519,7 +519,8 @@ final class TimeLapseTool {
 
     /// Records the canvas as a frame, one at a time while changes come.
     func record() {
-        guard recording else { return }
+        // (nothing recorded while the Time-lapse plugin is off)
+        guard recording, PluginsModel.shared.has(.timeLapse) else { return }
         if taking {
             stale = true
             return

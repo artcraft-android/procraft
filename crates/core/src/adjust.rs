@@ -49,37 +49,6 @@ pub enum ChromaticKind {
     Displace,
 }
 
-/// A dither's pattern: an ordered grid, or noise.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum DitherKind {
-    Ordered,
-    Noise,
-}
-
-/// A vignette darkening the edges, or lightening them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum VignetteKind {
-    Dark,
-    Light,
-}
-
-/// Pixelate's cells (canvas pixels) for the amount: one pixel at none, finer steps low down.
-fn pixelate_size(amount: f32) -> f32 {
-    1.0 + 127.0 * amount.powf(1.5)
-}
-
-/// A dither from its amount and its levels and pattern size sliders (0..1): 2 to 16 steps a
-/// channel, dots 1 to 8 canvas pixels.
-fn dither(kind: DitherKind, amount: f32, levels: f32, scale: f32, mono: bool) -> Filter {
-    Filter::Dither {
-        amount,
-        levels: (2.0 + levels * 14.0).round(),
-        scale: (1.0 + scale * 7.0).round(),
-        kind: kind as u32,
-        mono,
-    }
-}
-
 /// Perspective blur from its puck all round, or only towards its arrow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum PerspectiveKind {
@@ -444,7 +413,7 @@ impl Shared {
             return;
         }
         // with Drawing Assist on the layer, the symmetry's copies too, as a stroke's
-        let guide = st.doc.stroke_guide();
+        let guide = crate::guide::stroke_guide(&st.doc, st.guide_paused);
         if let Some(canvas) = st.canvas.as_mut() {
             for step in &steps {
                 canvas.liquify_stamps(&crate::guide::mirrored_liquify(&guide, step));
@@ -602,37 +571,6 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.adjust(Filter::Halftone { pitch: halftone_pitch(unit(amount)), kind: kind as u32 });
-        self.shared.frame(st);
-    }
-
-    /// Pixelate, its cells growing with `amount` (0..1).
-    pub fn adjust_pixelate(&self, amount: f32) {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        st.adjust(Filter::Pixelate { size: pixelate_size(unit(amount)) });
-        self.shared.frame(st);
-    }
-
-    /// A dither of `kind`, `amount` (0..1) of it, with its levels and pattern size sliders (0..1);
-    /// in black and white when `mono`.
-    pub fn adjust_dither(&self, kind: DitherKind, amount: f32, levels: f32, scale: f32, mono: bool) {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        st.adjust(dither(kind, unit(amount), unit(levels), unit(scale), mono));
-        self.shared.frame(st);
-    }
-
-    /// A vignette of `kind`, `amount` (0..1) of it, starting `size` (0..1) of the way out and fading
-    /// over `softness` (0..1) of the rest.
-    pub fn adjust_vignette(&self, kind: VignetteKind, amount: f32, size: f32, softness: f32) {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        st.adjust(Filter::Vignette {
-            amount: unit(amount),
-            size: unit(size),
-            softness: unit(softness),
-            light: kind == VignetteKind::Light,
-        });
         self.shared.frame(st);
     }
 

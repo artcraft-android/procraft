@@ -233,6 +233,8 @@ pub struct Gallery {
     presets: Vec<CanvasPreset>,
     /// The kinds of artwork the plugins on make: the New canvas list's last rows.
     pub kinds: Vec<procraft_core::PluginKind>,
+    /// The app's own features hidden (their built-in plugins off).
+    pub hidden: Vec<procraft_core::Feature>,
     /// The screen's size, pixels: Screen Size's canvas.
     pub screen_px: (u32, u32),
     /// Select: on, the artworks and stacks picked (by folder), More's list open, the picked
@@ -402,6 +404,7 @@ impl Gallery {
             new_open: false,
             presets,
             kinds: Vec::new(),
+            hidden: Vec::new(),
             screen_px: (1920, 1080),
             selecting: false,
             picked: Vec::new(),
@@ -629,6 +632,7 @@ impl Gallery {
         }
         if let Some(custom) = self.custom.as_mut() {
             use crate::custom_canvas::Done;
+            custom.time_lapse_hidden = self.hidden.contains(&procraft_core::Feature::TimeLapse);
             match custom.show(ctx, look, &colours.palettes, colours.harmony) {
                 Some(Done::Cancel) => self.custom = None,
                 // an edited preset is kept in its place; a new one goes at the end of the list
@@ -780,7 +784,8 @@ impl Gallery {
             own.x,
             self.selecting,
             screen.width() > screen.height(),
-            self.stack.is_some(),
+            // (no Stack, as in a stack, while the Gallery stacks plugin is off)
+            self.stack.is_some() || self.hidden.contains(&procraft_core::Feature::GalleryStacks),
         );
         self.header_fit = Some(fit.clone());
         fit
@@ -1645,6 +1650,8 @@ impl Gallery {
             return;
         }
         let stacking = self.stack.is_none() && matches!(entry, GalleryEntry::Artwork { .. });
+        // onto another only while the Gallery stacks plugin is on
+        let stacking = stacking && !self.hidden.contains(&procraft_core::Feature::GalleryStacks);
         let target = pointer.and_then(|p| Self::drop_at(entries, cells, &dir, p, stacking));
         let back = self.stack.is_some() && pointer.is_some_and(|p| self.back.contains(p));
         // what it rests on that opens: the way back, or a stack it would be put in
@@ -1819,7 +1826,13 @@ impl Gallery {
     /// Share, centred on it, kept 4 inside. A tap on one shares in it, a tap off closes.
     fn formats(&mut self, ctx: &egui::Context, look: &mut Look, screen: Rect) -> Option<Asked> {
         let (list, from, group) = self.sharing.clone()?;
-        let (width, n) = (FORMATS_WIDTH, SHARE_ROWS.len() as f32);
+        // PSD while the PSD plugin's export is on
+        let psd = !self.hidden.contains(&procraft_core::Feature::PsdExport);
+        let rows: Vec<ShareRow> = SHARE_ROWS
+            .into_iter()
+            .filter(|r| psd || !matches!(r, ShareRow::Still(crate::files::Format::Psd)))
+            .collect();
+        let (width, n) = (FORMATS_WIDTH, rows.len() as f32);
         let height = 55.0 + 40.0 * n + (n - 1.0) + 10.0;
         let (rect, arrow) = match from {
             Some(pill) => {
@@ -1875,7 +1888,7 @@ impl Gallery {
                 vec2(width - 20.0, 40.0 * n + n - 1.0),
             );
             ui.painter().rect_filled(group, 18.0, argb(ACTIONS_GROUP));
-            for (i, format) in SHARE_ROWS.into_iter().enumerate() {
+            for (i, format) in rows.iter().copied().enumerate() {
                 let row =
                     Rect::from_min_size(pos2(group.left(), group.top() + 41.0 * i as f32), vec2(group.width(), 40.0));
                 if i > 0 {

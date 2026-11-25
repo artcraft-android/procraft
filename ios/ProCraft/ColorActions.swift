@@ -201,6 +201,11 @@ extension CanvasModel {
     /// A palette file (ours, or another program's swatches) or a picture to take colours from, picked
     /// from Files.
     func paletteFromFile(_ url: URL) {
+        // while the Palettes plugin is on
+        guard PluginsModel.shared.has(.palettes) else {
+            showNotice("Turn on Palettes in Plugins to bring in palettes", warning: true)
+            return
+        }
         guard let bytes = url.readPicked() else {
             showNotice("This file could not be read.", warning: true)
             return

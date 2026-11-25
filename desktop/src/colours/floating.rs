@@ -259,7 +259,7 @@ impl Colours {
                 Mode::Palettes => self.floating_palettes(ui, look, session, rect),
             }
             let tabs = Rect::from_min_size(pos2(at.x, rect.bottom() - TABS), vec2(WIDTH, TABS));
-            if let Some(mode) = tabs_row(ui, look, tabs, self.mode) {
+            if let Some(mode) = tabs_row(ui, look, tabs, self.mode, self.palettes_hidden) {
                 self.mode = mode;
                 self.hex = None;
             }

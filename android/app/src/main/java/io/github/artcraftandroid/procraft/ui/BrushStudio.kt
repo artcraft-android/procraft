@@ -174,7 +174,8 @@ sealed class StudioControl {
     data object About : StudioControl()
 }
 
-class StudioSection(val title: String?, val controls: List<StudioControl>)
+/** [feature]: the built-in plugin's part it shows with, if it is one's. */
+class StudioSection(val title: String?, val controls: List<StudioControl>, val feature: io.github.artcraftandroid.procraft.core.Feature? = null)
 
 /** A page of the studio: its name, its icon (shown [iconSize] across) and its sections. */
 class StudioTab(val name: String, val icon: ImageVector, val iconSize: Dp, val sections: List<StudioSection>)
@@ -202,7 +203,7 @@ val STUDIO_TABS: List<StudioTab> by lazy {
             StudioSection("Pixel art", listOf(
                 toggle("pixelated", "Pixelated"),
                 toggle("pixel_perfect", "Pixel perfect", enabledBy = "pixelated" to 1),
-            )),
+            ), io.github.artcraftandroid.procraft.core.Feature.PIXEL_ART),
         )),
         StudioTab("Stabilization", PcIcons.StudioStabilize, 45.dp, listOf(
             StudioSection("StreamLine", listOf(slider("streamline", "Amount"), slider("streamline_pressure", "Pressure"))),
@@ -817,7 +818,8 @@ private fun StudioSettings(vm: CanvasViewModel, modifier: Modifier) {
     Column(modifier.verticalScroll(remember(vm.studioTab) { androidx.compose.foundation.ScrollState(0) }).padding(start = 20.dp, end = 20.dp, bottom = 77.dp)) {
         // what the space above each thing follows: a control, a title, or the top
         var above: Any = Edge.TOP
-        tab.sections.forEachIndexed { k, section ->
+        // a built-in plugin's sections while it is on
+        tab.sections.filter { s -> s.feature?.let(vm::has) ?: true }.forEachIndexed { k, section ->
             // the About page is headed by the brush's name
             val about = section.controls.firstOrNull() == StudioControl.About
             val title = section.title ?: vm.studioName.takeIf { about }

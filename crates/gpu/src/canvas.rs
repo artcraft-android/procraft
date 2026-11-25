@@ -11041,17 +11041,6 @@ impl Canvas {
                     ..FilterUniform::ZERO
                 },
             ),
-            Filter::Pixelate { size } => ("fs_pixelate", values([size.max(1.0), 0.0, 0.0, 0.0], [0.0; 4])),
-            Filter::Dither { amount, levels, scale, kind, mono } => (
-                "fs_dither",
-                values(
-                    [amount, levels.max(2.0), scale.max(1.0), kind.min(1) as f32],
-                    [f32::from(u8::from(mono)), 0.0, 0.0, 0.0],
-                ),
-            ),
-            Filter::Vignette { amount, size, softness, light } => {
-                ("fs_vignette", values([amount, size, softness, f32::from(u8::from(light))], [0.0; 4]))
-            }
         }
     }
 
@@ -16065,10 +16054,7 @@ const ADD: wgpu::BlendState = wgpu::BlendState {
     },
 };
 
-const FILTER_PASSES: [&str; 23] = [
-    "fs_pixelate",
-    "fs_dither",
-    "fs_vignette",
+const FILTER_PASSES: [&str; 20] = [
     "fs_style_rows",
     "fs_style_columns",
     "fs_style",

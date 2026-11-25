@@ -566,10 +566,19 @@ private struct ActionPicker: View {
         }
     }
 
+    /// The actions and adjustments listed, less a built-in plugin's that is off.
+    private var listed: [QuickAction?] {
+        quickActionsListed().filter { $0.map(PluginsModel.shared.shows) ?? true }
+    }
+
+    private var adjustmentsListed: [QuickAction] {
+        quickAdjustmentsListed().filter(PluginsModel.shared.shows)
+    }
+
     private var rows: [PickerRow] {
         switch page {
         case .actions:
-            quickActionsListed().map { a in
+            listed.map { a in
                 guard let a else {
                     return PickerRow(label: "Adjustments", more: true) { page = .adjustments }
                 }
@@ -583,7 +592,7 @@ private struct ActionPicker: View {
                 return PickerRow(label: label, more: false) { onPick(a) }
             }
         case .adjustments:
-            quickAdjustmentsListed().map { a in
+            adjustmentsListed.map { a in
                 PickerRow(label: quickActionLabel(action: a), more: false) { onPick(a) }
             }
         case .brushSets:
@@ -604,9 +613,9 @@ private struct ActionPicker: View {
     private var chosen: Int {
         switch page {
         case .actions:
-            quickActionsListed().firstIndex(of: current) ?? -1
+            listed.firstIndex(of: current) ?? -1
         case .adjustments:
-            quickAdjustmentsListed().firstIndex(of: current) ?? 0
+            adjustmentsListed.firstIndex(of: current) ?? 0
         case .brushSets:
             Int(brush?.set ?? 0)
         case .brushes:

@@ -390,7 +390,10 @@ private struct CropSettings: View {
                     Color.clear.frame(height: 1)
                     switchRow("Resample canvas", on: shown.resample) { tool.change { $0.cropSetResample(on: !shown.resample) } }
                     Color.clear.frame(height: 1)
-                    switchRow("Pixelated", on: shown.pixelated) { tool.change { $0.cropSetPixelated(on: !shown.pixelated) } }
+                    // while the Ribbon and pixel brushes plugin's Pixel art is on
+                    if PluginsModel.shared.has(.pixelArt) {
+                        switchRow("Pixelated", on: shown.pixelated) { tool.change { $0.cropSetPixelated(on: !shown.pixelated) } }
+                    }
                     Color.clear.frame(height: 1)
                     switchRow("Snapping", on: shown.snapping) { tool.change { $0.cropSetSnapping(on: !shown.snapping) } }
                 }

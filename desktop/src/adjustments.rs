@@ -48,8 +48,6 @@ fn icon(a: Adjustment) -> &'static Icon {
         Adjustment::Glitch => &icons::ADJUST_GLITCH,
         Adjustment::Halftone => &icons::ADJUST_HALFTONE,
         Adjustment::ChromaticAberration => &icons::ADJUST_CHROMATIC,
-        // (the desktop's own glyphs for these come with their panels)
-        Adjustment::Pixelate | Adjustment::Dither | Adjustment::Vignette => &icons::ADJUSTMENTS,
         Adjustment::Liquify => &icons::ADJUST_LIQUIFY,
         Adjustment::Clone => &icons::ADJUST_CLONE,
         Adjustment::Plugin => &icons::ADJUSTMENTS,
@@ -117,11 +115,20 @@ pub fn menu(
     actions: &[PluginAction],
     showing_filters: bool,
     as_layer: bool,
+    hidden: &[procraft_core::Feature],
 ) -> (Rect, Option<MenuRow>) {
     let screen = panel::screen(ctx);
     let (left, arrow_x) = panel::place(ctx, MENU_WIDTH, button.center().x);
     let top = screen.top() + pc::BAR_HEIGHT;
-    let groups = menu_groups(filters, actions, showing_filters);
+    // less what a built-in plugin turned off hides (Liquify, Gradient Map)
+    let groups: Vec<Vec<(String, MenuRow)>> = menu_groups(filters, actions, showing_filters)
+        .into_iter()
+        .map(|g| {
+            g.into_iter().filter(|(_, r)| !matches!(r, MenuRow::Open(a) if !crate::builtins::adjustment(hidden, *a)))
+        })
+        .map(Vec::from_iter)
+        .filter(|g| !g.is_empty())
+        .collect();
     // (Adjustment Layer's own group over the adjustments)
     let switch = if showing_filters { 0.0 } else { 44.0 + 10.0 };
     let rows: f32 = groups.iter().map(|g| g.len() as f32 * 44.0 + g.len().saturating_sub(1) as f32).sum::<f32>()
@@ -729,7 +736,8 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                let (rect, row) = menu(ui.ctx(), &mut look, button, &mut Vec::new(), &filters, &[], turned, false);
+                let (rect, row) =
+                    menu(ui.ctx(), &mut look, button, &mut Vec::new(), &filters, &[], turned, false, &[]);
                 at = menu_back(panel::body(rect)).center();
                 tapped = tapped.clone().or(row);
             });

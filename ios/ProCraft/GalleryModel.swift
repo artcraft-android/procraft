@@ -78,8 +78,11 @@ final class GalleryModel {
     /// export, and closes back to the gallery after.
     static let animatedFormats: [AnimatedFormat] = [.gif, .png, .mp4, .hevc]
 
-    /// What Share offers, in order.
-    static let shareFormats = ["ProCraft", "Procreate", "PSD", "PDF", "JPEG", "PNG", "TIFF"] + animatedFormats.map(\.title)
+    /// What Share offers, in order: PSD while the PSD plugin's export is on.
+    static var shareFormats: [String] {
+        ["ProCraft", "Procreate", "PSD", "PDF", "JPEG", "PNG", "TIFF"].filter { $0 != "PSD" || PluginsModel.shared.has(.psdExport) }
+            + animatedFormats.map(\.title)
+    }
 
     /// Several artworks shared as one PDF are named this, unless they are a stack's.
     static let groupName = "Artworks"
@@ -217,6 +220,15 @@ final class GalleryModel {
         flyOutOf = nil
         flyingBack = nil
         reload()
+    }
+
+    /// With the Workspaces plugin off, the gallery is the first workspace's, where the app has
+    /// always kept its artworks; the others wait, as they were, for it to be on again.
+    func followWorkspacesPlugin() {
+        guard !PluginsModel.shared.has(.workspaces), !workspace.isDefault,
+              let first = Gallery.workspaces.list().first
+        else { return }
+        showWorkspace(first)
     }
 
     func showWorkspace(_ next: Workspace) {
@@ -769,6 +781,8 @@ final class GalleryModel {
             return addBrushes(copy, name: name, ours: kind == .brushes)
         }
         if foreign || kind == .swatches {
+            // while the Palettes plugin is on
+            guard PluginsModel.shared.has(.palettes) else { return .said("Turn on Palettes in Plugins to bring in palettes.") }
             guard let bytes = try? Data(contentsOf: copy),
                   CanvasModel.paletteStore.importFile(bytes: bytes, fileName: name) else {
                 return .said("This palette can't be read.")
@@ -793,6 +807,8 @@ final class GalleryModel {
             return bringModel(copy, name: lower.hasSuffix(".zip") ? name : name + ".zip", title: named)
         }
         if tag == "8BPS" {
+            // while the PSD plugin's import is on
+            guard PluginsModel.shared.has(.psdImport) else { return .said("Turn on PSD in Plugins to bring in PSD files.") }
             return bringPsd(copy, title: title, folder: folder)
         }
         if tag == "%PDF" {
@@ -818,6 +834,10 @@ final class GalleryModel {
     /// holding one with its files), with the `files` picked along with it; named `title`, else
     /// after the file. The images it brings go into its texture sets.
     private func bringModel(_ copy: URL, name: String, files: [ModelFile] = [], title: String? = nil) -> Imported {
+        // while the 3D painting plugin is on
+        guard PluginsModel.shared.has(.modelPainting) else {
+            return .said("Turn on 3D painting in Plugins to bring in models.")
+        }
         guard let bytes = try? Data(contentsOf: copy) else { return .said("This model can't be opened.") }
         let artwork = (title ?? (name as NSString).deletingPathExtension).trimmingCharacters(in: .whitespaces)
         do {

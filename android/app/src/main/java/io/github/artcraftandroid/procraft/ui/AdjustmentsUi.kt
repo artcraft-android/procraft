@@ -142,7 +142,8 @@ fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modif
                         if (vm.adjustAsLayer) Icon(PcIcons.Tick, contentDescription = "On", tint = Pc.Accent, modifier = Modifier.size(20.dp))
                     }
                 }
-                for (group in Adjustment.groups) {
+                // less what a built-in plugin turned off hides (Liquify, Gradient Map)
+                for (group in Adjustment.groups.map { g -> g.filter(vm::showsAdjustment) }.filter { it.isNotEmpty() }) {
                     MenuGroup(group) { a ->
                         // as an adjustment layer, those that can't be one are greyed
                         if (vm.adjustAsLayer) {
@@ -284,8 +285,6 @@ private fun Adjustment.icon() = when (this) {
     Adjustment.GLITCH -> PcIcons.AdjustGlitch
     Adjustment.HALFTONE -> PcIcons.AdjustHalftone
     Adjustment.CHROMATIC_ABERRATION -> PcIcons.AdjustChromatic
-    // (Android's own glyphs for these come with their panels)
-    Adjustment.PIXELATE, Adjustment.DITHER, Adjustment.VIGNETTE -> PcIcons.Adjustments
     Adjustment.LIQUIFY -> PcIcons.AdjustLiquify
     Adjustment.CLONE -> PcIcons.AdjustClone
     Adjustment.PLUGIN -> PcIcons.Adjustments

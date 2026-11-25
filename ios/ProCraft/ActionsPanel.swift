@@ -252,7 +252,9 @@ struct ActionsPanel: View {
                 .padding(.leading, 24)
                 .padding(.top, 22)
             HStack(spacing: 10) {
-                ForEach(Array((model.scene.open ? modelTabs : tabs).enumerated()), id: \.offset) { i, tab in
+                // Video while the Time-lapse plugin is on (a model's 3D tab in its place stays)
+                let video = model.scene.open || PluginsModel.shared.has(.timeLapse)
+                ForEach(Array((model.scene.open ? modelTabs : tabs).enumerated()).filter { $0.offset != 3 || video }, id: \.offset) { i, tab in
                     tabButton(i, tab)
                 }
             }
@@ -327,8 +329,9 @@ struct ActionsPanel: View {
                     .privately("Insert a file", label: "Insert a private file", action: { ask(.file, false) }, onPrivate: { ask(.file, true) }),
                     .privately("Insert a photo", label: "Insert a private photo", action: { ask(.photo, false) }, onPrivate: { ask(.photo, true) }),
                     .privately("Take a photo", label: "Take a private photo", action: { ask(.camera, false) }, onPrivate: { ask(.camera, true) }),
-                    .act("Add text", action: { model.text.add() }),
-                ],
+                ]
+                // while the Text plugin is on
+                + (PluginsModel.shared.has(.text) ? [.act("Add text", action: { model.text.add() })] : []),
                 // Paste is grey until something has been cut or copied
                 [
                     .act("Cut", action: { model.cutLayer() }),
@@ -342,27 +345,39 @@ struct ActionsPanel: View {
                 ],
             ]
         case 1:
+            // the app's own features, each shown while its built-in plugin is on
+            let plugins = PluginsModel.shared
             return [
-                [
-                    .act("Crop & Resize", action: { model.crop.begin() }),
-                    // the canvas made a comic page the first time
-                    .act("Comic panels", action: { model.openComicPanels() }),
-                ],
-                [
-                    .toggle("Animation Assist", on: model.animationAssist.settings?.pages == false, change: {
+                [.act("Crop & Resize", action: { model.crop.begin() })]
+                    // the plugins' tools (Comic Panels makes the canvas a page the first time)
+                    + plugins.tools.map { tool in .act(tool.label, action: { model.openPluginTool(tool) }) },
+                // while the Animation Assist plugin (and its Page Assist) is on
+                (plugins.has(.animationAssist)
+                    ? [ActionRow.toggle("Animation Assist", on: model.animationAssist.settings?.pages == false, change: {
                         model.animationAssist.setAssist($0, pages: false)
-                    }),
-                    .toggle("Page Assist", on: model.animationAssist.settings?.pages == true, change: {
+                    })]
+                    : [])
+                + (plugins.has(.pageAssist)
+                    ? [ActionRow.toggle("Page Assist", on: model.animationAssist.settings?.pages == true, change: {
                         model.animationAssist.setAssist($0, pages: true)
-                    }),
-                    .toggle("Timeline", on: model.timeline.on, change: { model.timeline.setOn($0) }),
-                    // only on a timeline: its frame rate, playback, onion skins and length, on a
-                    // page standing on the timeline
-                    .act("Timeline Settings", action: model.timeline.on ? { model.timeline.openSettings() } : nil),
-                    .toggle("Drawing Guide", on: model.guideOn, change: { model.setGuideOn($0) }),
-                    // only with the guide on
-                    .act("Edit Drawing Guide", action: model.guideOn ? { model.guide.open() } : nil),
-                ],
+                    })]
+                    : [])
+                + (plugins.has(.timeline)
+                    ? [
+                        .toggle("Timeline", on: model.timeline.on, change: { model.timeline.setOn($0) }),
+                        // only on a timeline: its frame rate, playback, onion skins and length, on
+                        // a page standing on the timeline
+                        .act("Timeline Settings", action: model.timeline.on ? { model.timeline.openSettings() } : nil),
+                    ]
+                    : [])
+                // while the Drawing guides plugin is on
+                + (plugins.has(.drawingGuides)
+                    ? [
+                        .toggle("Drawing Guide", on: model.guideOn, change: { model.setGuideOn($0) }),
+                        // only with the guide on
+                        .act("Edit Drawing Guide", action: model.guideOn ? { model.guide.open() } : nil),
+                    ]
+                    : []),
                 [.toggle("Reference", on: model.reference.on, change: { showReference($0) })],
                 [
                     .act("Flip horizontal", action: { model.flipCanvas(horizontal: true) }),
@@ -374,6 +389,7 @@ struct ActionsPanel: View {
                 })],
             ]
         case 2:
+            let plugins = PluginsModel.shared
             // files plugins make of the artwork's layers of kinds they add, under their own names
             let made: [ActionRow] = model.session.pluginExports().map { e in
                 ActionRow.act(e.label, action: { model.sharePlugin(e) })
@@ -384,19 +400,23 @@ struct ActionsPanel: View {
                     // ours first, then the same package named for the other app
                     .act("ProCraft", action: { model.sharePackage(suffix: ".procraft") }),
                     .act("Procreate", action: { model.sharePackage(suffix: ".procreate") }),
-                    .act("PSD", action: { model.share(.psd) }),
+                ]
+                // while the PSD plugin's export is on
+                + (plugins.has(.psdExport) ? [.act("PSD", action: { model.share(.psd) })] : [])
+                + [
                     .act("PDF", action: { model.pdfAsking = .pdf }),
                     .act("JPEG", action: { model.share(.jpeg) }),
                     .act("PNG", action: { model.share(.png) }),
                     .act("TIFF", action: { model.share(.tiff) }),
                 ]
                 // an HDR artwork's light above white kept (JPEG and PNG have it rolled off)
-                + (model.isHdr
+                + (model.isHdr && plugins.has(.hdrExports)
                     ? [.act("HDR HEIC", action: { model.shareHdr(exr: false) }), .act("OpenEXR", action: { model.shareHdr(exr: true) })]
                     : [])
                 // a plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes
                 + (model.session.exportsSvg() ? [.act("SVG", action: { model.share(.svg) })] : [])
-                + (model.session.exportsVectors() ? [.act("Vector PDF", action: { model.share(.vectorPdf) })] : []),
+                + (model.session.exportsVectors() && plugins.has(.vectorShare)
+                    ? [.act("Vector PDF", action: { model.share(.vectorPdf) })] : []),
                 [
                     .heading("Share Layers"),
                     .act("PDF", action: { model.pdfAsking = .layersPdf }),
@@ -405,10 +425,10 @@ struct ActionsPanel: View {
                     .act("Animated PNG", action: { model.openAnimatedExport(.png) }),
                     .act("Animated MP4", action: { model.openAnimatedExport(.mp4) }),
                     .act("Animated HEVC", action: { model.openAnimatedExport(.hevc) }),
-                    .act("Sprite Sheet", action: { model.openSpriteSheetExport() }),
-                    .act("Texture Packer", action: { model.openTexturePacker() }),
-                    .act("Harmony Scene", action: { model.shareHarmony() }),
-                ],
+                ]
+                // the files plugins make of the animation (a sprite sheet, a Harmony scene)
+                + plugins.store.shares().map { share in ActionRow.act(share.label, action: { model.openPluginShare(share) }) }
+                + (plugins.has(.texturePacker) ? [.act("Texture Packer", action: { model.openTexturePacker() })] : []),
             ]
             // a plugin's artwork, its shapes kept, after TIFF; then what plugins make of its layers
             if model.session.exportsSvg() {

@@ -65,6 +65,9 @@ const ORDER_UNKEPT: &str = "The plugins' order couldn't be saved.";
 pub enum PluginSource {
     File,
     Catalogue,
+    /// One of the app's own features, listed as a plugin ([`crate::builtin_plugins`]): no file, and
+    /// it can't be removed, only turned off.
+    Builtin,
 }
 
 /// What a plugin holds, as its manifest says: one of these or several.
@@ -894,6 +897,59 @@ fn can_do(manifest: &Manifest) -> String {
     format!("{} It can't reach {reach}.", sentences.join(" "))
 }
 
+/// A file a plugin makes of the animation (interface 23), as Share lists it: `key` is
+/// `<id>.<key>`, and `controls` are those its sheet shows, as they are set.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginShare {
+    pub key: String,
+    pub label: String,
+    pub controls: Vec<PluginControl>,
+}
+
+/// A mesh a plugin lays and bends for Transform (interface 24), as Transform's bar lists it: `key`
+/// is `<id>.<key>`.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginWarp {
+    pub key: String,
+    pub label: String,
+}
+
+/// A mode of a plugin's tool: its name on the tool's header, and the words under it while chosen.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginToolMode {
+    pub label: String,
+    pub hint: String,
+}
+
+/// A plugin's tool (interface 24), as Actions › Canvas lists it: `key` is `<id>.<key>`; `fit`
+/// shows the whole canvas under its header while it is open.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginTool {
+    pub key: String,
+    pub label: String,
+    pub modes: Vec<PluginToolMode>,
+    pub fit: bool,
+}
+
+/// A copy of a plugin's code started for one of its warps or tools, and that one's place among
+/// its plugin's.
+pub(crate) struct CodeToRun {
+    pub running: Running,
+    pub index: u32,
+    /// Whose it is.
+    pub plugin: String,
+}
+
+/// An export ready to run: its plugin's code started, told its controls' values, and what it is.
+pub(crate) struct ExportToRun {
+    pub running: Running,
+    /// Its place among its plugin's exports.
+    pub index: u32,
+    pub exporter: plugin_file::Exporter,
+    /// Its plugin's controls' values, in order.
+    pub values: Vec<f32>,
+}
+
 /// A filter whose files have held up again, for opening: of plugin `plugin`.
 pub(crate) struct FilterToOpen {
     pub plugin: String,
@@ -1189,6 +1245,13 @@ impl Plugins {
                 list.added = added;
             }
         }
+    }
+
+    /// The app's own features, listed as plugins ([`crate::builtin_plugins`]), first on the page.
+    fn add_builtins(&self) {
+        let mut list = self.listed();
+        let files = std::mem::take(&mut list.files);
+        list.files = crate::builtin_plugins::listed().into_iter().chain(files).collect();
     }
 
     /// `id` off its hooks, and its panel closed.
@@ -1723,6 +1786,76 @@ impl Plugins {
         out
     }
 
+    /// Whether export `key` (as [`Plugins::shares`] has it) takes the animation's sounds.
+    pub(crate) fn shares_sounds(&self, key: &str) -> bool {
+        let list = self.listed();
+        list.files.iter().any(|p| {
+            list.shapes
+                .get(&p.id)
+                .is_some_and(|shape| shape.exporters.iter().any(|e| e.sounds && format!("{}.{}", p.id, e.key) == key))
+        })
+    }
+
+    /// Export `key` (as [`Plugins::shares`] has it) with its plugin's code started for it, on
+    /// its own copy; why not if it can't be.
+    pub(crate) fn export_to_run(&self, key: &str) -> Result<ExportToRun, String> {
+        const GONE: &str = "This export's plugin isn't on.";
+        let (id, version, permissions, values, index, exporter) = {
+            let list = self.listed();
+            let found = list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|p| {
+                let exporters = &list.shapes.get(&p.id)?.exporters;
+                let index = exporters.iter().position(|e| format!("{}.{}", p.id, e.key) == key)?;
+                Some((p, index, exporters.get(index)?.clone()))
+            });
+            let (plugin, index, exporter) = found.ok_or_else(|| GONE.to_owned())?;
+            let values: Vec<f32> = plugin.controls.iter().map(PluginControl::number).collect();
+            (plugin.id.clone(), plugin.version.clone(), plugin.permissions.clone(), values, index, exporter)
+        };
+        let (running, _) = self.start_code(&id, &version, &values, &permissions, None, &id).map_err(|stop| {
+            self.hooks.stopped(&id, stop);
+            stop.text().to_owned()
+        })?;
+        let index = u32::try_from(index).map_err(|_| GONE.to_owned())?;
+        Ok(ExportToRun { running, index, exporter, values })
+    }
+
+    /// The plugin that is on and lists `key` (`<id>.<key>`) among what `listed` finds in its
+    /// shape, its code started on a copy of its own; why not if it can't be.
+    fn part_to_run(&self, key: &str, listed: impl Fn(&Shape) -> Vec<String>) -> Result<CodeToRun, String> {
+        const GONE: &str = "This plugin isn't on.";
+        let (id, version, permissions, values, index) = {
+            let list = self.listed();
+            let found = list.files.iter().filter(|p| p.on && p.problem.is_none()).find_map(|p| {
+                let index = listed(list.shapes.get(&p.id)?).iter().position(|k| format!("{}.{k}", p.id) == key)?;
+                Some((p, index))
+            });
+            let (plugin, index) = found.ok_or_else(|| GONE.to_owned())?;
+            let values: Vec<f32> = plugin.controls.iter().map(PluginControl::number).collect();
+            (plugin.id.clone(), plugin.version.clone(), plugin.permissions.clone(), values, index)
+        };
+        let (running, _) = self.start_code(&id, &version, &values, &permissions, None, &id).map_err(|stop| {
+            self.hooks.stopped(&id, stop);
+            stop.text().to_owned()
+        })?;
+        let index = u32::try_from(index).map_err(|_| GONE.to_owned())?;
+        Ok(CodeToRun { running, index, plugin: id })
+    }
+
+    /// Mesh warp `key` (as [`Plugins::warps`] has it) with its plugin's code started for it.
+    pub(crate) fn warp_to_run(&self, key: &str) -> Result<CodeToRun, String> {
+        self.part_to_run(key, |shape| shape.warps.iter().map(|w| w.key.clone()).collect())
+    }
+
+    /// Tool `key` (as [`Plugins::tools`] has it) with its plugin's code started for it.
+    pub(crate) fn tool_to_run(&self, key: &str) -> Result<CodeToRun, String> {
+        self.part_to_run(key, |shape| shape.tools.iter().map(|t| t.key.clone()).collect())
+    }
+
+    /// A plugin `id`'s copy stopped (`stop`): it goes off, and says why.
+    pub(crate) fn part_stopped(&self, id: &str, stop: Stop) {
+        self.hooks.stopped(id, stop);
+    }
+
     /// Filter `id` is on trial: if the app ends before it has drawn, it is put down to it.
     pub(crate) fn filter_trying(&self, id: &str) {
         if let Some(store) = &self.store {
@@ -1790,6 +1923,7 @@ impl Plugins {
     #[uniffi::constructor]
     pub fn with_bundled(dir: String) -> Arc<Plugins> {
         let plugins = Plugins::kept_in(Some(PathBuf::from(dir)));
+        plugins.add_builtins();
         plugins.add_bundled(crate::bundled::BUNDLED);
         plugins
     }
@@ -1905,6 +2039,48 @@ impl Plugins {
             }
         }
         filters
+    }
+
+    /// The files the plugins that are on make of the animation (interface 23), for Share.
+    pub fn shares(&self) -> Vec<PluginShare> {
+        let list = self.listed();
+        let on = list.files.iter().filter(|p| p.on && p.problem.is_none() && p.holds(PluginPart::Hooks));
+        on.flat_map(|plugin| {
+            let exporters = list.shapes.get(&plugin.id).map(|shape| shape.exporters.as_slice()).unwrap_or_default();
+            exporters.iter().map(|e| PluginShare {
+                key: format!("{}.{}", plugin.id, e.key),
+                label: e.label.clone(),
+                controls: e.controls.iter().filter_map(|&at| plugin.controls.get(at).cloned()).collect(),
+            })
+        })
+        .collect()
+    }
+
+    /// The meshes the plugins that are on lay and bend for Transform (interface 24).
+    pub fn warps(&self) -> Vec<PluginWarp> {
+        let list = self.listed();
+        let on = list.files.iter().filter(|p| p.on && p.problem.is_none() && p.holds(PluginPart::Hooks));
+        on.flat_map(|plugin| {
+            let warps = list.shapes.get(&plugin.id).map(|shape| shape.warps.as_slice()).unwrap_or_default();
+            warps.iter().map(|w| PluginWarp { key: format!("{}.{}", plugin.id, w.key), label: w.label.clone() })
+        })
+        .collect()
+    }
+
+    /// The tools of the plugins that are on (interface 24).
+    pub fn tools(&self) -> Vec<PluginTool> {
+        let list = self.listed();
+        let on = list.files.iter().filter(|p| p.on && p.problem.is_none() && p.holds(PluginPart::Hooks));
+        on.flat_map(|plugin| {
+            let tools = list.shapes.get(&plugin.id).map(|shape| shape.tools.as_slice()).unwrap_or_default();
+            tools.iter().map(|t| PluginTool {
+                key: format!("{}.{}", plugin.id, t.key),
+                label: t.label.clone(),
+                modes: t.modes.iter().map(|(label, hint)| PluginToolMode { label: label.clone(), hint: hint.clone() }).collect(),
+                fit: t.fit,
+            })
+        })
+        .collect()
     }
 
     /// A value read back from where it was kept, as text. A key nothing has, or anything that
@@ -2549,6 +2725,9 @@ impl Plugins {
     /// Removes the imported plugin `id`: its folder goes, at once, no restart. The keys to take out
     /// of where values are kept; none if it can't be removed.
     pub fn remove(&self, id: String) -> Option<Vec<String>> {
+        if crate::builtin_plugins::is_builtin(&id) {
+            return None;
+        }
         let mut list = self.listed();
         let at = list.files.iter().position(|p| p.id == id)?;
         if let Some(store) = &self.store
@@ -2771,6 +2950,19 @@ impl Plugins {
     /// is open; one that tells [`crate::CanvasSession::set_touch_panel_open`] needn't ask).
     pub fn pins_panels(&self) -> bool {
         self.hooks().pin_panels()
+    }
+
+    /// Whether the app's own `feature` shows: the built-in plugin it is part of on, and the switch
+    /// it comes under, if any.
+    pub fn has(&self, feature: crate::builtin_plugins::Feature) -> bool {
+        crate::builtin_plugins::has(&self.listed().files, feature)
+    }
+
+    /// Every one of the app's own features that shows now (see [`Plugins::has`]), for an app to
+    /// read in one call each time the plugins change.
+    pub fn features(&self) -> Vec<crate::builtin_plugins::Feature> {
+        let list = self.listed();
+        crate::builtin_plugins::all().into_iter().filter(|f| crate::builtin_plugins::has(&list.files, *f)).collect()
     }
 
     /// Whether a plugin offers Lasso Fill: Color Fill's Lasso Fill switch and the Paint and Erase
@@ -3734,7 +3926,9 @@ mod tests {
     fn the_first_start_adds_what_the_app_comes_with_as_files_all_off() {
         let dir = store("bundled");
         let plugins = app_at(&dir);
-        let cards = plugins.plugins();
+        // (the app's own features, listed first, aren't files)
+        let cards: Vec<PluginInfo> =
+            plugins.plugins().into_iter().filter(|c| c.source != PluginSource::Builtin).collect();
         assert_eq!(cards.len(), crate::bundled::BUNDLED.len());
         for card in &cards {
             // as an import: a card like any other, kept in the store
@@ -3751,7 +3945,9 @@ mod tests {
         assert_eq!(plugins.take_moved_notice(), None);
         // and so on the next start, the filters too, with nothing kept for them
         let next = app_at(&dir);
-        assert_eq!(next.plugins(), cards);
+        let next_cards: Vec<PluginInfo> =
+            next.plugins().into_iter().filter(|c| c.source != PluginSource::Builtin).collect();
+        assert_eq!(next_cards, cards);
         assert!(next.filters().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3837,7 +4033,8 @@ mod tests {
             }
         }
         // each filter there while its switch is on, and each opens
-        assert!(plugins.filters().is_empty(), "each waits for its switch");
+        let first: Vec<String> = plugins.filters().into_iter().map(|f| f.name).collect();
+        assert!(first.is_empty(), "each waits for its switch: {first:?}");
         for switch in ["extract_lines", "outline", "posterise"] {
             assert!(plugins.set_switch(format!("{EFFECTS}.{switch}"), true));
         }
@@ -4188,6 +4385,33 @@ mod tests {
     }
 
     #[test]
+    fn pixel_effects_dither_and_vignette_are_filter_layers_of_their_own_pixel() {
+        const PIXEL: &str = "io.github.artcraftandroid.pixel-effects";
+        let dir = store("pixel-effects-layers");
+        let plugins = app_at(&dir);
+        // off as it comes, so none
+        assert!(plugins.layer_filter_defs().keys().all(|k| !k.starts_with(PIXEL)));
+        assert!(plugins.set_on(PIXEL.to_owned(), true));
+        // filter layers only: nothing under Adjustments
+        assert!(plugins.filters().iter().all(|f| !f.id.starts_with(PIXEL)));
+        let defs = plugins.layer_filter_defs();
+        let mut ours: Vec<_> = defs.iter().filter(|(k, _)| k.starts_with(PIXEL)).collect();
+        ours.sort_by(|a, b| a.0.cmp(b.0));
+        let names: Vec<&str> = ours.iter().map(|(_, d)| d.label.as_str()).collect();
+        assert_eq!(names, ["Dither", "Vignette"]);
+        for (name, def) in ours {
+            assert_eq!(def.reach, procraft_gpu::FilterReach::Within(0.0), "{name}: its own pixel alone");
+            let code = procraft_gpu::read_layer_filter(&def.text, &crate::plugin_file::value_names(&def.values));
+            assert!(code.is_ok(), "{name}: {:?}", code.err());
+        }
+        // each under its switch
+        assert!(plugins.set_switch(format!("{PIXEL}.dither"), false));
+        let shown: Vec<String> = plugins.layer_filter_defs().into_keys().filter(|k| k.starts_with(PIXEL)).collect();
+        assert_eq!(shown, [format!("{PIXEL}.vignette")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_filter_of_several_opens_at_its_card_s_values_and_resets_to_them() {
         let dir = store("listed-filters");
         let plugins = at(&dir);
@@ -4358,7 +4582,8 @@ mod tests {
         let next = app_at(&dir);
         read_lines(&next, &lines);
         assert!(!has(&next, EFFECTS) && !has(&next, COLORDROP));
-        assert_eq!(next.plugins().len(), crate::bundled::BUNDLED.len() - 2);
+        let files = next.plugins().into_iter().filter(|c| c.source == PluginSource::File).count();
+        assert_eq!(files, crate::bundled::BUNDLED.len() - 2);
         let mut newer = all_bundled();
         newer.retain(|(name, _)| *name != "layer-toolbox");
         newer.push(("layer-toolbox", bundled_file("layer-toolbox", "9.0.0")));
@@ -6315,11 +6540,13 @@ mod tests {
                 assert!(same_value(&got, value), "{id} off: {now}: {got}, not {value}");
             }
         }
-        // all the app comes with (upstream's fourteen, less Vector layers, and this app's own two),
-        // each off as the app comes
+        // every file the app comes with, each off as the app comes (the built-ins aside, which
+        // come on)
         let plugins = app_at(&dir);
-        assert_eq!(plugins.plugins().len(), crate::bundled::BUNDLED.len());
-        assert!(plugins.plugins().iter().all(|p| !p.on));
+        let files: Vec<PluginInfo> =
+            plugins.plugins().into_iter().filter(|p| p.source != PluginSource::Builtin).collect();
+        assert_eq!(files.len(), crate::bundled::BUNDLED.len());
+        assert!(files.iter().all(|p| !p.on));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

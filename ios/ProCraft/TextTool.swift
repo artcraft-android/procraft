@@ -164,7 +164,8 @@ final class TextTool {
 
     /// Text layer `id` back in its box, selected but with the keyboard away (undo and redo of it).
     func resume(_ id: UInt64) -> Bool {
-        guard let text = model.session.layerText(id: id), model.session.textBegin(id: id, info: text) != nil else { return false }
+        // (not while the Text plugin is off: the undo is made, the text left as it is)
+        guard PluginsModel.shared.has(.text), let text = model.session.layerText(id: id), model.session.textBegin(id: id, info: text) != nil else { return false }
         start(text, keyboard: false)
         return true
     }

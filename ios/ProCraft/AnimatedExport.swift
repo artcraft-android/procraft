@@ -470,68 +470,108 @@ private struct FpsSlider: View {
     }
 }
 
-/// The frames on one picture for a game engine: as the screen starts, a near-square grid of the
-/// frames full size, each held frame once, with its JSON and no background.
-extension SpriteSheetChoices {
-    static let start = SpriteSheetChoices(
-        layout: .grid, columns: 0, rows: 0, padding: 0, trim: false, heldOnce: true, json: true, maxSide: 0, transparent: true
-    )
-}
-
 extension CanvasModel {
-    /// The sprite sheet in the exports folder: its picture, then its JSON if asked for, and what
-    /// was made; none if it couldn't be. Slow: off the main thread.
-    static func exportSpriteSheet(_ session: CanvasSession, _ choices: SpriteSheetChoices) -> ([URL], SpriteSheetMade)? {
-        let base = exportFileName(name: session.name(), package: false)
-        let url = Sharing.exportsDir.appendingPathComponent(base + " Sprite Sheet.png")
-        guard let made = try? session.exportSpriteSheet(path: url.path, choices: choices) else { return nil }
-        return ([url] + (made.jsonPath.map { [URL(fileURLWithPath: $0)] } ?? []), made)
+    /// A plugin's export (`share`) made into a folder of its own in the exports folder: the files
+    /// it wrote, and what it said; none if it couldn't be. A sound it takes that it can't read as
+    /// it is goes over as a WAV copy. Slow: off the main thread.
+    static func exportPluginShare(_ session: CanvasSession, _ share: PluginShare) -> ([URL], String?)? {
+        let plugins = PluginsModel.shared.store
+        let folder = Sharing.exportsDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let wav = SoundCopies.wavCopies(session.pluginShareSounds(plugins: plugins, key: share.key))
+        defer { SoundCopies.forget(wav) }
+        guard let made = try? session.pluginShare(plugins: plugins, key: share.key, dir: folder.path, wav: wav) else { return nil }
+        return (made.files.map { URL(fileURLWithPath: $0) }, made.said)
     }
 
-    /// Share's sprite sheet export opens over everything, the panel fading away.
-    func openSpriteSheetExport() {
+    /// Share's export `share` of a plugin's: its screen if it has settings, over everything, the
+    /// panel fading away; otherwise made and shared at once.
+    func openPluginShare(_ share: PluginShare) {
+        guard !share.controls.isEmpty else {
+            sharePluginExport(share)
+            return
+        }
         fadePanels()
-        withAnimation(Motion.studioIn) { spriteSheetExport = true }
+        withAnimation(Motion.studioIn) { pluginShare = share }
+    }
+
+    /// A plugin's export `share` made, to share; `done` once it is.
+    func sharePluginExport(_ share: PluginShare, done: (() -> Void)? = nil) {
+        exporting(failed: "\(share.label) couldn't be made.") { session in
+            let files = Self.exportPluginShare(session, share)?.0 ?? []
+            if !files.isEmpty, let done {
+                DispatchQueue.main.async(execute: done)
+            }
+            return files
+        }
     }
 }
 
-/// Sharing the frames as a sprite sheet: the sheet as the settings make it, the settings (the
-/// size, the layout, padding, trimming, held frames, the JSON and the background), Cancel, and the
-/// round Done that shares the sheet and its JSON.
-struct SpriteSheetExport: View {
+/// A plugin's export with settings (a sprite sheet): what it makes as they stand, the settings as
+/// its plugin lists them (a slider with names as choices side by side, another as a count with −
+/// and +, a switch as a switch), Cancel, and the round Done that shares what it makes. The
+/// settings are the plugin's own, kept with it as on its card.
+struct PluginShareScreen: View {
     let model: CanvasModel
+    let share: PluginShare
 
-    @State private var choices = SpriteSheetChoices.start
-    @State private var sheet: UIImage?
-    @State private var made: SpriteSheetMade?
+    @State private var preview: UIImage?
+    @State private var said: String?
     @State private var settingsOpen = false
     @State private var exporting = false
+
+    /// The export as its controls are set now.
+    private var current: PluginShare {
+        // (read again as the plugins change)
+        _ = PluginsModel.shared.changes
+        return PluginsModel.shared.store.shares().first { $0.key == share.key } ?? share
+    }
 
     private var title: String {
         let name = model.session.name().trimmingCharacters(in: .whitespaces)
         return name.isEmpty ? "Untitled Artwork" : name
     }
 
-    /// What the sheet is: its size and how many pictures are on it.
-    private var said: String {
-        guard let made else { return "" }
-        let pictures = made.cells == 1 ? "1 frame" : "\(made.cells) frames"
-        return "\(made.width) × \(made.height) px · \(pictures)"
-    }
-
     private func close() {
-        withAnimation(Motion.studioOut) { model.spriteSheetExport = false }
+        withAnimation(Motion.studioOut) { model.pluginShare = nil }
     }
 
-    /// The settings as a key, so the sheet is made again as they change.
+    /// The settings as a key, so what it makes is made again as they change.
     private var asked: String {
-        let c = choices
-        return "\(c.layout)-\(c.columns)-\(c.rows)-\(c.padding)-\(c.trim)-\(c.heldOnce)-\(c.json)-\(c.maxSide)-\(c.transparent)"
+        current.controls.map { control in
+            switch control {
+            case let .switch(one): "\(one.on)"
+            case let .slider(one): "\(one.value)"
+            case .file, .texture, .folder: ""
+            }
+        }.joined(separator: "-")
+    }
+
+    @ViewBuilder private func row(_ control: PluginControl) -> some View {
+        let plugins = PluginsModel.shared
+        switch control {
+        case let .switch(one):
+            SettingLine(label: one.label, on: one.on) { plugins.setSwitch(one.key, !one.on) }
+        case let .slider(one) where !one.names.isEmpty:
+            Text(verbatim: one.label)
+                .font(.system(size: 15))
+                .foregroundStyle(rowInk.opacity(0.7))
+                .padding(.leading, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+            Segments(labels: one.names, chosen: Int(pluginSliderChosen(slider: one, value: one.value))) {
+                plugins.setSlider(one, pluginSliderChoice(slider: one, index: UInt32($0)))
+            }
+            .padding(.bottom, 6)
+        case let .slider(one):
+            StepLine(slider: one) { plugins.setSlider(one, $0) }
+        case .file, .texture, .folder:
+            EmptyView()
+        }
     }
 
     private var panel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(verbatim: "Sprite Sheet")
+            Text(verbatim: share.label)
                 .font(.system(size: 24, weight: .bold))
                 .foregroundStyle(titleInk)
                 .lineLimit(1)
@@ -539,24 +579,14 @@ struct SpriteSheetExport: View {
                 .padding(.leading, 24)
                 .padding(.top, 19)
                 .padding(.bottom, 11.5)
-            Segments(labels: ["Max Resolution", "Web Ready"], chosen: choices.maxSide == 0 ? 0 : 1) {
-                choices.maxSide = $0 == 1 ? UInt32(webReadySide) : 0
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(current.controls.enumerated()), id: \.offset) { _, control in
+                        row(control)
+                    }
+                }
             }
-            Segments(labels: ["Grid", "Row", "Column"], chosen: [SheetLayout.grid, .across, .down].firstIndex(of: choices.layout) ?? 0) {
-                choices.layout = [SheetLayout.grid, .across, .down][$0]
-            }
-            .padding(.top, 12)
-            .padding(.bottom, 6)
-            if choices.layout == .grid {
-                CountLine(label: "Columns", value: choices.columns, most: 64) { choices.columns = $0 }
-                CountLine(label: "Rows", value: choices.rows, most: 64) { choices.rows = $0 }
-            }
-            CountLine(label: "Padding", value: choices.padding, most: 64, none: "None") { choices.padding = $0 }
-            SettingLine(label: "Trim empty space", on: choices.trim) { choices.trim.toggle() }
-            SettingLine(label: "Held frames once", on: choices.heldOnce) { choices.heldOnce.toggle() }
-            SettingLine(label: "JSON data", on: choices.json) { choices.json.toggle() }
-            SettingLine(label: "Transparent background", on: choices.transparent) { choices.transparent.toggle() }
-            Spacer(minLength: 0)
+            .scrollIndicators(.hidden)
         }
         .frame(width: panelWidth)
         .frame(maxHeight: .infinity, alignment: .top)
@@ -579,10 +609,10 @@ struct SpriteSheetExport: View {
                 screenFill
                     .contentShape(Rectangle())
                     .onTapGesture { settingsOpen = false }
-                // the sheet, fitted to the box, its edge drawn
+                // what it makes, fitted to the box, its edge drawn
                 ZStack {
-                    if let sheet {
-                        Image(uiImage: sheet)
+                    if let preview {
+                        Image(uiImage: preview)
                             .resizable()
                             .interpolation(.none)
                             .scaledToFit()
@@ -599,7 +629,7 @@ struct SpriteSheetExport: View {
                             .foregroundStyle(titleInk)
                             .lineLimit(1)
                             .frame(height: 30)
-                        Text(verbatim: said)
+                        Text(verbatim: said ?? "")
                             .font(.system(size: 13))
                             .foregroundStyle(sizeInk)
                             .lineLimit(1)
@@ -623,7 +653,7 @@ struct SpriteSheetExport: View {
                 ExportButtons(cancel: close) {
                     guard !exporting else { return }
                     exporting = true
-                    model.shareSpriteSheet(choices) { close() }
+                    model.sharePluginExport(current) { close() }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exporting = false }
                 }
                 .frame(width: screen.width, alignment: .trailing)
@@ -633,49 +663,48 @@ struct SpriteSheetExport: View {
             }
         }
         .ignoresSafeArea()
-        // the sheet as the settings make it, a moment after they stop changing
+        // what it makes as the settings stand, a moment after they stop changing
         .task(id: asked) {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             let session = model.session
-            let wanted = choices
-            let result = await Task.detached(priority: .userInitiated) { () -> (UIImage?, SpriteSheetMade)? in
-                guard let done = CanvasModel.exportSpriteSheet(session, wanted), let png = done.0.first else { return nil }
-                return (UIImage(contentsOfFile: png.path), done.1)
+            let wanted = current
+            let result = await Task.detached(priority: .userInitiated) { () -> (UIImage?, String?)? in
+                guard let done = CanvasModel.exportPluginShare(session, wanted) else { return nil }
+                defer { done.0.forEach { try? FileManager.default.removeItem(at: $0.deletingLastPathComponent()) } }
+                let png = done.0.first { $0.pathExtension.lowercased() == "png" }
+                return (png.flatMap { UIImage(contentsOfFile: $0.path) }, done.1)
             }.value
             if !Task.isCancelled, let result {
-                sheet = result.0
-                made = result.1
+                preview = result.0
+                said = result.1
             }
         }
     }
 }
 
-/// A setting that counts: its name, its value (0 is "Auto", or `none`), and − and + in a grey
-/// track, 52 tall.
-private struct CountLine: View {
-    let label: String
-    let value: UInt32
-    let most: UInt32
-    var none = "Auto"
-    let change: (UInt32) -> Void
+/// A slider of a plugin's as a count: its name, its value as the plugin shows it, and − and + a
+/// step each, in a grey track, 52 tall.
+private struct StepLine: View {
+    let slider: PluginSlider
+    let change: (Float) -> Void
 
     var body: some View {
         HStack(spacing: 0) {
-            Text(verbatim: label)
+            Text(verbatim: slider.label)
                 .font(.system(size: 17))
                 .foregroundStyle(rowInk)
                 .lineLimit(1)
             Spacer(minLength: 0)
-            Text(verbatim: value == 0 ? none : "\(value)")
+            Text(verbatim: pluginSliderShown(slider: slider, value: slider.value))
                 .font(.system(size: 17))
                 .foregroundStyle(rowInk)
                 .monospacedDigit()
                 .padding(.trailing, 12)
             HStack(spacing: 0) {
-                step("−", enabled: value > 0) { change(value - 1) }
+                step("−", enabled: slider.value > slider.least) { change(max(slider.value - slider.step, slider.least)) }
                 Rectangle().fill(panelEdge).frame(width: 1, height: 18)
-                step("+", enabled: value < most) { change(value + 1) }
+                step("+", enabled: slider.value < slider.most) { change(min(slider.value + slider.step, slider.most)) }
             }
             .frame(height: 32)
             .background(Capsule().fill(segmentTrack))

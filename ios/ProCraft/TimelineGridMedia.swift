@@ -322,9 +322,12 @@ struct GridBlockMenu: View {
                                 close()
                                 tool.separateAudio(clip.id)
                             }
-                            row(PcIcons.gridInsert, "Make timing track…", dim: false) {
-                                close()
-                                tool.media.detecting = clip.id
+                            // the animatic detector, while Timeline media's switch for it is on
+                            if PluginsModel.shared.has(.animaticDetector) {
+                                row(PcIcons.gridInsert, "Make timing track…", dim: false) {
+                                    close()
+                                    tool.media.detecting = clip.id
+                                }
                             }
                             opens(PcIcons.gridBlend, "Size", .size)
                         }

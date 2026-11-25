@@ -11,7 +11,17 @@ extension CanvasModel {
 
     /// Layer `l`'s options menu, as the core lists it.
     func layerOptions(_ l: LayerInfo) -> [LayerOptionRow] {
-        session.layerOptions(id: l.id)
+        // Layer Style and an adjustment layer's settings while the Effects plugin's switches for
+        // them are on
+        let plugins = PluginsModel.shared
+        return session.layerOptions(id: l.id).filter { row in
+            switch row.option {
+            case .layerStyle: plugins.has(.layerStyles)
+            case .adjustmentSettings: plugins.has(.adjustmentLayers)
+            // Edit Text, Clipping Mask and Drawing Assist while their built-in plugins are on
+            default: plugins.shows(row.option)
+            }
+        }
     }
 
     /// Closed group `group`'s layers, top first, as the panel would list them open: a group closed

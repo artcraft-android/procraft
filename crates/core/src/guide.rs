@@ -212,18 +212,29 @@ pub(crate) enum GuideGrab {
     Turn,
 }
 
+/// The drawing guide as strokes on the current layer follow it ([`Document::stroke_guide`]), off
+/// while the drawing guides' built-in plugin is (`paused`).
+///
+/// [`Document::stroke_guide`]: procraft_engine::document::Document::stroke_guide
+pub(crate) fn stroke_guide(doc: &procraft_engine::document::Document, paused: bool) -> std::borrow::Cow<'_, Guide> {
+    if paused && doc.guide.on {
+        return std::borrow::Cow::Owned(Guide { on: false, ..doc.guide.clone() });
+    }
+    doc.stroke_guide()
+}
+
 impl State {
     /// Stroke input kept to the guide when assisted drawing is on: along the guide direction
     /// the stroke heads in once it has gone [`ASSIST_SETTLE`] window pixels, kept to its end,
     /// so a wavering hand doesn't switch it (before then, held where it began).
     pub(crate) fn assisted(&mut self, mut samples: Vec<Sample>) -> Vec<Sample> {
         if let Some(start) = self.assist_from {
-            let forced = self.force_assist.then(|| {
+            let forced = (self.force_assist && !self.guide_paused).then(|| {
                 let mut g = self.doc.guide.clone();
                 g.assisted = true;
                 g
             });
-            let layer_guide = self.doc.stroke_guide();
+            let layer_guide = stroke_guide(&self.doc, self.guide_paused);
             let guide = forced.as_ref().unwrap_or(&layer_guide);
             let settle = ASSIST_SETTLE / self.view.map_or(1.0, |v| v.zoom()).max(1e-6);
             for s in &mut samples {
@@ -287,7 +298,7 @@ impl State {
         // the turn handle sits up from the centre, at the canvas's top edge when level
         let up = Vec2::new(g.angle.sin(), -g.angle.cos()) * c.y.max(1.0);
         GuideInfo {
-            on: g.on,
+            on: g.on && !self.guide_paused,
             kind: type_of(g.kind),
             opacity: look.opacity,
             thickness: look.thickness,
@@ -332,6 +343,18 @@ impl State {
 impl CanvasSession {
     pub fn guide(&self) -> GuideInfo {
         self.shared.lock().guide_info()
+    }
+
+    /// The drawing guides' built-in plugin off (`paused`) or on again: while off the guide is
+    /// neither drawn nor followed, and the artwork keeps it as it was saved.
+    pub fn set_guide_paused(&self, paused: bool) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if st.guide_paused != paused {
+            st.guide_paused = paused;
+            st.revision += 1;
+            self.shared.frame(st);
+        }
     }
 
     pub fn set_guide_on(&self, on: bool) -> GuideInfo {
@@ -731,6 +754,26 @@ mod tests {
         s.guide_edit_begin();
         s.set_guide_length("3".into(), GuideUnit::Centimeters);
         assert_eq!(s.guide_edit_end(true).size_label, "3cm");
+    }
+
+    #[test]
+    fn a_paused_guide_is_neither_shown_nor_followed_and_kept_as_it_was() {
+        let s = CanvasSession::new(400, 300);
+        s.set_guide_on(true);
+        s.set_guide_kind(GuideType::Symmetry);
+        s.set_guide_assisted(true);
+        let copies = |s: &CanvasSession| {
+            let st = s.shared.lock();
+            stroke_guide(&st.doc, st.guide_paused).copies(Vec2::new(10.0, 10.0)).len()
+        };
+        assert_eq!(copies(&s), 1);
+        s.set_guide_paused(true);
+        assert!(!s.guide().on);
+        assert_eq!(copies(&s), 0);
+        // the artwork's guide itself untouched, for when the plugin is on again
+        assert!(s.shared.lock().doc.guide.on);
+        s.set_guide_paused(false);
+        assert!(s.guide().on && copies(&s) == 1);
     }
 
     #[test]

@@ -9,7 +9,16 @@ private var menuDisabledText: Color { Look.shared.light ? Color(argb: 0xFFAA_AAA
 struct AdjustmentsPanel: View {
     let model: CanvasModel
     let arrowX: CGFloat
-    private let groups = adjustmentGroups()
+    /// The groups, less what a built-in plugin turned off hides (Liquify, Gradient Map).
+    private var groups: [[Adjustment]] {
+        adjustmentGroups().map { $0.filter(PluginsModel.shared.shows) }.filter { !$0.isEmpty }
+    }
+
+    /// Whether the adjustment chosen next goes on a layer of its own: asked for, while the Effects
+    /// plugin's Adjustment layers is on.
+    private var asLayer: Bool {
+        model.adjustAsLayer && PluginsModel.shared.has(.adjustmentLayers)
+    }
     /// The filters imported, and the plugins' actions listed here: the menu's last group is one row
     /// to them, there only with some.
     private let filters = PluginsModel.shared.store.filters()
@@ -81,6 +90,7 @@ struct AdjustmentsPanel: View {
                             filterRows
                         } else {
                         // the adjustment chosen next goes on a layer of its own, editable
+                        if PluginsModel.shared.has(.adjustmentLayers) {
                         group {
                             HStack(spacing: 0) {
                                 Text(verbatim: "Adjustment Layer")
@@ -98,6 +108,7 @@ struct AdjustmentsPanel: View {
                             .contentShape(Rectangle())
                             .onTapGesture { model.adjustAsLayer.toggle() }
                         }
+                        }
                         ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
                             VStack(spacing: 0) {
                                 ForEach(Array(group.enumerated()), id: \.offset) { i, adjustment in
@@ -105,7 +116,7 @@ struct AdjustmentsPanel: View {
                                         Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
                                     }
                                     // as an adjustment layer, those that can't be one are greyed
-                                    let takes = !model.adjustAsLayer || adjustmentLive(adjustment: adjustment)
+                                    let takes = !asLayer || adjustmentLive(adjustment: adjustment)
                                     Text(verbatim: adjustmentLabel(adjustment: adjustment))
                                         .font(.system(size: 17))
                                         .foregroundStyle(takes ? menuText : menuDisabledText)
@@ -114,7 +125,7 @@ struct AdjustmentsPanel: View {
                                         .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
                                         .contentShape(Rectangle())
                                         .onTapGesture {
-                                            if model.adjustAsLayer {
+                                            if asLayer {
                                                 if takes {
                                                     model.addAdjustmentLayer(adjustment)
                                                 }

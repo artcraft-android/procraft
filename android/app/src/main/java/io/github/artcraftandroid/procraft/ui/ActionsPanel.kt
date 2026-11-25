@@ -237,11 +237,12 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     ) else when (shownTab) {
         0 -> listOf(
             // swiped to the left, the first three and Paste put what they bring on a private layer
-            listOf(
+            listOfNotNull(
                 Act("Insert a file", private = "Insert a private file", onPrivate = { file(true) }) { file(false) },
                 Act("Insert a photo", private = "Insert a private photo", onPrivate = { photoFrom(true) }) { photoFrom(false) },
                 Act("Take a photo", private = "Take a private photo", onPrivate = { camera(true) }) { camera(false) },
-                Act("Add text") { vm.addText() },
+                // while the Text plugin is on
+                Act("Add text") { vm.addText() }.takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.TEXT) },
             ),
             // Paste is grey until something has been cut or copied
             listOf(
@@ -257,20 +258,26 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             ),
         )
         1 -> listOf(
-            listOf(
+            listOfNotNull(
                 Act("Crop & Resize") { vm.beginCrop() },
-                // the canvas made a comic page the first time
-                Act("Comic panels") { vm.openComicPanels() },
+                // while the Comic Panels plugin is on (the canvas made a comic page the first time)
+                Act("Comic panels") { vm.openComicPanels() }.takeIf { vm.comicPanelsOn },
             ),
-            listOf(
-                Toggle("Animation Assist", vm.animation?.pages == false) { vm.changeAnimationAssist(it) },
-                Toggle("Page Assist", vm.animation?.pages == true) { vm.changePageAssist(it) },
-                Toggle("Timeline", vm.timeline.on) { vm.timeline.setOn(it) },
+            listOfNotNull(
+                // while the Animation Assist plugin (and its Page Assist) is on
+                Toggle("Animation Assist", vm.animation?.pages == false) { vm.changeAnimationAssist(it) }
+                    .takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.ANIMATION_ASSIST) },
+                Toggle("Page Assist", vm.animation?.pages == true) { vm.changePageAssist(it) }.takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.PAGE_ASSIST) },
+                // while the Timeline plugin is on
+                Toggle("Timeline", vm.timeline.on) { vm.timeline.setOn(it) }.takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.TIMELINE) },
                 // only on a timeline: its frame rate, playback, onion skins and length, on a card
-                Act("Timeline Settings", onClick = if (vm.timeline.on) ({ vm.openTimelineSettings() }) else null),
-                Toggle("Drawing Guide", vm.guide?.on == true) { vm.setGuideOn(it) },
+                Act("Timeline Settings", onClick = if (vm.timeline.on) ({ vm.openTimelineSettings() }) else null)
+                    .takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.TIMELINE) },
+                // while the Drawing guides plugin is on
+                Toggle("Drawing Guide", vm.guide?.on == true) { vm.setGuideOn(it) }.takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.DRAWING_GUIDES) },
                 // only with the guide on
-                Act("Edit Drawing Guide", onClick = if (vm.guide?.on == true) ({ vm.openGuideEditor() }) else null),
+                Act("Edit Drawing Guide", onClick = if (vm.guide?.on == true) ({ vm.openGuideEditor() }) else null)
+                    .takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.DRAWING_GUIDES) },
             ),
             listOf(Toggle("Reference", vm.referenceOn) { vm.changeReferenceOn(it) }),
             listOf(Act("Flip horizontal") { vm.flipCanvas(horizontal = true) }, Act("Flip vertical") { vm.flipCanvas(horizontal = false) }),
@@ -282,14 +289,16 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 // ours first, then the same package named for the other app
                 Act(CanvasViewModel.OWN_LABEL) { sharePackage(CanvasViewModel.OWN_EXTENSION) },
                 Act(CanvasViewModel.PACKAGE_LABEL) { sharePackage(CanvasViewModel.PACKAGE_EXTENSION) },
-                Act("PSD") { share(CanvasViewModel.Export.PSD) },
+                // while the PSD plugin's export is on
+                Act("PSD") { share(CanvasViewModel.Export.PSD) }.takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.PSD_EXPORT) },
                 Act("PDF") { pdfAsking = CanvasViewModel.Export.PDF },
                 Act("JPEG") { share(jpeg = true) },
                 Act("PNG") { share(jpeg = false) },
                 Act("TIFF") { share(CanvasViewModel.Export.TIFF) },
                 // a plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes
                 Act("SVG") { share(CanvasViewModel.Export.SVG) }.takeIf { vm.session?.exportsSvg() == true },
-                Act("Vector PDF") { share(CanvasViewModel.Export.VECTOR_PDF) }.takeIf { vm.session?.exportsVectors() == true },
+                Act("Vector PDF") { share(CanvasViewModel.Export.VECTOR_PDF) }
+                    .takeIf { vm.session?.exportsVectors() == true && vm.has(io.github.artcraftandroid.procraft.core.Feature.VECTOR_SHARE) },
                 // files plugins make of the artwork's layers of kinds they add, under their own names
                 *vm.session?.pluginExports().orEmpty().map { e -> Act(e.label) { share(e) } }.toTypedArray(),
             ),
@@ -401,7 +410,10 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     modifier = Modifier.padding(start = 24.dp, top = 22.dp).height(34.dp),
                 )
                 Row(Modifier.padding(start = 10.dp).height(60.dp)) {
+                    // Video while the Time-lapse plugin is on (a model's 3D tab in its place stays)
+                    val video = model || vm.has(io.github.artcraftandroid.procraft.core.Feature.TIME_LAPSE)
                     tabs.forEachIndexed { i, tab ->
+                        if (i == 3 && !video) return@forEachIndexed
                         // a tab lights up as soon as it is touched; the old one goes out when it is let go
                         val touch = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
                         val held = heldOf(touch)
@@ -545,10 +557,12 @@ private fun modelGroups(
         // showing the 2D texture, the rest is for the model
         val shown = !vm.modelFlat
         listOf(
-            listOf(
+            listOfNotNull(
                 Toggle("Show 2D texture", vm.modelFlat) { vm.changeModelFlat(it) },
                 Toggle("Paint through mesh", vm.paintThrough, onChange = if (shown) ({ vm.changePaintThrough(it) }) else null),
-                Act("Edit lighting & environment", onClick = if (shown) ({ vm.openLightingStudio() }) else null),
+                // while the 3D painting plugin is on
+                Act("Edit lighting & environment", onClick = if (shown) ({ vm.openLightingStudio() }) else null)
+                    .takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.MODEL_PAINTING) },
             ),
             // no AR on Android yet
             listOf(Act("View in AR")),

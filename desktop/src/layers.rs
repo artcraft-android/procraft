@@ -212,6 +212,11 @@ pub struct Layers {
     /// the grabber is dragged, where the press began and where the pointer is (the window's points).
     pub floats: bool,
     pub undock: Option<(egui::Pos2, egui::Pos2)>,
+    /// The + held makes no vector layer: the Vector layers plugin is off.
+    pub vector_layers_hidden: bool,
+    /// The app's own features hidden (their built-in plugins off): their rows in a layer's options
+    /// aren't listed.
+    pub hidden: Vec<procraft_core::Feature>,
     /// Each layer's thumbnail and the pixels' version it shows.
     thumbnails: HashMap<u64, (u64, TextureHandle)>,
     /// The current layer's options: whose (kept while they fade), and their coming and going.
@@ -549,7 +554,8 @@ impl Layers {
             // (held, or with the other button: a vector layer, which keeps what is drawn on it as
             // strokes and fills)
             let plus_touch = ui.interact(plus, ui.scope_id().with("new layer"), Sense::click());
-            let added = if plus_touch.long_touched() || plus_touch.secondary_clicked() {
+            let vector = !self.vector_layers_hidden && (plus_touch.long_touched() || plus_touch.secondary_clicked());
+            let added = if vector {
                 Some(session.add_vector_layer())
             } else if plus_touch.clicked() {
                 // with plugins' kinds of layer or filter layers on, it asks which
@@ -1586,7 +1592,12 @@ impl Layers {
         row_y: f32,
         backdrops: &mut Vec<f32>,
     ) {
-        let rows: Vec<LayerOptionRow> = session.layer_options(l.id);
+        let rows: Vec<LayerOptionRow> = session
+            .layer_options(l.id)
+            .into_iter()
+            // Edit Text, Clipping Mask and Drawing Assist while their built-in plugins are on
+            .filter(|r| crate::builtins::layer_option(&self.hidden, r.option))
+            .collect();
         // a vector layer's own rows: whether it is drawn again as fine as the screen when zoomed
         // in, and (with strokes or fills picked on it) what the brush as it is set can give them;
         // how the eraser works on it is chosen in the Eraser band

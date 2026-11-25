@@ -20,7 +20,8 @@ private let artworkLifted: CGFloat = 1.07
 /// What an artwork dragged out to another app becomes, as Settings says: the file, and a picture for
 /// those that can't read it.
 private var dragFormats: [String] {
-    let file = SystemSettings.dragFormat
+    // (our own instead of PSD while the PSD plugin's export is off)
+    let file = SystemSettings.dragFormat == "PSD" && !PluginsModel.shared.has(.psdExport) ? "ProCraft" : SystemSettings.dragFormat
     return ["JPEG", "PNG", "TIFF"].contains(file) ? [file] : [file, SystemSettings.dragImageFormat]
 }
 
@@ -371,7 +372,8 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
         scroll(point.y < grid.minY + dragScrollEdge ? -1 : point.y > grid.maxY - dragScrollEdge ? 1 : 0, on: window)
         var stacking = false
         if case .artwork = entry {
-            stacking = model.openStack == nil
+            // (onto another only while the Gallery stacks plugin is on)
+            stacking = model.openStack == nil && PluginsModel.shared.has(.galleryStacks)
         }
         at = dropAt(point, dragged: entry.dir, stacking: stacking)
         showOnto(at?.onto)

@@ -342,13 +342,14 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             // a full-screen page covers the timeline, as it covers the canvas; the panels open over it
             val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.comicPanels.open || vm.timeLapseReplaying ||
                 vm.animatedExport != null || vm.modelAnimatedExport != null || vm.spriteSheetExport
+            // while their plugins are on (on a timeline there is no Animation Assist: the core takes its frames over)
+            val timelineShown = vm.has(io.github.artcraftandroid.procraft.core.Feature.TIMELINE)
             if (!vm.barsHidden && !pageOver) {
-                AnimationBar(vm)
-                // (on a timeline there is no Animation Assist: the core takes its frames over)
-                TimelineGridBar(vm)
+                if (vm.animationShown) AnimationBar(vm)
+                if (timelineShown) TimelineGridBar(vm)
             }
             // the timeline's settings card, over the canvas and its bars
-            if (vm.timelineSettingsOpen && !pageOver) TimelineSettingsCard(vm)
+            if (vm.timelineSettingsOpen && !pageOver && timelineShown) TimelineSettingsCard(vm)
             // the bottom toolbars rise from below the screen, and drop away (over the timeline's
             // bar, not on it: they and their menus stand as much higher as it is tall)
             val overTimeline = Modifier.offset(y = -vm.timeline.gridLift)

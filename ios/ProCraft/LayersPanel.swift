@@ -458,7 +458,12 @@ struct LayersPanel: View {
                         }
                     }
                     // held (a short while: it is a way to a kind of layer, not a menu): a vector layer
-                    .onLongPressGesture(minimumDuration: 0.25) { model.addVectorLayer() }
+                    .onLongPressGesture(minimumDuration: 0.25) {
+                        // while the Vector layers plugin is on
+                        if PluginsModel.shared.has(.vectorLayers) {
+                            model.addVectorLayer()
+                        }
+                    }
                     .padding(.top, 12)
             }
             ScrollViewReader { reader in
@@ -1152,7 +1157,7 @@ private struct LayerOptionsMenu: View {
         let shape = RoundedRectangle(cornerRadius: 24, style: .circular)
         // a vector layer's own row: whether it is drawn as fine as the screen when zoomed in (how
         // the eraser works on it is chosen in the Eraser band, while erasing)
-        let vector = layer.vector && !layer.locked
+        let vector = layer.vector && !layer.locked && PluginsModel.shared.has(.vectorLayers)
         // and, with strokes or fills picked on it, what the brush as it is set can give them
         let applying = vector && model.vectorPicked(layer)
         let own = (vector ? 1 : 0) + (applying ? 3 : 0)

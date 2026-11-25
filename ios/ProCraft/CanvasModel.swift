@@ -253,8 +253,8 @@ final class CanvasModel {
     var sideBarMoving: SideBarShown?
     /// Share's animated export, while its screen is up.
     var animatedExport: AnimatedFormat?
-    /// Share's sprite sheet export, while its screen is up.
-    var spriteSheetExport = false
+    /// Share's export of a plugin's with settings (a sprite sheet), while its screen is up.
+    var pluginShare: PluginShare?
     /// Share's Texture Packer, while it is open.
     var texturePacker: TexturePackerState?
     /// A CMYK canvas's inks for the Value picker: the inks a canvas colour prints with, and back.
@@ -354,10 +354,11 @@ final class CanvasModel {
             && ((tool == .paint && paintLasso && !lassoOutline) || (tool == .erase && eraseLasso))
     }
     private(set) var recoloring = false
-    /// Comic Panels is open: the page's panels outlined, a line dragged across them cuts them.
-    var cuttingPanels = false
-    /// The panels' shapes while it is (canvas pixels, x and y by turns).
-    var panelShapes: [[Float]] = []
+    /// A plugin's tool open (Comic Panels): its touches go to its plugin.
+    var pluginTool: PluginTool?
+    /// What it shows over the canvas, and its mode chosen.
+    var toolShapes: [PluginToolShape] = []
+    var toolMode: UInt32 = 0
 
     /// The Actions panel's tab, kept from one session to the next.
     var actionsTab: Int {
@@ -555,7 +556,7 @@ final class CanvasModel {
         applyColor()
         tool = session.info().tool
         // the light tool is an HDR canvas's: a standard one left on it opens on the brush
-        if tool == .light, !isHdr {
+        if tool == .light, !isHdr || !PluginsModel.shared.has(.lightTool) {
             session.setTool(tool: .paint)
             tool = .paint
         }
@@ -618,14 +619,15 @@ final class CanvasModel {
     }
 
     /// The ways the current tool can draw, as the library's top offers them: none for the
-    /// Smudge, Lasso only with the Lasso Fill plugin, Light only on an HDR canvas.
+    /// Smudge, Lasso only with the Lasso Fill plugin, Light only on an HDR canvas with the HDR
+    /// plugin's Light tool on.
     var drawModes: [DrawMode] {
         guard tool != .smudge else { return [] }
         var modes: [DrawMode] = [.brush]
         if PluginsModel.shared.lassoFills {
             modes.append(.lasso)
         }
-        if tool != .erase, isHdr {
+        if tool != .erase, isHdr, PluginsModel.shared.has(.lightTool) {
             modes.append(.light)
         }
         return modes.count > 1 ? modes : []
@@ -2129,9 +2131,9 @@ final class CanvasModel {
         timeline.refresh()
         followAutokeyBox()
         refreshFlags()
-        // an undo or a cut changes the panels Comic Panels outlines
-        if cuttingPanels {
-            readComicPanels()
+        // an undo changes what a plugin's tool shows (the panels Comic Panels outlines)
+        if pluginTool != nil {
+            readPluginTool()
         }
         // undo and redo may go back to another texture set of a model
         if modelOpen {

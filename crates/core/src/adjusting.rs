@@ -15,8 +15,8 @@ use crate::CanvasSession;
 use procraft_engine::document::{Document, LayerAdjustment, LayerId};
 
 use crate::adjust::{
-    ChromaticKind, DitherKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, MOTION_DRAG_PT, NoiseKind,
-    PerspectiveKind, SwipeAdjustment, VignetteKind,
+    ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, MOTION_DRAG_PT, NoiseKind, PerspectiveKind,
+    SwipeAdjustment,
 };
 use crate::adjust_menu::{
     Adjustment, adjustment_groups, adjustment_live, adjustment_paintable, adjustment_pencil_amount,
@@ -135,14 +135,6 @@ pub struct AdjustShown {
     pub changed: bool,
     /// A plugin's filter: its name, and its controls for one panel to draw.
     pub plugin: Option<crate::plugin_filter::PluginFilterShown>,
-    /// Dither: its pattern, its levels and pattern size sliders (0..1), and whether it is in black
-    /// and white.
-    pub dither_kind: DitherKind,
-    pub dither: Vec<f32>,
-    pub dither_mono: bool,
-    /// Vignette: darkening or lightening, and its size and softness sliders (0..1).
-    pub vignette_kind: VignetteKind,
-    pub vignette: Vec<f32>,
     /// It is an adjustment layer's: it changes what is below that layer, and is never painted on.
     pub on_layer: bool,
 }
@@ -187,11 +179,6 @@ struct LayerSettings {
     perspective_kind: u32,
     perspective_origin: Option<[f32; 2]>,
     perspective_arrow: f32,
-    dither_kind: u32,
-    dither: Vec<f32>,
-    dither_mono: bool,
-    vignette_kind: u32,
-    vignette: Vec<f32>,
 }
 
 /// The `i`th of `all`, or `or`.
@@ -267,11 +254,6 @@ pub(crate) struct Adjusting {
     perspective: Perspective,
     perspective_before: Vec<Perspective>,
     perspective_after: Vec<Perspective>,
-    dither_kind: DitherKind,
-    dither: [f32; 2],
-    dither_mono: bool,
-    vignette_kind: VignetteKind,
-    vignette: [f32; 2],
     /// The adjustment layer the adjustment open works on (kept through its undo and reset, which
     /// open it again); none, the current layer.
     layer: Option<LayerId>,
@@ -334,11 +316,6 @@ impl Default for Adjusting {
             perspective: Perspective::default(),
             perspective_before: Vec::new(),
             perspective_after: Vec::new(),
-            dither_kind: DitherKind::Ordered,
-            dither: [0.0, 0.0],
-            dither_mono: false,
-            vignette_kind: VignetteKind::Dark,
-            vignette: [0.4, 0.6],
             layer: None,
         }
     }
@@ -520,11 +497,6 @@ impl Adjusting {
             perspective_puck: self.perspective_puck(view, middle),
             changed: self.changed(),
             plugin: None,
-            dither_kind: self.dither_kind,
-            dither: self.dither.to_vec(),
-            dither_mono: self.dither_mono,
-            vignette_kind: self.vignette_kind,
-            vignette: self.vignette.to_vec(),
             on_layer: false,
         }
     }
@@ -556,11 +528,6 @@ impl Adjusting {
             perspective_kind: self.perspective_kind as u32,
             perspective_origin: self.perspective.origin.map(|o| [o.x, o.y]),
             perspective_arrow: self.perspective.arrow,
-            dither_kind: self.dither_kind as u32,
-            dither: self.dither.to_vec(),
-            dither_mono: self.dither_mono,
-            vignette_kind: self.vignette_kind as u32,
-            vignette: self.vignette.to_vec(),
         };
         serde_json::to_value(settings).unwrap_or_default()
     }
@@ -597,7 +564,7 @@ impl Adjusting {
         }
         self.limit = limit_kept(self.limit);
         self.gradient = s.gradient as usize;
-        use {ChromaticKind as C, DitherKind as D, GlitchKind as G, HalftoneKind as H, NoiseKind as N};
+        use {ChromaticKind as C, GlitchKind as G, HalftoneKind as H, NoiseKind as N};
         self.noise_kind = nth(&[N::Clouds, N::Billows, N::Ridges], s.noise_kind, N::Clouds);
         fill(&mut self.noise, &s.noise, 0.0);
         self.noise_multi = s.noise_multi;
@@ -622,11 +589,6 @@ impl Adjusting {
             origin: s.perspective_origin.filter(|o| o.iter().all(|v| v.is_finite())).map(|[x, y]| Vec2::new(x, y)),
             arrow: if s.perspective_arrow.is_finite() { s.perspective_arrow } else { ARROW_UP },
         };
-        self.dither_kind = nth(&[D::Ordered, D::Noise], s.dither_kind, D::Ordered);
-        fill(&mut self.dither, &s.dither, 0.0);
-        self.dither_mono = s.dither_mono;
-        self.vignette_kind = nth(&[VignetteKind::Dark, VignetteKind::Light], s.vignette_kind, VignetteKind::Dark);
-        fill(&mut self.vignette, &s.vignette, 0.0);
         Some(adjustment)
     }
 
@@ -656,9 +618,6 @@ enum Redraw {
     Chroma(ChromaticKind, f32, (f32, f32), [f32; 2]),
     Glitch(GlitchKind, f32, Vec<f32>),
     Perspective(PerspectiveKind, f32, Option<[f32; 2]>, f32),
-    Pixelate(f32),
-    Dither(DitherKind, f32, [f32; 2], bool),
-    Vignette(VignetteKind, f32, [f32; 2]),
 }
 
 impl Adjusting {
@@ -703,9 +662,6 @@ impl Adjusting {
                 a,
                 self.glitch.get(self.glitch_kind as usize).cloned().unwrap_or_default(),
             ),
-            Some(Adjustment::Pixelate) => Redraw::Pixelate(a),
-            Some(Adjustment::Dither) => Redraw::Dither(self.dither_kind, a, self.dither, self.dither_mono),
-            Some(Adjustment::Vignette) => Redraw::Vignette(self.vignette_kind, a, self.vignette),
             _ => Redraw::None,
         }
     }
@@ -828,11 +784,6 @@ impl CanvasSession {
                 self.adjust_glitch(kind, amount, values, zoom);
             }
             Redraw::Perspective(kind, amount, origin, arrow) => self.adjust_perspective(kind, amount, origin, arrow),
-            Redraw::Pixelate(amount) => self.adjust_pixelate(amount),
-            Redraw::Dither(kind, amount, [levels, scale], mono) => {
-                self.adjust_dither(kind, amount, levels, scale, mono)
-            }
-            Redraw::Vignette(kind, amount, [size, softness]) => self.adjust_vignette(kind, amount, size, softness),
         }
     }
 
@@ -1335,37 +1286,6 @@ impl CanvasSession {
         self.change_adjustment(|a, _| {
             if let Some(v) = a.glitch.get_mut(a.glitch_kind as usize).and_then(|g| g.get_mut(index as usize)) {
                 *v = value.clamp(-1.0, 1.0);
-            }
-        });
-    }
-
-    pub fn adjustment_dither_kind(&self, kind: DitherKind) {
-        self.change_adjustment(|a, _| a.dither_kind = kind);
-    }
-
-    /// Dither's slider `index` (0 levels, 1 pattern size) moved to `value` (0..1).
-    pub fn adjustment_dither_value(&self, index: u32, value: f32) {
-        self.change_adjustment(|a, _| {
-            if let Some(v) = a.dither.get_mut(index as usize) {
-                *v = value.clamp(0.0, 1.0);
-            }
-        });
-    }
-
-    /// Dither in black and white, or in colour.
-    pub fn adjustment_dither_mono(&self, mono: bool) {
-        self.change_adjustment(|a, _| a.dither_mono = mono);
-    }
-
-    pub fn adjustment_vignette_kind(&self, kind: VignetteKind) {
-        self.change_adjustment(|a, _| a.vignette_kind = kind);
-    }
-
-    /// Vignette's slider `index` (0 size, 1 softness) moved to `value` (0..1).
-    pub fn adjustment_vignette_value(&self, index: u32, value: f32) {
-        self.change_adjustment(|a, _| {
-            if let Some(v) = a.vignette.get_mut(index as usize) {
-                *v = value.clamp(0.0, 1.0);
             }
         });
     }

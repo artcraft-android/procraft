@@ -41,6 +41,10 @@ struct Drag {
     zoomed: bool,
 }
 
+/// The Comic Panels plugin's tool, as the plugins list it (`<plugin id>.<tool key>`): the
+/// window is offered while that plugin is on.
+pub const TOOL: &str = "io.github.artcraftandroid.comic-panels.panels";
+
 #[derive(Default)]
 pub struct ComicPanels {
     pub open: bool,

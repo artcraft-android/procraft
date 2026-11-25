@@ -331,7 +331,8 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
                 ShortBottom(vm, c)
             } else {
                 History(vm, c)
-                vm.palettes.getOrNull(vm.defaultPalette)?.let { p ->
+                // the default palette's swatches while the Palettes plugin is on
+                vm.palettes.getOrNull(vm.defaultPalette)?.takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.PALETTES) }?.let { p ->
                     Box(Modifier.fillMaxWidth().height(44.dp)) {
                         Text(p.name, color = Pc.PanelTitle, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 21.dp, top = 13.dp))
                     }
@@ -496,7 +497,7 @@ fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
                 }
             }
         }
-        CompactTabs(vm.colorMode) { vm.colorMode = it }
+        CompactTabs(vm.colorMode, vm.has(io.github.artcraftandroid.procraft.core.Feature.PALETTES)) { vm.colorMode = it }
     }
     }
 }
@@ -661,7 +662,7 @@ fun CompactColors(vm: CanvasViewModel, c: ColorPick, arrowX: Dp, modifier: Modif
         // a 16.5 cap, as measured over a gradient stop
         Text("Colors", color = Pc.PanelTitle, fontSize = 23.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 18.dp, top = 9.dp, bottom = 5.dp))
         CompactBody(vm, c, mode)
-        CompactTabs(mode) { mode = it }
+        CompactTabs(mode, vm.has(io.github.artcraftandroid.procraft.core.Feature.PALETTES)) { mode = it }
     }
 }
 
@@ -679,9 +680,10 @@ internal fun CompactBody(vm: CanvasViewModel, c: ColorPick, mode: ColorMode) {
 
 /** The compact picker's modes as a row of icons, the chosen one blue. */
 @Composable
-internal fun CompactTabs(mode: ColorMode, onMode: (ColorMode) -> Unit) {
+internal fun CompactTabs(mode: ColorMode, palettes: Boolean = true, onMode: (ColorMode) -> Unit) {
     Row(Modifier.fillMaxWidth().height(52.dp)) {
-        for ((m, icon, label) in Modes) {
+        // Palettes while the Palettes plugin is on ([palettes])
+        for ((m, icon, label) in Modes.filter { palettes || it.first != ColorMode.PALETTES }) {
             Box(Modifier.weight(1f).fillMaxSize().clickable { onMode(m) }, contentAlignment = Alignment.Center) {
                 // the tabs' 36-unit glyphs, a little smaller here
                 Icon(icon, contentDescription = label, tint = if (m == mode) Pc.Accent else Pc.PanelTitle, modifier = Modifier.requiredSize(33.dp))
@@ -2027,7 +2029,8 @@ private val Modes = listOf(
 @Composable
 private fun ModeTabs(vm: CanvasViewModel) {
     Row(Modifier.fillMaxWidth().height(70.dp)) {
-        for ((mode, icon, label) in Modes) {
+        // Palettes while the Palettes plugin is on
+        for ((mode, icon, label) in Modes.filter { it.first != ColorMode.PALETTES || vm.has(io.github.artcraftandroid.procraft.core.Feature.PALETTES) }) {
             ModeTab(icon, label, selected = vm.colorMode == mode, Modifier.weight(1f)) { vm.colorMode = mode }
         }
     }

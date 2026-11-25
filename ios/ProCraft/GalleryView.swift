@@ -394,7 +394,9 @@ struct GalleryView: View {
         let titleX: Float = model.openStack != nil && !selecting ? 60 : 32
         return galleryHeaderFit(
             width: Float(screen.width), titleX: titleX, titleWidth: Float(width.rounded(.up)),
-            selecting: selecting, landscape: screen.width > screen.height, inStack: model.openStack != nil
+            // (no Stack while the Gallery stacks plugin is off, as in a stack)
+            selecting: selecting, landscape: screen.width > screen.height,
+            inStack: model.openStack != nil || !PluginsModel.shared.has(.galleryStacks)
         )
     }
 
@@ -722,6 +724,7 @@ struct GalleryView: View {
         cards(catchers(GeometryReader { place in screenContent(place) }.ignoresSafeArea(.container, edges: .vertical)))
             .onAppear {
                 model.onOpen = onOpen
+                model.followWorkspacesPlugin()
                 model.reload()
                 model.bringIn()
                 #if DEBUG
@@ -773,6 +776,7 @@ struct GalleryView: View {
             }
             .background { GalleryDragCatcher(model: model, shown: drag, canStart: quiet) }
             .background { PressCatcher(model: model, presses: presses) { quiet() || selecting } }
+            .onChange(of: PluginsModel.shared.features) { model.followWorkspacesPlugin() }
             .onChange(of: model.leftStack) {
                 regrown = 0
                 flown = 0
@@ -1084,7 +1088,7 @@ private struct GalleryHeader: View {
             .padding(.top, 10)
             .padding(.trailing, 20)
             // the workspaces are the gallery's: in a stack the middle is its name's
-            if stack == nil {
+            if stack == nil, PluginsModel.shared.has(.workspaces) {
                 WorkspaceButton(name: workspace, room: workspaceButtonRoom(width), action: onWorkspaces)
                     .frame(maxWidth: .infinity)
                     .padding(.top, 10)

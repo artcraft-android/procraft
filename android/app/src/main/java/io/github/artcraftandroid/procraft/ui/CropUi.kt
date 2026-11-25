@@ -207,8 +207,11 @@ private fun CropSettings(vm: CanvasViewModel, modifier: Modifier) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(RowLine))
                 SwitchRow("Resample canvas", vm.cropResample, vm::changeCropResample)
                 Box(Modifier.fillMaxWidth().height(1.dp).background(RowLine))
-                SwitchRow("Pixelated", vm.cropPixelated, vm::changeCropPixelated)
-                Box(Modifier.fillMaxWidth().height(1.dp).background(RowLine))
+                // while the Ribbon and pixel brushes plugin's Pixel art is on
+                if (vm.has(io.github.artcraftandroid.procraft.core.Feature.PIXEL_ART)) {
+                    SwitchRow("Pixelated", vm.cropPixelated, vm::changeCropPixelated)
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(RowLine))
+                }
                 SwitchRow("Snapping", vm.cropSnapping, vm::changeCropSnapping)
             }
             Box(Modifier.padding(top = 10.dp).fillMaxWidth().height(64.dp).clip(RoundedCornerShape(14.dp)).background(GroupFill)) {

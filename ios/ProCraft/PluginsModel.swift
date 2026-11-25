@@ -101,6 +101,12 @@ final class PluginsModel {
     /// Whether a plugin offers Lasso Fill: Color Fill's Lasso Fill and the Paint and Erase tools'
     /// lassos show.
     private(set) var lassoFills = false
+    /// The app's own features that show: each built-in plugin on, and the switch a part comes
+    /// under (see `has`).
+    private(set) var features: Set<Feature> = []
+    /// The meshes plugins lay and bend for Transform (Puppet while there is one), and their tools.
+    private(set) var warps: [PluginWarp] = []
+    private(set) var tools: [PluginTool] = []
     /// The artwork open, whose GPU draws a picker plugin's picture.
     @ObservationIgnored weak var pickerSession: CanvasSession?
     /// Words for someone who changed a setting that now comes as a plugin, said once.
@@ -175,6 +181,35 @@ final class PluginsModel {
         randomisesBrushes = store.randomisesBrushes()
         pinsPanels = store.pinsPanels()
         lassoFills = store.lassoFills()
+        features = Set(store.features())
+        warps = store.warps()
+        tools = store.tools()
+    }
+
+    /// Whether the app's own `feature` shows: its built-in plugin on, and its switch if it has one.
+    /// Off, only the ways in to it are hidden; an artwork that uses it opens and plays as saved.
+    func has(_ feature: Feature) -> Bool {
+        features.contains(feature)
+    }
+
+    /// Whether QuickMenu action `a` shows: none of the app's own features, or one that shows.
+    func shows(_ a: QuickAction) -> Bool {
+        quickActionFeature(action: a).map(has) ?? true
+    }
+
+    /// Whether the Adjustments menu lists `a`.
+    func shows(_ a: Adjustment) -> Bool {
+        adjustmentFeature(adjustment: a).map(has) ?? true
+    }
+
+    /// Whether a layer's options list `option`.
+    func shows(_ option: LayerOption) -> Bool {
+        layerOptionFeature(option: option).map(has) ?? true
+    }
+
+    /// Whether Gesture controls has a page for `purpose`.
+    func shows(_ purpose: GesturePurpose) -> Bool {
+        gesturePurposeFeature(purpose: purpose).map(has) ?? true
     }
 
     private func changed() {

@@ -119,7 +119,7 @@ fn ring_area(ring: &[Point]) -> f64 {
 
 /// The box (x0, y0, x1, y1, pixels, the end ones past it) of the pixels of `alpha` (one byte a
 /// pixel, `width` across) that aren't clear; none when all are.
-pub(crate) fn painted(alpha: &[u8], width: usize) -> Option<[usize; 4]> {
+pub fn painted(alpha: &[u8], width: usize) -> Option<[usize; 4]> {
     if width == 0 {
         return None;
     }
@@ -138,7 +138,7 @@ pub(crate) fn painted(alpha: &[u8], width: usize) -> Option<[usize; 4]> {
 /// One piece of the mesh: its vertices (source points) and its triangles (anticlockwise as the
 /// numbers go, y down), the vertices numbered so each triangle's are near one another.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Piece {
+pub struct Piece {
     pub verts: Vec<Vec2>,
     pub tris: Vec<[u32; 3]>,
 }
@@ -147,14 +147,7 @@ pub(crate) struct Piece {
 /// source point `origin`) that aren't clear, within `bounds` (from [`painted`]): reaching
 /// `expansion` past them, hollows filled, the triangles about `spacing` on a side. A piece for each
 /// part apart from the rest.
-pub(crate) fn lay(
-    alpha: &[u8],
-    width: usize,
-    bounds: [usize; 4],
-    origin: Vec2,
-    expansion: f32,
-    spacing: f32,
-) -> Vec<Piece> {
+pub fn lay(alpha: &[u8], width: usize, bounds: [usize; 4], origin: Vec2, expansion: f32, spacing: f32) -> Vec<Piece> {
     let [x0, y0, x1, y1] = bounds;
     if width == 0 || x0 >= x1 || y0 >= y1 || spacing.is_nan() || spacing <= 0.0 {
         return Vec::new();

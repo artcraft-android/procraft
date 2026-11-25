@@ -109,7 +109,10 @@ struct GridAddMenu: View {
                 .padding(.bottom, 12)
             HStack(spacing: 8) {
                 tile(PcIcons.gridPhoto, "Photo", dim: false) { ask(.photo) }
-                tile(PcIcons.gridVideo, "Video", dim: busy) { ask(.video) }
+                // a video, while Timeline media's Videos is on
+                if PluginsModel.shared.has(.videos) {
+                    tile(PcIcons.gridVideo, "Video", dim: busy) { ask(.video) }
+                }
             }
             .padding(.horizontal, 10)
             GridSection {
@@ -208,7 +211,10 @@ struct GridImports: ViewModifier {
             }
             .fileImporter(
                 isPresented: Binding(get: { grid.asking == .file }, set: { if !$0, grid.asking == .file { grid.asking = nil } }),
-                allowedContentTypes: [.audio, .movie, .image]
+                // sounds and videos while Timeline media's switches for them are on
+                allowedContentTypes: [.image]
+                    + (PluginsModel.shared.has(.sounds) ? [.audio] : [])
+                    + (PluginsModel.shared.has(.videos) ? [.movie] : [])
             ) { result in
                 if case let .success(url) = result {
                     model.timeline.addFile(url)

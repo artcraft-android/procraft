@@ -136,7 +136,7 @@ struct CustomCanvas: View {
         return CanvasPreset(
             name: shown.isEmpty ? "Untitled Canvas" : shown, unit: unit.key, sizeWidth: width, sizeHeight: height,
             dpi: dpi, background: background, backgroundHidden: hidden, timeLapseResolution: resolution,
-            timeLapseQuality: quality, timeLapseHevc: hevc, profile: profile, hdr: hdr && !cmyk
+            timeLapseQuality: quality, timeLapseHevc: hevc, profile: profile, hdr: hdr && !cmyk && PluginsModel.shared.has(.hdr)
         )
     }
 
@@ -295,7 +295,8 @@ struct CustomCanvas: View {
                 .padding(.leading, 24)
                 .padding(.top, 16)
                 .padding(.bottom, 20)
-            ForEach(sections.indices, id: \.self) { i in
+            // Time-lapse settings while the Time-lapse plugin is on
+            ForEach(sections.indices.filter { $0 != 2 || PluginsModel.shared.has(.timeLapse) }, id: \.self) { i in
                 let chosen = i == section
                 let tint = chosen ? Color.white : idleInk
                 // icons centred 43 in, whatever their size; the names 69 in
@@ -376,7 +377,8 @@ struct CustomCanvas: View {
             let names = cmyk ? cmykProfiles() : colorProfiles()
             VStack(spacing: 24) {
                 kindSwitch
-                if !cmyk {
+                // while the HDR plugin is on
+                if !cmyk, PluginsModel.shared.has(.hdr) {
                     group {
                         switchLine("HDR", on: hdr) { hdr.toggle() }
                     }

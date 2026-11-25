@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.puppet-warp",
+  "name": "Puppet Warp",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Transform's Puppet: a mesh laid over what you painted, bent as rigidly as it can be by the pins you put on it and drag.",
+  "compat": { "procraft": { "interface": 24 } },
+  "permissions": [],
+  "warps": [{ "key": "puppet", "label": "Puppet" }]
+}

@@ -24179,39 +24179,6 @@ fn an_adjustment_layer_let_go_unkept_goes_and_undo_inside_it_steps_its_values_ba
 }
 
 #[test]
-fn the_new_adjustments_keep_their_values_on_an_adjustment_layer() {
-    use crate::{Adjustment, DitherKind, VignetteKind};
-    let Some(s) = session(64, 64) else { return };
-    red_bar(&s);
-    assert!(s.adjustment_layer_add(Adjustment::Dither));
-    s.adjustment_amount_by(1.0);
-    s.adjustment_dither_kind(DitherKind::Noise);
-    s.adjustment_dither_value(0, 0.5);
-    s.adjustment_dither_mono(true);
-    assert!(s.adjustment_end(true));
-    let id = s.layers().iter().find(|l| l.current).unwrap().id;
-    // the file keeps them: read back, it opens on them
-    let saved = s.shared.lock().doc.clone();
-    let text = serde_json::to_string(&saved).unwrap();
-    let read: procraft_engine::document::Document = serde_json::from_str(&text).unwrap();
-    s.shared.lock().doc = read;
-    assert_eq!(s.adjustment_layer_edit(id), Some(Adjustment::Dither));
-    let shown = s.adjustment_shown();
-    assert_eq!((shown.amount, shown.dither_kind, shown.dither_mono), (1.0, DitherKind::Noise, true));
-    assert_eq!(shown.dither, vec![0.5, 0.0]);
-    assert!(s.adjustment_end(false));
-    // a vignette on the layer itself, as any adjustment
-    assert!(s.select_layer(s.layers().last().unwrap().id));
-    assert!(s.adjustment_start(Adjustment::Vignette));
-    s.adjustment_vignette_kind(VignetteKind::Light);
-    s.adjustment_vignette_value(0, 0.1);
-    s.adjustment_amount_by(1.0);
-    assert!(!s.adjustment_shown().on_layer);
-    assert!(s.adjustment_end(true));
-    assert_eq!(s.undo().as_deref(), Some("adjustment"));
-}
-
-#[test]
 fn a_layer_style_shows_at_once_and_is_one_step_when_let_go() {
     use crate::LayerEffectInfo;
     let Some(s) = session(64, 64) else { return };
@@ -24320,13 +24287,27 @@ fn three_frames(s: &CanvasSession) {
 
 #[test]
 fn the_frames_export_as_a_sprite_sheet_with_its_json() {
-    use crate::frame_exports::{SheetLayout, SpriteSheetChoices};
+    use crate::harmony_tests::{EXPORTS, exports_plugin};
     let Some(s) = session(40, 40) else { return };
     three_frames(&s);
     s.set_name("Dots walk".into());
     let dir = std::env::temp_dir().join(format!("procraft-sheet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = |n: &str| dir.join(n).to_string_lossy().into_owned();
+    let plugins = exports_plugin(&dir);
+    let set = |key: &str, value: f32| {
+        let key = format!("{EXPORTS}.{key}");
+        if plugins.set_slider(key.clone(), value).is_none() {
+            assert!(plugins.set_switch(key, value >= 0.5));
+        }
+    };
+    // the sheet as Share lists it, its controls those of its sheet
+    let shares = plugins.shares();
+    let sheet = shares.iter().find(|p| p.label == "Sprite Sheet").unwrap();
+    assert_eq!(sheet.controls.len(), 9);
+    let out = dir.join("out").to_string_lossy().into_owned();
+    let share =
+        || s.plugin_share(plugins.clone(), format!("{EXPORTS}.sprite_sheet"), out.clone(), Default::default()).unwrap();
     let read = |p: &str| {
         let decoder = png::Decoder::new(std::io::Cursor::new(std::fs::read(p).unwrap()));
         let mut reader = decoder.read_info().unwrap();
@@ -24334,23 +24315,14 @@ fn the_frames_export_as_a_sprite_sheet_with_its_json() {
         let info = reader.next_frame(&mut buf).unwrap();
         (info.width, info.height, buf)
     };
-    let choices = SpriteSheetChoices {
-        layout: SheetLayout::Grid,
-        columns: 0,
-        rows: 0,
-        padding: 0,
-        trim: false,
-        held_once: true,
-        json: true,
-        max_side: 0,
-        transparent: false,
-    };
+    set("transparent", 0.0);
 
     // held once: three pictures on a 2 × 2 grid, the green lasting three frames
-    let made = s.export_sprite_sheet(path("grid.png"), choices).unwrap();
-    assert_eq!((made.width, made.height, made.cells, made.frames), (80, 80, 3, 5));
+    let made = share();
+    assert_eq!(made.said.as_deref(), Some("5 frames on a 80 × 80 sheet"));
     assert_eq!(s.export_progress(), 1.0);
-    let (w, h, px) = read(&path("grid.png"));
+    assert!(made.files[0].ends_with("Dots_walk.png") && made.files[1].ends_with("Dots_walk.json"), "{:?}", made.files);
+    let (w, h, px) = read(&made.files[0]);
     assert_eq!((w, h), (80, 80));
     let at = |x: u32, y: u32| px[((y * w + x) * 4) as usize..][..4].to_vec();
     // each frame its own dot over white: red in the first cell, green in the second, blue below
@@ -24359,9 +24331,7 @@ fn the_frames_export_as_a_sprite_sheet_with_its_json() {
     assert!(at(32, 40 + 20)[2] > 200 && at(32, 40 + 20)[0] < 60, "{:?}", at(32, 60));
     assert_eq!(at(70, 70)[3], 0, "the empty fourth cell is clear");
     assert_eq!(at(39, 1), [255, 255, 255, 255], "the background is in each frame");
-    let json_path = made.json_path.unwrap();
-    assert!(json_path.ends_with("grid.json"));
-    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&made.files[1]).unwrap()).unwrap();
     let frames = json["frames"].as_array().unwrap();
     let rects: Vec<_> =
         frames.iter().map(|f| (f["frame"]["x"].as_u64().unwrap(), f["frame"]["y"].as_u64().unwrap())).collect();
@@ -24370,40 +24340,48 @@ fn the_frames_export_as_a_sprite_sheet_with_its_json() {
     let durations: Vec<_> = frames.iter().map(|f| f["duration"].as_u64().unwrap()).collect();
     assert_eq!(durations, [67, 200, 66]);
     assert_eq!(frames[0]["filename"], "Dots_walk 0");
-    assert_eq!(json["meta"]["image"], "grid.png");
+    assert_eq!(json["meta"]["image"], "Dots_walk.png");
     assert_eq!(json["meta"]["size"], serde_json::json!({ "w": 80, "h": 80 }));
 
     // a strip with every frame its own, padded, no JSON: evenly cut
-    let strip =
-        SpriteSheetChoices { layout: SheetLayout::Across, padding: 2, held_once: false, json: false, ..choices };
-    let made = s.export_sprite_sheet(path("strip.png"), strip).unwrap();
-    assert_eq!((made.width, made.height, made.cells, made.frames), (5 * 40 + 4 * 2, 40, 5, 5));
-    assert!(made.json_path.is_none());
-    let down = SpriteSheetChoices { layout: SheetLayout::Down, padding: 0, ..strip };
-    let made = s.export_sprite_sheet(path("down.png"), down).unwrap();
-    assert_eq!((made.width, made.height), (40, 200));
+    set("layout", 1.0);
+    set("padding", 2.0);
+    set("once", 0.0);
+    set("json", 0.0);
+    let made = share();
+    assert_eq!(made.files.len(), 1);
+    assert_eq!((read(&made.files[0]).0, read(&made.files[0]).1), (5 * 40 + 4 * 2, 40));
+    set("layout", 2.0);
+    set("padding", 0.0);
+    let made = share();
+    assert_eq!((read(&made.files[0]).0, read(&made.files[0]).1), (40, 200));
 
-    // trimmed and transparent, at half size: each dot alone, where it was kept in the JSON
-    let trimmed =
-        SpriteSheetChoices { trim: true, transparent: true, max_side: 20, layout: SheetLayout::Across, ..choices };
-    let made = s.export_sprite_sheet(path("trim.png"), trimmed).unwrap();
-    assert_eq!(made.cells, 3);
-    assert!(made.width < 60 && made.height <= 20, "{} × {}", made.width, made.height);
-    let json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(made.json_path.unwrap()).unwrap()).unwrap();
+    // trimmed and transparent: each dot alone, where it was kept in the JSON
+    set("layout", 1.0);
+    set("once", 1.0);
+    set("json", 1.0);
+    set("trim", 1.0);
+    set("transparent", 1.0);
+    let made = share();
+    let (w, h, px) = read(&made.files[0]);
+    assert!(w < 3 * 40 && h <= 40, "{w} × {h}");
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&made.files[1]).unwrap()).unwrap();
+    assert_eq!(json["frames"].as_array().unwrap().len(), 3);
     let first = &json["frames"][0];
     assert_eq!(first["trimmed"], true);
-    assert_eq!(first["sourceSize"], serde_json::json!({ "w": 20, "h": 20 }));
+    assert_eq!(first["sourceSize"], serde_json::json!({ "w": 40, "h": 40 }));
     // the red dot sat left of the blue one
     let x = |i: usize| json["frames"][i]["spriteSourceSize"]["x"].as_u64().unwrap();
     assert!(x(0) < x(2), "{} {}", x(0), x(2));
-    let (_, _, px) = read(&path("trim.png"));
     assert!(px.chunks(4).all(|p| p[3] == 0 || p[0] > 0 || p[1] > 0 || p[2] > 0));
 
     // on a timeline, the same
+    set("trim", 0.0);
+    set("transparent", 0.0);
+    set("layout", 0.0);
     assert!(s.start_timeline());
-    let made = s.export_sprite_sheet(path("timeline.png"), choices).unwrap();
-    assert_eq!((made.width, made.height, made.cells, made.frames), (80, 80, 3, 5));
+    let made = share();
+    assert_eq!(made.said.as_deref(), Some("5 frames on a 80 × 80 sheet"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -24428,15 +24406,19 @@ fn a_timeline_exports_as_a_harmony_scene() {
 
     let dir = std::env::temp_dir().join(format!("procraft-harmony-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let zip_path = dir.join("Dots.zip");
-    let made = s.export_harmony(zip_path.to_string_lossy().into_owned(), Default::default()).unwrap();
+    let plugins = crate::harmony_tests::exports_plugin(&dir);
+    let key = format!("{}.harmony", crate::harmony_tests::EXPORTS);
+    let out = dir.join("out").to_string_lossy().into_owned();
+    let made = s.plugin_share(plugins.clone(), key.clone(), out.clone(), Default::default()).unwrap();
     assert_eq!(s.export_progress(), 1.0);
-    let bytes = std::fs::read(&zip_path).unwrap();
+    assert!(made.files[0].ends_with("Dots.zip"));
+    assert_eq!(made.said.as_deref(), Some("3 layers, 5 drawings"));
+    let bytes = std::fs::read(&made.files[0]).unwrap();
     let zip = procraft_engine::zip::ZipReader::new(&bytes).unwrap();
     let mut names: Vec<&str> = zip.names().collect();
     names.sort_unstable();
     let track = &tracks[0].name;
-    let plain = procraft_engine::harmony::Names::plain(track, "Layer");
+    let plain: String = track.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     let mut wanted = vec![
         "Dots/Dots.aux".to_owned(),
         "Dots/Dots.xstage".to_owned(),
@@ -24450,7 +24432,6 @@ fn a_timeline_exports_as_a_harmony_scene() {
     ];
     wanted.sort_unstable();
     assert_eq!(names, wanted);
-    assert_eq!((made.layers, made.drawings, made.frames), (3, 5, 5));
 
     let stage = String::from_utf8(zip.read("Dots/Dots.xstage").unwrap()).unwrap();
     let stage = procraft_engine::xml::parse(&stage).unwrap();
@@ -24489,9 +24470,9 @@ fn a_timeline_exports_as_a_harmony_scene() {
     // an Animation Assist canvas is put on a timeline for it, and stays as it was
     let Some(assist) = session(40, 40) else { return };
     three_frames(&assist);
-    let made =
-        assist.export_harmony(dir.join("assist.zip").to_string_lossy().into_owned(), Default::default()).unwrap();
-    assert_eq!((made.layers, made.drawings, made.frames), (2, 4, 5));
+    assist.set_name("Assist".into());
+    let made = assist.plugin_share(plugins, key, out, Default::default()).unwrap();
+    assert_eq!(made.said.as_deref(), Some("2 layers, 4 drawings"));
     assert!(assist.timeline_info().is_none());
     assert_eq!(assist.animation_sequence(), [0, 1, 1, 1, 2]);
     let _ = std::fs::remove_dir_all(&dir);
@@ -25179,6 +25160,9 @@ fn a_puppet_bends_the_layer_by_its_pins_as_one_undo_step() {
     s.stroke_end(vec![sample(170.0, 100.0, 150.0)]);
     assert_eq!(pixel(&s, 160, 100), [0, 0, 0, 255]);
     s.transform_begin().unwrap();
+    // with no mesh warp, Puppet lays no mesh
+    assert!(s.transform_set_kind(TransformKind::Puppet).unwrap().puppet_edges.is_empty());
+    crate::plugin_warps::puppet_on(&s);
     let laid = s.transform_set_kind(TransformKind::Puppet).unwrap();
     assert!(!laid.puppet_edges.is_empty() && laid.pins.is_empty() && laid.selected_pin == -1);
     // a tap off the mesh puts no pin; on it, a pin each

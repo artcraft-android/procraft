@@ -129,7 +129,8 @@ extension CanvasModel {
             return brush.name
         }
         guard let menu = QuickMenus.shared.menu, menu.slots.indices.contains(i) else { return "" }
-        return quickActionLabel(action: menu.slots[i])
+        // a built-in plugin's action, while it is off, as no action
+        return quickActionLabel(action: PluginsModel.shared.shows(menu.slots[i]) ? menu.slots[i] : .none)
     }
 
     /// Sets button `i` of the ring to give brush `b` to the current tool.
@@ -154,6 +155,8 @@ extension CanvasModel {
     /// Does `a`, a QuickMenu button opened at window point `at`. What has no screen on the iPad yet
     /// (the animation's and the reference's) does nothing.
     func runQuickAction(_ a: QuickAction, at: CGPoint) {
+        // nothing for a built-in plugin's action while it is off
+        guard PluginsModel.shared.shows(a) else { return }
         func onCurrent(_ f: (LayerInfo) -> Void) {
             if let l = layers.first(where: { $0.current }) {
                 f(l)

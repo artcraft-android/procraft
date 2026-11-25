@@ -38,9 +38,6 @@ private func icon(_ a: Adjustment) -> PcIcon {
     case .glitch: PcIcons.adjustGlitch
     case .halftone: PcIcons.adjustHalftone
     case .chromaticAberration: PcIcons.adjustChromatic
-    case .pixelate: PcIcons.adjustPixelate
-    case .dither: PcIcons.adjustDither
-    case .vignette: PcIcons.adjustVignette
     case .liquify: PcIcons.adjustLiquify
     case .clone: PcIcons.adjustClone
     case .plugin: PcIcons.adjustments

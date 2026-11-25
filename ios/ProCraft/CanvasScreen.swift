@@ -27,7 +27,7 @@ struct CanvasScreen: View {
             let screen = Interface.shared.screen(place.size)
             let right = AppSettings.shared.rightHanded
             // (the Texture Packer and Comic Panels take the screen's bars away while they are open)
-            let hidden = model.barsHidden || model.texturePacker != nil || model.cuttingPanels
+            let hidden = model.barsHidden || model.texturePacker != nil || model.pluginTool != nil
             // the side bar at its kept place down its edge; its modify button dragged, it follows
             // the finger up or down stretching a little toward it, and let go settles back
             let sideFit = model.sideBarPlace(height: screen.size.height)
@@ -120,11 +120,13 @@ struct CanvasScreen: View {
                 }
                 // over the canvas, under the panels; not over a page that takes the screen
                 if !hidden, !model.canvasInfoOpen, !model.gestureControlsOpen, model.crop.shown == nil, !model.timeLapse.replaying,
-                   model.animatedExport == nil, !model.spriteSheetExport, model.scene.animatedExport == nil, !model.scene.studioOpen {
+                   model.animatedExport == nil, model.pluginShare == nil, model.scene.animatedExport == nil, !model.scene.studioOpen {
                     Group {
                         if model.timeline.on {
-                            TimelineBar(model: model, screen: screen.size)
-                        } else {
+                            if model.timeline.shown {
+                                TimelineBar(model: model, screen: screen.size)
+                            }
+                        } else if model.animationAssist.shown {
                             AnimationBar(model: model, screen: screen.size)
                         }
                     }
@@ -222,7 +224,7 @@ struct CanvasScreen: View {
                     if model.adjusting, model.adjustment != .liquify, !hidden {
                         AdjustmentPanel(model: model, screen: screen.size)
                             // (over the timeline's bar, not on it)
-                            .padding(.bottom, model.timeline.on ? model.timeline.gridHeight : 0)
+                            .padding(.bottom, model.timeline.shown ? model.timeline.gridHeight : 0)
                             .reportsPiece(.adjusting, lift: 25)
                             .transition(.move(edge: .bottom))
                     }
@@ -234,7 +236,7 @@ struct CanvasScreen: View {
                     if model.transforming, !hidden {
                         TransformToolbar(model: model, screenWidth: screen.size.width)
                             // (over the timeline's bar, not on it)
-                            .padding(.bottom, model.timeline.on ? model.timeline.gridHeight : 0)
+                            .padding(.bottom, model.timeline.shown ? model.timeline.gridHeight : 0)
                             .reportsPiece(.transform, lift: 25)
                             .transition(.move(edge: .bottom))
                     }
@@ -253,7 +255,7 @@ struct CanvasScreen: View {
                 ZStack {
                     if model.selecting, !hidden {
                         SelectionToolbar(model: model, screenWidth: screen.size.width)
-                            .padding(.bottom, model.timeline.on ? model.timeline.gridHeight : 0)
+                            .padding(.bottom, model.timeline.shown ? model.timeline.gridHeight : 0)
                             .reportsPiece(.selection, lift: 25)
                             .transition(.move(edge: .bottom))
                     }
@@ -295,8 +297,8 @@ struct CanvasScreen: View {
                     AnimatedExport(model: model, format: format)
                         .transition(.move(edge: .bottom))
                 }
-                if model.spriteSheetExport {
-                    SpriteSheetExport(model: model)
+                if let share = model.pluginShare {
+                    PluginShareScreen(model: model, share: share)
                         .transition(.move(edge: .bottom))
                 }
                 if let packer = model.texturePacker {
@@ -314,8 +316,8 @@ struct CanvasScreen: View {
                     TimeLapseReplay(model: model)
                         .transition(.opacity)
                 }
-                if model.cuttingPanels {
-                    PanelCutter(model: model)
+                if let tool = model.pluginTool {
+                    PluginToolView(model: model, tool: tool)
                         .transition(.opacity)
                 }
                 CropOverlay(model: model)

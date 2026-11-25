@@ -77,16 +77,6 @@ pub enum Filter {
     /// the block size (0..1), wave the amplitude and frequency (0..1), diverge the red, green and
     /// blue shifts (−1..1). `zoom` (0..1) scales the pattern; `seed` varies it.
     Glitch { kind: u32, amount: f32, values: [f32; 3], zoom: f32, seed: f32 },
-    /// Square cells `size` canvas pixels across, each the mean of what it covers.
-    Pixelate { size: f32 },
-    /// Each channel brought to `levels` steps (2..), the steps between broken up by a pattern
-    /// `scale` canvas pixels a dot: `kind` 0 an ordered (Bayer) grid, 1 noise. `amount` (0..1) of
-    /// the way from the colour to that; `mono` in black and white.
-    Dither { amount: f32, levels: f32, scale: f32, kind: u32, mono: bool },
-    /// The edges darkened (`light`: lightened) towards the corners by `amount` (0..1), starting
-    /// `size` (0..1) of the way from the middle to a corner and fading over `softness` (0..1) of the
-    /// rest; round on the canvas, whatever its shape.
-    Vignette { amount: f32, size: f32, softness: f32, light: bool },
 }
 
 impl Filter {
@@ -102,8 +92,6 @@ impl Filter {
                 | Filter::Curves { .. }
                 | Filter::GradientMap { .. }
                 | Filter::ColorBalance { .. }
-                | Filter::Dither { .. }
-                | Filter::Vignette { .. }
         )
     }
 
@@ -130,8 +118,6 @@ impl Filter {
                 shadows.iter().chain(&midtones).chain(&highlights).all(|v| *v == 0.0)
             }
             Filter::Glitch { amount, .. } => amount <= 0.0,
-            Filter::Pixelate { size } => size < 1.5,
-            Filter::Dither { amount, .. } | Filter::Vignette { amount, .. } => amount <= 0.0,
             Filter::Halftone { .. } | Filter::Curves { .. } | Filter::Liquify { .. } | Filter::Clone { .. } => false,
         }
     }
@@ -218,13 +204,6 @@ fn param_specs(f: &Filter) -> &'static [(&'static str, f32, f32, ParamUnit)] {
             ("Zoom", 0.0, 1.0, Percent),
             ("Seed", 0.0, 1.0, Plain),
         ],
-        Filter::Pixelate { .. } => &[("Size", 1.0, 128.0, Pixels)],
-        Filter::Dither { .. } => {
-            &[("Amount", 0.0, 1.0, Percent), ("Levels", 2.0, 16.0, Plain), ("Pattern size", 1.0, 8.0, Pixels)]
-        }
-        Filter::Vignette { .. } => {
-            &[("Amount", 0.0, 1.0, Percent), ("Size", 0.0, 1.0, Percent), ("Softness", 0.0, 1.0, Percent)]
-        }
         Filter::Curves { .. } => &[
             ("Exposure", -5.0, 5.0, Stops),
             ("Above", 0.0, 1.0, Percent),
@@ -257,9 +236,6 @@ impl Filter {
                 shadows.iter().chain(&midtones).chain(&highlights).copied().collect()
             }
             Filter::Glitch { amount, values: [a, b, c], zoom, seed, .. } => vec![amount, a, b, c, zoom, seed],
-            Filter::Pixelate { size } => vec![size],
-            Filter::Dither { amount, levels, scale, .. } => vec![amount, levels, scale],
-            Filter::Vignette { amount, size, softness, .. } => vec![amount, size, softness],
             Filter::Curves { exposure, above, soft, peak, knee } => vec![exposure, above, soft, peak, knee],
             Filter::Liquify { .. } | Filter::Clone { .. } => Vec::new(),
         }
@@ -306,9 +282,6 @@ impl Filter {
             Filter::Glitch { kind, .. } => {
                 Filter::Glitch { kind, amount: g(0), values: [g(1), g(2), g(3)], zoom: g(4), seed: g(5) }
             }
-            Filter::Pixelate { .. } => Filter::Pixelate { size: g(0) },
-            Filter::Dither { kind, mono, .. } => Filter::Dither { amount: g(0), levels: g(1), scale: g(2), kind, mono },
-            Filter::Vignette { light, .. } => Filter::Vignette { amount: g(0), size: g(1), softness: g(2), light },
             Filter::Curves { .. } => Filter::Curves { exposure: g(0), above: g(1), soft: g(2), peak: g(3), knee: g(4) },
             Filter::Liquify { .. } | Filter::Clone { .. } => self,
         }
@@ -354,7 +327,6 @@ impl Filter {
             Filter::Blur { sigma } | Filter::Bloom { sigma, .. } => px(sigma * 3.0 + 64.0),
             Filter::Sharpen { .. } => Some(1),
             Filter::Motion { along: [x, y] } => px(x.hypot(y) / 2.0 + 2.0),
-            Filter::Pixelate { size } => px(size + 1.0),
             Filter::Chromatic { displace: true, offset: [x, y], blur, .. } => px(x.hypot(y) * (1.0 + blur) + 2.0),
             _ => None,
         }
@@ -421,7 +393,15 @@ mod tests {
 
     #[test]
     fn a_filter_is_kept_in_a_file_as_it_was() {
-        let f = Filter::Dither { amount: 0.5, levels: 4.0, scale: 2.0, kind: 1, mono: true };
+        let f = Filter::Noise {
+            amount: 0.5,
+            frequency: 0.1,
+            octaves: 3,
+            turbulence: 0.2,
+            kind: 1,
+            multi: true,
+            added: false,
+        };
         let text = serde_json::to_string(&f).ok();
         let back: Option<Filter> = text.as_deref().and_then(|t| serde_json::from_str(t).ok());
         assert_eq!(back, Some(f));
@@ -444,10 +424,9 @@ mod tests {
     #[test]
     fn colour_changes_are_pointwise_and_blurs_are_not() {
         assert!(Filter::Hsb { hue: 0.1, saturation: 1.0, brightness: 0.0 }.pointwise());
-        assert!(Filter::Vignette { amount: 1.0, size: 0.5, softness: 0.5, light: false }.pointwise());
         assert!(!Filter::Blur { sigma: 4.0 }.pointwise());
-        assert!(!Filter::Pixelate { size: 8.0 }.pointwise());
+        assert!(!Filter::Motion { along: [4.0, 0.0] }.pointwise());
         assert!(Filter::Hsb { hue: 0.0, saturation: 1.0, brightness: 0.0 }.changes_nothing());
-        assert!(!Filter::Pixelate { size: 8.0 }.changes_nothing());
+        assert!(!Filter::Halftone { pitch: 8.0, kind: 0 }.changes_nothing());
     }
 }

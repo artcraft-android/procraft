@@ -246,7 +246,7 @@ impl State {
         if let Some(brush) = last.map(|s| &s.setup.brush).filter(|b| ***b == *setup.brush) {
             setup.brush = Arc::clone(brush);
         }
-        let guide = self.doc.stroke_guide();
+        let guide = crate::guide::stroke_guide(&self.doc, self.guide_paused);
         let guide = match last.and_then(|s| s.guide.as_ref()).filter(|g| ***g == *guide) {
             Some(same) => Arc::clone(same),
             None => Arc::new(guide.into_owned()),
@@ -4288,6 +4288,7 @@ mod tests {
         let layer = two_lines_and_a_square(&s);
         let before = pixels(&s, layer);
         assert!(s.transform_begin().is_some(), "{}", s.transform_refusal());
+        crate::plugin_warps::puppet_on(&s);
         s.transform_set_kind(crate::TransformKind::Puppet);
         // the first line pinned at its ends, its right end taken down
         s.transform_puppet_tap(50.0, 100.0);

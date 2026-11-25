@@ -48,7 +48,8 @@ struct GestureControls: View {
     let model: CanvasModel
 
     private var pages: [GesturePurpose] {
-        gesturePurposes()
+        // less a built-in plugin's that is off (QuickShape, assisted drawing)
+        gesturePurposes().filter(PluginsModel.shared.shows)
     }
 
     private var rail: some View {

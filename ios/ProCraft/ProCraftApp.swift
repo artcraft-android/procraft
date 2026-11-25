@@ -322,7 +322,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "layers-adjustment", "layers-style", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline", "ribbon", "light", "hdr", "texture-packer", "layers-vector"]
+    private static let canvasScreens = ["liquify", "adjust-", "layers-adjustment", "layers-style", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline", "ribbon", "light", "hdr", "texture-packer", "layers-vector", "puppet", "comic-panels"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// Animation Assist's settings open on the onion skins' colours.
@@ -582,16 +582,9 @@ enum ScreenCapture {
     private static func effects(_ name: String, _ model: CanvasModel) {
         paintStrokes(model)
         switch name {
-        case "effect-pixelate", "effect-dither", "effect-vignette":
-            let a: Adjustment = name == "effect-pixelate" ? .pixelate : name == "effect-dither" ? .dither : .vignette
-            model.startAdjustment(a)
-            model.adjust { $0.adjustmentAmountBy(step: name == "effect-pixelate" ? 0.25 : 0.8) }
         case "effect-layer":
             model.addAdjustmentLayer(.hsb)
             model.adjust { $0.adjustmentHsb(hue: 0.75, saturation: 0.5, brightness: 0.5) }
-        case "effect-layer-dither":
-            model.addAdjustmentLayer(.dither)
-            model.adjust { $0.adjustmentAmountBy(step: 1) }
         case "layers-adjustment":
             model.addAdjustmentLayer(.gradientMap)
             model.endAdjustment(commit: true)
@@ -884,6 +877,70 @@ enum ScreenCapture {
                 model.packerFocus(packer, 0)
             }
             paced(steps)
+        case "puppet", "puppet-bent":
+            // the Puppet Warp plugin on, a bar painted, Transform's Puppet over it; bent: two pins
+            // put at its ends and the far one taken down
+            let s = model.session
+            let plugins = PluginsModel.shared
+            if let puppet = plugins.plugins.first(where: { $0.id == "io.github.artcraftandroid.puppet-warp" }), !puppet.on {
+                plugins.setOn(puppet, true)
+            }
+            s.setBrushSize(slider: 0.9)
+            s.setBrushOpacity(slider: 1)
+            s.setColor(r: 0.2, g: 0.35, b: 0.8)
+            paced([
+                {
+                    line(s, (500, 900), (1700, 900))
+                    model.refresh()
+                },
+                {
+                    model.toggleTransform()
+                    model.transform.choose(.puppet)
+                },
+                {
+                    guard name == "puppet-bent" else { return }
+                    _ = s.transformPuppetTap(x: 560, y: 900)
+                    _ = s.transformPuppetTap(x: 1640, y: 900)
+                    s.transformGrab(handle: .pin(index: 1), x: 1640, y: 900)
+                    for k in 1 ... 10 {
+                        _ = s.transformDrag(x: 1640 - Float(k) * 20, y: 900 + Float(k) * 40)
+                    }
+                    if let box = s.transformRelease() {
+                        model.transform.moved(box)
+                    }
+                    model.refreshView()
+                },
+            ])
+        case "comic-panels", "comic-panels-cutting":
+            // the Comic Panels plugin on, its tool opened (the canvas made a page), cut down the
+            // middle and its left half across; cutting: a line being drawn across the right half
+            let plugins = PluginsModel.shared
+            if let comic = plugins.plugins.first(where: { $0.id == "io.github.artcraftandroid.comic-panels" }), !comic.on {
+                plugins.setOn(comic, true)
+            }
+            paced([
+                {
+                    guard let tool = PluginsModel.shared.tools.first else { return }
+                    model.openPluginTool(tool)
+                },
+                {
+                    // window points: the page fitted under the header, in the middle across
+                    let screen = UIScreen.main.bounds
+                    let mid = max(screen.width, screen.height) / 2
+                    let drag = { (a: CGPoint, b: CGPoint, up: Bool) in
+                        model.touchPluginTool(.down, at: a)
+                        model.touchPluginTool(.moved, at: b)
+                        if up {
+                            model.touchPluginTool(.up, at: b)
+                        }
+                    }
+                    drag(CGPoint(x: mid, y: 100), CGPoint(x: mid + 2, y: 1100), true)
+                    drag(CGPoint(x: 40, y: 500), CGPoint(x: mid - 20, y: 520), true)
+                    if name == "comic-panels-cutting" {
+                        drag(CGPoint(x: mid + 40, y: 700), CGPoint(x: mid + 600, y: 760), false)
+                    }
+                },
+            ])
         case "hdr":
             // brightened past white: the bands' middles glow on a screen with extended range
             model.setLightLimit(3)
@@ -1052,25 +1109,23 @@ enum ScreenCapture {
             s.setTimelineFrame(frame: 0)
             _ = s.setName(name: "Bounce")
             model.refresh()
+            // the Sprite Sheet and Harmony plugin on: its sprite sheet's screen, or each made
+            let plugins = PluginsModel.shared
+            if let exports = plugins.plugins.first(where: { $0.id == "io.github.artcraftandroid.frame-exports" }), !exports.on {
+                plugins.setOn(exports, true)
+            }
+            let shares = plugins.store.shares()
             if name == "export-sheet" {
-                model.spriteSheetExport = true
+                model.pluginShare = shares.first { $0.label == "Sprite Sheet" }
             } else {
                 DispatchQueue.global(qos: .userInitiated).async {
                     var said: [String] = []
-                    var choices = SpriteSheetChoices.start
-                    choices.trim = true
-                    choices.padding = 4
-                    if let done = CanvasModel.exportSpriteSheet(s, choices) {
-                        let made = done.1
-                        said.append("Sheet: \(made.width) × \(made.height), \(made.cells) cells, \(made.frames) frames, \(done.0.map(\.lastPathComponent))")
-                    } else {
-                        said.append("Sheet: failed")
-                    }
-                    let zip = Sharing.exportsDir.appendingPathComponent("Bounce Harmony.zip")
-                    if let made = try? HarmonyExport.export(s, to: zip) {
-                        said.append("Harmony: \(made.layers) layers, \(made.drawings) drawings, \(made.frames) frames")
-                    } else {
-                        said.append("Harmony: failed")
+                    for share in shares {
+                        if let done = CanvasModel.exportPluginShare(s, share) {
+                            said.append("\(share.label): \(done.1 ?? ""), \(done.0.map(\.lastPathComponent))")
+                        } else {
+                            said.append("\(share.label): failed")
+                        }
                     }
                     DispatchQueue.main.async { model.saying = ("Export check", said.joined(separator: "\n")) }
                 }
@@ -1218,8 +1273,8 @@ enum ScreenCapture {
             model.startAdjustment(.chromaticAberration)
         case "effect-perspective":
             model.startAdjustment(.perspectiveBlur)
-        case "effect-pixelate", "effect-dither", "effect-vignette", "effect-layer", "effect-layer-dither",
-             "layers-adjustment", "layers-style", "layers-style-color":
+        case "effect-layer", "layers-adjustment", "layers-style",
+             "layers-style-color":
             effects(name, model)
         case "layers-vector-merge":
             VectorMergeScene.show(model)

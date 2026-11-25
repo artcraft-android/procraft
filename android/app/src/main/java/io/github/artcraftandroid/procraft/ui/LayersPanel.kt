@@ -253,7 +253,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, 
                 val filters = vm.layerFilters()
                 val asks = kinds.isNotEmpty() || filters.isNotEmpty()
                 Box(
-                    Modifier.padding(top = 12.dp).size(40.dp, 41.dp).combinedClickable(onLongClick = { vm.addVectorLayer() }) {
+                    Modifier.padding(top = 12.dp).size(40.dp, 41.dp).combinedClickable(onLongClick = { if (vm.has(io.github.artcraftandroid.procraft.core.Feature.VECTOR_LAYERS)) vm.addVectorLayer() }) {
                         if (!asks) vm.addLayer() else addMenu = true
                     },
                     contentAlignment = Alignment.Center,
@@ -1408,7 +1408,10 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
         PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = place, onDismissRequest = onDone, properties = PopupProperties(focusable = true)) {
             // frosted over the canvas, as the library's menus are; empty (a locked group's or
             // mask's), as measured, a pill 64 tall with the frost alone, untinted
-            val rows = vm.layerOptions(l)
+            val rows = vm.layerOptions(l).filter {
+                // Edit Text, Clipping Mask and Drawing Assist while their built-in plugins are on
+                vm.showsOption(it.option)
+            }
             // a plugin's actions for the layer, after the app's own
             val actions = remember { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.LAYER) }
             val tint = if (rows.isEmpty() && actions.isEmpty()) Color.Transparent else Pc.GlassMenu

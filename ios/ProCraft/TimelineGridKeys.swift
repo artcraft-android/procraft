@@ -467,7 +467,7 @@ struct GridPerformOverlay: View {
 
     var body: some View {
         let tool = model.timeline
-        if tool.performArmed, tool.on {
+        if tool.performArmed, tool.shown, PluginsModel.shared.has(.performedMoves) {
             PerformPad(
                 began: { begin() },
                 changed: { from, to, scale, turn in

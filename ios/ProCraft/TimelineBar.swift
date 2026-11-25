@@ -141,6 +141,10 @@ final class TimelineTool {
 
     var on: Bool { info != nil }
 
+    /// Whether it shows: on, with the Timeline plugin on. With the plugin off an artwork on a
+    /// timeline opens as saved, its frame painted on, but no timeline shows to change it.
+    var shown: Bool { on && PluginsModel.shared.has(.timeline) }
+
     /// The frame in the middle: the one played or scrubbed past, else the playhead.
     var frame: UInt32 { shownFrame ?? info?.frame ?? 0 }
 
@@ -634,7 +638,7 @@ struct MotionPathOverlay: View {
 
     var body: some View {
         let tool = model.timeline
-        if let id = tool.pathClip, !tool.isPlaying, tool.shownFrame == nil,
+        if tool.shown, let id = tool.pathClip, !tool.isPlaying, tool.shownFrame == nil,
            let path = live ?? tool.path, !path.keys.isEmpty {
             let screen = { (x: Float, y: Float) in model.canvasToWindow(CGPoint(x: CGFloat(x), y: CGFloat(y))) }
             ZStack(alignment: .topLeading) {
@@ -879,9 +883,11 @@ struct EasingPage: View {
                 }
             }
             .padding(.top, 10)
-            MyCurves(spec: spec, reveal: reveal) { commit($0) }
-                .padding(.top, 14)
-                .padding(.bottom, 10)
+            if PluginsModel.shared.has(.myCurves) {
+                MyCurves(spec: spec, reveal: reveal) { commit($0) }
+                    .padding(.top, 14)
+                    .padding(.bottom, 10)
+            }
         }
         .onChange(of: frame) { live = nil }
     }

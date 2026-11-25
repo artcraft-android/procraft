@@ -43,6 +43,8 @@ pub struct Crop {
     /// The size readout last shown, and when the drag showing it ended (it fades from then).
     readout: Option<CropReadout>,
     readout_gone: Option<f64>,
+    /// Pixelated isn't offered: the Ribbon and pixel brushes plugin's Pixel art is off.
+    pub pixel_art_hidden: bool,
 }
 
 impl Crop {
@@ -224,11 +226,13 @@ impl Crop {
             {
                 session.crop_set_dpi(dpi);
             }
-            for (k, (label, on)) in
-                [("Resample canvas", shown.resample), ("Pixelated", shown.pixelated), ("Snapping", shown.snapping)]
-                    .into_iter()
-                    .enumerate()
-            {
+            let switches = [
+                (0, "Resample canvas", shown.resample),
+                (1, "Pixelated", shown.pixelated),
+                (2, "Snapping", shown.snapping),
+            ];
+            let shown_switches = switches.into_iter().filter(|(which, ..)| *which != 1 || !self.pixel_art_hidden);
+            for (k, (which, label, on)) in shown_switches.enumerate() {
                 let switch_row = row_at(1.0 + k as f32);
                 text(
                     ui.painter(),
@@ -246,7 +250,7 @@ impl Crop {
                     label,
                 );
                 if ui.interact(switch_row, ui.scope_id().with(("crop switch", k)), Sense::click()).clicked() {
-                    match k {
+                    match which {
                         0 => session.crop_set_resample(!on),
                         1 => session.crop_set_pixelated(!on),
                         _ => session.crop_set_snapping(!on),

@@ -35,9 +35,6 @@ fn every_kind_lists_a_name_and_range_for_each_smooth_value() {
         Filter::GradientMap { amount: 0.4 },
         Filter::ColorBalance { shadows: [0.1, 0.2, 0.3], midtones: [0.0; 3], highlights: [-0.1, 0.0, 0.4] },
         Filter::Glitch { kind: 2, amount: 0.5, values: [0.1, 0.2, 0.3], zoom: 0.4, seed: 0.5 },
-        Filter::Pixelate { size: 8.0 },
-        Filter::Dither { amount: 1.0, levels: 4.0, scale: 2.0, kind: 1, mono: true },
-        Filter::Vignette { amount: 0.6, size: 0.3, softness: 0.5, light: true },
     ];
     for f in kinds {
         let params = f.params();
@@ -51,20 +48,29 @@ fn every_kind_lists_a_name_and_range_for_each_smooth_value() {
     assert_eq!(Filter::CURVES.params()[0].unit, ParamUnit::Stops);
     assert_eq!(GREY.params()[0].unit, ParamUnit::Degrees);
     // a value set is kept in its range, and the others stay
-    let d = Filter::Dither { amount: 1.0, levels: 4.0, scale: 2.0, kind: 1, mono: true };
-    assert_eq!(d.with_param(1, 99.0), Filter::Dither { amount: 1.0, levels: 16.0, scale: 2.0, kind: 1, mono: true });
+    let d = Filter::Halftone { pitch: 8.0, kind: 2 };
+    assert_eq!(d.with_param(0, 999.0), Filter::Halftone { pitch: 98.0, kind: 2 });
     assert_eq!(d.with_param(7, 0.5), d, "no such value");
 }
 
 #[test]
 fn keyed_filters_ease_value_by_value_and_keep_their_choices() {
-    let a = Filter::Vignette { amount: 0.0, size: 0.2, softness: 0.4, light: true };
-    let b = Filter::Vignette { amount: 1.0, size: 0.6, softness: 0.4, light: true };
+    let noise = |amount: f32, frequency: f32| Filter::Noise {
+        amount,
+        frequency,
+        octaves: 3,
+        turbulence: 0.2,
+        kind: 2,
+        multi: true,
+        added: true,
+    };
+    let (a, b) = (noise(0.0, 0.2), noise(1.0, 0.4));
     let mut c: Channel<Filter> = Channel::default();
     c.set(0, a, Easing::Linear);
     c.set(10, b, Easing::Linear);
-    let Some(Filter::Vignette { amount, size, softness, light }) = c.value_at(5.0) else { panic!() };
-    assert!((amount - 0.5).abs() < 1e-5 && (size - 0.4).abs() < 1e-5 && (softness - 0.4).abs() < 1e-5 && light);
+    let Some(Filter::Noise { amount, frequency, turbulence, kind, multi, .. }) = c.value_at(5.0) else { panic!() };
+    assert!((amount - 0.5).abs() < 1e-5 && (frequency - 0.3).abs() < 1e-5 && (turbulence - 0.2).abs() < 1e-5);
+    assert!(kind == 2 && multi);
     // of another kind, they don't mix
     assert_eq!(a.plus(Filter::Blur { sigma: 3.0 }), a);
     // held, it keeps the first key's
@@ -80,7 +86,6 @@ fn reach_is_how_far_a_change_below_spreads() {
     assert_eq!(Filter::Blur { sigma: 0.0 }.reach(), Some(0), "a blur of none changes nothing");
     assert!(Filter::Blur { sigma: 10.0 }.reach() > Filter::Blur { sigma: 2.0 }.reach());
     assert_eq!(Filter::Sharpen { amount: 1.0 }.reach(), Some(1));
-    assert_eq!(Filter::Pixelate { size: 8.0 }.reach(), Some(9));
     assert_eq!(Filter::Zoom { centre: [0.0; 2], amount: 0.1, toward: [0.0; 2] }.reach(), None);
 }
 

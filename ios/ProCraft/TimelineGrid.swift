@@ -563,8 +563,9 @@ private struct GridHeader: View {
                     tool.picked = nil
                     tool.togglePlaying()
                 }
-            // with Animate on: a take armed, which the next touch on the canvas starts
-            if tool.autokey {
+            // with Animate on: a take armed, which the next touch on the canvas starts (while the
+            // Timeline plugin's Performed moves is on)
+            if tool.autokey, PluginsModel.shared.has(.performedMoves) {
                 // (a record light: ringed while a take is armed)
                 Circle()
                     .fill(autokeyRed)

@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.pixel-effects",
+  "name": "Pixel effects",
+  "version": "2.0.0",
+  "holds": ["filter"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Dither and Vignette as filter layers (the Layers panel's + › Filter Layer), changing as the layers under them do.",
+  "compat": { "procraft": { "interface": 17 } },
+  "permissions": [],
+  "controls": [
+    { "key": "dither", "type": "switch", "label": "Dither", "starts": true },
+    { "key": "vignette", "type": "switch", "label": "Vignette", "starts": true }
+  ],
+  "filters": [
+    {
+      "key": "dither", "label": "Dither", "layer": true, "group": "Pixel effects", "under": "dither",
+      "values": [
+        { "key": "amount", "type": "slider", "label": "Amount", "least": 0, "most": 1, "step": 0.01, "starts": 1, "shown_times": 100, "unit": "%", "live": true },
+        { "key": "levels", "type": "slider", "label": "Levels", "least": 2, "most": 16, "step": 1, "starts": 4, "live": true },
+        { "key": "pattern", "type": "slider", "label": "Pattern size", "least": 1, "most": 8, "step": 1, "starts": 1, "unit": " px", "live": true },
+        { "key": "noise", "type": "slider", "label": "Pattern", "least": 0, "most": 1, "step": 1, "starts": 0, "names": ["Ordered", "Noise"] },
+        { "key": "mono", "type": "switch", "label": "Black and white", "starts": false }
+      ]
+    },
+    {
+      "key": "vignette", "label": "Vignette", "layer": true, "group": "Pixel effects", "under": "vignette",
+      "values": [
+        { "key": "amount", "type": "slider", "label": "Amount", "least": 0, "most": 1, "step": 0.01, "starts": 0.7, "shown_times": 100, "unit": "%", "live": true },
+        { "key": "size", "type": "slider", "label": "Size", "least": 0, "most": 1, "step": 0.01, "starts": 0.5, "shown_times": 100, "unit": "%", "live": true },
+        { "key": "softness", "type": "slider", "label": "Softness", "least": 0, "most": 1, "step": 0.01, "starts": 0.5, "shown_times": 100, "unit": "%", "live": true },
+        { "key": "light", "type": "slider", "label": "Towards", "least": 0, "most": 1, "step": 1, "starts": 0, "names": ["Dark", "Light"] }
+      ]
+    }
+  ]
+}

@@ -79,15 +79,45 @@ fn clip_of(s: &CanvasSession, track: usize) -> u64 {
     s.timeline_tracks()[track].clips[0].id
 }
 
-fn export(
-    s: &CanvasSession,
-    dir: &Path,
-    wav: HashMap<String, String>,
-) -> (crate::frame_exports::HarmonyMade, ZipReader<'static>) {
-    let path = dir.join("scene.zip");
-    let made = s.export_harmony(path.to_string_lossy().into_owned(), wav).unwrap();
-    let bytes: &'static [u8] = Box::leak(std::fs::read(&path).unwrap().into_boxed_slice());
-    (made, ZipReader::new(bytes).unwrap())
+/// What a scene holds, read from its stage: its drawing layers, their drawings, its frames and its
+/// sound columns.
+pub(crate) struct Made {
+    pub layers: u32,
+    pub drawings: u32,
+    pub frames: u32,
+    pub sounds: u32,
+}
+
+/// The app's plugins in a folder of their own, the frame exports plugin on.
+pub(crate) fn exports_plugin(dir: &Path) -> Arc<crate::Plugins> {
+    let plugins = crate::Plugins::with_bundled(dir.join("plugins").to_string_lossy().into_owned());
+    assert!(plugins.set_on(EXPORTS.to_owned(), true));
+    plugins
+}
+
+/// The frame exports plugin.
+pub(crate) const EXPORTS: &str = "io.github.artcraftandroid.frame-exports";
+
+fn export(s: &CanvasSession, dir: &Path, wav: HashMap<String, String>) -> (Made, ZipReader<'static>) {
+    let plugins = exports_plugin(dir);
+    let out = dir.join("out");
+    let shared =
+        s.plugin_share(plugins, format!("{EXPORTS}.harmony"), out.to_string_lossy().into_owned(), wav).unwrap();
+    assert_eq!(shared.files.len(), 1, "one zip");
+    let bytes: &'static [u8] = Box::leak(std::fs::read(&shared.files[0]).unwrap().into_boxed_slice());
+    let zip = ZipReader::new(bytes).unwrap();
+    let stage_name = zip.names().find(|n| n.ends_with(".xstage")).unwrap().to_owned();
+    let text = String::from_utf8(zip.read(&stage_name).unwrap()).unwrap();
+    let stage = xml::parse(&text).unwrap();
+    let columns = stage.find("columns").unwrap().all("column");
+    let of_type = |t: &str| columns.iter().filter(|c| c.attribute("type") == Some(t)).count() as u32;
+    let made = Made {
+        layers: of_type("0"),
+        drawings: stage.all("dwg").len() as u32,
+        frames: stage.find("scene").and_then(|s| s.attribute("nbframes")).and_then(|n| n.parse().ok()).unwrap_or(0),
+        sounds: of_type("1"),
+    };
+    (made, zip)
 }
 
 fn stage(zip: &ZipReader<'_>, scene: &str) -> Element {
@@ -218,7 +248,7 @@ fn sounds_are_sound_columns_with_their_files() {
     assert!(s.set_timeline_sound(muted, 1.0, true, 0.0, true));
 
     // the m4a needs a WAV copy; the WAV doesn't
-    let kept = s.harmony_sounds_to_convert();
+    let kept = s.plugin_share_sounds(exports_plugin(&dir), format!("{EXPORTS}.harmony"));
     assert_eq!(kept.len(), 1);
     assert!(kept[0].ends_with(".m4a"));
 

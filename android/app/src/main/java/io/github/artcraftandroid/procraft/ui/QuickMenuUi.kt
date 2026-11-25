@@ -178,6 +178,7 @@ fun BoxScope.QuickMenu(vm: CanvasViewModel) {
             val top = c.second + dy.dp - RingButtonHeight / 2
             ActionPicker(
                 slots.getOrNull(i) ?: QuickAction.NONE, vm.quickSlotBrush(i), vm.brushSets, centre, top, top + RingButtonHeight, maxWidth, maxHeight,
+                shows = vm::showsAction,
                 onBrush = {
                     vm.setQuickSlotBrush(i, it)
                     choosing = null
@@ -415,9 +416,13 @@ private fun ActionPicker(
     buttonBottom: Dp,
     maxWidth: Dp,
     maxHeight: Dp,
+    shows: (QuickAction) -> Boolean,
     onBrush: (BrushInfo) -> Unit,
     onPick: (QuickAction) -> Unit,
 ) {
+    // less a built-in plugin's actions while it is off
+    val listed = QuickAction.LISTED.filter { it == null || shows(it) }
+    val adjustmentsListed = QuickAction.ADJUSTMENTS_LISTED.filter(shows)
     var page by remember { mutableStateOf(if (current.adjustment != null) PickerPage.ADJUSTMENTS else PickerPage.ACTIONS) }
     var set by remember { mutableStateOf(0) }
     val below = buttonBottom + PickerArrow + PickerHeight <= maxHeight - PickerMargin
@@ -440,7 +445,7 @@ private fun ActionPicker(
         PickerPage.BRUSHES -> "Brushes" to PickerPage.BRUSH_SETS
     }
     val rows: List<PickerRow> = when (page) {
-        PickerPage.ACTIONS -> QuickAction.LISTED.map { a ->
+        PickerPage.ACTIONS -> listed.map { a ->
             when (a) {
                 null -> PickerRow("Adjustments", true) { page = PickerPage.ADJUSTMENTS }
                 QuickAction.BRUSHES -> PickerRow(a.label, true) {
@@ -450,7 +455,7 @@ private fun ActionPicker(
                 else -> PickerRow(a.label, false) { onPick(a) }
             }
         }
-        PickerPage.ADJUSTMENTS -> QuickAction.ADJUSTMENTS_LISTED.map { a -> PickerRow(a.label, false) { onPick(a) } }
+        PickerPage.ADJUSTMENTS -> adjustmentsListed.map { a -> PickerRow(a.label, false) { onPick(a) } }
         PickerPage.BRUSH_SETS -> sets.mapIndexed { s, info ->
             PickerRow(info.name, true) {
                 set = s
@@ -460,8 +465,8 @@ private fun ActionPicker(
         PickerPage.BRUSHES -> sets.getOrNull(set)?.brushes.orEmpty().map { b -> PickerRow(b.name, false) { onBrush(b) } }
     }
     val chosen = when (page) {
-        PickerPage.ACTIONS -> QuickAction.LISTED.indexOf(current)
-        PickerPage.ADJUSTMENTS -> QuickAction.ADJUSTMENTS_LISTED.indexOf(current).coerceAtLeast(0)
+        PickerPage.ACTIONS -> listed.indexOf(current)
+        PickerPage.ADJUSTMENTS -> adjustmentsListed.indexOf(current).coerceAtLeast(0)
         PickerPage.BRUSH_SETS -> brush?.set?.toInt() ?: 0
         PickerPage.BRUSHES -> brush?.takeIf { it.set.toInt() == set }?.index?.toInt() ?: 0
     }

@@ -317,7 +317,7 @@ impl State {
         // a brush engine's stroke drawn by it again, as it was
         let mut builder = self.engine_again(kept.stroke.builder.clone(), kept.stroke.layer, kept.stroke.seed);
         let mut second = kept.stroke.second.as_ref().map(|s| s.fresh.clone());
-        let guide = self.doc.stroke_guide();
+        let guide = crate::guide::stroke_guide(&self.doc, self.guide_paused);
         let Some(canvas) = self.canvas.as_mut() else { return false };
         crate::draw_samples(canvas, &mut builder, second.as_mut(), &kept.stroke.samples, &guide, false);
         crate::close_stroke(canvas, builder, second, &guide);
@@ -379,7 +379,7 @@ impl State {
         builder.add(&samples);
         let stamps = builder.finish();
         // with a symmetry guide on, its copies too, as the stroke had them and as it is kept
-        let guide = self.doc.stroke_guide();
+        let guide = crate::guide::stroke_guide(&self.doc, self.guide_paused);
         if let Some(canvas) = self.canvas.as_mut() {
             // nothing drawn ahead of the pen before it snapped stays over the shape
             canvas.set_prediction(&[]);

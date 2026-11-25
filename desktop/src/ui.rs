@@ -468,7 +468,7 @@ impl Interface {
         self.selection.on = false;
         self.drop.end_filling();
         session.use_colour_history(self.colours.history.clone());
-        session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
+        session.set_touch_settings(self.touch_settings());
         session.use_gradients(self.gradients.clone());
         self.prefs.apply(session);
         self.time_lapse.open(self.artwork_dir.as_deref(), session.edits());
@@ -516,7 +516,12 @@ impl Interface {
     /// What an artwork dragged out of the gallery becomes (Advanced settings' Drag and Drop export).
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn drag_format(&self) -> crate::files::Format {
-        crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
+        use crate::files::Format;
+        match crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(Format::Procraft) {
+            // (our own instead while the PSD plugin's export is off)
+            Format::Psd if !self.prefs.plugins.has(procraft_core::Feature::PsdExport) => Format::Procraft,
+            format => format,
+        }
     }
 
     /// Lets go of the pictures the interface keeps only to be quicker: the brush library's sample
@@ -711,7 +716,10 @@ impl Interface {
             panel_open: matches!(self.open, Some(Popover::Layers | Popover::Colour)),
         };
         let colour = srgb(self.colours.rgb());
-        self.time_lapse.record(&ctx, session, input.idle());
+        // nothing recorded while the Time-lapse plugin is off
+        if self.prefs.plugins.has(procraft_core::Feature::TimeLapse) {
+            self.time_lapse.record(&ctx, session, input.idle());
+        }
         // the brush studio over everything (the library stays open under it)
         if let Some(new) = self.library.studio.take() {
             // a brush a plugin's brush engine draws opens in that plugin's own studio
@@ -1191,6 +1199,23 @@ impl Interface {
         crate::model_picture::show(&ctx, &mut self.look, session);
         self.selection.lasso_fill = self.prefs.lasso_fill;
         self.selection.lasso_fills = self.prefs.plugins.lasso_fills();
+        // the app's own features, each shown while its built-in plugin is on
+        self.layers.vector_layers_hidden = !self.prefs.plugins.has(procraft_core::Feature::VectorLayers);
+        self.crop.pixel_art_hidden = !self.prefs.plugins.has(procraft_core::Feature::PixelArt);
+        let hidden = self.prefs.plugins.hidden_features();
+        // the drawing guide neither drawn nor followed while its plugin is off, kept as saved
+        session.set_guide_paused(hidden.contains(&procraft_core::Feature::DrawingGuides));
+        // a built-in plugin turned off while what it shows is in use
+        self.colours.palettes_hidden = hidden.contains(&procraft_core::Feature::Palettes);
+        if self.colours.palettes_hidden && self.colours.mode == crate::colours::Mode::Palettes {
+            self.colours.mode = crate::colours::Mode::Disc;
+        }
+        if self.text.editing() && hidden.contains(&procraft_core::Feature::Text) {
+            self.text.end(session, true);
+        }
+        self.quick_menu.hidden.clone_from(&hidden);
+        self.gesture_controls.hidden.clone_from(&hidden);
+        self.layers.hidden = hidden;
         self.selection.fill_opacity = self.prefs.fill_opacity;
         self.selection.pixelated = self.prefs.selection_pixelated;
         // the bars and panels that hang from the top bar hang from where it ends as it shows
@@ -1268,8 +1293,13 @@ impl Interface {
             }
             None => {}
         }
-        // a full-screen page covers the timeline, as it covers the canvas
-        if self.canvas_info.is_none() && !self.gesture_controls.open {
+        // a full-screen page covers the timeline, as it covers the canvas; it shows while the
+        // Animation Assist plugin (its Page Assist, for pages) is on
+        let assist = session.animation_settings().is_none_or(|a| {
+            use procraft_core::Feature::{AnimationAssist, PageAssist};
+            self.prefs.plugins.has(if a.pages { PageAssist } else { AnimationAssist })
+        });
+        if self.canvas_info.is_none() && !self.gesture_controls.open && assist {
             self.animation.tweens = self.prefs.plugins.tweens();
             self.animation.frame_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Frame);
             let said = self.animation.show(&ctx, &mut self.look, session, &self.colours.palettes, self.colours.harmony);
@@ -1280,8 +1310,13 @@ impl Interface {
                 crate::files::no_room(session);
             }
             self.timeline.perform_smoothing = self.prefs.timeline_perform_smoothing;
-            if let Some((said, warning)) = self.timeline.show(&ctx, &mut self.look, session, &self.prefs) {
-                self.overlays.notice(said, warning);
+            // the grid while the Timeline plugin is on (the iPad's timeline bar, likewise)
+            if self.prefs.plugins.has(procraft_core::Feature::Timeline) {
+                if let Some((said, warning)) = self.timeline.show(&ctx, &mut self.look, session, &self.prefs) {
+                    self.overlays.notice(said, warning);
+                }
+            } else {
+                self.timeline.reset(session);
             }
             // Animate: autokey on or off, the transform tool opened or ended with it; while it
             // keys a pose, its box follows the playhead
@@ -1325,7 +1360,7 @@ impl Interface {
         self.text_editor(&ctx, session);
         // a gesture setting changed: the touches follow it, and it is kept
         if self.gesture_controls.show(&ctx, &mut self.look, &self.gestures) {
-            session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
+            session.set_touch_settings(self.touch_settings());
             crate::files::keep_gestures(&self.gestures.kept());
         }
         if let Some(info) = self.canvas_info.as_mut() {
@@ -1347,8 +1382,9 @@ impl Interface {
                 None => {}
             }
         }
-        // the timeline's settings, over the canvas (a full-screen page covers them)
-        if self.canvas_shown() {
+        // the timeline's settings, over the canvas (a full-screen page covers them), while the
+        // Timeline plugin is on
+        if self.canvas_shown() && self.prefs.plugins.has(procraft_core::Feature::Timeline) {
             use crate::timeline_settings::Said;
             match self.timeline_settings.show(&ctx, &mut self.look, session, &mut self.prefs) {
                 Some(Said::Crop) => {
@@ -1819,6 +1855,8 @@ impl Interface {
         // a finished text's step goes back to editing that text first, as a step of its own
         if !self.text.editing()
             && !self.transform.on
+            // (not while the Text plugin is off: the undo is made, the text left as it is)
+            && self.prefs.plugins.has(procraft_core::Feature::Text)
             && let Some(id) = session.text_undo_layer()
             && self.text.edit(session, id)
         {
@@ -1921,8 +1959,18 @@ impl Interface {
         }
     }
 
+    /// The gesture settings as the canvas's touches take them, less QuickShape and assisted drawing
+    /// while their built-in plugins are off.
+    fn touch_settings(&self) -> procraft_core::TouchSettings {
+        self.prefs.plugins.touch_settings_shown(self.prefs.touch_settings(&self.gestures))
+    }
+
     /// A QuickMenu button's action, the menu opened at `at` (points).
     fn run_quick(&mut self, ctx: &egui::Context, session: &CanvasSession, action: QuickAction, at: egui::Pos2) {
+        // nothing for a built-in plugin's action while it is off
+        if !crate::builtins::action(&self.prefs.plugins.hidden_features(), action) {
+            return;
+        }
         let current = session.layers().into_iter().find(|l| l.current);
         let id = current.as_ref().map(|l| l.id);
         if let Some(a) = procraft_core::quick_action_adjustment(action) {
@@ -2064,7 +2112,7 @@ impl Interface {
             QuickAction::QuickshapeOn => {
                 let on = self.gestures.is_on(GesturePurpose::Quickshape, "DRAW_HOLD".into());
                 self.gestures.set(GesturePurpose::Quickshape, "DRAW_HOLD".into(), !on);
-                session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
+                session.set_touch_settings(self.touch_settings());
                 crate::files::keep_gestures(&self.gestures.kept());
             }
             QuickAction::AddText => self.add_text(ctx, session),
@@ -2169,10 +2217,11 @@ impl Interface {
         // read one after another on a thread of their own (a video's frames take seconds), what
         // each came to told on a frame after (`inserted`); a picture alone is transformed
         let transform = paths.len() == 1;
+        let vectors = self.prefs.plugins.has(procraft_core::Feature::VectorLayers);
         let (session, (done, inserting)) = (Arc::clone(session), std::sync::mpsc::channel());
         std::thread::spawn(move || {
             for path in paths {
-                if done.send((read_insert(&session, &path, private), transform)).is_err() {
+                if done.send((read_insert(&session, &path, private, vectors), transform)).is_err() {
                     return;
                 }
             }
@@ -3350,8 +3399,9 @@ impl Interface {
         let actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Adjustments);
         let turned = self.adjustments.showing_filters && (!filters.is_empty() || !actions.is_empty());
         let as_layer = self.adjustments.as_layer;
+        let hidden = self.prefs.plugins.hidden_features();
         let (shown, tapped) =
-            crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, &actions, turned, as_layer);
+            crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, &actions, turned, as_layer, &hidden);
         match tapped {
             Some(MenuRow::AsLayer) => self.adjustments.as_layer = !as_layer,
             // as an adjustment layer (those that can't be one do nothing)
@@ -3391,12 +3441,13 @@ impl Interface {
             reference: self.reference.on,
             guide: session.guide().on,
             timeline: session.timeline_info().is_some(),
+            comic_panels: self.prefs.plugins.tools().iter().any(|t| t.key == crate::comic_panels::TOOL),
             side_bar: self.side_bar_shown,
             model: self.model,
             model_flat: self.model && session.model_flat(),
             paint_through: self.model && session.paint_through(),
             svg: session.exports_svg(),
-            vectors: session.exports_vectors(),
+            vectors: session.exports_vectors() && self.prefs.plugins.has(procraft_core::Feature::VectorShare),
             plugin_exports: session.plugin_exports().into_iter().map(|e| e.label).collect(),
             plugin_controls: self.prefs.plugins.controls_in(procraft_core::PluginPlace::Canvas),
             plugin_actions: self.prefs.plugins.actions_in(procraft_core::PluginPlace::Canvas),
@@ -3416,7 +3467,7 @@ impl Interface {
             }
             Some(Act::Prefs) => {
                 self.prefs.apply(session);
-                session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
+                session.set_touch_settings(self.touch_settings());
                 self.prefs.keep();
             }
             Some(Act::SideBar) => self.side_bar_shown = !self.side_bar_shown,
@@ -4316,7 +4367,7 @@ enum Inserted {
 /// each fitted on a layer of their own at the animation's frame rate (or 15 a second; for each
 /// time a frame falls due, the video's frame nearest it; 999 at most), a moving picture's frames,
 /// or a picture on a layer of its own.
-fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -> Inserted {
+fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool, vectors: bool) -> Inserted {
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     if VIDEOS.contains(&extension.as_str()) {
         let settings = session.animation_settings();
@@ -4346,6 +4397,10 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
     let Ok(bytes) = std::fs::read(path) else { return Inserted::Failed("This picture can't be opened.") };
     // an SVG picture comes in as a vector layer: its shapes fills, its lines strokes
     if extension == "svg" {
+        // as a vector layer, while the Vector layers plugin is on
+        if !vectors {
+            return Inserted::Failed("Turn on Vector layers in Plugins to bring in SVG files.");
+        }
         let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         return if session.insert_svg(bytes, name) != 0 {
             Inserted::Vectors

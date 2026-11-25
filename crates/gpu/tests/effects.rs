@@ -1,4 +1,4 @@
-//! Adjustment layers, the pixelate, dither and vignette adjustments, and layer styles on a real GPU
+//! Adjustment layers and layer styles on a real GPU
 //! (skipped where the machine has none).
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
@@ -166,101 +166,13 @@ fn a_curves_adjustment_layer_reads_its_own_table() {
     assert!(r.abs_diff(55) <= 2 && g.abs_diff(155) <= 2 && b.abs_diff(205) <= 2, "{r} {g} {b}");
     // a new table goes up as it changes
     let same: Vec<u8> = (0..=255u8).flat_map(|v| [v, v, v, v]).collect();
-    doc.set_adjustment(a, LayerAdjustment { filter: Filter::CURVES, table: same, settings: serde_json::Value::Null });
+    doc.set_adjustment(
+        a,
+        LayerAdjustment { filter: Filter::CURVES, table: same, settings: serde_json::Value::Null },
+    );
     canvas.invalidate();
     let [r, g, b, _] = at(&composite(&gpu, &mut doc, &mut canvas), 16, 16);
     assert!(r.abs_diff(200) <= 2 && g.abs_diff(100) <= 2 && b.abs_diff(50) <= 2, "{r} {g} {b}");
-}
-
-/// The layer's pixels drawn through `filter` (destructively, as the Adjustments menu does).
-fn filtered(gpu: &Gpu, doc: &mut Document, canvas: &mut Canvas, layer: LayerId, filter: Filter) -> Vec<u8> {
-    canvas.begin_transform(layer);
-    canvas.set_filter(filter);
-    canvas.render(gpu, doc, None);
-    assert_eq!(gpu.errors(), 0, "GPU validation errors");
-    let px = canvas.read_layer(gpu, layer).unwrap();
-    canvas.end_transform(false);
-    canvas.render(gpu, doc, None);
-    px
-}
-
-#[test]
-fn pixelate_makes_each_cell_one_colour() {
-    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
-    let layer = doc.current();
-    // a hard disc: cells across its edge come out a part of the way
-    paint(&mut canvas, layer, [255, 255, 255], Vec2::new(16.0, 16.0), 14.0);
-    let px = filtered(&gpu, &mut doc, &mut canvas, layer, Filter::Pixelate { size: 8.0 });
-    for cell in [(0, 0), (8, 0), (16, 8), (24, 24), (0, 16)] {
-        let first = at(&px, cell.0, cell.1);
-        for y in cell.1..cell.1 + 8 {
-            for x in cell.0..cell.0 + 8 {
-                let p = at(&px, x, y);
-                assert!(p.iter().zip(&first).all(|(a, b)| a.abs_diff(*b) <= 1), "cell {cell:?} at {x},{y}: {p:?}");
-            }
-        }
-    }
-    assert_eq!(at(&px, 16, 16), [255, 255, 255, 255]);
-    let edge = at(&px, 0, 0)[3];
-    assert!(edge > 10 && edge < 245, "a cell across the edge: {edge}");
-}
-
-#[test]
-fn dither_breaks_a_grey_into_its_two_nearest_steps() {
-    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
-    let layer = doc.current();
-    fill(&mut canvas, layer, [128, 128, 128]);
-    for kind in [0, 1] {
-        let dither = Filter::Dither { amount: 1.0, levels: 2.0, scale: 1.0, kind, mono: true };
-        let px = filtered(&gpu, &mut doc, &mut canvas, layer, dither);
-        let mut white = 0;
-        for y in 0..W {
-            for x in 0..W {
-                let [r, g, b, a] = at(&px, x, y);
-                assert!((r == 0 || r == 255) && r == g && g == b && a == 255, "kind {kind} at {x},{y}: {r}");
-                white += usize::from(r == 255);
-            }
-        }
-        let share = white as f32 / (W * W) as f32;
-        assert!((share - 0.5).abs() < 0.1, "kind {kind}: {share} white");
-    }
-    // none of it: as it was
-    let none = Filter::Dither { amount: 0.0, levels: 2.0, scale: 1.0, kind: 0, mono: false };
-    assert_eq!(at(&filtered(&gpu, &mut doc, &mut canvas, layer, none), 5, 5), [128, 128, 128, 255]);
-}
-
-#[test]
-fn a_vignette_darkens_the_corners_and_not_the_middle() {
-    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
-    let layer = doc.current();
-    fill(&mut canvas, layer, [200, 200, 200]);
-    let dark = Filter::Vignette { amount: 1.0, size: 0.3, softness: 0.5, light: false };
-    let px = filtered(&gpu, &mut doc, &mut canvas, layer, dark);
-    assert_eq!(at(&px, 16, 16), [200, 200, 200, 255]);
-    assert!(at(&px, 0, 0)[0] < 60, "{:?}", at(&px, 0, 0));
-    assert!(at(&px, 0, 16)[0] < at(&px, 8, 16)[0], "darker further out");
-    let light = Filter::Vignette { amount: 1.0, size: 0.3, softness: 0.5, light: true };
-    let px = filtered(&gpu, &mut doc, &mut canvas, layer, light);
-    assert!(at(&px, 0, 0)[0] > 240 && at(&px, 0, 0)[3] == 255, "{:?}", at(&px, 0, 0));
-}
-
-#[test]
-fn the_new_adjustments_run_as_adjustment_layers_too() {
-    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
-    let base = doc.current();
-    fill(&mut canvas, base, [200, 200, 200]);
-    let a = doc.add_adjustment_layer(
-        "Vignette".to_owned(),
-        adjustment(Filter::Vignette { amount: 1.0, size: 0.3, softness: 0.5, light: false }),
-    );
-    let px = composite(&gpu, &mut doc, &mut canvas);
-    assert!(at(&px, 0, 0)[0] < 60 && at(&px, 16, 16)[0] == 200);
-    doc.set_adjustment(a, adjustment(Filter::Pixelate { size: 16.0 }));
-    paint(&mut canvas, base, [0, 0, 0], Vec2::new(4.0, 4.0), 3.0);
-    let px = composite(&gpu, &mut doc, &mut canvas);
-    assert_eq!(at(&px, 0, 0), at(&px, 15, 15), "one cell");
-    assert!(at(&px, 0, 0)[0] < 200 && at(&px, 0, 0)[0] > 100, "{:?}", at(&px, 0, 0));
-    assert_eq!(at(&px, 16, 16), [200, 200, 200, 255]);
 }
 
 fn styled(style: impl FnOnce(&mut LayerStyle)) -> LayerStyle {

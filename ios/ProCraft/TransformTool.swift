@@ -100,8 +100,10 @@ final class TransformTool {
     private(set) var interpolation: Interpolation
     /// Interpolation's Pixelated, for pixel art: the content keeps to whole pixels as it is moved
     /// and sized, nothing is blended whatever the interpolation, and what is turned keeps its lines
-    /// clean.
-    private(set) var pixelated: Bool
+    /// clean. Only while the Ribbon and pixel brushes plugin's Pixel art is on; off, what was set
+    /// waits for it.
+    var pixelated: Bool { pixelatedSet && PluginsModel.shared.has(.pixelArt) }
+    private var pixelatedSet: Bool
     var popup = TransformPopup.none
     /// Magnetics, snapping, and snapping's distance (1..50 points) and velocity (0..10).
     private(set) var guides: GuideSettings
@@ -119,9 +121,11 @@ final class TransformTool {
     init(model: CanvasModel) {
         self.model = model
         let d = UserDefaults.standard
-        kind = Self.kinds[d.string(forKey: Self.kindKey) ?? ""] ?? .freeform
+        let kept = Self.kinds[d.string(forKey: Self.kindKey) ?? ""] ?? .freeform
+        // Puppet while a plugin lays and bends its mesh (Puppet Warp)
+        kind = kept == .puppet && PluginsModel.shared.warps.isEmpty ? .freeform : kept
         interpolation = Self.interpolations[d.string(forKey: Self.interpolationKey) ?? ""] ?? .bilinear
-        pixelated = d.bool(forKey: Self.pixelatedKey)
+        pixelatedSet = d.bool(forKey: Self.pixelatedKey)
         advancedMesh = d.bool(forKey: Self.meshKey)
         puppet = PuppetSettings(
             expansion: d.object(forKey: Self.puppetExpansionKey) as? Float ?? 4,
@@ -151,6 +155,11 @@ final class TransformTool {
         _ = s.transformSetPixelated(on: pixelated)
         s.transformSetGuides(guides: guides)
         _ = s.transformPuppetSettings(settings: puppet)
+        // Puppet's mesh is the plugin's
+        let plugins = PluginsModel.shared
+        if !s.transformMeshWarp(plugins: plugins.store, key: plugins.warps.first?.key), kind == .puppet {
+            kind = .freeform
+        }
         guard let first = s.transformBegin() else {
             model.showNotice(s.transformRefusal())
             return false
@@ -183,9 +192,9 @@ final class TransformTool {
 
     /// Pixelated on or off: the content goes onto whole pixels at once.
     func togglePixelated() {
-        pixelated.toggle()
+        pixelatedSet.toggle()
         box = model.session.transformSetPixelated(on: pixelated) ?? box
-        UserDefaults.standard.set(pixelated, forKey: Self.pixelatedKey)
+        UserDefaults.standard.set(pixelatedSet, forKey: Self.pixelatedKey)
     }
 
     func toggleAdvancedMesh() {
@@ -552,6 +561,11 @@ private func interpolationName(_ i: Interpolation, short: Bool) -> String {
     }
 }
 
+/// How many kinds of transform the toolbar shows: Puppet while a plugin lays and bends its mesh.
+private var transformKindsShown: Int {
+    PluginsModel.shared.warps.isEmpty ? 4 : 5
+}
+
 /// The floating toolbar at the foot of the screen while transforming.
 struct TransformToolbar: View {
     let model: CanvasModel
@@ -561,14 +575,16 @@ struct TransformToolbar: View {
         let tool = model.transform
         let popup = tool.popup
         FloatingToolbar(
-            layout: ToolbarLayout(screenWidth: screenWidth, count: 7, roomy: buttonRoomy, narrow: buttonNarrow),
+            layout: ToolbarLayout(screenWidth: screenWidth, count: transformKindsShown + 2, roomy: buttonRoomy, narrow: buttonNarrow),
             onBackground: { tool.popup = .none }
         ) {
             ToolbarSegment(icon: PcIcons.freeform, label: "Freeform", selected: tool.kind == .freeform, iconSize: 43) { tool.choose(.freeform) }
             ToolbarSegment(icon: PcIcons.uniform, label: "Uniform", selected: tool.kind == .uniform, iconSize: 43) { tool.choose(.uniform) }
             ToolbarSegment(icon: PcIcons.distort, label: "Distort", selected: tool.kind == .distort, iconSize: 43) { tool.choose(.distort) }
             ToolbarSegment(icon: PcIcons.warp, label: "Warp", selected: tool.kind == .warp, iconSize: 43) { tool.choose(.warp) }
-            ToolbarSegment(icon: PcIcons.puppet, label: "Puppet", selected: tool.kind == .puppet, iconSize: 43) { tool.choose(.puppet) }
+            if let warp = PluginsModel.shared.warps.first {
+                ToolbarSegment(icon: PcIcons.puppet, label: warp.label, selected: tool.kind == .puppet, iconSize: 43) { tool.choose(.puppet) }
+            }
         } buttons: { w in
             if tool.kind == .warp {
                 ToolbarButton(icon: PcIcons.advancedMesh, label: "Advanced Mesh", active: tool.advancedMesh, width: w, iconSize: 28.8) {
@@ -611,8 +627,8 @@ struct TransformPopover: View {
     var body: some View {
         let tool = model.transform
         if tool.popup != .none {
-            let layout = ToolbarLayout(screenWidth: screen.width, count: 7, roomy: buttonRoomy, narrow: buttonNarrow)
-            let centre = layout.buttonCentre(tool.popup == .interpolation ? 5 : 0, screenWidth: screen.width)
+            let layout = ToolbarLayout(screenWidth: screen.width, count: transformKindsShown + 2, roomy: buttonRoomy, narrow: buttonNarrow)
+            let centre = layout.buttonCentre(tool.popup == .interpolation ? transformKindsShown : 0, screenWidth: screen.width)
             let left = min(max(centre - toolbarMenuWidth / 2, 0), screen.width - toolbarMenuWidth)
             ToolbarPopover(
                 arrowX: centre - left, left: left, bottom: ToolbarLayout.buttonsTop(screenHeight: screen.height),
@@ -667,7 +683,9 @@ private struct InterpolationMenu: View {
         .padding(.bottom, 10)
         // for pixel art: whole pixels moved and sized, nothing blended, turns kept clean
         ToolbarMenuGroup {
-            ToolbarSwitchRow(label: "Pixelated", on: tool.pixelated) { tool.togglePixelated() }
+            if PluginsModel.shared.has(.pixelArt) {
+                ToolbarSwitchRow(label: "Pixelated", on: tool.pixelated) { tool.togglePixelated() }
+            }
         }
     }
 }

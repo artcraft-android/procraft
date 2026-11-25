@@ -113,7 +113,7 @@ private val ScrollHintInk get() = if (Pc.light) Color(0x66000000) else Color(0x8
 
 /** What gestures can do, by icon and name on a card headed "Gesture controls" (a wide screen's). */
 @Composable
-private fun GesturePagesCard(page: GesturePurpose, onPage: (GesturePurpose) -> Unit) {
+private fun GesturePagesCard(page: GesturePurpose, shows: (GesturePurpose) -> Boolean, onPage: (GesturePurpose) -> Unit) {
     val shape = RoundedCornerShape(20.dp)
     val scroll = rememberScrollState()
     Column(Modifier.padding(start = 10.dp, top = 10.dp, bottom = 10.dp).width(320.dp).fillMaxHeight().clip(shape).background(RailFill).border(1.dp, CardEdge, shape)) {
@@ -122,7 +122,8 @@ private fun GesturePagesCard(page: GesturePurpose, onPage: (GesturePurpose) -> U
             Modifier.scrollHint(scroll).verticalScroll(scroll).padding(start = 8.dp, end = 8.dp, top = 17.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            for (p in GesturePurpose.entries) {
+            // less a built-in plugin's that is off (QuickShape, assisted drawing)
+            for (p in GesturePurpose.entries.filter(shows)) {
                 val chosen = p == page
                 Row(
                     Modifier.fillMaxWidth().height(53.dp).clip(CircleShape).background(if (chosen) Pc.Accent else Color.Transparent).clickable { onPage(p) },
@@ -169,11 +170,11 @@ fun GestureControls(vm: CanvasViewModel) {
     val wide = screen.screenWidthDp > screen.screenHeightDp
     Box(Modifier.fillMaxSize().background(ScreenFill).pointerInput(Unit) { detectTapGestures { } }) {
         if (wide) {
-            GesturePagesCard(page) { page = it }
+            GesturePagesCard(page, vm::showsGestures) { page = it }
         } else {
             val rail = rememberScrollState()
             Column(Modifier.width(81.dp).fillMaxHeight().background(RailFill).scrollHint(rail).verticalScroll(rail).padding(start = 8.dp, top = 46.dp, bottom = 20.dp)) {
-                for (p in GesturePurpose.entries) {
+                for (p in GesturePurpose.entries.filter(vm::showsGestures)) {
                     val chosen = p == page
                     Box(
                         Modifier.size(65.dp, 53.dp).clip(CircleShape).background(if (chosen) Pc.Accent else Color.Transparent).clickable { page = p },

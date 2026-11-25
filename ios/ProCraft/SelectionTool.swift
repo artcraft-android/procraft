@@ -67,8 +67,10 @@ final class SelectionTool {
     private(set) var colorFill = false
     /// Pixelated, for pixel art (in Feather's popover, the selection's edge being what it sets):
     /// the shapes drawn to select with land on whole pixels and take whole pixels only. (The Pen's
-    /// and Eraser's lassos go by their brush's Pixelated.)
-    private(set) var pixelated: Bool
+    /// and Eraser's lassos go by their brush's Pixelated.) Only while the Ribbon and pixel brushes
+    /// plugin's Pixel art is on; off, what was set waits for it.
+    var pixelated: Bool { pixelatedSet && PluginsModel.shared.has(.pixelArt) }
+    private var pixelatedSet: Bool
     private(set) var hasSelection = false
     private(set) var popup = SelectionPopup.none
     /// The feather popover's amount (0..1).
@@ -105,7 +107,7 @@ final class SelectionTool {
         let d = UserDefaults.standard
         kind = d.string(forKey: Self.kindKey).flatMap(SelectionKind.init(rawValue:)) ?? .freehand
         threshold = d.object(forKey: Self.thresholdKey) as? Float ?? 0.5
-        pixelated = d.bool(forKey: Self.pixelatedKey)
+        pixelatedSet = d.bool(forKey: Self.pixelatedKey)
         colorFill = d.bool(forKey: Self.colorFillKey)
     }
 
@@ -332,9 +334,9 @@ final class SelectionTool {
     }
 
     func togglePixelated() {
-        pixelated.toggle()
+        pixelatedSet.toggle()
         model.session.setSelectionPixelated(on: pixelated)
-        UserDefaults.standard.set(pixelated, forKey: Self.pixelatedKey)
+        UserDefaults.standard.set(pixelatedSet, forKey: Self.pixelatedKey)
     }
 
     /// Whether the shape being drawn is pixel art's: with Pixelated (a tool's own lasso, with its
@@ -502,7 +504,9 @@ struct SelectionPopover: View {
                     // the other end of the same thing: no soft edge at all, for pixel art (shapes on
                     // whole pixels, taking whole pixels only)
                     ToolbarMenuGroup {
-                        ToolbarSwitchRow(label: "Pixelated", on: tool.pixelated) { tool.togglePixelated() }
+                        if PluginsModel.shared.has(.pixelArt) {
+                            ToolbarSwitchRow(label: "Pixelated", on: tool.pixelated) { tool.togglePixelated() }
+                        }
                     }
                 } else {
                     SavedSelections(tool: tool)

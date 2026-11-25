@@ -29,6 +29,7 @@ mod brush_libraries;
 mod brush_library;
 mod brush_pictures;
 mod brushes;
+mod builtin_plugins;
 mod bundled;
 mod clipboard;
 mod colour;
@@ -50,7 +51,6 @@ mod folders;
 mod frame;
 #[cfg(test)]
 mod frame_cache_tests;
-mod frame_exports;
 mod frame_loop;
 mod gallery;
 #[cfg(test)]
@@ -91,7 +91,6 @@ mod named_layouts;
 mod open_marks;
 mod pacing;
 mod palettes;
-mod panels;
 mod pick;
 mod pickers;
 /// A picker plugin's picture compiled: whose it is, its code, the keys it reads its controls by.
@@ -101,10 +100,14 @@ mod heavy_tests;
 mod paper_picture;
 mod plugin_artwork;
 mod plugin_brushes;
+mod plugin_band;
 mod plugin_canvas;
 mod plugin_commands;
 mod plugin_file;
 mod plugin_filter;
+mod plugin_exports;
+mod plugin_tools;
+mod plugin_warps;
 mod plugin_icon;
 mod plugin_layers;
 mod plugin_panel;
@@ -195,8 +198,8 @@ use procraft_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
 
 pub use activity::{Activity, live_sessions};
 pub use adjust::{
-    ChromaticKind, DitherKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, PerspectiveKind,
-    SwipeAdjustment, VignetteKind,
+    ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, PerspectiveKind,
+    SwipeAdjustment,
 };
 pub use adjust_menu::{
     Adjustment, adjustment_groups, adjustment_label, adjustment_live, adjustment_paintable, adjustment_pencil_amount,
@@ -222,6 +225,10 @@ pub use brush_files::{
 pub use brush_libraries::BrushLibraryInfo;
 pub use brush_library::{BrushDrop, BrushDropOver, brush_drop_copies, brush_drop_place, prepare_brushes};
 pub use brushes::{BrushInfo, BrushSetInfo, HoverFill, RecentBrush, brush_previews_kept};
+pub use builtin_plugins::{
+    Feature, adjustment_feature, gesture_purpose_feature, layer_option_feature, quick_action_feature,
+};
+pub use plugin_exports::PluginShared;
 pub use clipboard::{COPY_PIXELS_A_METRE, copy_straight, picture_png, write_copy_png};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
@@ -295,7 +302,7 @@ pub use plugin_panel::{PanelBrush, PanelPoint, PanelRow, PluginPanel};
 pub use plugin_run::set_memory_available;
 pub use plugins::{
     InterfacePart, NoticeKind, PluginAction, PluginChoice, PluginControl, PluginFeature, PluginFileKind, PluginFolder,
-    PluginInfo, PluginMenuPlace, PluginOffer, PluginPart, PluginPicture, PluginPlace, PluginPressed, PluginSlider,
+    PluginInfo, PluginMenuPlace, PluginOffer, PluginPart, PluginPicture, PluginShare, PluginTool, PluginToolMode, PluginWarp, PluginPlace, PluginPressed, PluginSlider,
     PluginSource, PluginSwitch, PluginTexture, Plugins, SliderLook, plugin_file_most_bytes, plugin_slider_along,
     plugin_slider_at, plugin_slider_choice, plugin_slider_choices, plugin_slider_chosen, plugin_slider_shown,
     plugin_slider_whole,
@@ -1074,6 +1081,8 @@ pub(crate) struct State {
     /// the rectangle it was read from): what a puppet's mesh is laid over.
     transform_alpha: Option<(procraft_engine::geom::IRect, Vec<u8>)>,
     puppet_settings: transform::PuppetSettings,
+    /// The plugin's mesh warp Transform's Puppet lays and bends its mesh by, if it has one.
+    mesh_warp: Option<Arc<plugin_warps::MeshWarp>>,
     /// Selection's Pixelated: shapes land on whole pixels and take whole pixels only.
     selection_pixelated: bool,
     transform_guides: transform::GuideSettings,
@@ -1153,6 +1162,9 @@ pub(crate) struct State {
     unkept_shape: Option<Box<quickshape::KeptShape>>,
     /// Strokes follow the drawing guide even where drawing assist is off (□ held down).
     force_assist: bool,
+    /// The drawing guides' built-in plugin is off: the guide is neither drawn nor followed, the
+    /// artwork keeping it as it was saved ([`State::stroke_guide`]).
+    guide_paused: bool,
     /// Where the stroke began (canvas pixels), for assisted drawing; the guide and view as the
     /// guide editor opened.
     assist_from: Option<Vec2>,
@@ -1160,8 +1172,8 @@ pub(crate) struct State {
     /// tell: chosen then and kept to its end, so a wavering hand doesn't switch it.
     assist_angle: Option<f32>,
     pub(crate) guide_before: Option<(procraft_engine::guide::Guide, Option<View>)>,
-    /// A comic page's gutter being dragged (panels.rs).
-    pub(crate) gutter_drag: Option<panels::GutterDrag>,
+    /// A plugin's tool open (plugin_tools.rs).
+    pub(crate) plugin_tool: Option<plugin_tools::OpenTool>,
 }
 
 impl State {
@@ -1300,7 +1312,7 @@ impl State {
     fn close_painted(&mut self, open: StrokeBuilder, second: Option<StrokeBuilder>) {
         self.end_lasso_preview();
         let filled = self.fill_under_stroke(&open);
-        let guide = self.doc.stroke_guide();
+        let guide = crate::guide::stroke_guide(&self.doc, self.guide_paused);
         let Some(canvas) = self.canvas.as_mut() else { return };
         if filled {
             canvas.name_next_step("Lasso fill");
@@ -1897,7 +1909,7 @@ impl State {
         }
         let predicted = std::mem::take(&mut self.ahead_of);
         let (Some(builder), Some(canvas)) = (self.stroke.as_mut(), self.canvas.as_mut()) else { return };
-        let guide = self.doc.stroke_guide();
+        let guide = crate::guide::stroke_guide(&self.doc, self.guide_paused);
         // a dual brush's second runs ahead with it (after the stroke's own: that takes this off)
         let second_tip =
             self.second.as_deref_mut().and_then(|second| second_ahead(canvas, second, &predicted, &guide));
@@ -2707,6 +2719,7 @@ impl CanvasSession {
             transform_pixelated: false,
             transform_alpha: None,
             puppet_settings: transform::PuppetSettings::default(),
+            mesh_warp: None,
             selection_pixelated: false,
             transform_guides: transform::GuideSettings::default(),
             snap_pending: None,
@@ -2751,10 +2764,11 @@ impl CanvasSession {
             kept_shape: None,
             unkept_shape: None,
             force_assist: false,
+            guide_paused: false,
             assist_from: None,
             assist_angle: None,
             guide_before: None,
-            gutter_drag: None,
+            plugin_tool: None,
             name,
             pending_pixels: project::opened(pixels),
             canvas_failed: false,
@@ -3160,7 +3174,7 @@ impl CanvasSession {
         }
         // (a fill shown as it grows lays no stamps: the next frame shows its region)
         if fill != Some(lasso_fill::FillShown::Growing) {
-            draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &st.doc.stroke_guide(), false);
+            draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &crate::guide::stroke_guide(&st.doc, st.guide_paused), false);
         }
         st.stroke = Some(Box::new(builder));
         st.second = second_builder.map(Box::new);
@@ -3292,7 +3306,7 @@ impl Shared {
         // while the platform predicts input, what runs ahead waits for the frame (its prediction
         // follows these samples): on to the input, until a prediction comes
         let later = st.predicting;
-        if draw_samples(canvas, builder, st.second.as_deref_mut(), &canvas_samples, &st.doc.stroke_guide(), later) {
+        if draw_samples(canvas, builder, st.second.as_deref_mut(), &canvas_samples, &crate::guide::stroke_guide(&st.doc, st.guide_paused), later) {
             st.ahead = later;
             // Lasso Fill's Outline: what it goes round shown filled under it as it goes
             st.preview_stroke_fill(&[]);
@@ -3392,7 +3406,7 @@ impl CanvasSession {
         if !st.end_fill(&canvas_samples) {
             let (Some(mut builder), Some(canvas)) = (st.stroke.take().map(|b| *b), st.canvas.as_mut()) else { return };
             let mut second = st.second.take().map(|b| *b);
-            lift_samples(canvas, &mut builder, second.as_mut(), &canvas_samples, &st.doc.stroke_guide());
+            lift_samples(canvas, &mut builder, second.as_mut(), &canvas_samples, &crate::guide::stroke_guide(&st.doc, st.guide_paused));
             match st.recording.take() {
                 // on a plugin's layer, handed to the plugin
                 Some(mut recording) => {

@@ -652,7 +652,9 @@ private enum StudioRow {
 private func studioRows(_ tab: StudioTab, plugins: [PluginBrushControl]) -> [StudioRow] {
     var rows: [StudioRow] = []
     var above = StudioNeighbour.top
-    for (k, section) in tab.sections.enumerated() {
+    // a built-in plugin's sections while it is on
+    let sections = tab.sections.filter { $0.feature.map(PluginsModel.shared.has) ?? true }
+    for (k, section) in sections.enumerated() {
         var title = section.title.map { StudioRow.title($0) }
         if title == nil, let first = section.controls.first, case .about = first {
             title = .name

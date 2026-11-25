@@ -58,11 +58,13 @@ pub struct GestureControls {
     /// The page shown (it opens on the one it was last on).
     page: GesturePurpose,
     reset: Alert,
+    /// The app's own features hidden (their built-in plugins off): their pages aren't listed.
+    pub hidden: Vec<procraft_core::Feature>,
 }
 
 impl Default for GestureControls {
     fn default() -> GestureControls {
-        GestureControls { open: false, page: GesturePurpose::Smudge, reset: Alert::default() }
+        GestureControls { open: false, page: GesturePurpose::Smudge, reset: Alert::default(), hidden: Vec::new() }
     }
 }
 
@@ -73,6 +75,10 @@ impl GestureControls {
             return false;
         }
         let mut changed = false;
+        // a page hidden while it was the one shown: the first instead
+        if !crate::builtins::gesture_page(&self.hidden, self.page) {
+            self.page = GesturePurpose::Smudge;
+        }
         let screen = ctx.content_rect();
         let wide = screen.width() > screen.height();
         egui::Area::new(Id::unique("gesture controls")).fixed_pos(screen.min).order(Order::Foreground).show(
@@ -138,7 +144,7 @@ impl GestureControls {
         let title = pos2(card.left() + 24.0, card.top() + 19.0);
         text(ui.painter(), title, Align2::LEFT_TOP, "Gesture controls", 24.0, Weight::Bold, argb(INK));
         let mut y = card.top() + 65.0;
-        for p in gesture_purposes() {
+        for p in gesture_purposes().into_iter().filter(|&p| crate::builtins::gesture_page(&self.hidden, p)) {
             let row = Rect::from_min_size(pos2(card.left() + 8.0, y), vec2(card.width() - 16.0, 53.0));
             let chosen = p == self.page;
             if chosen {
@@ -169,7 +175,7 @@ impl GestureControls {
         let rail = Rect::from_min_size(screen.min, vec2(81.0, screen.height()));
         ui.painter().rect_filled(rail, 0, argb(RAIL_FILL));
         let mut y = rail.top() + 46.0;
-        for p in gesture_purposes() {
+        for p in gesture_purposes().into_iter().filter(|&p| crate::builtins::gesture_page(&self.hidden, p)) {
             let button = Rect::from_min_size(pos2(rail.left() + 8.0, y), vec2(65.0, 53.0));
             let chosen = p == self.page;
             if chosen {

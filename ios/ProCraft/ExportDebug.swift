@@ -62,12 +62,12 @@ enum ExportDebug {
                 for sound in s.timelineSounds(frame: 0) {
                     said.append("Sound \(URL(fileURLWithPath: sound.path).lastPathComponent): at \(sound.at) s, from \(sound.from) s, \(sound.length) s")
                 }
-                let zip = Sharing.exportsDir.appendingPathComponent("Sound check Harmony.zip")
-                do {
-                    let made = try HarmonyExport.export(s, to: zip)
-                    said.append("Harmony: \(made.layers) layers, \(made.drawings) drawings, \(made.frames) frames, \(made.sounds) sounds, \(zip.path)")
-                } catch {
-                    said.append("Harmony: failed, \(error)")
+                // through the Sprite Sheet and Harmony plugin, as Share makes it
+                let harmony = PluginsModel.shared.store.shares().first { $0.label == "Harmony Scene" }
+                if let harmony, let done = CanvasModel.exportPluginShare(s, harmony) {
+                    said.append("Harmony: \(done.1 ?? ""), \(done.0.map(\.path))")
+                } else {
+                    said.append("Harmony: failed (is the Sprite Sheet and Harmony plugin on?)")
                 }
                 if let url = CanvasModel.exportAnimation(s, .mp4, AnimatedChoices(fps: fps)) {
                     let asset = AVURLAsset(url: url)

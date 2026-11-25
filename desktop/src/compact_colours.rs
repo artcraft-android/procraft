@@ -181,7 +181,7 @@ impl CompactColours {
 
     /// The modes as icons at `rect` (260 by [`TABS`]); a tap shows that mode.
     pub fn tabs(&mut self, ui: &Ui, look: &mut Look, rect: Rect) {
-        if let Some(mode) = tabs_row(ui, look, rect, self.mode) {
+        if let Some(mode) = tabs_row(ui, look, rect, self.mode, false) {
             self.mode = mode;
             self.hex = None;
         }
@@ -245,10 +245,12 @@ impl CompactColours {
 }
 
 /// The modes as a row of icons, the one shown blue; returns the one tapped.
-pub(crate) fn tabs_row(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode) -> Option<Mode> {
-    let w = rect.width() / colours::MODE_TABS.len() as f32;
+/// `palettes_hidden`: the Palettes plugin is off, and Palettes isn't one.
+pub(crate) fn tabs_row(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode, palettes_hidden: bool) -> Option<Mode> {
+    let tabs: Vec<_> = colours::MODE_TABS.into_iter().filter(|t| !palettes_hidden || t.2 != Mode::Palettes).collect();
+    let w = rect.width() / tabs.len() as f32;
     let mut chosen = None;
-    for (i, (icon, _, m)) in colours::MODE_TABS.into_iter().enumerate() {
+    for (i, (icon, _, m)) in tabs.into_iter().enumerate() {
         let tab = Rect::from_min_size(pos2(rect.left() + w * i as f32, rect.top()), vec2(w, rect.height()));
         if ui.interact(tab, ui.scope_id().with(("compact tab", i)), Sense::click()).clicked() {
             chosen = Some(m);

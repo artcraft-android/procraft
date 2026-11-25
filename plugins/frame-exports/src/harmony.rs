@@ -20,9 +20,6 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use crate::document::BlendMode;
-use crate::timeline::{MaskMode, Timeline, TrackId};
-
 /// Where drawings are kept, in the scene folder.
 pub const ELEMENTS: &str = "elements";
 /// Where sounds are kept, in the scene folder.
@@ -60,7 +57,7 @@ pub struct Layer {
     /// The drawing showing at each frame; none is blank.
     pub exposures: Vec<Option<u32>>,
     /// How it blends with the layers under it (a mode Harmony has none of: normally).
-    pub blend: BlendMode,
+    pub blend: String,
 }
 
 /// A sound column: a stretch of a sound file, played from a frame.
@@ -108,36 +105,33 @@ impl Sound {
 
 /// Harmony's name (in the blending node's `blendMode`) for `mode`, as Harmony 21 and later write
 /// it; none for normal and for the modes Harmony hasn't.
-pub fn blend_keyword(mode: BlendMode) -> Option<&'static str> {
+pub fn blend_keyword(mode: &str) -> Option<&'static str> {
     Some(match mode {
-        BlendMode::Multiply => "eMULTIPLY_OVER",
-        BlendMode::Darken => "eDARKEN_OVER",
-        BlendMode::ColorBurn => "eCOLOR_BURN_OVER",
-        BlendMode::LinearBurn => "eLINEAR_BURN_OVER",
-        BlendMode::Lighten => "eLIGHTEN_OVER",
-        BlendMode::Screen => "eSCREEN_OVER",
-        BlendMode::ColorDodge => "eCOLOR_DODGE_OVER",
-        BlendMode::Add => "eLINEAR_DODGE_OVER",
-        BlendMode::Overlay => "eOVERLAY_OVER",
-        BlendMode::SoftLight => "eSOFTLIGHT_OVER",
-        BlendMode::HardLight => "eHARDLIGHT_OVER",
-        BlendMode::VividLight => "eVIVIDLIGHT_OVER",
-        BlendMode::LinearLight => "eLINEARLIGHT_OVER",
-        BlendMode::PinLight => "ePINLIGHT_OVER",
-        BlendMode::Difference => "eDIFFERENCE_OVER",
-        BlendMode::Exclusion => "eEXCLUSION_OVER",
-        BlendMode::Subtract => "eSUBTRACT_OVER",
-        BlendMode::Divide => "eDIVIDE_OVER",
-        BlendMode::Hue => "eHUE_OVER",
-        BlendMode::Saturation => "eSATURATION_OVER",
-        BlendMode::Color => "eCOLOR_OVER",
+        "Multiply" => "eMULTIPLY_OVER",
+        "Darken" => "eDARKEN_OVER",
+        "ColorBurn" => "eCOLOR_BURN_OVER",
+        "LinearBurn" => "eLINEAR_BURN_OVER",
+        "Lighten" => "eLIGHTEN_OVER",
+        "Screen" => "eSCREEN_OVER",
+        "ColorDodge" => "eCOLOR_DODGE_OVER",
+        "Add" => "eLINEAR_DODGE_OVER",
+        "Overlay" => "eOVERLAY_OVER",
+        "SoftLight" => "eSOFTLIGHT_OVER",
+        "HardLight" => "eHARDLIGHT_OVER",
+        "VividLight" => "eVIVIDLIGHT_OVER",
+        "LinearLight" => "eLINEARLIGHT_OVER",
+        "PinLight" => "ePINLIGHT_OVER",
+        "Difference" => "eDIFFERENCE_OVER",
+        "Exclusion" => "eEXCLUSION_OVER",
+        "Subtract" => "eSUBTRACT_OVER",
+        "Divide" => "eDIVIDE_OVER",
+        "Hue" => "eHUE_OVER",
+        "Saturation" => "eSATURATION_OVER",
+        "Color" => "eCOLOR_OVER",
         // Harmony spells it so
-        BlendMode::Luminosity => "eLUNINOSITY_OVER",
-        BlendMode::Normal
-        | BlendMode::Shade
-        | BlendMode::DarkerColor
-        | BlendMode::LighterColor
-        | BlendMode::HardMix => return None,
+        "Luminosity" => "eLUNINOSITY_OVER",
+        // Normal, and Shade, Darker Color, Lighter Color and Hard Mix, which Harmony hasn't
+        _ => return None,
     })
 }
 
@@ -355,7 +349,7 @@ fn xstage(scene: &Scene, id: u64) -> String {
     let blends: Vec<Option<(String, &str)>> = scene
         .layers
         .iter()
-        .map(|l| blend_keyword(l.blend).map(|k| (names.unique(&format!("{}_Blending", l.name), "Blending"), k)))
+        .map(|l| blend_keyword(&l.blend).map(|k| (names.unique(&format!("{}_Blending", l.name), "Blending"), k)))
         .collect();
     // the node view: the drawings in a row over the composite, the top layer leftmost
     let spacing = 160i64;
@@ -635,49 +629,6 @@ const READ_ATTRS: &str = r#"<enable3d val="false"/>
 <tileHorizontal val="false"/>
 <tileVertical val="false"/>"#;
 
-/// The tracks whose clips mask what track `track` shows at `frame` of `tl`, nearest first: the
-/// clip on the track below it, if it masks with that, then whatever masks that clip, and so on.
-pub fn matte_sources(tl: &Timeline, track: TrackId, frame: u32) -> Vec<TrackId> {
-    let items = tl.plan(frame).items;
-    let mut out = Vec::new();
-    let mut at = items.iter().position(|i| i.track == track);
-    while let Some((_, source)) = at.and_then(|i| items.get(i)).and_then(|i| i.mask) {
-        let Some(item) = items.get(source) else { break };
-        out.push(item.track);
-        at = Some(source);
-    }
-    out
-}
-
-/// `tl` changed to show what track `track` shows at `frame` as a layer of its own: every other
-/// track hidden but those that mask it there (see [`matte_sources`]), which only mask (a clipping
-/// mask's source, drawn too on the timeline, is left to its own layer), and its clip there
-/// blending normally (its mode is its layer's in Harmony).
-pub fn solo(tl: &mut Timeline, track: TrackId, frame: u32) {
-    let sources = matte_sources(tl, track, frame);
-    for t in &mut tl.tracks {
-        let mine = t.id == track;
-        t.hidden = !mine && !sources.contains(&t.id);
-        if t.hidden {
-            continue;
-        }
-        // (a track's own mask and blend mode are those of its clips that have none)
-        let look = t.look;
-        if mine {
-            t.look.blend = BlendMode::Normal;
-        }
-        let Some(clip) = t.clips.iter_mut().find(|c| c.covers(frame)) else { continue };
-        // the same matte, its source no longer drawn
-        let mask = if clip.mask == MaskMode::None { look.mask } else { clip.mask };
-        if mask == MaskMode::Clipping {
-            clip.mask = MaskMode::Alpha;
-        }
-        if mine {
-            clip.blend = BlendMode::Normal;
-        }
-    }
-}
-
 /// Numbers a layer's drawings as they come, a frame at a time: a picture met before (by
 /// `key`, such as a hash of its pixels) is the drawing it was then.
 #[derive(Clone, Debug, Default)]
@@ -721,35 +672,166 @@ impl<K: PartialEq> Drawings<K> {
     }
 }
 
-#[cfg(test)]
-#[path = "harmony_tests.rs"]
-mod harmony_tests;
+/// A scene being put together, a picture at a time: the background, then each track's frames.
+pub struct SceneBuilder {
+    art: crate::Artwork,
+    name: String,
+    names: Names,
+    /// The background's layer and the number its drawing is kept by.
+    background: Option<(String, Option<u32>)>,
+    tracks: Vec<TrackDrawings>,
+    /// Each drawing to write: its layer, its number there, and the number the app keeps it by.
+    drawings: Vec<(String, u32, u32)>,
+    kept: u32,
+}
+
+/// A track's drawings as they come: its layer's name, each picture by where it is painted and the
+/// hash of that, and how many frames each blend mode shows in.
+struct TrackDrawings {
+    layer: String,
+    drawings: Drawings<([u32; 4], u64)>,
+    blends: Vec<(String, u32)>,
+}
+
+impl SceneBuilder {
+    pub fn new(art: crate::Artwork) -> SceneBuilder {
+        let mut names = Names::scene();
+        let name = Names::plain(&art.name, "Scene");
+        let background = art.background.then(|| (names.unique("Background", "Background"), None));
+        let tracks = art
+            .tracks
+            .iter()
+            .map(|t| TrackDrawings { layer: names.unique(t, "Layer"), drawings: Drawings::new(), blends: Vec::new() })
+            .collect();
+        SceneBuilder { art, name, names, background, tracks, drawings: Vec::new(), kept: 0 }
+    }
+
+    /// A picture told: the number the app is to keep it by, if it is a new drawing.
+    pub fn add(&mut self, p: &crate::Picture) -> Option<u32> {
+        match p.kind {
+            crate::BACKGROUND => {
+                let (_, kept) = self.background.as_mut()?;
+                p.painted?;
+                let number = self.kept;
+                self.kept += 1;
+                *kept = Some(number);
+                Some(number)
+            }
+            crate::TRACK => {
+                let track = self.tracks.get_mut(p.track as usize)?;
+                if p.matte {
+                    track.drawings.show(None);
+                    return None;
+                }
+                let count = |blends: &mut Vec<(String, u32)>| {
+                    if p.blend.is_empty() {
+                        return;
+                    }
+                    match blends.iter_mut().find(|(b, _)| *b == p.blend) {
+                        Some((_, n)) => *n += 1,
+                        None => blends.push((p.blend.clone(), 1)),
+                    }
+                };
+                if p.held {
+                    track.drawings.hold();
+                    if track.drawings.exposures.last().copied().flatten().is_some() {
+                        count(&mut track.blends);
+                    }
+                    return None;
+                }
+                let (n, new) = track.drawings.show(p.painted.map(|at| (at, p.hash)))?;
+                count(&mut track.blends);
+                if !new {
+                    return None;
+                }
+                let number = self.kept;
+                self.kept += 1;
+                self.drawings.push((track.layer.clone(), n, number));
+                Some(number)
+            }
+            _ => None,
+        }
+    }
+
+    /// The scene folder's files, and what to say of it.
+    pub fn finish(mut self) -> (Vec<crate::File>, String) {
+        let (w, h, frames) = (self.art.width, self.art.height, self.art.frames);
+        let folder = self.name.clone();
+        let mut files = Vec::new();
+        let mut layers = Vec::new();
+        let image = |path: String, kept: u32| crate::File::Image(path, w, h, vec![[kept, 0, 0, w, h, 0, 0]]);
+        if let Some((layer, Some(kept))) = self.background.take() {
+            files.push(image(format!("{folder}/{}", drawing_path(&layer, 1)), kept));
+            layers.push(Layer {
+                name: layer,
+                drawings: 1,
+                exposures: vec![Some(1); frames as usize],
+                blend: "Normal".to_owned(),
+            });
+        }
+        for (layer, n, kept) in &self.drawings {
+            files.push(image(format!("{folder}/{}", drawing_path(layer, *n)), *kept));
+        }
+        for track in self.tracks {
+            // a track that never showed anything has no drawings to be a layer
+            if track.drawings.count() == 0 {
+                continue;
+            }
+            // a layer has one mode: the one most of its frames show with
+            let blend = track.blends.iter().max_by_key(|(_, n)| *n).map_or("Normal".to_owned(), |(b, _)| b.clone());
+            let mut exposures = track.drawings.exposures.clone();
+            exposures.resize(frames as usize, None);
+            layers.push(Layer { name: track.layer, drawings: track.drawings.count(), exposures, blend });
+        }
+        // each sound file once, named apart from the columns
+        let mut file_names = Names::default();
+        let mut named: Vec<(u32, String)> = Vec::new();
+        let mut sounds = Vec::new();
+        for s in &self.art.sounds {
+            let Some((start, clip)) = Sound::placed(s.at, s.from, s.length, self.art.fps) else { continue };
+            let file = match named.iter().find(|(f, _)| *f == s.file) {
+                Some((_, file)) => file.clone(),
+                None => {
+                    let file = format!("{}.{}", file_names.unique(&s.stem, "Sound"), s.extension);
+                    files.push(crate::File::Sound(format!("{folder}/{}", sound_path(&file)), s.file));
+                    named.push((s.file, file.clone()));
+                    file
+                }
+            };
+            sounds.push(Sound { name: self.names.unique(&s.name, "Sound"), file, start, clip });
+        }
+        let scene = Scene { name: folder.clone(), width: w, height: h, fps: self.art.fps, frames, layers, sounds };
+        // a number of its own for the scene, from what it is
+        let id = scene_id(&self.art);
+        for (file, text) in self::files(&scene, id) {
+            files.push(crate::File::Bytes(format!("{folder}/{file}"), text.into_bytes()));
+        }
+        let drawings: u32 = scene.layers.iter().map(|l| l.drawings).sum();
+        let said = format!(
+            "{} {}, {drawings} {}",
+            scene.layers.len(),
+            if scene.layers.len() == 1 { "layer" } else { "layers" },
+            if drawings == 1 { "drawing" } else { "drawings" }
+        );
+        (files, said)
+    }
+}
+
+/// A scene's id from its artwork (FNV-1a of its name, size and length).
+fn scene_id(art: &crate::Artwork) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let bytes =
+        art.name.bytes().chain(art.width.to_le_bytes()).chain(art.height.to_le_bytes()).chain(art.frames.to_le_bytes());
+    for b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xml;
-
-    pub(super) fn walk() -> Scene {
-        Scene {
-            name: "Walk".into(),
-            width: 1920,
-            height: 1080,
-            fps: 12,
-            frames: 8,
-            layers: vec![
-                Layer { name: "Background".into(), drawings: 1, exposures: vec![Some(1); 8], blend: BlendMode::Normal },
-                // 1 held 3, 2 held 2, a blank, 1 again for 2 (a cycle)
-                Layer {
-                    name: "Character".into(),
-                    drawings: 2,
-                    exposures: vec![Some(1), Some(1), Some(1), Some(2), Some(2), None, Some(1), Some(1)],
-                    blend: BlendMode::Normal,
-                },
-            ],
-            sounds: Vec::new(),
-        }
-    }
 
     #[test]
     fn names_are_plain_and_each_new() {
@@ -789,86 +871,78 @@ mod tests {
     }
 
     #[test]
-    fn the_scene_has_a_column_for_each_layer_with_its_holds() {
-        let files = files(&walk(), 0xABCD);
-        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["Walk.xstage", "Walk.aux", "scene.elementTable", "scene.versionTable"]);
-        let stage = xml::parse(&files[0].1).expect("the scene reads as XML");
-        assert_eq!(stage.name, "project");
-
-        let scene = stage.find("scene").unwrap();
-        assert_eq!(scene.attribute("id"), Some("000000000000abcd"));
-        assert_eq!(scene.attribute("nbframes"), Some("8"));
-        assert_eq!(scene.attribute("stopFrame"), Some("8"));
-        assert_eq!(stage.find("framerate").unwrap().attribute("val"), Some("12"));
-        assert_eq!(stage.find("resolution").unwrap().attribute("size"), Some("1920,1080"));
-
-        // an element for each layer, with its drawings
-        let elements = stage.child("elements").unwrap().all("element");
-        assert_eq!(elements.len(), 2);
-        assert_eq!(elements[1].attribute("elementName"), Some("Character"));
-        assert_eq!(elements[1].attribute("pixmapFormat"), Some("10"));
-        assert_eq!(elements[1].attribute("rootFolder"), Some("elements"));
-        let drawings: Vec<_> = elements[1].all("dwg").iter().map(|d| d.attribute("name").unwrap()).collect();
-        assert_eq!(drawings, ["1", "2"]);
-
-        // a column for each, its drawings exposed where they show
-        let columns = scene.child("columns").unwrap().all("column");
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[0].attribute("name"), Some("Background"));
-        let seq: Vec<_> = columns[0].all("elementSeq");
-        assert_eq!(seq.len(), 1);
-        assert_eq!(seq[0].attribute("exposures"), Some("1-8"));
-        let seq: Vec<(_, _)> = columns[1]
-            .all("elementSeq")
-            .iter()
-            .map(|s| (s.attribute("val").unwrap(), s.attribute("exposures").unwrap()))
-            .collect();
-        assert_eq!(seq, [("1", "1-3,7-8"), ("2", "4-5")]);
-        assert!(columns.iter().all(|c| c.attribute("type") == Some("0")));
-
-        // a READ node for each layer reading its column, into the composite bottom first
-        let reads: Vec<_> = stage.all("module").into_iter().filter(|m| m.attribute("type") == Some("READ")).collect();
-        assert_eq!(reads.len(), 2);
-        let element = reads[1].find("element").unwrap();
-        assert_eq!(element.attribute("col"), Some("Character"));
-        let links: Vec<_> = stage
-            .all("link")
-            .iter()
-            .map(|l| (l.attribute("out").unwrap(), l.attribute("in").unwrap(), l.attribute("inport")))
-            .collect();
-        assert_eq!(
-            links,
-            [
-                ("Composite", "Display", None),
-                ("Composite", "Write", None),
-                ("Background", "Composite", Some("0")),
-                ("Character", "Composite", Some("1")),
-            ]
-        );
+    fn a_sound_starts_on_a_whole_frame() {
+        let near = |a: Option<(u32, Range<f64>)>, b: (u32, Range<f64>)| {
+            let a = a.expect("placed");
+            a.0 == b.0 && (a.1.start - b.1.start).abs() < 1e-9 && (a.1.end - b.1.end).abs() < 1e-9
+        };
+        // on a frame: as it is
+        assert!(near(Sound::placed(0.5, 1.0, 2.0, 12), (6, 1.0..3.0)));
+        // a twentieth of a second past frame 6: that much earlier in the file, from frame 6
+        assert!(near(Sound::placed(0.55, 1.0, 2.0, 12), (6, 0.95..3.0)));
+        // too near the file's start for that: from frame 7, missing what plays before it
+        assert!(near(Sound::placed(0.55, 0.02, 2.0, 12), (7, (0.02 + 7.0 / 12.0 - 0.55)..2.02)));
+        // nothing left
+        assert_eq!(Sound::placed(0.55, 0.0, 0.01, 12), None);
+        assert_eq!(Sound::placed(f64::NAN, 0.0, 1.0, 12), None);
+        let sound = Sound { name: "S".into(), file: "S.wav".into(), start: 0, clip: 0.0..2.0 };
+        assert_eq!(sound.frames(12), 24);
+        let sound = Sound { clip: 0.0..2.01, ..sound };
+        assert_eq!(sound.frames(12), 25);
     }
 
     #[test]
-    fn the_tables_list_every_element_and_drawing() {
-        let files = files(&walk(), 1);
-        let aux = xml::parse(&files[1].1).unwrap();
-        let elements = aux.all("Element");
-        assert_eq!(elements.len(), 2);
-        assert_eq!(elements[1].attribute("Folder"), Some("Character"));
-        assert_eq!(elements[1].all("Drawing").len(), 2);
-        let table = xml::parse(&files[2].1).unwrap();
-        let ids: Vec<_> = table.all("element").iter().map(|e| e.attribute("id").unwrap()).collect();
-        assert_eq!(ids, ["1", "2"]);
-        let version = xml::parse(&files[3].1).unwrap();
-        assert_eq!(version.attribute("Name"), Some("Walk"));
-    }
-
-    #[test]
-    fn names_are_escaped_in_the_scene() {
-        let mut scene = walk();
-        scene.name = "A&B".into();
-        let files = files(&scene, 1);
-        assert!(files[3].1.contains("Name=\"A&amp;B\""));
-        assert!(xml::parse(&files[0].1).is_some());
+    fn a_scene_is_its_drawings_its_sounds_and_its_files() {
+        use crate::{Artwork, BACKGROUND, File, Picture, TRACK};
+        let art = Artwork {
+            width: 40,
+            height: 30,
+            fps: 12,
+            frames: 3,
+            name: "Walk cycle".into(),
+            tracks: vec!["Line art".into()],
+            sounds: vec![crate::Sound {
+                name: "Voice".into(),
+                file: 0,
+                stem: "voice".into(),
+                extension: "wav".into(),
+                at: 0.0,
+                from: 0.0,
+                length: 1.0,
+            }],
+            background: true,
+        };
+        let mut s = SceneBuilder::new(art);
+        let painted = Some([0, 0, 40, 30]);
+        assert_eq!(s.add(&Picture { kind: BACKGROUND, painted, hash: 1, ..Picture::default() }), Some(0));
+        let line = |hash: u64| Picture {
+            kind: TRACK,
+            painted: Some([1, 1, 2, 2]),
+            hash,
+            blend: "Multiply".into(),
+            ..Picture::default()
+        };
+        assert_eq!(s.add(&line(5)), Some(1));
+        assert_eq!(s.add(&Picture { kind: TRACK, held: true, blend: "Multiply".into(), ..Picture::default() }), None);
+        assert_eq!(s.add(&line(5)), None, "the first drawing again");
+        let (files, said) = s.finish();
+        assert_eq!(said, "2 layers, 2 drawings");
+        let paths: Vec<&str> = files
+            .iter()
+            .map(|f| match f {
+                File::Bytes(p, _) | File::Image(p, ..) | File::Sound(p, _) => p.as_str(),
+            })
+            .collect();
+        assert!(paths.contains(&"Walk_cycle/elements/Background/Background-1.png"), "{paths:?}");
+        assert!(paths.contains(&"Walk_cycle/elements/Line_art/Line_art-1.png"));
+        assert!(paths.contains(&"Walk_cycle/audio/voice.wav"));
+        assert!(paths.contains(&"Walk_cycle/Walk_cycle.xstage"));
+        let stage = files.iter().find_map(|f| match f {
+            File::Bytes(p, b) if p.ends_with(".xstage") => Some(String::from_utf8(b.clone()).unwrap()),
+            _ => None,
+        });
+        let stage = stage.unwrap();
+        assert!(stage.contains("eMULTIPLY_OVER"), "the line art blends as it showed");
+        assert!(stage.contains("exposures=\"1-3\" val=\"1\""));
     }
 }
