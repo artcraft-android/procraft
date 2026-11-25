@@ -153,7 +153,8 @@ mod timeline;
 /// The timeline panel's reading, named for the desktop's grid (the other apps read it through
 /// uniffi).
 pub use timeline::{
-    TimelineClipInfo, TimelineClipKind, TimelineInfo, TimelineKeyInfo, TimelineRepeat, TimelineRow, TimelineTrackInfo,
+    TimelineClipInfo, TimelineClipKind, TimelineInfo, TimelineKeyInfo, TimelineMask, TimelineRepeat, TimelineRow,
+    TimelineTrackInfo,
     panel::{TimelineClipKeys, TimelinePanel, TimelinePicture},
 };
 mod touch;
