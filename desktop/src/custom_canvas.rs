@@ -70,6 +70,8 @@ pub struct CustomCanvas {
     /// The preset edited (its place in the list); none for a new one.
     pub editing: Option<usize>,
     section: usize,
+    /// Time-lapse settings isn't there: the Time-lapse plugin is off.
+    pub time_lapse_hidden: bool,
     name: String,
     /// The size in the unit chosen (its place in [`UNITS`]), and the DPI.
     width: f32,
@@ -110,12 +112,15 @@ impl CustomCanvas {
                     time_lapse_quality: 1,
                     time_lapse_hevc: false,
                     profile: SRGB.into(),
+                    // the desktop's canvases are standard ones
+                    hdr: false,
                 },
             ),
         };
         CustomCanvas {
             editing,
             section: 0,
+            time_lapse_hidden: false,
             name: p.name.clone(),
             width: p.size_width,
             height: p.size_height,
@@ -148,6 +153,7 @@ impl CustomCanvas {
             time_lapse_quality: self.quality,
             time_lapse_hevc: self.hevc,
             profile: self.profile.clone(),
+            hdr: false,
         }
     }
 
@@ -226,9 +232,12 @@ impl CustomCanvas {
                 Rect::from_min_max(screen.min + vec2(10.0, 10.0), pos2(screen.left() + 329.0, screen.bottom() - 10.0));
             painter.rect_filled(rail, 20.0, argb(PANEL));
             text(&painter, rail.min + vec2(24.0, 16.0), Align2::LEFT_TOP, "Custom Canvas", 22.0, Weight::Bold, ink);
-            for (i, (label, icon, size)) in SECTIONS.into_iter().enumerate() {
+            // Time-lapse settings while the Time-lapse plugin is on
+            let hidden = self.time_lapse_hidden;
+            let shown = SECTIONS.into_iter().enumerate().filter(|(i, _)| *i != 2 || !hidden);
+            for (at, (i, (label, icon, size))) in shown.enumerate() {
                 let row = Rect::from_min_size(
-                    pos2(rail.left() + 8.0, rail.top() + 59.0 + 62.0 * i as f32),
+                    pos2(rail.left() + 8.0, rail.top() + 59.0 + 62.0 * at as f32),
                     vec2(304.0, 52.0),
                 );
                 let chosen = i == self.section;

@@ -235,6 +235,25 @@ final class StudioModel {
         padMenuOpen = false
     }
 
+
+    /// Asks first, then resets: it can't be undone.
+    func askReset() {
+        model.question = Question(
+            title: "Reset this brush?",
+            message: "It goes back to its last reset point, or to how it came. It can't be undone.",
+            action: "Reset", icon: nil
+        ) { [weak self] in self?.reset() }
+    }
+
+    /// Asks first, then makes a new reset point: it can't be undone.
+    func askNewResetPoint() {
+        model.question = Question(
+            title: "New reset point?",
+            message: "Resetting the brush will bring it back to how it is now. It can't be undone.",
+            action: "Make", icon: nil, destructive: false
+        ) { [weak self] in self?.newResetPoint() }
+    }
+
     /// Sets the brush aside as it is now, for resetting it to go back to.
     func newResetPoint() {
         session.studioNewResetPoint()
@@ -386,6 +405,7 @@ final class StudioModel {
     /// What was cut or copied in the app (only where it is painted), or else a picture on the
     /// clipboard, as a source image; none if there isn't one.
     func pastedSource() -> Data? {
+        // what was cut or copied here first, cut to its drawing
         if let own = model.copySource() {
             return own
         }

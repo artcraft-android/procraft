@@ -11,7 +11,7 @@ private var capsuleChosen: Color { themed(0xFF46_4646, 0xFFA5_A5A5) }
 private var headerBand: Color { themed(0xFF1D_1D1D, 0xFFDF_E2E3) }
 private var headerCapsule: Color { themed(0xFF1A_1A1A, 0xFFF5_F8F9) }
 private var headerEdge: Color { themed(0xFF37_3737, 0xFFDC_DEDF) }
-private let doneBlue = Color(argb: 0xFF01_90FF)
+private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 
 // light over the dark surround; dark with the light interface
 private var frameLine: Color { themed(0xCCFF_FFFF, 0xCC30_3030) }
@@ -319,7 +319,8 @@ private struct CropSizeReadout: View {
     }
 }
 
-/// The settings popover: the size (aspect locked or not), DPI, resampling, snapping, the turn.
+/// The settings popover: the size (aspect locked or not), DPI, resampling, Pixelated (pixel art's
+/// resampling), snapping, the turn.
 private struct CropSettings: View {
     let tool: CropTool
     let shown: CropShown
@@ -388,6 +389,11 @@ private struct CropSettings: View {
                     // rows a point apart, no line between them, as measured
                     Color.clear.frame(height: 1)
                     switchRow("Resample canvas", on: shown.resample) { tool.change { $0.cropSetResample(on: !shown.resample) } }
+                    Color.clear.frame(height: 1)
+                    // while the Ribbon and pixel brushes plugin's Pixel art is on
+                    if PluginsModel.shared.has(.pixelArt) {
+                        switchRow("Pixelated", on: shown.pixelated) { tool.change { $0.cropSetPixelated(on: !shown.pixelated) } }
+                    }
                     Color.clear.frame(height: 1)
                     switchRow("Snapping", on: shown.snapping) { tool.change { $0.cropSetSnapping(on: !shown.snapping) } }
                 }

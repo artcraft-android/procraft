@@ -48,6 +48,12 @@ extension Color {
 
 /// Interface colours and sizes, in points as measured.
 enum Pc {
+    /// `blue`, one of the interface's own blues, or the accent a plugin gives in its place.
+    static func tinted(_ blue: Color) -> Color {
+        guard let accent = Look.shared.accentGiven else { return blue }
+        return Color(argb: 0xFF00_0000 | (accent & 0xFF_FFFF))
+    }
+
     /// A colour for the interface as it is now: `dark`, or `light` when the light interface is on.
     private static func pick(_ dark: UInt32, _ light: UInt32) -> Color {
         Color(argb: Look.shared.light ? light : dark)
@@ -83,9 +89,9 @@ enum Pc {
 
     static var panel: Color { pick(0xF726_2626, 0xF7E6_E6E6) }
     static var row: Color { pick(0xFF30_3030, 0xFFD8_D8D8) }
-    static let rowSelected = Color(argb: 0xFF00_76FD)
+    static var rowSelected: Color { Pc.tinted(Color(argb: 0xFF00_76FD)) }
     /// The interface's blue, or the accent a plugin gives in its place.
-    static var accent: Color { Color(argb: Look.shared.accentGiven.map { 0xFF00_0000 | $0 } ?? 0xFF00_76FD) }
+    static var accent: Color { Pc.tinted(Color(argb: 0xFF00_76FD)) }
     static var text: Color { pick(0xFFFF_FFFF, 0xFF22_2222) }
     static var textDim: Color { pick(0x99FF_FFFF, 0x9900_0000) }
     static var disabled: Color { pick(0x4DFF_FFFF, 0x4D00_0000) }
@@ -96,7 +102,7 @@ enum Pc {
     static var bar: Color { frost(0xE61C_1C1C, 0xCFE6_E6E6) }
     static var barText: Color { pick(0xFFAA_AAAA, 0xFF3B_3B3B) }
     static var barGlyph: Color { pick(0xFFC7_C7C7, 0xFF37_3737) }
-    static let barGlyphSelected = Color(argb: 0xFF00_76FD)
+    static var barGlyphSelected: Color { Pc.tinted(Color(argb: 0xFF00_76FD)) }
     static var actionDisc: Color { pick(0xFF14_1414, 0xFFED_EDED) }
     static var actionGlyph: Color { pick(0xFF96_9696, 0xFF64_6464) }
     static var colorRing: Color { pick(0xFF96_9696, 0xFF69_6969) }

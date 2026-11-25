@@ -353,32 +353,90 @@ fn unzip_model(bytes: &[u8]) -> Option<Zipped> {
     Some(Zipped { name, model, files })
 }
 
-/// Whether a zip holding `names` is a model's artwork: its folder, as
-/// [`CanvasSession::export_model_artwork`] writes it.
+/// Whether a zip holding `names` is an artwork of ours, whole: its folder, as
+/// [`CanvasSession::export_model_artwork`] and [`CanvasSession::export_artwork`] write it (a
+/// model's, or one on a timeline).
 pub(crate) fn is_model_artwork<'n>(mut names: impl Iterator<Item = &'n str>) -> bool {
-    let (mut artwork, mut model) = (false, false);
-    names.any(|n| {
-        artwork |= n == "artwork.json";
-        model |= !n.contains('/') && n.starts_with("model.") && is_model_name(n);
-        artwork && model
-    })
+    names.any(|n| n == crate::gallery::ARTWORK_FILE)
 }
 
-/// Every file under `dir` into `zip`, named by its path from `root`.
-fn zip_folder(zip: &mut procraft_engine::zip::ZipWriter, root: &Path, dir: &Path) -> std::io::Result<()> {
+/// The artwork folder `dir`, every file in it, as a zip at `path`; `done` hears how far it has
+/// come (0..1). Its files are packed side by side on a few threads, a group at a time (so only
+/// so much is held besides the archive), those already compressed (videos, sounds, JPEGs) stored
+/// as they are.
+pub(crate) fn zip_artwork_folder(dir: &Path, path: &Path, done: impl Fn(f32)) -> Result<(), MobileError> {
+    use procraft_engine::zip::{Ready, ZipWriter};
+    /// Files packed together hold about this much between them, bytes.
+    const GROUP: u64 = 96 << 20;
+    let mut files = Vec::new();
+    folder_files(dir, dir, &mut files).map_err(|e| file_error("saving", e))?;
+    let total = files.iter().map(|f| f.2).sum::<u64>().max(1);
+    let mut zip = ZipWriter::new();
+    let (mut rest, mut packed) = (files.as_slice(), 0u64);
+    while !rest.is_empty() {
+        let (mut count, mut size) = (0, 0);
+        for f in rest {
+            if count > 0 && size + f.2 > GROUP {
+                break;
+            }
+            size += f.2;
+            count += 1;
+        }
+        let (group, after) = rest.split_at(count);
+        let ready = procraft_engine::par::side_by_side(group, |(name, file, _)| {
+            fs::read(file).map(|bytes| Ready::of(&bytes, !arrives_compressed(name)))
+        });
+        for ((name, ..), ready) in group.iter().zip(ready) {
+            let ready = ready.ok_or_else(|| file_error("saving", "a file couldn't be packed"))?;
+            zip.add_ready(name, ready.map_err(|e| file_error("saving", e))?);
+        }
+        packed += size;
+        rest = after;
+        done(packed as f32 / total as f32);
+    }
+    let bytes = zip.finish();
+    write_atomically(path, |p| crate::storage::write(p, &bytes).map_err(|e| file_error("saving", e)))
+}
+
+/// Whether a file named `name` is of a kind already compressed, which deflating wouldn't shrink.
+fn arrives_compressed(name: &str) -> bool {
+    let extension = name.rsplit_once('.').map_or("", |(_, e)| e).to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "mp4"
+            | "mov"
+            | "m4v"
+            | "m4a"
+            | "mp3"
+            | "aac"
+            | "ogg"
+            | "opus"
+            | "flac"
+            | "jpg"
+            | "jpeg"
+            | "heic"
+            | "webp"
+            | "zip"
+    )
+}
+
+/// Every file under `dir`, with its name in a zip of `root` (its path from there) and its size.
+fn folder_files(root: &Path, dir: &Path, files: &mut Vec<(String, std::path::PathBuf, u64)>) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
+        let entry = entry?;
+        let path = entry.path();
         if path.is_dir() {
-            zip_folder(zip, root, &path)?;
+            folder_files(root, &path, files)?;
         } else if let Ok(name) = path.strip_prefix(root) {
             let name: Vec<String> = name.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-            zip.add(&name.join("/"), &fs::read(&path)?);
+            files.push((name.join("/"), path.clone(), entry.metadata()?.len()));
         }
     }
     Ok(())
 }
 
-/// Unpacks a model's artwork (see [`CanvasSession::export_model_artwork`]) from file `path` into
+/// Unpacks an artwork's folder (see [`CanvasSession::export_model_artwork`] and
+/// [`CanvasSession::export_artwork`]) from file `path` into
 /// the empty folder `dir`: false, with nothing kept, if it isn't one. Nothing goes outside `dir`.
 #[uniffi::export]
 pub fn unpack_model_artwork(path: String, dir: String) -> bool {
@@ -1870,12 +1928,11 @@ impl CanvasSession {
     /// copy of the app: its folder zipped, the model, every texture set's layers and how it was
     /// seen.
     pub fn export_model_artwork(&self, dir: String, path: String) -> Result<(), MobileError> {
+        self.exported(0.0);
         self.save(dir.clone())?;
-        let root = Path::new(&dir);
-        let mut zip = procraft_engine::zip::ZipWriter::new();
-        zip_folder(&mut zip, root, root).map_err(|e| file_error("saving", e))?;
-        let bytes = zip.finish();
-        write_atomically(Path::new(&path), |p| crate::storage::write(p, &bytes).map_err(|e| file_error("saving", e)))
+        zip_artwork_folder(Path::new(&dir), Path::new(&path), |done| self.exported(0.1 + 0.85 * done))?;
+        self.exported(1.0);
+        Ok(())
     }
 
     /// Writes the model as a glTF binary at `path`, for a viewer that shows it in the room: as
@@ -2948,7 +3005,7 @@ impl State {
             let [r, g, b, _] = canvas.read_composite_pixel(gpu, tx, ty)?;
             Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
         });
-        Some(crate::pick::Pick { rgb, side, pixels })
+        Some(crate::pick::Pick { rgb, stops: 0.0, side, pixels })
     }
 
     /// A tool that works on the texture, not through the camera (a transform, Liquify, Clone), is
@@ -3162,7 +3219,7 @@ impl State {
             || self
                 .doc
                 .layer(current)
-                .is_none_or(|l| self.doc.is_locked(l.id) || l.kind == LayerKind::Group || l.text.is_some())
+                .is_none_or(|l| self.doc.is_locked(l.id) || l.kind == LayerKind::Group || l.is_made())
         {
             return;
         }

@@ -174,6 +174,51 @@ impl Mask {
         m
     }
 
+    /// As [`Mask::polygon`], for pixel art: each pixel whose middle is inside taken whole and no
+    /// other at all, so no edge pixel is partly selected.
+    pub fn polygon_hard(width: u32, height: u32, points: &[Vec2]) -> Mask {
+        let mut m = Mask::empty(width, height);
+        let pts: Vec<Vec2> = points.iter().copied().filter(|p| p.is_finite()).collect();
+        if pts.len() < 3 {
+            return m;
+        }
+        let w = width as usize;
+        let edges: Vec<(Vec2, Vec2)> = pts.iter().zip(pts.iter().cycle().skip(1)).map(|(a, b)| (*a, *b)).collect();
+        let (lo, hi) = pts.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
+        let (y_lo, y_hi) = (lo.max(0.0) as usize, (hi.max(0.0).ceil() as usize).min(height as usize));
+        let reached = m.data.get_mut(y_lo * w..y_hi * w).unwrap_or_default();
+        by_bands(reached, w, |first, rows| {
+            let mut crossings: Vec<(f32, i32)> = Vec::new();
+            for (k, row) in rows.chunks_mut(w.max(1)).enumerate() {
+                // through the row's middles
+                let sy = (y_lo + first + k) as f32 + 0.5;
+                crossings.clear();
+                for &(a, b) in &edges {
+                    if (a.y <= sy) != (b.y <= sy) {
+                        let x = a.x + (sy - a.y) / (b.y - a.y) * (b.x - a.x);
+                        crossings.push((x, if b.y > a.y { 1 } else { -1 }));
+                    }
+                }
+                crossings.sort_by(|p, q| p.0.total_cmp(&q.0));
+                let mut winding = 0;
+                for pair in crossings.windows(2) {
+                    let [(x0, d), (x1, _)] = pair else { continue };
+                    winding += d;
+                    if winding == 0 {
+                        continue;
+                    }
+                    // the pixels whose middles lie from x0 up to x1
+                    let from = (x0 - 0.5).ceil().max(0.0) as usize;
+                    let to = ((x1 - 0.5).ceil().max(0.0) as usize).min(w);
+                    if let Some(span) = row.get_mut(from..to) {
+                        span.fill(255);
+                    }
+                }
+            }
+        });
+        m
+    }
+
     /// Joins `other` to this selection.
     pub fn combine(&mut self, other: &Mask, how: Combine) {
         for (a, &b) in self.data.iter_mut().zip(&other.data) {
@@ -1064,5 +1109,30 @@ mod tests {
         let all = Mask::by_colour(6, 1, &px, (0, 0), 1.0);
         assert!(all.data.iter().all(|&v| v == 255));
         assert!(Mask::by_colour(6, 1, &px, (9, 0), 0.5).is_empty());
+    }
+
+    #[test]
+    fn a_hard_polygon_takes_whole_pixels_only() {
+        // a square with its corners on whole pixels: just the pixels between them
+        let square = [Vec2::new(2.0, 1.0), Vec2::new(5.0, 1.0), Vec2::new(5.0, 4.0), Vec2::new(2.0, 4.0)];
+        let m = Mask::polygon_hard(8, 8, &square);
+        for y in 0..8 {
+            for x in 0..8 {
+                let inside = (2..5).contains(&x) && (1..4).contains(&y);
+                assert_eq!(m.data[y * 8 + x], if inside { 255 } else { 0 }, "{x} {y}");
+            }
+        }
+        // a triangle: no pixel is partly taken, where the soft one's edge pixels are
+        let triangle = [Vec2::new(1.0, 1.0), Vec2::new(7.0, 2.0), Vec2::new(3.0, 7.0)];
+        let hard = Mask::polygon_hard(8, 8, &triangle);
+        assert!(hard.data.iter().all(|&v| v == 0 || v == 255));
+        assert!(hard.data.contains(&255));
+        assert!(Mask::polygon(8, 8, &triangle).data.iter().any(|&v| v != 0 && v != 255));
+        // nothing of it off the canvas, and too few points make nothing
+        assert!(
+            Mask::polygon_hard(8, 8, &[Vec2::new(-5.0, -5.0), Vec2::new(20.0, -5.0), Vec2::new(20.0, 20.0)]).data.len()
+                == 64
+        );
+        assert!(Mask::polygon_hard(8, 8, &square[..2]).is_empty());
     }
 }

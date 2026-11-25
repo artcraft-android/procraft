@@ -86,6 +86,8 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
         when {
             vm.guideEditing -> vm.closeGuideEditor(keep = false)
             vm.cropRect != null -> vm.endCrop(false)
+            vm.pluginTool.tool != null -> vm.closePluginTool()
+            vm.timelineSettingsOpen -> vm.closeTimelineSettings()
             vm.lightingStudioOpen -> vm.closeLightingStudio(keep = false)
             vm.studioOpen -> vm.closeStudio(keep = false)
             vm.transformPopup != TransformPopup.NONE -> vm.transformPopup = TransformPopup.NONE
@@ -148,16 +150,24 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             // the drawing guide is the canvas's: under every bar and panel
             GuideOverlay(vm)
             if (vm.transforming) TransformOverlay(vm)
-            if (vm.selecting) SelectionOverlay(vm, Pc.barShown)
+            // (and the Paint or Erase tool's lasso shapes as they are drawn)
+            if (vm.selecting || vm.lassoToolOn) SelectionOverlay(vm, Pc.barShown)
+            // on a timeline: the frame the transform keys; the motion path of the block under the
+            // playhead; and a move about to be performed, which takes the next touch on the canvas
+            if (vm.transforming) AutokeyBadge(vm)
+            MotionPathOverlay(vm)
+            PerformOverlay(vm)
             vm.picking?.let { pick ->
                 val pickingZ = if (pick.fromReference) 1f else 0f
                 Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))
                 if (!vm.barsHidden) PickingBar(Modifier.offset(y = Pc.barShown).zIndex(pickingZ), pick.fromReference)
             }
             // the bars fade out as the interface hides, and back
-            val barsShown = androidx.compose.animation.core.animateFloatAsState(if (vm.barsHidden) 0f else 1f, Motion.bars(), label = "bars").value
+            // (the Texture Packer takes the bars away while it is open)
+            val packing = vm.texturePacker != null
+            val barsShown = androidx.compose.animation.core.animateFloatAsState(if (vm.barsHidden || packing) 0f else 1f, Motion.bars(), label = "bars").value
             // with the interface hidden, a button in the top left brings it back
-            if (barsShown < 1f) {
+            if (barsShown < 1f && !packing) {
                 Box(
                     Modifier.offset(x = 20.dp).size(44.dp).graphicsLayer { alpha = 1f - barsShown }
                         .pointerInput(Unit) { detectTapGestures { if (vm.barsHidden) vm.toggleBars() } },
@@ -266,7 +276,7 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
                     }
                 }
                 androidx.compose.animation.AnimatedVisibility(
-                    vm.showSideBar && !sideGone && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
+                    vm.showSideBar && !sideGone && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.pluginTool.tool == null && vm.textInfo == null &&
                         vm.opacityLayer == null &&
                         (vm.adjustment == null || vm.adjustPencil),
                     if (sideMoved != null) {
@@ -329,18 +339,31 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
                     }
                 }
             }
+            EraserBandUi(vm)
             NoticeBand(vm)
             DropBandUi(vm)
             // a full-screen page covers the timeline, as it covers the canvas; the panels open over it
-            val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
-                vm.animatedExport != null || vm.modelAnimatedExport != null
-            if (!vm.barsHidden && !pageOver) AnimationBar(vm)
-            // the bottom toolbars rise from below the screen, and drop away
+            val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.pluginTool.tool != null || vm.timeLapseReplaying ||
+                vm.animatedExport != null || vm.modelAnimatedExport != null || vm.pluginShare != null
+            // while their plugins are on (on a timeline there is no Animation Assist: the core takes its frames over)
+            val timelineShown = vm.has(io.github.artcraftandroid.procraft.core.Feature.TIMELINE)
+            if (!vm.barsHidden && !pageOver) {
+                if (vm.animationShown) AnimationBar(vm)
+                if (timelineShown) TimelineGridBar(vm)
+            }
+            // the timeline's settings card, over the canvas and its bars
+            if (vm.timelineSettingsOpen && !pageOver && timelineShown) TimelineSettingsCard(vm)
+            // the bottom toolbars rise from below the screen, and drop away (over the timeline's
+            // bar, not on it: they and their menus stand as much higher as it is tall)
+            val overTimeline = Modifier.offset(y = -vm.timeline.gridLift)
+            val screenWidth = maxWidth
+            val screenHeight = maxHeight
             FloatableBottom(
                 vm,
                 io.github.artcraftandroid.procraft.core.LayoutPiece.TRANSFORM,
                 vm.transforming && !vm.barsHidden,
-                goesWith = { if (vm.transforming && !vm.barsHidden) TransformPopover(vm, maxWidth, maxHeight) },
+                raise = vm.timeline.gridLift,
+                goesWith = { if (vm.transforming && !vm.barsHidden) Box(overTimeline) { TransformPopover(vm, screenWidth, screenHeight) } },
             ) { TransformToolbar(vm, maxWidth) }
             BrushCursor(vm)
             // the Reference window floats over the bars and the canvas's own marks; the panels,
@@ -493,10 +516,13 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             }
             TouchCompanion(vm)
             CropOverlay(vm)
+            vm.texturePacker?.let { TexturePackerOverlay(vm, it) }
+            PluginToolOverlay(vm)
             if (vm.textInfo != null) TextEditor(vm)
             RasterizePrompt(vm)
             vm.animatedExport?.let { AnimatedExport(vm, it) }
             vm.modelAnimatedExport?.let { ModelAnimatedExport(vm, it) }
+            vm.pluginShare?.let { PluginShareExport(vm, it) }
             // full-screen pages slide up over everything, and back down
             androidx.compose.animation.AnimatedVisibility(
                 vm.canvasInfoOpen,
@@ -564,6 +590,7 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             if (vm.adjustment == Adjustment.PERSPECTIVE_BLUR) PerspectivePuck(vm)
             if (vm.recoloring) RecolorReticle(vm)
             QuickShapeHandles(vm)
+            VectorNodes(vm)
             CopyPastePanel(vm)
             QuickMenu(vm)
             LayerChoice(vm)
@@ -579,7 +606,8 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             val shownPanel = androidx.compose.runtime.remember { arrayOfNulls<Adjustment>(1) }
             if (bottomPanel != null) shownPanel[0] = bottomPanel
             val bottomPiece = if (shownPanel[0] == Adjustment.LIQUIFY) io.github.artcraftandroid.procraft.core.LayoutPiece.LIQUIFY else io.github.artcraftandroid.procraft.core.LayoutPiece.ADJUSTING
-            FloatableBottom(vm, bottomPiece, bottomPanel != null) {
+            // (Liquify's stands where it is: it is a piece of its own)
+            FloatableBottom(vm, bottomPiece, bottomPanel != null, raise = if (shownPanel[0] == Adjustment.LIQUIFY) 0.dp else vm.timeline.gridLift) {
                 shownPanel[0]?.let {
                     when (it) {
                         Adjustment.HSB -> HsbPanel(vm, Modifier)
@@ -604,7 +632,8 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
                 vm,
                 io.github.artcraftandroid.procraft.core.LayoutPiece.SELECTION,
                 vm.selecting && !vm.barsHidden,
-                goesWith = { if (vm.selecting && !vm.barsHidden) SelectionPopover(vm, maxWidth, maxHeight) },
+                raise = vm.timeline.gridLift,
+                goesWith = { if (vm.selecting && !vm.barsHidden) Box(overTimeline) { SelectionPopover(vm, screenWidth, screenHeight) } },
             ) { SelectionToolbar(vm, maxWidth) }
             GuideEditor(vm)
             LightingStudio(vm)

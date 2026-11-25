@@ -9,19 +9,30 @@
 pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("brush-extras", include_bytes!("../bundled-plugins/brush-extras.procraft-plugin")),
     ("colour-tools", include_bytes!("../bundled-plugins/colour-tools.procraft-plugin")),
+    ("comic-panels", include_bytes!("../bundled-plugins/comic-panels.procraft-plugin")),
     ("edit-layout", include_bytes!("../bundled-plugins/edit-layout.procraft-plugin")),
+    ("frame-exports", include_bytes!("../bundled-plugins/frame-exports.procraft-plugin")),
     ("infinite-plugins", include_bytes!("../bundled-plugins/infinite-plugins.procraft-plugin")),
     ("interface-look", include_bytes!("../bundled-plugins/interface-look.procraft-plugin")),
     ("keyboard-shortcuts", include_bytes!("../bundled-plugins/keyboard-shortcuts.procraft-plugin")),
     ("krita-brushes", include_bytes!("../bundled-plugins/krita-brushes.procraft-plugin")),
     ("layer-toolbox", include_bytes!("../bundled-plugins/layer-toolbox.procraft-plugin")),
+    ("pixel-effects", include_bytes!("../bundled-plugins/pixel-effects.procraft-plugin")),
     ("pop-up-palette", include_bytes!("../bundled-plugins/pop-up-palette.procraft-plugin")),
+    ("puppet-warp", include_bytes!("../bundled-plugins/puppet-warp.procraft-plugin")),
     ("radial-segments", include_bytes!("../bundled-plugins/radial-segments.procraft-plugin")),
+    ("selection-lasso-fill", include_bytes!("../bundled-plugins/selection-lasso-fill.procraft-plugin")),
     ("storage-folder", include_bytes!("../bundled-plugins/storage-folder.procraft-plugin")),
+    ("stroke-preview-opacity", include_bytes!("../bundled-plugins/stroke-preview-opacity.procraft-plugin")),
     ("tweening", include_bytes!("../bundled-plugins/tweening.procraft-plugin")),
-    ("vector-layers", include_bytes!("../bundled-plugins/vector-layers.procraft-plugin")),
     ("view-tools", include_bytes!("../bundled-plugins/view-tools.procraft-plugin")),
 ];
+
+/// The Vector layers plugin, as packed for v0.0.6. It doesn't come with this app, whose
+/// vector layers are the core's own (`vector_layer.rs`): it is kept only for the tests of plugins'
+/// kinds of layer, which draw with it.
+#[cfg(test)]
+pub(crate) const VECTOR_LAYERS_FIXTURE: &[u8] = include_bytes!("../test-plugins/vector-layers.procraft-plugin");
 
 #[cfg(test)]
 mod tests {

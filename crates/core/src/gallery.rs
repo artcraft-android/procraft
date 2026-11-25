@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const ARTWORK_FILE: &str = "artwork.json";
+pub(crate) const ARTWORK_FILE: &str = "artwork.json";
 const STACK_FILE: &str = "stack.json";
 /// The folders' order, one name a line, first first.
 const ORDER_FILE: &str = "order.txt";
@@ -343,7 +343,7 @@ fn modified(path: &Path) -> i64 {
     fs::metadata(path).and_then(|m| m.modified()).map_or(0, millis)
 }
 
-fn name_of(path: &Path) -> String {
+pub(crate) fn name_of(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
@@ -396,7 +396,7 @@ fn sweep_imports(root: &Path) {
     }
 }
 
-fn folders(at: &Path) -> Vec<PathBuf> {
+pub(crate) fn folders(at: &Path) -> Vec<PathBuf> {
     fs::read_dir(at).map_or_else(
         |_| Vec::new(),
         |entries| entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir()).collect(),
@@ -971,7 +971,8 @@ impl ArtworkStore {
 /// isn't read to find out): how Import takes it.
 #[derive(uniffi::Enum, Debug, PartialEq, Eq)]
 pub enum ZipKind {
-    /// A model's artwork, whole.
+    /// An artwork of ours, whole: its folder (a model's, or one on a timeline), as
+    /// [`crate::unpack_model_artwork`] unpacks it.
     ModelArtwork,
     /// Not an archive that can be read.
     NotZip,

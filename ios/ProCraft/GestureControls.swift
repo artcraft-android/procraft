@@ -16,7 +16,7 @@ private var trackOff: Color { themed(0xFF1D_1D1D, 0xFFE9_E9EB) }
 private var knobOff: Color { themed(0xFF33_3333, 0xFFD0_D0D0) }
 private var cardEdge: Color { themed(0xFF37_3737, 0xFFDA_DADA) }
 private var pageInk: Color { themed(0xFF79_7979, 0xFF3E_3E3E) }
-private let doneBlue = Color(argb: 0xFF01_90FF)
+private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 /// Where a wide screen's page starts and ends, beside the card of what gestures can do.
 private let wideContentStart: CGFloat = 358
 private let wideContentEnd: CGFloat = 28
@@ -48,7 +48,8 @@ struct GestureControls: View {
     let model: CanvasModel
 
     private var pages: [GesturePurpose] {
-        gesturePurposes()
+        // less a built-in plugin's that is off (QuickShape, assisted drawing)
+        gesturePurposes().filter(PluginsModel.shared.shows)
     }
 
     private var rail: some View {

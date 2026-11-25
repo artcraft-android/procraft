@@ -9,6 +9,11 @@ build the file on your own computer (see [Building it](#building-it)) and share 
 For now the samples in [`plugins/`](../plugins) also come inside the app, packed: see
 [The plugins that come with the app](#the-plugins-that-come-with-the-app).
 
+The Plugins page also lists the app's own features as built-in plugins (Timeline, HDR, Effects and
+the rest), tagged "built in", first. They have no file and can't be removed, only turned off, and they
+start on. Their ids start `procraft.`, which a plugin file can't take. See
+[`docs/design/plugins-everything.md`](design/plugins-everything.md).
+
 A plugin holds one or both of these:
 
 - **Code**, which changes how the app behaves. It's a WebAssembly module, run under limits by an
@@ -101,8 +106,8 @@ plugin do.
 `hooks` lists the hooks the code uses, and only a plugin that holds `"hooks"` may have it. Code
 needs at least one hook, one action (see [Actions](#actions)), one kind of artwork (see
 [Artworks of its own](#artworks-of-its-own)), one kind of layer (see
-[Layers of its own](#layers-of-its-own)) or one brush engine (see
-[Brush engines of its own](#brush-engines-of-its-own)). `interface` is 1 here; actions, permissions, panels,
+[Layers of its own](#layers-of-its-own)), one brush engine (see
+[Brush engines of its own](#brush-engines-of-its-own)), one export, one mesh warp or one tool. `interface` is 1 here; actions, permissions, panels,
 the `picker` hook and kinds of artwork need 2, kinds of layer 3, brush engines 4, several filters
 5, more than eight controls, or a picker's picture that reads its controls, 6, the `hide_notices`
 and `floating_panels` hooks 7, the `gesture_lock`, `view_look`, `paper` and `reference_windows`
@@ -116,7 +121,8 @@ picture, actions in the Layers panel, `set_control` and the `colour_panel` hook 
 the `paper` hook's grain 15, [features](#features), a row in the brush studio kept as a plugin it
 takes the place of kept it, and the marks of one it takes the place of 16, a feature taken from a
 plugin that stays and a set of brushes under a switch 19, the `panel_layout` hook 20, and
-[`folder` controls](#folders) and the `artwork_saved`, `video_exported` and `gallery_opened` hooks 22.
+[`folder` controls](#folders) and the `artwork_saved`, `video_exported` and `gallery_opened` hooks 22,
+exports of the animation 23, and mesh warps, tools and the `layers.edit` permission 24.
 
 ### Brushes it comes with
 
@@ -410,6 +416,16 @@ module's own code would in the app:
 
 What one makes waits for `read_answer` until the next call to either, so a module makes room for it
 first, by its length or size.
+
+From interface 24, least squares too: a symmetric positive definite matrix kept by its envelope (a
+skyline), factored and solved by the app, about a hundred times as fast as interpreted code. A
+[mesh warp](#mesh-warps) bends its mesh this way on every frame of a drag.
+
+| Function | Does |
+|---|---|
+| `band_factor(first: i32, n: i32, values: i32) -> i32` | Factors the matrix of `n` rows whose first columns (`u32` each, at most the row's own) are at `first` and whose entries, each row's from its first column to the diagonal, one row after another (`f64` each), are at `values`: the number the factor is kept by, 0 if it isn't positive definite or is too big (a million rows, 32 million entries) |
+| `band_solve(band: i32, b: i32, n: i32) -> i32` | Solves the kept matrix for the `n` numbers at `b` (`f64` each), in place: 1 if it did |
+| `band_drop(band: i32)` | Lets a kept factor go. A copy of the code keeps at most 64; another lets the oldest go |
 
 ### The crate
 
@@ -992,6 +1008,19 @@ than closing it (a tap) or fading it away (a drag). The panel's own button still
 procraft_pin_panels() -> i32
 ```
 
+### `lasso_fill`
+
+Whether Lasso Fill is offered (not 0): Color Fill's Lasso Fill switch, and the Paint and Erase tools'
+own lassos, taken up by holding the tool's button while Lasso Fill is on. With it, a shape drawn with
+a selection tool (or the tool's lasso) is filled with the paint colour, or erased, on the current
+layer as one undo step, and nothing stays selected.
+
+```
+procraft_lasso_fill() -> i32
+```
+
+It only says they're offered: drawing the shapes and filling them stay the app's. With no plugin on
+it, the apps show neither, and a shape the core is asked to fill is selected as ever.
 Edit layout's Panels stay open, which the app comes with, answers yes while it is on.
 
 ### `panel_layout`
@@ -1105,6 +1134,27 @@ to the same (not 0), as one undo step. A layer that isn't picked still goes alon
 ```
 procraft_opacity_together() -> i32
 ```
+
+### `stroke_preview_opacity`
+
+How strongly a stroke shows while it is being drawn, as a share of how it will be kept: 0 (not at
+all) to 1 (as it is).
+
+```
+procraft_stroke_preview_opacity(tool: i32) -> f32
+```
+
+`tool` is what the stroke does: 0 paint, 1 erase, 2 smudge, 3 light. The app asks as the stroke
+begins and with each move of the pen, so a `live` slider moved while a stroke is being drawn changes
+that stroke, all of it. It only says how the stroke shows meanwhile: once the pen lifts, the stroke
+is kept at its own opacity, as if no plugin were on the hook. Paint laid into its layer as it goes
+(wet paint, a smudge) fades back towards the layer as it was before the stroke. An answer outside 0
+to 1, or not a number, stops the plugin. Several plugins on this hook each have a say, and their
+answers multiply. The brush studio's drawing pad, an adjustment painted on and a model being painted
+show their strokes as they are.
+
+The Stroke preview opacity plugin the app comes with answers by its slider (5% to 100%) for paint and
+the light tool, and for the eraser and the smudge too with its switch on.
 
 ### `randomise_brush`
 
@@ -1479,6 +1529,7 @@ says what each permission lets the plugin do.
 | `notice` | `notice` |
 | `panel` | `show_panel`, `close_panel` (see [Panels](#panels)), `set_control` (interface 12) |
 | `view` | `view_turn() -> f32`, how far the canvas is turned on the screen (radians, clockwise, -π to π), and `turn_view(radians: f32)`, which turns it there about the middle of the window, its zoom and what is in the middle kept, settling into place (interface 8) |
+| `layers.edit` | None: a [tool's](#tools) answers make its edits (interface 24) |
 
 The module imports them from `"procraft"`, and the app checks each one's types. It exports
 `procraft_action(index: i32) -> i32`, called with the action's place in `actions`; it returns 0.
@@ -1651,7 +1702,7 @@ procraft_canvas_load() -> i32                                  // 0 if it took t
 procraft_canvas_tool(tool: i32, colour: i32, size: f32, opacity: f32)   // if it exports it
 ```
 
-`procraft_canvas_tool` is told what each stroke starts with: the tool (0 paint, 1 erase, 2 smudge),
+`procraft_canvas_tool` is told what each stroke starts with: the tool (0 paint, 1 erase, 2 smudge, 3 light),
 the colour (`0xRRGGBBAA`), the brush's width in canvas pixels, and its opacity (0 to 1).
 
 - A touch's `phase` is 0 down, 1 moved, 2 up, or 3 called off (a second finger made it a gesture).
@@ -1823,7 +1874,7 @@ all little-endian. A reader passes over ids it doesn't know, so a later app can 
 
 | Id | Field |
 |---|---|
-| 1 | The tool, u8: 0 paint, 1 mask (the eraser, laid as it erased), 2 smudge |
+| 1 | The tool, u8: 0 paint, 1 mask (the eraser, laid as it erased), 2 smudge, 3 light |
 | 2 | The samples, 32 bytes each: x, y (canvas pixels), pressure, tilt, azimuth and roll as 32-bit floats, then the milliseconds since the first sample as a 64-bit float |
 | 3, 4 | The colour and the secondary colour, three 32-bit floats each, sRGB 0 to 1 |
 | 5, 6 | The size and opacity sliders, 32-bit floats, 0 to 1 |
@@ -1853,7 +1904,8 @@ The kit's `layer` module writes all of this. Implement `kit::layer::Layer` and a
   its symmetry's copies, `paths`). It cuts samples into a new item (`with_samples`), and keeps the
   record as it came.
 
-`plugins/vector-layers` is one to start from. It keeps each brush once, and its card chooses what
+The `vector-layers` plugin (here vector layers are built into the core, and the plugin is kept
+only packed, as a test fixture) is one to start from. It keeps each brush once, and its card chooses what
 the eraser does, and what a selection takes:
 
 - Eraser: Mask (as it starts) keeps an erasing stroke as an item that hides what is under it, so
@@ -2157,6 +2209,52 @@ code in `filters/<key>.wgsl`, the controls it reads, and the switch it comes und
 - One under a switch is listed only while that switch is on.
 - Such a plugin has no `filter.wgsl`. It can hold code as well.
 
+## Exports of the animation
+
+Code written to interface 23 can make files of the animation for Share: a sprite sheet, a scene
+for another app. The pixels stay the app's: it draws the frames, tells the plugin about each
+picture, keeps the ones the plugin asks it to, and puts together the pictures the plugin lays out.
+The plugin decides what goes where, and writes every file's text.
+
+```json
+"exports": [
+  { "key": "sprite_sheet", "label": "Sprite Sheet", "asks": "frames",
+    "controls": ["size", "layout", "padding"], "size": "size", "transparent": "transparent" },
+  { "key": "harmony", "label": "Harmony Scene", "asks": "tracks", "zip": true, "sounds": true }
+]
+```
+
+- `asks` is what the app draws: `frames`, each of the animation's frames whole, or `tracks`, each
+  drawing track alone, frame by frame, through the mattes below it, and the background on its own.
+- `controls` are those of the plugin's controls that Share's sheet for it shows (with none, Share
+  makes it at once). `size` names a slider whose value is the longest side drawn (0 full size), and
+  `transparent` a switch that leaves the background out.
+- `zip` puts its files in one zip named for the artwork; otherwise each is shared as it is, and its
+  paths are names alone.
+- `sounds` hands it the animation's sounds, each file it can't read as it is (not WAV or AIFF)
+  copied as WAV first.
+- Up to four. Code with exports needs no hook besides.
+
+Its code exports `procraft_export_in(len) -> ptr` and `procraft_export_out() -> ptr`, where
+records go in and out, and:
+
+- `procraft_export_begin(export, len) -> i32`: the export at that place in `exports` begins, told
+  the artwork (its size as drawn, frame rate, frames, name, tracks, sounds); below 0 to make
+  nothing.
+- `procraft_export_picture(len) -> i32`: each picture drawn, told where it is painted, a hash of
+  that, and whether it holds the one before (then not drawn again) or only mattes the track
+  above; the number the app is to keep it by, or below 0 to leave it.
+- `procraft_export_finish() -> i32`: its plan, its length, at `procraft_export_out()`: each file's
+  path and its bytes, a picture laid out from parts of those it kept, or a sound's file; and what
+  to say when it's done.
+
+The records and their fields are written down at the top of
+[`crates/core/src/plugin_exports.rs`](../crates/core/src/plugin_exports.rs). Its code may spend 2
+billion and take 30 seconds on each call, and hold 256 MB: a picture never goes in. The pictures
+it lays out are at most 32,768 pixels across or down.
+
+`plugins/frame-exports` is the sample: the sprite sheet and the Harmony scene.
+
 ### What is refused
 
 The file is read before anything runs. It's refused if the text is over 64 KiB, doesn't parse, or
@@ -2270,6 +2368,100 @@ much as that layer does. Hidden, it does nothing.
 - Its row shows a filter badge on an empty thumbnail; the app tells it as `filter` in `LayerInfo` (its
   filter's name).
 - A flattened file has it, as the canvas shows it. A layered file has it as an empty layer.
+
+`plugins/pixel-effects` is a small sample: Dither and Vignette, each a filter layer that reads
+only its own pixel.
+
+## Mesh warps
+
+Code written to interface 24 can lay a mesh over what is transformed and bend it by pins: Transform's
+Puppet. The app hands the plugin what is painted, the plugin hands back a mesh of triangles, and the
+app keeps it: it finds where touches and pins land on it, draws it, and warps the pixels through it
+on the GPU (a vector layer's points through its triangles). As pins are put, dragged and turned, the
+app tells the plugin where each is on the mesh and where it has been taken, and the plugin answers
+where every point of the mesh goes, and the turn about each pin.
+
+```json
+"warps": [{ "key": "puppet", "label": "Puppet" }]
+```
+
+`label` is its name on Transform's bar, where Puppet shows while a plugin with a warp is on (the
+first one's). Up to four. Code with warps needs no hook besides.
+
+Its code exports `procraft_warp_in(len) -> ptr` and `procraft_warp_out() -> ptr`, where records go
+in and out, and:
+
+- `procraft_warp_mesh(warp, len) -> i32`: the mesh the warp at that place in `warps` lays over what
+  is painted, as cells (one byte a cell, each one or more pixels on a side: at most 262,144 of them),
+  with Transform's settings for it (how far past what is painted it reaches, about how many
+  triangles across); its points and triangles, the length of the answer at `procraft_warp_out()`,
+  or below 0 for none.
+- `procraft_warp_bend(len) -> i32`: the mesh it laid last bent by the pins told (each a triangle,
+  the weights of its corners, where it has been taken, and the turn it holds or none); where every
+  point goes and the turn about each pin, or below 0 to leave the mesh at rest.
+
+The records and their fields are written down at the top of
+[`crates/core/src/plugin_warps.rs`](../crates/core/src/plugin_warps.rs). A copy of its code is
+started for Transform and kept while it is open, so it keeps what it made ready from one bend to the
+next. Laying a mesh may spend 4 billion steps and take 10 seconds; a bend, which comes with every
+frame of a drag, 2 billion and 4 seconds, and it should take a few milliseconds: build the sums in
+the code and let the [band utilities](#utilities) solve them. It may hold 256 MB.
+
+`plugins/puppet-warp` is the sample: the mesh traced round what is painted and refined into
+triangles about as wide as Transform asks, and bent as rigidly as it can be by its pins. Laying a
+mesh over a drawing 1,800 pixels square takes it about 0.4 seconds (0.8 at the densest), putting a
+pin 45 milliseconds (about 0.3 seconds at the densest), and each frame of a drag 6 (25 at the
+densest), on an M-series Mac in the interpreter.
+
+## Tools
+
+Code written to interface 24 can have tools, opened from the Actions panel's Canvas tab, whose
+touches go to the plugin: Comic Panels. The app tells it what happens; the plugin answers with what
+to show over the canvas and edits to the layers, which the app makes and draws. Edits need the
+`layers.edit` permission.
+
+```json
+"permissions": ["layers.edit"],
+"tools": [
+  {
+    "key": "panels", "label": "Comic panels", "fit": true,
+    "modes": [
+      { "label": "Cut", "hint": "Drag across panels to cut them" },
+      { "label": "Move", "hint": "Drag a gutter, or the page's edge, to move it" }
+    ]
+  }
+]
+```
+
+`label` is its row in the Canvas tab and its header's title. `modes` are buttons on the header (the
+hint shows under it while one is chosen; up to four), beside the app's Undo and Done; `fit` shows the
+whole canvas under the header while it's open. A pinch zooms, and cancels the touch under way. Up
+to four tools.
+
+Its code exports `procraft_tool_in(len) -> ptr` and `procraft_tool_out() -> ptr`, and
+`procraft_tool_touch(tool, len) -> i32`: the tool at that place in `tools` told what happened (it
+opened, the artwork changed under it with an undo, or a touch went down, moved, lifted or was
+cancelled; where, in canvas pixels; the mode chosen; how many canvas pixels a point of the screen
+spans; the canvas's size; whether it's an animation; and each panel's frame and shape). Its answer,
+the length at `procraft_tool_out()`, or below 0 for nothing, holds:
+
+- shapes to show: corners in canvas pixels, closed or not, drawn as a guide (dashed) or as what the
+  touch draws;
+- edits: a panel's shape set, or a new panel made (a group of its frame, white with a border, and an
+  empty layer clipped to it) just above another or on top of the stack, named, with that panel's
+  border or one as wide as it says, its layer current or not;
+- what becomes of them: shown as they are while the touch goes on, kept as one step undo takes
+  back (with those shown since the touch began, under a name it gives), or gone back to how the
+  layers were;
+- what the app says, and whether the tool closes.
+
+The records and their fields are written down at the top of
+[`crates/core/src/plugin_tools.rs`](../crates/core/src/plugin_tools.rs). Each call may spend 200
+million steps and take a second. The edits are the app's to make and draw, so what a tool made opens
+and shows as it was with its plugin off or removed.
+
+`plugins/comic-panels` is the sample: a page made of the canvas the first time, cuts across panels
+with a gutter between their halves, and gutters dragged.
 
 ## When a plugin stops
 
@@ -2420,7 +2612,8 @@ layers' editors, interface 19 a feature taken from a plugin that stays (`takes`)
 brushes under a switch and given as a plugin's it takes the place of (`brushes`), and an artwork's
 values kept for one it takes the place of, interface 20 the `panel_layout` hook, and interface 22
 `folder` controls (one the whole plugin's, in a plugin of features) and the `artwork_saved`,
-`video_exported` and `gallery_opened` hooks. What comes under a switch at the top of the list (a menu and
+`video_exported` and `gallery_opened` hooks, interface 23 exports of the animation, and interface 24
+mesh warps, tools with the `layers.edit` permission, and the band utilities. What comes under a switch at the top of the list (a menu and
 a row in the brush studio too), taking the place of other plugins, a menu of its own, and controls in
 the Canvas tab, on a key or kept with each artwork need no newer interface: an older app shows every
 control, leaves the others where they are, shows no menu and keeps every control with the plugin. What a

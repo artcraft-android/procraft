@@ -223,6 +223,7 @@ impl State {
     fn sharp_wanted(&self, to_screen: Affine) -> bool {
         let plain = self.doc.background_visible
             && self.doc.animation.is_none()
+            && self.doc.timeline.is_none()
             && self.plugin_dim <= 0.0
             && self.stroke.is_none()
             && self.recording.is_none()

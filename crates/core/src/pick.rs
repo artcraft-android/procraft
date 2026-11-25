@@ -11,6 +11,9 @@ pub struct Pick {
     /// The colour under the point (0xRRGGBB): the canvas's, or the current layer's when a plugin
     /// says to read that (none where it is clear); none when the point is off the canvas.
     pub rgb: Option<u32>,
+    /// On an HDR canvas, how many stops above white the colour under the point is lit (`rgb` is
+    /// that colour brought down to white): 0 for a colour within white, and on a standard canvas.
+    pub stops: f32,
     /// The window around the point as it is shown, `side` × `side` RGBA8, rows top to bottom.
     pub side: u32,
     pub pixels: Vec<u8>,
@@ -82,10 +85,20 @@ impl CanvasSession {
                 let un = |c: u32| ((c * 255 + a / 2) / a.max(1)).min(255);
                 (a > 0).then(|| un(r) << 16 | un(g) << 8 | un(b))
             })
+        } else if canvas.is_hdr() {
+            // the light above white kept, as stops
+            let lit = at.and_then(|p| canvas.read_composite_pixel_wide(gpu, p.x as u32, p.y as u32));
+            let (rgb, stops) = lit.map_or((None, 0.0), |[r, g, b, a]| {
+                let a = if a > 0.0 { a } else { 1.0 };
+                let (colour, stops) = procraft_engine::hdr::above_white([r / a, g / a, b / a]);
+                let [r, g, b] = colour.map(|c| (c * 255.0).round() as u32);
+                (Some(r << 16 | g << 8 | b), stops)
+            });
+            return Some(Pick { rgb, stops, side, pixels });
         } else {
             at.and_then(|p| canvas.read_composite_pixel(gpu, p.x as u32, p.y as u32))
                 .map(|[r, g, b, _]| u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
         };
-        Some(Pick { rgb, side, pixels })
+        Some(Pick { rgb, stops: 0.0, side, pixels })
     }
 }

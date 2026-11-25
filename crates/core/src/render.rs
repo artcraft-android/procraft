@@ -1,13 +1,13 @@
 //! The render thread: owns the window's surface and draws a frame whenever something changed.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use procraft_engine::profile::Profile;
 use procraft_gpu::{Gpu, wgpu};
 
 use crate::Shared;
-use crate::frame::{configure, configure_with, screen_profile};
+use crate::frame::{configure, configure_extended, configure_with, offers_extended, screen_profile};
 use crate::frame_loop::Acquired;
 
 /// The window drawn into: Android's native window, or the iPad app's `CAMetalLayer`.
@@ -17,6 +17,7 @@ type Window = ndk::native_window::NativeWindow;
 type Window = crate::layer::Layer;
 
 pub(crate) fn run(shared: Arc<Shared>, window: Window) {
+    let came = Instant::now();
     let own = shared.lock().gpu.as_ref().map(|g| g.instance.clone());
     // the app's device (waited for while it is being made), else one made for this window and
     // kept for every artwork after
@@ -118,6 +119,8 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
     crate::frame_loop::draw_loop(&shared, &mut screen, || {
         showing.shown();
         if !std::mem::replace(&mut pipelines_kept, true) {
+            // (until then the window shows nothing: what a slow start looks like from outside)
+            log::info!("the canvas first showed {} ms after its window came", came.elapsed().as_millis());
             keep_pipelines(&shared);
         }
     });
@@ -141,10 +144,22 @@ struct WindowScreen {
 impl crate::frame_loop::Screen for WindowScreen {
     type Image = wgpu::SurfaceTexture;
 
-    fn configure(&mut self, gpu: &Gpu, size: (u32, u32), wide: bool) -> Option<(wgpu::TextureFormat, Profile)> {
+    fn configure(
+        &mut self,
+        gpu: &Gpu,
+        size: (u32, u32),
+        wide: bool,
+        hdr: bool,
+    ) -> Option<(wgpu::TextureFormat, Profile)> {
         let caps = self.caps.get_or_insert_with(|| self.surface.get_capabilities(&gpu.adapter));
-        self.config = configure_with(gpu, &self.surface, caps, size, wide);
+        // an HDR canvas in the screen's extended range, where it has one
+        let extended = if hdr { configure_extended(gpu, &self.surface, caps, size) } else { None };
+        self.config = extended.or_else(|| configure_with(gpu, &self.surface, caps, size, wide));
         self.config.as_ref().map(|c| (c.format, screen_profile(c)))
+    }
+
+    fn extended_offered(&mut self, gpu: &Gpu) -> bool {
+        offers_extended(self.caps.get_or_insert_with(|| self.surface.get_capabilities(&gpu.adapter)))
     }
 
     fn acquire(&mut self) -> Acquired<wgpu::SurfaceTexture> {
@@ -231,7 +246,7 @@ pub(crate) fn project(shared: Arc<Shared>, window: Window) {
             size = wanted;
             let st = shared.lock();
             let Some(gpu) = st.gpu.as_ref() else { break };
-            config = configure(gpu, &surface, size, wants_wide);
+            config = configure(gpu, &surface, size, wants_wide, st.doc.range.is_high());
             wide = wants_wide;
             drawn = None;
         }

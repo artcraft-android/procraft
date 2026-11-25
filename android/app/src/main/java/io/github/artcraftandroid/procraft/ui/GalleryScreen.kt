@@ -157,6 +157,13 @@ fun GalleryScreen(vm: CanvasViewModel) {
     var selecting by remember { mutableStateOf(false) }
     val selected = remember { mutableStateListOf<String>() }
     var moreOpen by remember { mutableStateOf(false) }
+    // the workspaces' list open, a workspace's name being asked for, and one asked about deleting
+    var workspacesOpen by remember { mutableStateOf(false) }
+    var namingWorkspace by remember { mutableStateOf<WorkspaceNaming?>(null) }
+    // the first workspace's gallery while the Workspaces plugin is off
+    val workspacesOn = vm.has(io.github.artcraftandroid.procraft.core.Feature.WORKSPACES)
+    LaunchedEffect(workspacesOn) { vm.followWorkspacesPlugin() }
+    var deletingWorkspace by remember { mutableStateOf<WorkspaceDeleting?>(null) }
     // Share's formats, open for these artworks
     var sharing by remember { mutableStateOf<GalleryShare?>(null) }
     // artworks waiting for their PDF's quality (several go into one, named as the share says)
@@ -220,7 +227,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
             with(headerDensity) { titleSize.width.toDp().value },
             selecting,
             headerConfig.screenWidthDp > headerConfig.screenHeightDp,
-            vm.openStack != null,
+            // (no Stack, as in a stack, while the Gallery stacks plugin is off)
+            vm.openStack != null || !vm.has(io.github.artcraftandroid.procraft.core.Feature.GALLERY_STACKS),
         )
         val titleHeight = with(headerDensity) { titleSize.height.toDp() }
         // the middle of More in the title row, for its list to hang from
@@ -240,7 +248,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     },
                     onMove = vm::moveInGallery,
                     onTakeOut = vm::takeOutOfStack,
-                    onStack = vm::dropOnto,
+                    // onto another only while the Gallery stacks plugin is on
+                    onStack = vm::dropOnto.takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.GALLERY_STACKS) },
                     onFiles = vm::importFiles,
                 ),
             ),
@@ -273,6 +282,12 @@ fun GalleryScreen(vm: CanvasViewModel) {
             } else {
                 GalleryHeader(
                     stack = vm.openStack?.name,
+                    // the workspaces while their plugin is on
+                    workspace = vm.workspace.name.takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.WORKSPACES) },
+                    onWorkspaces = {
+                        moreOpen = false
+                        workspacesOpen = !workspacesOpen
+                    },
                     fit = fit,
                     titleHeight = titleHeight,
                     onMore = { moreOpen = !moreOpen },
@@ -518,7 +533,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                                         val h = ((shown?.height ?: cell.thumb.toPx()) * scale).toInt()
                                                         val touch = cellAt[0] + c.position - (shown?.topLeft ?: cellAt[0])
                                                         val held = android.graphics.Point((touch.x * scale).toInt(), (touch.y * scale).toInt())
-                                                        if (io.github.artcraftandroid.procraft.gallery.startArtworkDrag(view, a, vm.store.root, w, h, held)) dragging = a.dir.name
+                                                        if (io.github.artcraftandroid.procraft.gallery.startArtworkDrag(view, a, vm.store.root, w, h, held, psd = vm.has(io.github.artcraftandroid.procraft.core.Feature.PSD_EXPORT))) dragging = a.dir.name
                                                         break
                                                     }
                                                 }
@@ -605,6 +620,32 @@ fun GalleryScreen(vm: CanvasViewModel) {
                 vm.newArtwork(w, h)
             }
         }
+        // the workspaces, hanging from their button in the middle of the title row
+        if (workspacesOpen) Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { workspacesOpen = false } })
+        MenuPresence(workspacesOpen && vm.openStack == null, androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)) { look ->
+            WorkspacesPanel(
+                Modifier.offset(x = (maxWidth - 300.dp) / 2, y = 60.dp).then(look),
+                workspaces = vm.workspaceList,
+                showing = vm.workspace,
+                onPick = { picked ->
+                    workspacesOpen = false
+                    endSelecting()
+                    vm.showWorkspace(picked)
+                },
+                onNew = {
+                    workspacesOpen = false
+                    namingWorkspace = WorkspaceNaming()
+                },
+                onRename = { renamed ->
+                    workspacesOpen = false
+                    namingWorkspace = WorkspaceNaming(renamed)
+                },
+                onDelete = { gone ->
+                    workspacesOpen = false
+                    deletingWorkspace = WorkspaceDeleting(gone, vm.workspaceArtworkCount(gone))
+                },
+            )
+        }
         if (moreOpen) Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { moreOpen = false } })
         // under More, kept 4 from the screen's edge: what the title row has no room for
         val morePlace = popoverPlace(250.dp, moreCentre, maxWidth, minRight = 4.dp)
@@ -664,9 +705,10 @@ fun GalleryScreen(vm: CanvasViewModel) {
         shown?.let { share ->
             val density = LocalDensity.current.density
             val from = share.from?.let { r -> androidx.compose.ui.geometry.Rect(r.left / density, r.top / density, r.right / density, r.bottom / density) }
-            val place = formatsPlace(from, maxWidth, maxHeight, shareCentre)
+            val psd = vm.has(io.github.artcraftandroid.procraft.core.Feature.PSD_EXPORT)
+            val place = formatsPlace(from, maxWidth, maxHeight, shareCentre, psd)
             MenuPresence(sharing != null, place.origin) { look ->
-                ImageFormats(Modifier.offset(x = place.left, y = place.top).then(look), place.side, place.arrowAt) { format ->
+                ImageFormats(Modifier.offset(x = place.left, y = place.top).then(look), place.side, place.arrowAt, psd) { format ->
                     sharing = null
                     swiped = null
                     val animated = CanvasViewModel.Animated.entries.firstOrNull { it.title == format }
@@ -782,6 +824,38 @@ fun GalleryScreen(vm: CanvasViewModel) {
         RecoveryProgress(recovery, recovered)
     }
 
+    // a workspace's name asked for (a new one's, shown at once, or another name), and one deleted
+    // with its artworks after asking
+    Alert(
+        namingWorkspace,
+        title = { n -> if (n.renamed != null) "Rename Workspace" else "New Workspace" },
+        message = { "" },
+        action = if (namingWorkspace?.renamed != null) "Rename" else "Create",
+        destructive = false,
+        field = namingWorkspace?.typed,
+        onField = { typed -> namingWorkspace = namingWorkspace?.copy(typed = typed) },
+        onCancel = { namingWorkspace = null },
+        onAction = { n ->
+            val name = n.typed.trim()
+            if (name.isNotEmpty()) {
+                if (n.renamed != null) vm.renameWorkspace(n.renamed, name) else vm.newWorkspace(name)
+                endSelecting()
+            }
+            namingWorkspace = null
+        },
+    )
+    Alert(
+        deletingWorkspace,
+        title = { d -> "Delete “${d.workspace.name}”?" },
+        message = { d -> d.message },
+        action = "Delete",
+        icon = PcIcons.Trash,
+        onCancel = { deletingWorkspace = null },
+        onAction = { d ->
+            vm.deleteWorkspace(d.workspace)
+            deletingWorkspace = null
+        },
+    )
     // deleting what Select picked (a stack with its artworks), or one swiped to
     Alert(
         deletingSelected,
@@ -850,6 +924,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
 @Composable
 private fun GalleryHeader(
     stack: String?,
+    workspace: String?,
+    onWorkspaces: () -> Unit,
     fit: io.github.artcraftandroid.procraft.core.GalleryHeaderFit,
     titleHeight: Dp,
     onMore: () -> Unit,
@@ -862,7 +938,11 @@ private fun GalleryHeader(
     onImport: () -> Unit,
     onPhoto: () -> Unit,
 ) {
-    Box(Modifier.fillMaxWidth().height(55.dp)) {
+    BoxWithConstraints(Modifier.fillMaxWidth().height(55.dp)) {
+        // the workspaces are the gallery's: in a stack the middle is its name's
+        if (stack == null && workspace != null) {
+            WorkspaceButton(workspace, workspaceButtonRoom(maxWidth), Modifier.align(Alignment.TopCenter).padding(top = 10.dp), onWorkspaces)
+        }
         // into a stack the title changes at once; back out, the stack's name fades out as the
         // gallery's fades in
         androidx.compose.animation.AnimatedContent(
@@ -906,14 +986,28 @@ private fun GalleryHeader(
                     GalleryTitle(name, ink, fit, Modifier)
                 }
             } else {
-                // as wide as there is room beside the capsule, the name on one line in it
+                // as wide as there is room beside the capsule, the name on one line in it, and the
+                // app's version beside it, small and thin on the same baseline
+                val context = androidx.compose.ui.platform.LocalContext.current
+                val version = remember(context) { versionName(context) }
                 Box(Modifier.padding(start = 32.dp, top = 11.dp).size(fit.titleRoom.dp, titleHeight), contentAlignment = Alignment.CenterStart) {
-                    GalleryTitle(
-                        "ProCraft",
-                        Pc.GalleryTitle,
-                        fit,
+                    Row(
                         Modifier.clickable(remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null, onClick = onAbout),
-                    )
+                    ) {
+                        GalleryTitle("ProCraft", Pc.GalleryTitle, fit, Modifier.weight(1f, fill = false).alignByBaseline())
+                        Text(
+                            version,
+                            color = Pc.GalleryTitle,
+                            fontSize = 17.sp * fit.titleScale,
+                            // the bundled Inter stops at Regular: the system sans has the thin weights
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif,
+                            fontWeight = FontWeight.Light,
+                            letterSpacing = 0.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.padding(start = 8.dp).alignByBaseline(),
+                        )
+                    }
                 }
             }
         }
@@ -1191,7 +1285,7 @@ private fun galleryDrop(
     onEnded: () -> Unit,
     onMove: (GalleryEntry, Int) -> Unit,
     onTakeOut: (GalleryEntry) -> Unit,
-    onStack: (Artwork, GalleryEntry) -> Unit,
+    onStack: ((Artwork, GalleryEntry) -> Unit)?,
     onFiles: (List<android.net.Uri>) -> Unit,
 ): Modifier {
     val now = androidx.compose.runtime.rememberUpdatedState(entries)
@@ -1273,7 +1367,7 @@ private fun galleryDrop(
                     p.y > places.gridHeight - near -> 1
                     else -> 0
                 }
-                at = places.grid?.let { dropAt(it, now.value, entry.dir.name, p, top, box, inGallery.value && entry is Artwork) }
+                at = places.grid?.let { dropAt(it, now.value, entry.dir.name, p, top, box, inGallery.value && entry is Artwork && stack.value != null) }
                 over.value(at?.onto)
                 val stack = at?.onto?.let { name -> now.value.firstOrNull { it.dir.name == name } } as? io.github.artcraftandroid.procraft.gallery.Stack
                 if (stack != null) springOn(stack.dir.name) { open.value(stack) } else stopSpring()
@@ -1306,7 +1400,7 @@ private fun galleryDrop(
                 val list = now.value
                 val onto = drop.onto?.let { name -> list.firstOrNull { it.dir.name == name } }
                 if (onto != null && e is Artwork) {
-                    stack.value(e, onto)
+                    stack.value?.invoke(e, onto)
                 } else {
                     // from a stack it comes in at the slot; from here, the slot counted without it
                     val from = list.indexOfFirst { it.dir.name == e.dir.name }
@@ -1376,7 +1470,10 @@ private class GalleryShare(val artworks: List<Artwork>, val from: androidx.compo
 private val FormatsWidth = 260.dp
 private val FormatsTitleHeight = 55.dp
 private val FormatsRow = 40.dp
-private val FormatsHeight = FormatsTitleHeight + FormatsRow * CanvasViewModel.SHARE_FORMATS.size + (CanvasViewModel.SHARE_FORMATS.size - 1).dp + 10.dp
+/** Share's formats as listed: PSD while the PSD plugin's export is on ([psd]). */
+private fun shareFormats(psd: Boolean) = CanvasViewModel.SHARE_FORMATS.filter { psd || it != "PSD" }
+
+private fun formatsHeight(psd: Boolean) = shareFormats(psd).size.let { n -> FormatsTitleHeight + FormatsRow * n + (n - 1).dp + 10.dp }
 
 /** Where Share's formats go: their top left, the arrow's side and place, and where they grow from. */
 private class FormatsPlace(val left: Dp, val top: Dp, val side: ArrowSide, val arrowAt: Dp, val origin: androidx.compose.ui.graphics.TransformOrigin)
@@ -1389,7 +1486,8 @@ private fun selectShareCentre(screenWidth: Dp): Dp = screenWidth - 20.dp - 44.dp
  * else on its left, kept 2 inside the screen; with no button, under Select's Share, centred on it
  * and 15 below it, kept 4 inside.
  */
-private fun formatsPlace(from: androidx.compose.ui.geometry.Rect?, screenWidth: Dp, screenHeight: Dp, selectShare: Dp): FormatsPlace {
+private fun formatsPlace(from: androidx.compose.ui.geometry.Rect?, screenWidth: Dp, screenHeight: Dp, selectShare: Dp, psd: Boolean): FormatsPlace {
+    val FormatsHeight = formatsHeight(psd)
     if (from == null) {
         val left = (selectShare - FormatsWidth / 2).coerceIn(4.dp, (screenWidth - 4.dp - FormatsWidth).coerceAtLeast(4.dp))
         return FormatsPlace(left, 69.dp, ArrowSide.NONE, 0.dp, androidx.compose.ui.graphics.TransformOrigin((selectShare - left) / FormatsWidth, 0f))
@@ -1414,13 +1512,13 @@ private fun formatsPlace(from: androidx.compose.ui.geometry.Rect?, screenWidth: 
 
 /** Share's formats, the animated ones last: a tap on one shares in it. */
 @Composable
-private fun ImageFormats(modifier: Modifier, side: ArrowSide, arrowAt: Dp, onPick: (String) -> Unit) {
+private fun ImageFormats(modifier: Modifier, side: ArrowSide, arrowAt: Dp, psd: Boolean, onPick: (String) -> Unit) {
     Popover(FormatsWidth, arrowAt, modifier, fill = Pc.GalleryPopover, side = side) {
         Box(Modifier.height(FormatsTitleHeight).padding(start = 22.dp), contentAlignment = Alignment.CenterStart) {
             Text("Image Format", color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         }
         Column(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp).clip(RoundedCornerShape(18.dp)).background(Pc.ActionsGroup)) {
-            for ((i, format) in CanvasViewModel.SHARE_FORMATS.withIndex()) {
+            for ((i, format) in shareFormats(psd).withIndex()) {
                 if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
                 Box(Modifier.fillMaxWidth().height(FormatsRow).clickable { onPick(format) }.padding(start = 16.dp), contentAlignment = Alignment.CenterStart) {
                     Text(format, color = Pc.PanelTitle, fontSize = 17.sp)

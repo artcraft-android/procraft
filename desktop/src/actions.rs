@@ -86,6 +86,11 @@ pub enum Act {
     },
     Share(Format),
     AnimatedExport(Animated),
+    /// A file a plugin makes of the animation (a sprite sheet, a Harmony scene), by its place in
+    /// [`Showing::plugin_shares`].
+    PluginShare(u8),
+    /// The Texture Packer: the canvas's drawings, each shared as a PNG of its own.
+    TexturePacker,
     /// A model's turntable as an animation.
     ModelAnimated(Animated),
     About,
@@ -108,7 +113,11 @@ pub enum Act {
     GestureControls,
     CanvasInfo,
     AnimationAssist,
+    /// Timeline Settings: the timeline's settings card (only on a timeline).
+    TimelineSettings,
     PageAssist,
+    /// The artwork on a timeline, or off it.
+    Timeline,
     TimeLapseReplay,
     TimeLapseRecording,
     ExportTimeLapse,
@@ -116,6 +125,8 @@ pub enum Act {
     DrawingGuide,
     EditGuide,
     Crop,
+    /// A plugin's tool (Comic Panels), by its place in [`Showing::plugin_tools`].
+    PluginTool(u8),
     Cut,
     Copy,
     CopyCanvas,
@@ -128,6 +139,7 @@ pub enum Act {
     RightHanded,
     BrushCursor,
     ProjectCanvas,
+    VectorCrisp,
     ResetInput,
 }
 
@@ -180,7 +192,7 @@ impl Row {
 }
 
 /// The groups of a model's tab `tab` (Add, Canvas, Share or 3D).
-fn model_groups(tab: usize, showing: &Showing) -> Vec<Vec<Row>> {
+fn model_groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
     use Row::{Button, Heading, Switch};
     // showing the 2D texture, the rest is for the model
     let shown = !showing.model_flat;
@@ -228,8 +240,15 @@ fn model_groups(tab: usize, showing: &Showing) -> Vec<Vec<Row>> {
             vec![
                 Switch("Show 2D texture", showing.model_flat, Some(Act::ModelFlat)),
                 Switch("Paint through mesh", showing.paint_through, shown.then_some(Act::PaintThrough)),
-                Button("Edit lighting & environment", None, shown.then_some(Act::LightingStudio)),
-            ],
+            ]
+            .into_iter()
+            // while the 3D painting plugin is on
+            .chain(prefs.plugins.has(procraft_core::Feature::ModelPainting).then_some(Button(
+                "Edit lighting & environment",
+                None,
+                shown.then_some(Act::LightingStudio),
+            )))
+            .collect(),
             vec![Button("View in AR", None, None)],
         ],
     }
@@ -272,16 +291,25 @@ pub struct Showing {
     pub time_lapse_recorded: bool,
     pub reference: bool,
     pub guide: bool,
+    /// The canvas has a timeline: Timeline Settings opens its settings.
+    pub timeline: bool,
+    /// What Actions › Canvas calls the tools of the plugins that are on (Comic panels).
+    pub plugin_tools: Vec<String>,
     pub side_bar: bool,
     /// The artwork paints on a model: whether its 2D texture shows flat, and strokes reach
     /// through it.
     pub model: bool,
     pub model_flat: bool,
     pub paint_through: bool,
-    /// The artwork is a plugin's: Share Image offers SVG too.
+    /// The artwork is a plugin's, or has vector layers: Share Image offers SVG too.
     pub svg: bool,
+    /// The artwork has vector layers: Share Image offers them as a PDF of shapes.
+    pub vectors: bool,
     /// What Share Image calls the files plugins make of the artwork's layers of kinds they add.
     pub plugin_exports: Vec<String>,
+    /// What Share Layers calls the files plugins make of the animation (a sprite sheet, a Harmony
+    /// scene).
+    pub plugin_shares: Vec<String>,
     /// The controls and actions plugins put in the Canvas tab, after its own rows.
     pub plugin_controls: Vec<PluginControl>,
     pub plugin_actions: Vec<PluginAction>,
@@ -345,7 +373,7 @@ fn kept_label(label: &str) -> &'static str {
 fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
     use Row::{Button, Heading, Private, Slide, Switch};
     if showing.model && tab <= 3 {
-        return model_groups(tab, showing);
+        return model_groups(tab, showing, prefs);
     }
     match tab {
         0 => vec![
@@ -360,8 +388,15 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     Some(Act::InsertPrivatePhoto),
                 ),
                 Private("Take a photo", "Take a private photo", None, None),
-                Button("Add text", None, Some(Act::AddText)),
-            ],
+            ]
+            .into_iter()
+            // while the Text plugin is on
+            .chain(prefs.plugins.has(procraft_core::Feature::Text).then_some(Button(
+                "Add text",
+                None,
+                Some(Act::AddText),
+            )))
+            .collect(),
             vec![
                 Button("Cut", None, Some(Act::Cut)),
                 Button("Copy", None, Some(Act::Copy)),
@@ -375,14 +410,60 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             ],
         ],
         1 => vec![
-            vec![Button("Crop & Resize", None, Some(Act::Crop))],
-            vec![
-                Switch("Animation Assist", showing.animation, Some(Act::AnimationAssist)),
-                Switch("Page Assist", showing.pages, Some(Act::PageAssist)),
-                Switch("Drawing Guide", showing.guide, Some(Act::DrawingGuide)),
-                // greyed until the guide is on
-                Button("Edit Drawing Guide", None, showing.guide.then_some(Act::EditGuide)),
-            ],
+            [Button("Crop & Resize", None, Some(Act::Crop))]
+                .into_iter()
+                // the plugins' tools (Comic Panels makes the canvas a page the first time)
+                .chain(
+                    showing
+                        .plugin_tools
+                        .iter()
+                        .enumerate()
+                        .take(usize::from(u8::MAX))
+                        .map(|(i, label)| Button(kept_label(label), None, Some(Act::PluginTool(i as u8)))),
+                )
+                .collect(),
+            [
+                // while the Animation Assist plugin (and its Page Assist) is on
+                prefs.plugins.has(procraft_core::Feature::AnimationAssist).then_some(Switch(
+                    "Animation Assist",
+                    showing.animation,
+                    Some(Act::AnimationAssist),
+                )),
+                prefs.plugins.has(procraft_core::Feature::PageAssist).then_some(Switch(
+                    "Page Assist",
+                    showing.pages,
+                    Some(Act::PageAssist),
+                )),
+            ]
+            .into_iter()
+            .flatten()
+            // while the Timeline plugin is on; Timeline Settings only on a timeline: its frame rate,
+            // playback, onion skins and length, on a card
+            .chain(
+                prefs
+                    .plugins
+                    .has(procraft_core::Feature::Timeline)
+                    .then_some([
+                        Switch("Timeline", showing.timeline, Some(Act::Timeline)),
+                        Button("Timeline Settings", None, showing.timeline.then_some(Act::TimelineSettings)),
+                    ])
+                    .into_iter()
+                    .flatten(),
+            )
+            // while the Drawing guides plugin is on
+            .chain(
+                prefs
+                    .plugins
+                    .has(procraft_core::Feature::DrawingGuides)
+                    .then_some([
+                        Switch("Drawing Guide", showing.guide, Some(Act::DrawingGuide)),
+                        // greyed until the guide is on
+                        Button("Edit Drawing Guide", None, showing.guide.then_some(Act::EditGuide)),
+                    ])
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect(),
             vec![Switch("Reference", showing.reference, Some(Act::Reference))],
             vec![
                 Button("Flip horizontal", None, Some(Act::Flip { horizontal: true })),
@@ -401,14 +482,22 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 Heading("Share Image"),
                 Button("ProCraft", None, Some(Act::Share(Format::Procraft))),
                 Button("Procreate", None, Some(Act::Share(Format::Package))),
-                Button("PSD", None, Some(Act::Share(Format::Psd))),
+            ]
+            .into_iter()
+            // while the PSD plugin's export is on
+            .chain(prefs.plugins.has(procraft_core::Feature::PsdExport).then_some(Button(
+                "PSD",
+                None,
+                Some(Act::Share(Format::Psd)),
+            )))
+            .chain([
                 Button("PDF", None, Some(Act::Share(Format::Pdf))),
                 Button("JPEG", None, Some(Act::Share(Format::Jpeg))),
                 Button("PNG", None, Some(Act::Share(Format::Png))),
                 Button("TIFF", None, Some(Act::Share(Format::Tiff))),
-            ]
-            .into_iter()
+            ])
             .chain(showing.svg.then_some(Button("SVG", None, Some(Act::Share(Format::Svg)))))
+            .chain(showing.vectors.then_some(Button("Vector PDF", None, Some(Act::Share(Format::VectorPdf)))))
             // files plugins make of the artwork's layers, under their own names
             .chain(
                 showing
@@ -419,7 +508,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     .map(|(i, label)| Button(kept_label(label), None, Some(Act::PluginExport(i as u8)))),
             )
             .collect(),
-            vec![
+            [
                 Heading("Share Layers"),
                 Button("PDF", None, Some(Act::Share(Format::LayersPdf))),
                 Button("PNG Files", None, Some(Act::Share(Format::LayerPngs))),
@@ -427,7 +516,24 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 Button("Animated PNG", None, Some(Act::AnimatedExport(Animated::Png))),
                 Button("Animated MP4", None, Some(Act::AnimatedExport(Animated::Mp4))),
                 Button("Animated HEVC", None, Some(Act::AnimatedExport(Animated::Hevc))),
-            ],
+            ]
+            .into_iter()
+            // the files plugins make of the animation (a sprite sheet, a Harmony scene)
+            .chain(
+                showing
+                    .plugin_shares
+                    .iter()
+                    .enumerate()
+                    .take(usize::from(u8::MAX))
+                    .map(|(i, label)| Button(kept_label(label), None, Some(Act::PluginShare(i as u8)))),
+            )
+            // while the Texture Packer plugin is on
+            .chain(prefs.plugins.has(procraft_core::Feature::TexturePacker).then_some(Button(
+                "Texture Packer",
+                None,
+                Some(Act::TexturePacker),
+            )))
+            .collect(),
         ],
         3 => vec![
             vec![
@@ -449,6 +555,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                         Some(Act::ScalingMenu),
                     ),
                     Switch("Project canvas", prefs.project_canvas, Some(Act::ProjectCanvas)),
+                    Switch("Crisp zoom", prefs.vector_crisp, Some(Act::VectorCrisp)),
                     Switch("Brush cursor", prefs.brush_cursor, Some(Act::BrushCursor)),
                     Button("Advanced cursor settings", None, Some(Act::Page(Page::Cursor))),
                 ],
@@ -553,6 +660,8 @@ pub struct Actions {
     curve: crate::curve::CurveEditor,
     /// The artwork paints on a model: its tabs have 3D in Video's place.
     model_tabs: bool,
+    /// The Video tab isn't there: the Time-lapse plugin is off (a model's 3D tab stays).
+    video_hidden: bool,
     /// The rows with a private action swiped (by group and row), until the tab changes or the
     /// panel closes.
     swipes: Swipes,
@@ -679,6 +788,11 @@ impl Actions {
         let screen = panel::screen(ctx);
         let (left, arrow_x) = panel::place(ctx, ACTIONS_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
+        // the Video tab while the Time-lapse plugin is on; were it open, the first instead
+        self.video_hidden = !showing.model && !prefs.plugins.has(procraft_core::Feature::TimeLapse);
+        if self.video_hidden && self.tab.unwrap_or(prefs.actions_tab) == 3 {
+            self.tab = Some(0);
+        }
         let tab = *self.tab.get_or_insert(prefs.actions_tab);
         let rows_alpha = self.tab_fade(ctx, tab);
         let groups = groups(self.shown_tab.unwrap_or(tab), showing, prefs);
@@ -807,6 +921,10 @@ impl Actions {
             }
             Some(Tapped::Act(Act::BrushCursor)) => {
                 prefs.brush_cursor = !prefs.brush_cursor;
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::VectorCrisp)) => {
+                prefs.vector_crisp = !prefs.vector_crisp;
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(Act::ProjectCanvas)) => {
@@ -956,8 +1074,9 @@ impl Actions {
         // the tabs: 54 wide, 10 apart; a tab lights up as soon as it is touched
         let tabs_top = body.top() + 22.0 + 34.0;
         let tabs = if self.model_tabs { &MODEL_TABS } else { &TABS };
-        for (i, (label, icon)) in tabs.iter().enumerate() {
-            let cell = Rect::from_min_size(pos2(body.left() + 10.0 + 64.0 * i as f32, tabs_top), vec2(54.0, 60.0));
+        let shown = tabs.iter().enumerate().filter(|(i, _)| *i != 3 || !self.video_hidden);
+        for (at, (i, (label, icon))) in shown.enumerate() {
+            let cell = Rect::from_min_size(pos2(body.left() + 10.0 + 64.0 * at as f32, tabs_top), vec2(54.0, 60.0));
             let response = ui.interact(cell, ui.scope_id().with(("tab", i)), Sense::click());
             if response.clicked() {
                 self.tab = Some(i);
@@ -3059,12 +3178,22 @@ mod tests {
         page.prefs.plugins = Plugins::with_bundled(store.clone());
         page.frame(Vec::new());
         page.frame(Vec::new());
-        let list = page.list();
+        let all = page.list();
+        // the app's own features first, on, which can only be turned off
+        let first = all.iter().take_while(|p| p.source == PluginSource::Builtin).count();
+        assert!(first > 0);
+        for plugin in &all[..first] {
+            assert!(plugin.on && matches!(card_rows(plugin)[..], [CardRow::TurnOff]), "{}", plugin.name);
+        }
+        let list = all[first..].to_vec();
         assert!(list.len() >= 8, "{list:?}");
         for plugin in &list {
             assert!(plugin.source == PluginSource::File && !plugin.on, "{plugin:?}");
             assert!(matches!(card_rows(plugin)[..], [CardRow::TurnOn, CardRow::Remove]), "{}", plugin.name);
         }
+        // (the first moved to the top of the page, above the built-ins, to be in view)
+        assert_eq!(page.prefs.plugins.move_plugin(list[0].id.clone(), 0), None);
+        page.frame(Vec::new());
         // its first row turns it on, and off again
         let at = page.on_row(0, 1.0);
         assert!(page.tap(at));
@@ -3078,7 +3207,7 @@ mod tests {
         assert!(gone(&page.prefs.plugins));
         let next = Plugins::with_bundled(store);
         assert!(gone(&next));
-        assert_eq!(next.plugins().len(), list.len() - 1);
+        assert_eq!(next.plugins().len(), all.len() - 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

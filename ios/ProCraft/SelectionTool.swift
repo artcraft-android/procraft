@@ -6,6 +6,7 @@ private let buttonRoomy: CGFloat = 83
 private let buttonNarrow: CGFloat = 70
 private let featherWidth: CGFloat = 250
 private let startDot = Color(argb: 0xFFC7_C7C7)
+private let lassoErasePreview = Color(argb: 0xFF80_8080)
 private let savedThumb = Color(argb: 0xFF00_0000)
 /// A path's dashes, dark over light.
 let overlayDash = Color(argb: 0xE600_0000)
@@ -53,6 +54,7 @@ enum SelectionPopup {
 final class SelectionTool {
     private static let kindKey = "selectionKind"
     private static let thresholdKey = "selectionThreshold"
+    private static let pixelatedKey = "selectionPixelated"
     private static let colorFillKey = "selectionColorFill"
 
     @ObservationIgnored private unowned let model: CanvasModel
@@ -63,6 +65,12 @@ final class SelectionTool {
     /// What is selected shows covered by the paint colour, and is filled with it as the tool closes;
     /// kept between launches.
     private(set) var colorFill = false
+    /// Pixelated, for pixel art (in Feather's popover, the selection's edge being what it sets):
+    /// the shapes drawn to select with land on whole pixels and take whole pixels only. (The Pen's
+    /// and Eraser's lassos go by their brush's Pixelated.) Only while the Ribbon and pixel brushes
+    /// plugin's Pixel art is on; off, what was set waits for it.
+    var pixelated: Bool { pixelatedSet && PluginsModel.shared.has(.pixelArt) }
+    private var pixelatedSet: Bool
     private(set) var hasSelection = false
     private(set) var popup = SelectionPopup.none
     /// The feather popover's amount (0..1).
@@ -70,8 +78,12 @@ final class SelectionTool {
     /// How many selections are kept, and their pictures.
     private(set) var saved = 0
     private(set) var savedThumbnails: [Int: UIImage] = [:]
-    /// The freehand path as drawn (canvas pixels).
+    /// The freehand path as drawn (canvas pixels): with Pixelated, as it is taken, along the
+    /// pixels' edges a pixel across or down at a time.
     private(set) var freehand: [CGPoint] = []
+    /// With Pixelated, the way back from the path's end to where it began, along the pixels' edges
+    /// too: how it closes when it is let go.
+    private(set) var freehandClosing: [CGPoint] = []
     /// A rectangle or ellipse being dragged out, between two window points.
     private(set) var shapeDrag: (CGPoint, CGPoint)?
     /// A colour selection's threshold being slid: from where (window points), and how far.
@@ -95,6 +107,7 @@ final class SelectionTool {
         let d = UserDefaults.standard
         kind = d.string(forKey: Self.kindKey).flatMap(SelectionKind.init(rawValue:)) ?? .freehand
         threshold = d.object(forKey: Self.thresholdKey) as? Float ?? 0.5
+        pixelatedSet = d.bool(forKey: Self.pixelatedKey)
         colorFill = d.bool(forKey: Self.colorFillKey)
     }
 
@@ -133,21 +146,44 @@ final class SelectionTool {
 
     /// How the canvas's touches select while the tool is open; none otherwise.
     func touch() -> SelectTouch? {
-        guard model.selecting else { return nil }
-        return SelectTouch(kind: kind.touch, join: join, threshold: threshold)
+        guard model.selecting else {
+            // the Paint or Erase tool's own lasso: its shapes fill (or erase) at its opacity
+            guard model.lassoToolOn else { return nil }
+            return SelectTouch(
+                kind: .freehand, join: .add, threshold: threshold,
+                lassoFill: true, lassoErase: model.tool == .erase, lassoTool: true
+            )
+        }
+        return SelectTouch(
+            kind: kind.touch, join: join, threshold: threshold,
+            lassoFill: false, lassoErase: false, lassoTool: false
+        )
     }
 
     /// The freehand path as the touches have drawn it.
     func freehandChanged() {
         let flat = model.session.freehandPath()
-        freehand = stride(from: 0, to: flat.count - 1, by: 2).compactMap {
+        let drawn = stride(from: 0, to: flat.count - 1, by: 2).compactMap {
             model.windowToCanvas(CGPoint(x: CGFloat(flat[$0]), y: CGFloat(flat[$0 + 1])))
         }
+        guard hard, let first = drawn.first, let last = drawn.last else {
+            freehand = drawn
+            freehandClosing = []
+            return
+        }
+        // however far apart its points came, it shows as it is taken: no slant across a pixel
+        freehand = Self.stepped(drawn)
+        freehandClosing = Array(Self.stepped([last, first]).dropFirst())
     }
 
     /// The touches' rectangle or ellipse, dragged out between two points (window pixels).
     func dragged(_ a: CGPoint, _ b: CGPoint) {
         let pixels = model.pixels
+        // with Pixelated its corners show where they will land, on whole pixels
+        if pixelated, !model.lassoToolOn, let a = model.windowToCanvas(a), let b = model.windowToCanvas(b) {
+            shapeDrag = (model.canvasToWindow(shown(a)), model.canvasToWindow(shown(b)))
+            return
+        }
         shapeDrag = (CGPoint(x: a.x / pixels, y: a.y / pixels), CGPoint(x: b.x / pixels, y: b.y / pixels))
     }
 
@@ -155,6 +191,15 @@ final class SelectionTool {
     func touched() {
         shapeDrag = nil
         changed()
+    }
+
+    /// With the Pen's or Eraser's lasso, a shape was filled (or erased) on the layer. Its preview goes at
+    /// once, not at the next read of the path, so it is never shown over the fill.
+    func shapeFilled() {
+        shapeDrag = nil
+        freehand = []
+        freehandClosing = []
+        model.refresh()
     }
 
     /// A colour selection's threshold slid from window pixels `p`: shown as it goes; `done`, kept
@@ -178,6 +223,7 @@ final class SelectionTool {
     func closeFreehand() {
         let drawn = !freehand.isEmpty
         freehand = []
+        freehandClosing = []
         model.session.closeFreehand()
         if drawn {
             changed()
@@ -287,15 +333,50 @@ final class SelectionTool {
         showLook()
     }
 
+    func togglePixelated() {
+        pixelatedSet.toggle()
+        model.session.setSelectionPixelated(on: pixelated)
+        UserDefaults.standard.set(pixelatedSet, forKey: Self.pixelatedKey)
+    }
+
+    /// Whether the shape being drawn is pixel art's: with Pixelated (a tool's own lasso, with its
+    /// brush's).
+    private var hard: Bool {
+        model.lassoToolOn ? model.session.currentBrushSetting(key: "pixelated") >= 0.5 : pixelated
+    }
+
+    /// A canvas point as a shape being drawn shows it: on a whole pixel, when it is pixel art's.
+    private func shown(_ canvas: CGPoint) -> CGPoint {
+        hard ? CGPoint(x: canvas.x.rounded(), y: canvas.y.rounded()) : canvas
+    }
+
+    /// A path through `points` as pixel art takes it (the core's `pixelPath`): along the pixels'
+    /// edges from each to the next.
+    private static func stepped(_ points: [CGPoint]) -> [CGPoint] {
+        let flat = pixelPath(points: points.flatMap { [Float($0.x), Float($0.y)] }, closed: false)
+        return stride(from: 0, to: flat.count - 1, by: 2).map { CGPoint(x: CGFloat(flat[$0]), y: CGFloat(flat[$0 + 1])) }
+    }
+
     func clear() {
         closeFreehand()
         model.session.selectNone()
         changed()
     }
 
-    private func changed() {
+    /// Whether anything is selected, read again (undo and redo may change it).
+    func readHas() {
+        let has = model.session.hasSelection()
+        if has != hasSelection {
+            hasSelection = has
+        }
+    }
+
+    /// (Color Fill fills what is selected as the tool closes, not as it changes.)
+    private func changed(fill _: Bool = true) {
         hasSelection = model.session.hasSelection()
         showLook()
+        // one stroke picked on a vector layer shows its nodes
+        model.readVectorNodes()
     }
 
     /// Bands over what is not selected, except while selecting by colour, which tints what is, and
@@ -367,7 +448,8 @@ struct SelectionToolbar: View {
             ToolbarButton(icon: PcIcons.selectCopyPaste, label: "Copy & Paste", enabled: has || drawing, width: w, iconSize: 44) {
                 tool.copyToLayer()
             }
-            ToolbarButton(icon: PcIcons.feather, label: "Feather", active: tool.popup == .feather, enabled: has || drawing, width: w, iconSize: 44) {
+            // always there to tap: its Pixelated is for the shapes yet to be drawn
+            ToolbarButton(icon: PcIcons.feather, label: "Feather", active: tool.popup == .feather, width: w, iconSize: 44) {
                 tool.openPopup(.feather)
             }
             ToolbarButton(icon: PcIcons.saveLoad, label: "Save & Load", active: tool.popup == .saved, enabled: has || drawing, width: w, iconSize: 44) {
@@ -395,7 +477,8 @@ struct SelectionPopover: View {
         if tool.popup != .none {
             let width = tool.popup == .feather ? featherWidth : toolbarMenuWidth
             let layout = ToolbarLayout(screenWidth: screen.width, count: 8, roomy: buttonRoomy, narrow: buttonNarrow)
-            let centre = layout.buttonCentre(tool.popup == .feather ? 4 : 5, screenWidth: screen.width)
+            let index = tool.popup == .feather ? 4 : 5
+            let centre = layout.buttonCentre(index, screenWidth: screen.width)
             let left = min(max(centre - width / 2, 0), screen.width - width)
             ToolbarPopover(
                 arrowX: centre - left, left: left, bottom: ToolbarLayout.buttonsTop(screenHeight: screen.height),
@@ -404,6 +487,8 @@ struct SelectionPopover: View {
                 if tool.popup == .feather {
                     ToolbarMenuTitle(text: "Feather")
                         .padding(.bottom, 4)
+                    // the amount softens what is selected: nothing to soften, it waits
+                    let softens = tool.hasSelection || !tool.freehand.isEmpty
                     ToolbarMenuGroup {
                         let amount = tool.featherAmount
                         PanelSlider(
@@ -412,6 +497,16 @@ struct SelectionPopover: View {
                             onChange: { tool.featherTo($0) },
                             onLetGo: { tool.featherLetGo() }
                         )
+                    }
+                    .opacity(softens ? 1 : 0.4)
+                    .allowsHitTesting(softens)
+                    .padding(.bottom, 10)
+                    // the other end of the same thing: no soft edge at all, for pixel art (shapes on
+                    // whole pixels, taking whole pixels only)
+                    ToolbarMenuGroup {
+                        if PluginsModel.shared.has(.pixelArt) {
+                            ToolbarSwitchRow(label: "Pixelated", on: tool.pixelated) { tool.togglePixelated() }
+                        }
                     }
                 } else {
                     SavedSelections(tool: tool)
@@ -540,8 +635,9 @@ private struct SavedSelectionRow: View {
 }
 
 /// What the selection tool shows while a shape is made: the rectangle or ellipse being dragged and
-/// the freehand path (dashed, its first point a dot to close it on), and the bar and crosshair while
-/// a colour selection's threshold is dragged.
+/// the freehand path (dashed, its first point a dot to close it on; with the Pen's or Eraser's lasso,
+/// filled as it will fill, with no dot), and the bar and crosshair while a colour selection's
+/// threshold is dragged.
 struct SelectionOverlay: View {
     let model: CanvasModel
 
@@ -558,6 +654,16 @@ struct SelectionOverlay: View {
         let drag = tool.shapeDrag
         let slid = tool.thresholdDrag
         let kind = tool.kind
+        // a lasso on a sharp vector layer: the shape shows as it will fill, at the Lasso's Preview
+        // (the Pen's at its opacity slider's; the Eraser's grey, as what it takes away)
+        let strength = Double(model.lassoPreviewOpacity * model.opacity)
+        let preview: Color? = if model.lassoToolOn, model.tool == .erase {
+            lassoErasePreview.opacity(strength)
+        } else if model.lassoToolOn {
+            CanvasSpace.shared.color(model.colorRgb()).opacity(strength)
+        } else {
+            nil
+        }
         let taken = tool.takenBox
         let outlines = tool.outlines
         if drag != nil || !path.isEmpty || slid != nil || taken.count == 8 || !outlines.isEmpty {
@@ -578,16 +684,30 @@ struct SelectionOverlay: View {
                     }
                     if let (a, b) = drag {
                         let r = CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
-                        dashed(context, kind == .ellipse ? Path(ellipseIn: r) : Path(r))
+                        let outline = kind == .ellipse ? Path(ellipseIn: r) : Path(r)
+                        if let preview {
+                            context.fill(outline, with: .color(preview))
+                        } else {
+                            dashed(context, outline)
+                        }
                     }
                     if let first = points.first {
                         var line = Path()
-                        line.addLines(points)
-                        dashed(context, line)
-                        context.fill(
-                            Path(ellipseIn: CGRect(x: first.x - 5.5, y: first.y - 5.5, width: 11, height: 11)),
-                            with: .color(startDot)
-                        )
+                        if let preview {
+                            // closed back to the first point, as lifting closes it (non-zero, as the
+                            // fill; pixel art's along the pixels' edges); no dot to close it on, as it
+                            // is drawing
+                            line.addLines(points + tool.freehandClosing.map { model.canvasToWindow($0) })
+                            line.closeSubpath()
+                            context.fill(line, with: .color(preview))
+                        } else {
+                            line.addLines(points)
+                            dashed(context, line)
+                            context.fill(
+                                Path(ellipseIn: CGRect(x: first.x - 5.5, y: first.y - 5.5, width: 11, height: 11)),
+                                with: .color(startDot)
+                            )
+                        }
                     }
                     if let p = slid?.at {
                         // a thin cross where the colour is picked

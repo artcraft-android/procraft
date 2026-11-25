@@ -26,6 +26,13 @@ pub enum PsdKind<'a> {
         rgba: &'a [u8],
         mask: Option<&'a [u8]>,
     },
+    /// An adjustment layer: no pixels, its adjustment as the tagged block `key` holds it (see
+    /// [`psd_adjustment`]), and a mask (its grey, the canvas's size) if it has one.
+    Adjustment {
+        key: [u8; 4],
+        data: Vec<u8>,
+        mask: Option<&'a [u8]>,
+    },
     /// Pixels read only as the file is written ([`write_psd`]'s `read`), a layer at a time, so a
     /// file of many layers never has them all in memory; and whether it has a mask.
     Read {
@@ -44,7 +51,12 @@ impl PsdKind<'_> {
     }
 
     fn has_mask(&self) -> bool {
-        matches!(self, PsdKind::Pixels { mask: Some(_), .. } | PsdKind::Read { masked: true })
+        matches!(
+            self,
+            PsdKind::Pixels { mask: Some(_), .. }
+                | PsdKind::Adjustment { mask: Some(_), .. }
+                | PsdKind::Read { masked: true }
+        )
     }
 }
 
@@ -271,6 +283,14 @@ fn layer_channels(
             }
             (rect, data)
         }
+        // an adjustment has no pixels of its own: empty channels, and its mask
+        PsdKind::Adjustment { mask, .. } => {
+            let mut data: Vec<(i16, Vec<u8>)> = ids.iter().map(|&id| (id, vec![0, 0])).collect();
+            if let Some(m) = mask {
+                data.push((-2, packed(m, [0, 0, width, height])));
+            }
+            ([0, 0, 0, 0], data)
+        }
         // groups have no pixels: empty channels (a layer read is given its pixels first)
         _ => ([0, 0, 0, 0], ids.iter().map(|&id| (id, vec![0, 0])).collect()),
     }
@@ -299,7 +319,7 @@ fn record(records: &mut Vec<u8>, width: u32, height: u32, layer: &PsdLayer<'_>, 
     records.push(u8::from(layer.clipped));
     // bit 1: hidden; bit 3 and 4: the record describes a group divider
     let mut flags = if layer.visible { 0 } else { 2 };
-    if !layer.kind.has_pixels() {
+    if !(layer.kind.has_pixels() || matches!(layer.kind, PsdKind::Adjustment { .. })) {
         flags |= 0x18;
     }
     records.push(flags);
@@ -346,10 +366,89 @@ fn record(records: &mut Vec<u8>, width: u32, height: u32, layer: &PsdLayer<'_>, 
             put32(&mut lsct, 3);
             tagged(&mut extra, b"lsct", &lsct);
         }
+        PsdKind::Adjustment { key, ref data, .. } => tagged(&mut extra, &key, data),
         PsdKind::Pixels { .. } | PsdKind::Read { .. } => {}
     }
     put32(records, extra.len() as u32);
     records.extend_from_slice(&extra);
+}
+
+/// An adjustment as a PSD adjustment layer keeps it, where the format has one like it: its tagged
+/// block's key and data. Hue/saturation (`hue2`) for HSB, curves (`curv`, from `table`, the 256
+/// RGBA8 entries curves read: each channel's curve, then the one for all three in alpha) and
+/// colour balance (`blnc`). None for the rest: a file keeps those flattened into pixels.
+pub fn psd_adjustment(filter: &crate::filter::Filter, table: &[u8]) -> Option<([u8; 4], Vec<u8>)> {
+    use crate::filter::Filter;
+    let to_i16 = |v: f32, most: f32| (v.clamp(-most, most).round() as i16) as u16;
+    match *filter {
+        Filter::Hsb { hue, saturation, brightness } => {
+            let mut d = Vec::new();
+            // version 2, not colourized, padding, the colourize values
+            put16(&mut d, 2);
+            d.extend([0, 0]);
+            for v in [0u16, 25, 0] {
+                put16(&mut d, v);
+            }
+            // the master hue (degrees), saturation and lightness (-100..100)
+            put16(&mut d, to_i16(hue.to_degrees(), 180.0));
+            put16(&mut d, to_i16((saturation - 1.0) * 100.0, 100.0));
+            put16(&mut d, to_i16(brightness * 100.0, 100.0));
+            // the six colour ranges, each its four range values and no change
+            let ranges: [[u16; 4]; 6] = [
+                [315, 345, 15, 45],
+                [15, 45, 75, 105],
+                [75, 105, 135, 165],
+                [135, 165, 195, 225],
+                [195, 225, 255, 285],
+                [255, 285, 315, 345],
+            ];
+            for r in ranges {
+                for v in r {
+                    put16(&mut d, v);
+                }
+                for _ in 0..3 {
+                    put16(&mut d, 0);
+                }
+            }
+            Some((*b"hue2", d))
+        }
+        // (with an exposure or a limit, which Photoshop's curves have no way to say: flattened)
+        Filter::Curves { exposure, peak, .. }
+            if table.len() == 1024 && exposure == 0.0 && peak >= crate::filter::LIMIT_OFF =>
+        {
+            let mut d = vec![0];
+            // version 1; curves for all three (bit 0), red, green and blue
+            put16(&mut d, 1);
+            put32(&mut d, 0b1111);
+            for channel in [3usize, 0, 1, 2] {
+                // 17 points along it, the most a channel can have a little short of 19
+                put16(&mut d, 17);
+                for i in 0..17u16 {
+                    let x = (i * 16).min(255);
+                    let y = table.get(usize::from(x) * 4 + channel).copied().unwrap_or(x as u8);
+                    put16(&mut d, u16::from(y));
+                    put16(&mut d, x);
+                }
+            }
+            // kept to an even length
+            if d.len() % 2 == 1 {
+                d.push(0);
+            }
+            Some((*b"curv", d))
+        }
+        Filter::ColorBalance { shadows, midtones, highlights } => {
+            let mut d = Vec::new();
+            for range in [shadows, midtones, highlights] {
+                for v in range {
+                    put16(&mut d, to_i16(v * 100.0, 100.0));
+                }
+            }
+            // preserve luminosity, and padding
+            d.extend([1, 0]);
+            Some((*b"blnc", d))
+        }
+        _ => None,
+    }
 }
 
 fn tagged(out: &mut Vec<u8>, key: &[u8; 4], data: &[u8]) {

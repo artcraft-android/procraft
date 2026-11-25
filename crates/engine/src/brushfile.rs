@@ -332,6 +332,9 @@ const PLAIN: &[(&str, &str, Kept)] = &[
     ("hover_fill", "hoverFill", Kept::LastTwoSwapped),
     // properties and preview
     ("orient_to_screen", "oriented", Kept::Switch),
+    // pixel art: ours, which other apps leave be
+    ("pixelated", "procraftPixelated", Kept::Switch),
+    ("pixel_perfect", "procraftPixelPerfect", Kept::Switch),
     ("smudge_pull", "dynamicsSmudgeAccumulation", Kept::Same),
     ("max_opacity", "maxOpacity", Kept::Same),
     ("min_opacity", "minOpacity", Kept::Same),

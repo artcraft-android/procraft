@@ -148,7 +148,7 @@ extension CanvasModel {
         case .copyLayer: copyLayer()
         case .cutLayer: cutLayer()
         case .paste: paste()
-        case .paint: select(.paint)
+        case .paint: select(penTool)
         case .erase: select(.erase)
         case .eyedropper: pickNext.toggle()
         case .selection: toggleSelecting()
@@ -204,28 +204,63 @@ extension CanvasModel {
         return true
     }
 
-    /// Files dropped on the canvas: pictures on layers of their own, a picture alone ready to
-    /// transform, a video's frames on the timeline; other files' brushes join the library. The
-    /// copies in `folder` go after them.
+    /// Files dropped on the canvas's screen, each brought in as what it is: pictures on layers of
+    /// their own (a picture alone ready to transform), a video's frames on the timeline, brushes
+    /// into the library, a palette among the palettes, a font among the fonts, a colour profile
+    /// among the profiles, a plugin offered.
+    /// An artwork with layers of its own can't join this one: it goes to the gallery as one opened
+    /// with the app does, this artwork kept and closed first. The copies in `folder` go after them.
     func dropOnCanvas(_ urls: [URL], from folder: URL) {
-        let inserted = urls.filter { $0.isMovie || UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image) == true }
-        let others = urls.filter { !inserted.contains($0) }
-        guard !urls.isEmpty else { return }
-        let gone = DispatchGroup()
-        for file in others {
-            gone.enter()
-            importBrushes(from: file) { gone.leave() }
+        guard !urls.isEmpty else {
+            try? FileManager.default.removeItem(at: folder)
+            return
         }
+        var sorted: [DroppedKind: [URL]] = [:]
+        for file in urls {
+            sorted[DroppedKind(of: file), default: []].append(file)
+        }
+        for file in sorted[.palette] ?? [] {
+            paletteFromFile(file)
+        }
+        for file in sorted[.font] ?? [] {
+            text.importFont(file)
+        }
+        for file in sorted[.profile] ?? [] {
+            let added = (try? Data(contentsOf: file)).flatMap { importProfile(bytes: $0) }
+            if let added {
+                showNotice("\(added) added to the color profiles.")
+            } else {
+                showNotice("This color profile can't be read.", warning: true)
+            }
+        }
+        for file in sorted[.plugin] ?? [] {
+            // read a moment later: a copy the folder's going doesn't take with it
+            let kept = FileManager.default.temporaryDirectory.appendingPathComponent("plugin-\(UUID().uuidString)-\(file.lastPathComponent)")
+            guard (try? FileManager.default.copyItem(at: file, to: kept)) != nil else { continue }
+            PluginsModel.shared.offer(kept) { [weak self] in self?.showNotice($0, warning: true) }
+        }
+        // pictures on layers, a video's frames on the timeline (the folder kept until they are read)
+        let inserting = DispatchGroup()
+        let inserted = (sorted[.picture] ?? []) + (sorted[.movie] ?? [])
         if !inserted.isEmpty {
             if transforming {
                 endTransform(commit: true)
             }
             closePanels()
-            gone.enter()
-            insertDropped(inserted[...], transform: inserted.count == 1) { gone.leave() }
+            inserting.enter()
+            insertDropped(inserted[...], transform: inserted.count == 1) { inserting.leave() }
         }
-        gone.notify(queue: .global(qos: .utility)) {
-            try? FileManager.default.removeItem(at: folder)
+        let artworks = sorted[.artwork] ?? []
+        // the brushes read first, the folder there until they are
+        importBrushes(from: sorted[.brushes] ?? []) { [weak self] in
+            inserting.notify(queue: .main) {
+                guard let self, !artworks.isEmpty else {
+                    DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: folder) }
+                    return
+                }
+                self.onClose()
+                GalleryModel.shared.importDropped(artworks, from: folder)
+            }
         }
     }
 
@@ -253,6 +288,50 @@ extension CanvasModel {
             }
         }
     }
+}
+
+/// What a file dropped on the canvas's screen is: by what is in it where that tells, else its name.
+enum DroppedKind {
+    case picture, movie, brushes, palette, artwork, font, profile, plugin
+
+    init(of file: URL) {
+        // a video's frames go on the timeline
+        if file.isMovie {
+            self = .movie
+            return
+        }
+        let ending = file.pathExtension.lowercased()
+        let handle = try? FileHandle(forReadingFrom: file)
+        let head = (try? handle?.read(upToCount: 4)) ?? Data()
+        try? handle?.close()
+        let tag = String(decoding: head, as: UTF8.self)
+        if ["procraft-plugin", "procraftplugin"].contains(ending) {
+            self = .plugin
+        } else if ["ttf", "otf", "ttc"].contains(ending) {
+            self = .font
+        } else if ["icc", "icm"].contains(ending) {
+            self = .profile
+        } else if head.starts(with: [0x50, 0x4B]) {
+            // a package: brushes, a palette, or an artwork
+            switch zipFileKind(path: file.path) {
+            case .brushes: self = .brushes
+            case .swatches: self = .palette
+            default: self = .artwork
+            }
+        } else if droppedBrushExtensions.contains(ending) {
+            self = .brushes
+        } else if tag == "ASEF" || droppedPaletteExtensions.contains(ending) {
+            self = .palette
+        } else if UTType(filenameExtension: ending)?.conforms(to: .image) == true {
+            self = .picture
+        } else if tag == "%PDF" || droppedArtworkExtensions.contains(ending) {
+            self = .artwork
+        } else {
+            // whatever else it is, the brushes' reader says so
+            self = .brushes
+        }
+    }
+
 }
 
 /// The canvas's keyboard shortcuts as the system lists them while ⌘ is held: the shared shortcuts
@@ -337,7 +416,8 @@ final class CanvasDropper: NSObject, UIDropInteractionDelegate {
     }
 
     func dropInteraction(_: UIDropInteraction, performDrop session: any UIDropSession) {
-        loadDropped(session) { [model] urls, folder in
+        // a picture of an artwork (a layer here) before the artwork itself, which would close this one
+        loadDropped(session, taking: [.brushes, .palette, .picture, .artwork]) { [model] urls, folder in
             model.dropOnCanvas(urls, from: folder)
         }
     }

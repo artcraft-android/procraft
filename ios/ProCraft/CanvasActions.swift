@@ -8,8 +8,10 @@ import UniformTypeIdentifiers
 /// What the Share tab makes.
 enum ShareKind {
     case psd, pdf, tiff, jpeg, png, layersPdf, layerPngs
-    /// A plugin's artwork, its shapes kept.
+    /// A plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes.
     case svg
+    /// The artwork's vector layers as a page of shapes.
+    case vectorPdf
 }
 
 /// What the Share tab makes of a model: the artwork whole, the model as USDZ or OBJ, pictures of
@@ -60,7 +62,7 @@ extension CanvasModel {
     /// Runs `work`, an export by the core, off the main thread with the export card showing how far
     /// it has come and a check once made; what it made goes to the share sheet. Cancelled, nothing
     /// is shared; made nothing, `failed` is told.
-    private func exporting(
+    func exporting(
         failed: @escaping @autoclosure () -> String, progress: (() -> Float)? = nil,
         _ work: @escaping (CanvasSession) -> [URL]
     ) {
@@ -130,15 +132,42 @@ extension CanvasModel {
     /// The layered package, named with `suffix`.
     func sharePackage(suffix: String) {
         let lapse = timeLapse.lapse
-        exporting(failed: "The artwork couldn't be exported.") { session in
+        let artworkDir = self.dir
+        let session = session
+        // the card: the time-lapse's frames made into video first (a long one takes a while), then
+        // the file written
+        let meter = ExportMeter()
+        exporting(
+            failed: "The artwork couldn't be exported.",
+            progress: { meter.share < 1 ? meter.share / 2 : 0.5 + session.exportProgress() / 2 }
+        ) { [weak self] session in
+            let started = Date()
+            let frames = lapse.count
+            guard let timeLapse = lapse.forPackage(going: { share in
+                meter.share = min(share, 0.999)
+                return self?.exportCancelled != true
+            }) else { return [] }
+            meter.share = 1
+            let lapseDone = Date()
             let base = exportFileName(name: session.name(), package: true)
             let out = Sharing.exportsDir.appendingPathComponent(base + suffix)
-            let made = (try? session.exportPackage(path: out.path, seed: UInt64.random(in: 0 ... UInt64.max), timeLapse: lapse.forPackage())) != nil
+            let seed = UInt64.random(in: 0 ... UInt64.max)
+            // ours keeps a timeline (the artwork's folder, whole); Procreate's is the package alone
+            let made = suffix == ".procreate"
+                ? (try? session.exportPackage(path: out.path, seed: seed, timeLapse: timeLapse)) != nil
+                : (try? session.exportArtwork(dir: artworkDir, saveFirst: true, path: out.path, seed: seed, timeLapse: timeLapse)) != nil
+            // how long each half took, for when an export is slow
+            let bytes = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            NSLog(
+                "ProCraft: export %@: time-lapse (%d frames) %.1f s, file %.1f s, %.1f MB",
+                suffix, frames, lapseDone.timeIntervalSince(started), Date().timeIntervalSince(lapseDone), Double(bytes) / 1_048_576
+            )
             return made ? [out] : []
         }
     }
 
     func share(_ kind: ShareKind, quality: UInt8 = PdfQuality.best) {
+        let artworkDir = self.dir
         exporting(failed: "The artwork couldn't be exported.") { session in
             let dir = Sharing.exportsDir
             let base = exportFileName(name: session.name(), package: false)
@@ -162,6 +191,9 @@ extension CanvasModel {
                 case .svg:
                     try session.exportSvg(path: file(".svg").path)
                     return [file(".svg")]
+                case .vectorPdf:
+                    try session.exportVectorPdf(path: file(".pdf").path)
+                    return [file(".pdf")]
                 case .pdf:
                     try session.exportPdf(path: file(".pdf").path, layers: false, quality: quality)
                     return [file(".pdf")]
@@ -471,6 +503,22 @@ extension CanvasModel {
 
     /// A file from the picker, read with the access it gave: a video's frames, or a picture.
     func insertFile(_ url: URL, isPrivate: Bool) {
+        // an SVG picture comes in as a vector layer: its shapes fills, its lines strokes
+        if url.pathExtension.lowercased() == "svg" {
+            guard PluginsModel.shared.has(.vectorLayers) else {
+                showNotice("Turn on Vector layers in Plugins to bring in SVG files", warning: true)
+                return
+            }
+            closePanels()
+            let name = url.deletingPathExtension().lastPathComponent
+            if let data = url.readPicked(), session.insertSvg(bytes: data, name: name) != 0 {
+                refresh()
+                showNotice("Vector Layer")
+            } else {
+                showNotice("This picture can't be opened.", warning: true)
+            }
+            return
+        }
         guard url.isMovie else {
             insertPicture(url.readPicked(), name: url.lastPathComponent, isPrivate: isPrivate)
             return

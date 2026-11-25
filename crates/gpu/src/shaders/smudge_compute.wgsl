@@ -1,6 +1,7 @@
-// Smudge's passes as compute passes (see smudge.wgsl): the window is a buffer of packed
-// premultiplied RGBA8 pixels, read and written in place, and what the brush carries a buffer of
-// its own.
+// Smudge's passes as compute passes (see smudge.wgsl): the window is a buffer of the layer's
+// premultiplied pixels as the canvas keeps them (packed RGBA8, or an HDR canvas's half floats:
+// see smudge_rgba8.wgsl and smudge_rgba16f.wgsl), read and written in place, and what the brush
+// carries a buffer of its own.
 
 @group(0) @binding(1) var<storage, read_write> work: array<u32>;
 @group(0) @binding(2) var<storage, read_write> carry: array<vec4<f32>>;
@@ -19,19 +20,39 @@ fn window_index(p: vec2<i32>) -> u32 {
 // ES's (in wgpu) aren't checked, and one there reads whatever memory lies past the buffer, or
 // faults.
 fn work_at(p: vec2<i32>) -> vec4<f32> {
-    let i = window_index(p);
-    if (i >= arrayLength(&work)) {
+    let i = PX_WORDS * window_index(p);
+    if (i + PX_WORDS - 1u >= arrayLength(&work)) {
         return vec4<f32>(0.0);
     }
-    return unpack4x8unorm(work[i]);
+    return px_of(work[i], work[i + PX_WORDS - 1u]);
 }
 
 fn grained_at(p: vec2<i32>) -> vec4<f32> {
-    let i = window_index(p);
-    if (i >= arrayLength(&grained)) {
+    let i = PX_WORDS * window_index(p);
+    if (i + PX_WORDS - 1u >= arrayLength(&grained)) {
         return vec4<f32>(0.0);
     }
-    return unpack4x8unorm(grained[i]);
+    return px_of(grained[i], grained[i + PX_WORDS - 1u]);
+}
+
+// pixel `k` of the window (see `window_index`) written
+fn put_work(k: u32, v: vec4<f32>) {
+    work[PX_WORDS * k] = word0(v);
+    if (PX_WORDS > 1u) {
+        work[PX_WORDS * k + 1u] = word1(v);
+    }
+}
+
+fn put_grained(k: u32, v: vec4<f32>) {
+    grained[PX_WORDS * k] = word0(v);
+    if (PX_WORDS > 1u) {
+        grained[PX_WORDS * k + 1u] = word1(v);
+    }
+}
+
+// `v` as the window keeps it, read back
+fn as_kept(v: vec4<f32>) -> vec4<f32> {
+    return px_of(word0(v), word1(v));
 }
 
 fn amount_word(i: u32) -> f32 {
@@ -136,15 +157,15 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
         amount[st.stride * st.rows + k] = d.shown;
     }
     if (d.into_grained) {
-        grained[k] = pack4x8unorm(d.out);
+        put_grained(k, d.out);
         return;
     }
-    work[k] = pack4x8unorm(d.out);
+    put_work(k, d.out);
 }
 
 // A run of a pass's stamps (`st.run`, as `wet_pass` lists them) laid at once over all their bounds
-// (`st.bbox`): each pixel goes through those over it in order, as its paint stands after each (in 8
-// bits a channel, as the window keeps it), and is written once. It comes out as the stamps laid
+// (`st.bbox`): each pixel goes through those over it in order, as its paint stands after each (as
+// the window keeps it: 8 bits a channel, or half floats), and is written once. It comes out as the stamps laid
 // one by one do, each a dispatch of its own.
 @compute @workgroup_size(8, 8)
 fn cs_deposit_run(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -156,7 +177,7 @@ fn cs_deposit_run(@builtin(global_invocation_id) id: vec3<u32>) {
     var laid = false;
     var amount_set = false;
     var shown_set = false;
-    var word = 0u;
+    var last = vec4<f32>(0.0);
     for (var k = st.run.x; k < st.run.y; k++) {
         let bbox = wet_pass.stamps[k].bbox;
         if (any(p < bbox.xy) || any(p >= bbox.zw)) {
@@ -176,11 +197,11 @@ fn cs_deposit_run(@builtin(global_invocation_id) id: vec3<u32>) {
             shown_set = true;
         }
         // as the window keeps it, and the next stamp finds it
-        word = pack4x8unorm(d.out);
+        last = as_kept(d.out);
         if (d.into_grained) {
-            found.grained = unpack4x8unorm(word);
+            found.grained = last;
         } else {
-            found.work = unpack4x8unorm(word);
+            found.work = last;
         }
     }
     if (!laid) {
@@ -194,9 +215,9 @@ fn cs_deposit_run(@builtin(global_invocation_id) id: vec3<u32>) {
         amount[st.stride * st.rows + i] = found.shown;
     }
     if (st.laid_apart == 2u) {
-        grained[i] = word;
+        put_grained(i, last);
     } else {
-        work[i] = word;
+        put_work(i, last);
     }
 }
 
@@ -206,7 +227,7 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     if (!in_bbox(own_dab(), p) || left_out(p)) {
         return;
     }
-    work[window_index(p)] = pack4x8unorm(synthesized(p));
+    put_work(window_index(p), synthesized(p));
 }
 
 @compute @workgroup_size(8, 8)

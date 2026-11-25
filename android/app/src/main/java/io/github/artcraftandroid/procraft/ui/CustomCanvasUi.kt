@@ -247,6 +247,8 @@ fun CustomCanvasScreen(vm: CanvasViewModel, onMade: () -> Unit) {
                 Text("Custom Canvas", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 17.dp))
             }
             Sections.forEachIndexed { i, s ->
+                // Time-lapse settings while the Time-lapse plugin is on
+                if (i == 2 && !vm.has(io.github.artcraftandroid.procraft.core.Feature.TIME_LAPSE)) return@forEachIndexed
                 val chosen = i == section
                 Row(
                     Modifier.padding(start = 8.dp, bottom = 10.dp).size(fit.cellWidth, 52.dp).clip(CircleShape).background(if (chosen) Pc.Accent else Color.Transparent).clickable {
@@ -307,7 +309,7 @@ fun CustomCanvasScreen(vm: CanvasViewModel, onMade: () -> Unit) {
                         SizeRow("DPI", if (field == Field.DPI && typed.isNotEmpty()) typed else "${dpi.roundToInt()}", "", field == Field.DPI) { commit(); field = Field.DPI }
                         Line()
                         val p = preset()
-                        SizeRow("Maximum Layers", "${vm.layersFor(p.width, p.height)}", "", false) {}
+                        SizeRow("Maximum Layers", vm.maximumLayers(p.width, p.height), "", false) {}
                     }
                 }
                 1 -> {

@@ -33,7 +33,7 @@ private var renameFieldInk: Color { Look.shared.light ? Color(argb: 0xFF22_2222)
 
 /// The new-canvas list hanging from the + button, 2 from the screen's edge: the screen's size
 /// first, then the presets, each with its colour profile and size; a preset row swiped left shows
-/// Edit and Delete.
+/// Edit and Delete. Under them, a row for each kind of artwork a plugin on makes, the screen's size.
 struct NewCanvasPanel: View {
     let model: GalleryModel
     let screen: CGSize
@@ -70,6 +70,13 @@ struct NewCanvasPanel: View {
             .padding(.top, 18)
             .padding(.trailing, 13)
         }
+    }
+
+    /// The kinds of artwork the plugins on make: the list's last rows.
+    private var kinds: [PluginKind] {
+        // read again as plugins go on or off
+        _ = PluginsModel.shared.changes
+        return PluginsModel.shared.store.kinds()
     }
 
     var body: some View {
@@ -133,6 +140,7 @@ struct NewCanvasPanel: View {
                 .padding(.horizontal, 9)
                 .padding(.top, 9.5)
                 .padding(.bottom, kinds.isEmpty ? 30 : 0)
+                // the plugins' kinds of artwork under the presets, each the screen's size
                 ForEach(kinds.indices, id: \.self) { k in
                     let kind = kinds[k]
                     PresetRow(name: kind.label, label: "\(width) × \(height)px", profile: "Display P3") {
@@ -224,23 +232,23 @@ private struct SwipeRow: View {
                 .frame(maxHeight: .infinity)
                 .background(Pc.lightRow)
                 .offset(x: x)
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 14)
-                        .onChanged { drag in
-                            guard moved != nil || abs(drag.translation.width) > abs(drag.translation.height) else { return }
-                            let from: CGFloat = open ? -swipeReveal : 0
-                            moved = min(max(from + drag.translation.width, -swipeReveal), 0)
-                        }
-                        .onEnded { _ in
-                            guard let end = moved else { return }
-                            withAnimation(Motion.swipeSettle) {
-                                moved = nil
-                                onOpen(end < -swipeReveal / 2)
-                            }
-                        }
-                )
         }
         .clipped()
+        // UIKit's, behind the row: a SwiftUI drag on it keeps the presets from scrolling
+        .background(RowTouches(
+            slides: { _ in true },
+            slid: { by in
+                let from: CGFloat = open ? -swipeReveal : 0
+                moved = min(max(from + by, -swipeReveal), 0)
+            },
+            slideEnded: {
+                guard let end = moved else { return }
+                withAnimation(Motion.swipeSettle) {
+                    moved = nil
+                    onOpen(end < -swipeReveal / 2)
+                }
+            }
+        ))
     }
 }
 

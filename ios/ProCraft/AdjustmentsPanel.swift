@@ -2,13 +2,23 @@ import SwiftUI
 
 private let adjustmentsWidth: CGFloat = 330
 private var menuText: Color { Look.shared.light ? Color(argb: 0xFF39_3939) : Color(argb: 0xFFC5_C5C5) }
+private var menuDisabledText: Color { Look.shared.light ? Color(argb: 0xFFAA_AAAA) : Color(argb: 0xFF62_6262) }
 
 /// The adjustments menu hanging from its button, in groups as the core lists them: colour, blurs,
 /// effects, painting.
 struct AdjustmentsPanel: View {
     let model: CanvasModel
     let arrowX: CGFloat
-    private let groups = adjustmentGroups()
+    /// The groups, less what a built-in plugin turned off hides (Liquify, Gradient Map).
+    private var groups: [[Adjustment]] {
+        adjustmentGroups().map { $0.filter(PluginsModel.shared.shows) }.filter { !$0.isEmpty }
+    }
+
+    /// Whether the adjustment chosen next goes on a layer of its own: asked for, while the Effects
+    /// plugin's Adjustment layers is on.
+    private var asLayer: Bool {
+        model.adjustAsLayer && PluginsModel.shared.has(.adjustmentLayers)
+    }
     /// The filters imported, and the plugins' actions listed here: the menu's last group is one row
     /// to them, there only with some.
     private let filters = PluginsModel.shared.store.filters()
@@ -55,6 +65,10 @@ struct AdjustmentsPanel: View {
                     }
                 }
             }
+            ForEach(actions, id: \.key) { action in
+                Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
+                row(action.label) { model.runPluginAction(action.key) }
+            }
         }
     }
 
@@ -75,21 +89,49 @@ struct AdjustmentsPanel: View {
                         if showFilters {
                             filterRows
                         } else {
+                        // the adjustment chosen next goes on a layer of its own, editable
+                        if PluginsModel.shared.has(.adjustmentLayers) {
+                        group {
+                            HStack(spacing: 0) {
+                                Text(verbatim: "Adjustment Layer")
+                                    .font(.system(size: 17))
+                                    .foregroundStyle(menuText)
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                if model.adjustAsLayer {
+                                    PcIconView(PcIcons.tick, size: 20, color: Pc.accent)
+                                }
+                            }
+                            .padding(.leading, 15)
+                            .padding(.trailing, 14)
+                            .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .onTapGesture { model.adjustAsLayer.toggle() }
+                        }
+                        }
                         ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
                             VStack(spacing: 0) {
                                 ForEach(Array(group.enumerated()), id: \.offset) { i, adjustment in
                                     if i > 0 {
                                         Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
                                     }
+                                    // as an adjustment layer, those that can't be one are greyed
+                                    let takes = !asLayer || adjustmentLive(adjustment: adjustment)
                                     Text(verbatim: adjustmentLabel(adjustment: adjustment))
                                         .font(.system(size: 17))
-                                        .foregroundStyle(menuText)
+                                        .foregroundStyle(takes ? menuText : menuDisabledText)
                                         .lineLimit(1)
                                         .padding(.leading, 15)
                                         .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
                                         .contentShape(Rectangle())
                                         .onTapGesture {
-                                            model.startAdjustment(adjustment)
+                                            if asLayer {
+                                                if takes {
+                                                    model.addAdjustmentLayer(adjustment)
+                                                }
+                                            } else {
+                                                model.startAdjustment(adjustment)
+                                            }
                                         }
                                 }
                             }
@@ -109,7 +151,12 @@ struct AdjustmentsPanel: View {
             }
         }
         #if DEBUG
-        .onAppear { showFilters = ScreenCapture.filtersShow }
+        .onAppear {
+            showFilters = ScreenCapture.filtersShow
+            if ScreenCapture.adjustAsLayer {
+                model.adjustAsLayer = true
+            }
+        }
         #endif
     }
 }

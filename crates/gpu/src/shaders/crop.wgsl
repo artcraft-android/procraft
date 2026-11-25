@@ -1,6 +1,7 @@
 // A layer of the canvas from before a crop seen through it: each new pixel's middle mapped onto
 // the old canvas (`m`), bilinear between the four old pixels around it, clear past the old edges;
-// worked in steps of 0..255 and rounded as the CPU's crop does.
+// worked in steps of 0..255 and rounded as the CPU's crop does. Or (`ef.z` set) each new pixel the
+// one old pixel its middle falls in: a layer magnified as the squares its pixels show as.
 
 struct Crop {
     // x' = a x + c y + e, y' = b x + d y + f
@@ -29,6 +30,10 @@ fn tap(x: i32, y: i32) -> vec4<f32> {
 @fragment
 fn fs_crop(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = vec2<f32>(m.abcd.x * pos.x + m.abcd.z * pos.y + m.ef.x, m.abcd.y * pos.x + m.abcd.w * pos.y + m.ef.y);
+    if (m.ef.z > 0.5) {
+        let at = vec2<i32>(floor(p));
+        return tap(at.x, at.y) / 255.0;
+    }
     let f = p - vec2<f32>(0.5);
     let o = floor(f);
     let t = f - o;

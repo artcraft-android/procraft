@@ -82,12 +82,37 @@ final class QuickMenus {
 }
 
 extension CanvasModel {
-    /// The QuickMenu opened around window point `at` (in points), or closed if it is open.
-    func toggleQuickMenu(at: CGPoint) {
+    /// The QuickMenu opened around window point `at` (in points), or closed if it is open; `held`
+    /// when the finger that opens it is still down on the canvas.
+    func toggleQuickMenu(at: CGPoint, held: Bool = false) {
         if quickMenuAt == nil {
             QuickMenus.shared.shown = QuickMenus.shared.active
         }
+        quickMenuFinger = nil
+        quickMenuHeld = held && quickMenuAt == nil
         quickMenuAt = quickMenuAt == nil ? at : nil
+    }
+
+    /// A lone finger on the canvas slid or lifted, or is alone no more. While it is the finger
+    /// that opened the QuickMenu (sliding off where it landed, or held still), the menu follows
+    /// it: slid towards a button and let go, the button runs. Another finger landing with it, they
+    /// meant the canvas, and the menu goes.
+    func loneFinger(_ step: FingerStep) {
+        guard quickMenuAt != nil, quickMenuHeld else { return }
+        switch step {
+        case .slid:
+            quickMenuFinger = step
+        case .lifted:
+            quickMenuHeld = false
+            // only a finger the menu has followed
+            if case .slid = quickMenuFinger {
+                quickMenuFinger = step
+            }
+        case .takenBack:
+            quickMenuHeld = false
+            quickMenuFinger = nil
+            quickMenuAt = nil
+        }
     }
 
     /// The brush button `i` of the ring gives the current tool, if it is set to one still in the
@@ -104,7 +129,8 @@ extension CanvasModel {
             return brush.name
         }
         guard let menu = QuickMenus.shared.menu, menu.slots.indices.contains(i) else { return "" }
-        return quickActionLabel(action: menu.slots[i])
+        // a built-in plugin's action, while it is off, as no action
+        return quickActionLabel(action: PluginsModel.shared.shows(menu.slots[i]) ? menu.slots[i] : .none)
     }
 
     /// Sets button `i` of the ring to give brush `b` to the current tool.
@@ -129,6 +155,8 @@ extension CanvasModel {
     /// Does `a`, a QuickMenu button opened at window point `at`. What has no screen on the iPad yet
     /// (the animation's and the reference's) does nothing.
     func runQuickAction(_ a: QuickAction, at: CGPoint) {
+        // nothing for a built-in plugin's action while it is off
+        guard PluginsModel.shared.shows(a) else { return }
         func onCurrent(_ f: (LayerInfo) -> Void) {
             if let l = layers.first(where: { $0.current }) {
                 f(l)
@@ -160,7 +188,7 @@ extension CanvasModel {
         case .pageAssist: animationAssist.setAssist(animationAssist.settings?.pages != true, pages: true)
         case .nextFrame: animationAssist.step(1)
         case .previousFrame: animationAssist.step(-1)
-        case .onionSkin: animationAssist.toggleOnionSkin()
+        case .onionSkin: if timeline.info != nil { timeline.toggleOnionSkin() } else { animationAssist.toggleOnionSkin() }
         case .projectCanvas: changeProjectCanvas(!AppSettings.shared.projectCanvas)
         case .companionMove: toggleCompanionMode(.move)
         case .companionZoom: toggleCompanionMode(.zoom)
@@ -168,7 +196,7 @@ extension CanvasModel {
         case .flipVertical: flipCanvas(horizontal: false)
         case .undo: undo()
         case .redo: redo()
-        case .paint: select(.paint)
+        case .paint: select(penTool)
         case .smudge: select(.smudge)
         case .erase: select(.erase)
         case .eyedropper: pickNext = true

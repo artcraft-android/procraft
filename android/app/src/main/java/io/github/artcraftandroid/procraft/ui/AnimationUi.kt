@@ -377,7 +377,7 @@ private fun ColumnScope.OnionColorsPage(vm: CanvasViewModel, onBack: () -> Unit)
     Box(Modifier.offset(x = (-4).dp).padding(top = 11.dp).size(282.dp, 365.dp)) {
         Box(Modifier.scaledFrom(260.dp, 282.dp)) { CompactBody(vm, c, mode) }
     }
-    Box(Modifier.offset(x = (-4).dp).width(282.dp)) { CompactTabs(mode) { mode = it } }
+    Box(Modifier.offset(x = (-4).dp).width(282.dp)) { CompactTabs(mode, vm.has(io.github.artcraftandroid.procraft.core.Feature.PALETTES)) { mode = it } }
 }
 
 private val SwatchRim = Color(0xFF969696)

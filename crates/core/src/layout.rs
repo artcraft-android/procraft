@@ -2226,7 +2226,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("procraft-layout-off-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let plugins = Plugins::with_bundled(dir.to_string_lossy().into_owned());
-        assert!(!plugins.plugins().is_empty() && plugins.plugins().iter().all(|p| !p.on));
+        // (the files: the built-ins come on, and lay nothing out)
+        let files: Vec<_> =
+            plugins.plugins().into_iter().filter(|p| p.source != crate::plugins::PluginSource::Builtin).collect();
+        assert!(!files.is_empty() && files.iter().all(|p| !p.on));
         assert_eq!(plugins.panel_layout(), PanelLayoutLook::default());
         let layout = PanelLayout::new();
         layout.follow(Arc::clone(&plugins));

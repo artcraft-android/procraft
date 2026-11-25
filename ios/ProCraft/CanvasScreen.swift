@@ -26,7 +26,8 @@ struct CanvasScreen: View {
         GeometryReader { place in
             let screen = Interface.shared.screen(place.size)
             let right = AppSettings.shared.rightHanded
-            let hidden = model.barsHidden
+            // (the Texture Packer and Comic Panels take the screen's bars away while they are open)
+            let hidden = model.barsHidden || model.texturePacker != nil || model.pluginTool != nil
             // the side bar at its kept place down its edge; its modify button dragged, it follows
             // the finger up or down stretching a little toward it, and let go settles back
             let sideFit = model.sideBarPlace(height: screen.size.height)
@@ -44,18 +45,27 @@ struct CanvasScreen: View {
                     }
                 }
                 // with the interface hidden, a button in the top left brings it back
-                if hidden {
+                if model.barsHidden, model.texturePacker == nil {
                     ShowInterfaceButton(model: model)
                         .transition(.opacity)
                 }
                 GuideOverlay(model: model)
                 if model.transforming {
                     TransformOverlay(model: model)
+                    AutokeyBadge(model: model)
                 }
-                if model.selecting {
+                // (and the Pen's or Eraser's lasso shapes as they are drawn, where the canvas doesn't
+                // show them itself: on a sharp vector layer)
+                if model.selecting || (model.lassoToolOn && model.lassoPreviewOnScreen) {
                     SelectionOverlay(model: model)
                 }
+                // the motion path of the block under the playhead, over the canvas but under the
+                // bars and the timeline's panels (beside the vector nodes in what they are)
+                MotionPathOverlay(model: model)
+                // a move about to be performed takes the next touch on the canvas
+                GridPerformOverlay(model: model)
                 ColorDropBand(drop: model.drop, width: screen.size.width)
+                EraserBand(model: model, width: screen.size.width)
                 // the top bar slides up off the screen and the side bar out to its side as they fade
                 // (each half on glass of its own while moved, or collapsed into its side: Collapse to edge)
                 if model.barMoved(.topLeft) == nil, model.barMoved(.topRight) == nil,
@@ -110,9 +120,17 @@ struct CanvasScreen: View {
                 }
                 // over the canvas, under the panels; not over a page that takes the screen
                 if !hidden, !model.canvasInfoOpen, !model.gestureControlsOpen, model.crop.shown == nil, !model.timeLapse.replaying,
-                   model.animatedExport == nil, model.scene.animatedExport == nil, !model.scene.studioOpen {
-                    AnimationBar(model: model, screen: screen.size)
-                        .frame(width: screen.size.width, height: screen.size.height, alignment: .bottom)
+                   model.animatedExport == nil, model.pluginShare == nil, model.scene.animatedExport == nil, !model.scene.studioOpen {
+                    Group {
+                        if model.timeline.on {
+                            if model.timeline.shown {
+                                TimelineBar(model: model, screen: screen.size)
+                            }
+                        } else if model.animationAssist.shown {
+                            AnimationBar(model: model, screen: screen.size)
+                        }
+                    }
+                    .frame(width: screen.size.width, height: screen.size.height, alignment: .bottom)
                 }
                 // the panels a plugin lets float, in windows of their own, under those hanging
                 if !hidden {
@@ -155,6 +173,7 @@ struct CanvasScreen: View {
                         initial: true
                     ) { _, room in model.layoutRoom(room) }
                 QuickShapeHandles(model: model)
+                VectorNodes(model: model)
                 if !hidden {
                     QuickShapeBar(model: model)
                         .offset(y: Pc.barShown)
@@ -204,6 +223,8 @@ struct CanvasScreen: View {
                 ZStack {
                     if model.adjusting, model.adjustment != .liquify, !hidden {
                         AdjustmentPanel(model: model, screen: screen.size)
+                            // (over the timeline's bar, not on it)
+                            .padding(.bottom, model.timeline.shown ? model.timeline.gridHeight : 0)
                             .reportsPiece(.adjusting, lift: 25)
                             .transition(.move(edge: .bottom))
                     }
@@ -214,6 +235,8 @@ struct CanvasScreen: View {
                 ZStack {
                     if model.transforming, !hidden {
                         TransformToolbar(model: model, screenWidth: screen.size.width)
+                            // (over the timeline's bar, not on it)
+                            .padding(.bottom, model.timeline.shown ? model.timeline.gridHeight : 0)
                             .reportsPiece(.transform, lift: 25)
                             .transition(.move(edge: .bottom))
                     }
@@ -232,6 +255,7 @@ struct CanvasScreen: View {
                 ZStack {
                     if model.selecting, !hidden {
                         SelectionToolbar(model: model, screenWidth: screen.size.width)
+                            .padding(.bottom, model.timeline.shown ? model.timeline.gridHeight : 0)
                             .reportsPiece(.selection, lift: 25)
                             .transition(.move(edge: .bottom))
                     }
@@ -273,6 +297,14 @@ struct CanvasScreen: View {
                     AnimatedExport(model: model, format: format)
                         .transition(.move(edge: .bottom))
                 }
+                if let share = model.pluginShare {
+                    PluginShareScreen(model: model, share: share)
+                        .transition(.move(edge: .bottom))
+                }
+                if let packer = model.texturePacker {
+                    TexturePackerOverlay(model: model, state: packer, screen: screen.size)
+                        .transition(.opacity)
+                }
                 if let format = model.scene.animatedExport {
                     ModelAnimatedExport(model: model, format: format)
                         .transition(.move(edge: .bottom))
@@ -282,6 +314,10 @@ struct CanvasScreen: View {
                 }
                 if model.timeLapse.replaying {
                     TimeLapseReplay(model: model)
+                        .transition(.opacity)
+                }
+                if let tool = model.pluginTool {
+                    PluginToolView(model: model, tool: tool)
                         .transition(.opacity)
                 }
                 CropOverlay(model: model)
@@ -402,7 +438,7 @@ struct CanvasScreen: View {
                 BlockedDialog(model: model)
                 AlertView(
                     content: model.question.map {
-                        AlertContent(title: $0.title, message: $0.message, action: $0.action, icon: $0.icon)
+                        AlertContent(title: $0.title, message: $0.message, action: $0.action, icon: $0.icon, destructive: $0.destructive)
                     },
                     onCancel: { model.question = nil },
                     onAction: {
@@ -530,6 +566,11 @@ private struct BlockedDialog: View {
             return AlertContent(
                 title: "Several layers are chosen", message: "This works on one layer at a time: choose just one.",
                 action: "Open Layers", icon: PcIcons.folder, destructive: false
+            )
+        case .alphaLocked:
+            return AlertContent(
+                title: "Alpha Lock is on", message: "\u{201C}\(name)\u{201D} can't be liquified while its alpha is locked.",
+                action: "Open Layers", icon: PcIcons.pageLocked, destructive: false, extra: "Turn Off"
             )
         // only on a model
         case .meshHidden:
@@ -687,13 +728,13 @@ private struct PanelHost: View {
             let hang = moved(false, libraryButton(model.tool), brushLibraryWidth)
             let height = room(hang, less: 25)
             let at = origin(hang, place, height: height)
-            // ending 25 above the screen's edge, as measured
+            // the brushes reach 25 above the screen's edge; Lasso's and Light's settings are as tall as they are
             hung(
                 BrushLibrary(
                     model: model, arrowX: arrow(hang, place), origin: CGPoint(x: at.x / k, y: at.y / k),
                     screen: CGSize(width: screen.width / k, height: screen.height / k)
                 )
-                .frame(height: height)
+                .frame(height: model.drawMode == .brush ? height : nil)
                 // torn off by its grabber: unseen until let go, its window following the finger
                 .opacity(model.floating.undocking == .brushes ? 0 : 1),
                 place, hang
@@ -762,6 +803,9 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
     private let model: CanvasModel
     private let canvas: CanvasView
     private lazy var dropper = CanvasDropper(model: model)
+    /// Files dragged in from another app, taken anywhere on the window (over a panel or a bar as
+    /// over the canvas): on the window itself once the screen is on it.
+    private lazy var drops = UIDropInteraction(delegate: dropper)
     private var observers: [NSObjectProtocol] = []
     /// Back to the gallery, once the artwork is kept.
     private let leave: () -> Void
@@ -801,7 +845,6 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             DispatchQueue.global(qos: .utility).async { try? session.save(dir: dir) }
             model.startedNew()
         }
-        canvas.addInteraction(UIDropInteraction(delegate: dropper))
         // on a second display too, with Project canvas on
         Projection.shared.artwork(session)
         // kept saved by the core a few seconds after it changes; a failure told
@@ -819,6 +862,9 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             }
         }
         canvas.afterTouches = { [weak self] ended in self?.model.layerOpacityTouched(ended: ended) }
+        // no brush outline under the hovering Pencil while a selection or a transform is open
+        canvas.cursorStaysAway = { [weak self] in self?.model.selecting == true || self?.model.transforming == true }
+        canvas.onLoneFinger = { [weak self] in self?.model.loneFinger($0) }
         canvas.ringAt = { [weak self] in self?.model.showLiquifyRing($0) }
         canvas.tapAssistance = SystemSettings.tapAssistance
         let pencil = UIPencilInteraction()
@@ -834,6 +880,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
         observers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
+            self?.model.hearsStrokes = false
             self?.model.session.setShown(shown: false)
             self?.saveInBackground()
         })
@@ -843,6 +890,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             self?.model.session.setShown(shown: true)
             self?.model.followStrokeSound()
             self?.model.readAppSettings()
+            self?.model.hearsStrokes = true
             self?.canvas.tapAssistance = SystemSettings.tapAssistance
         })
         // time on the artwork counts only while the app is active: not while the iPad is locked,
@@ -859,6 +907,8 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             guard let self, !self.leaving else { return }
             self.model.resumeTracking()
         })
+        // the strokes heard while the canvas shows (a plugin's sound)
+        model.hearsStrokes = true
         // Paste offered once anything holds a picture: what another app copied meanwhile, or this
         // app's clipboard changing
         model.lookAtSystemClipboard()
@@ -878,6 +928,15 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         becomeFirstResponder()
+        if let window = view.window, drops.view !== window {
+            drops.view?.removeInteraction(drops)
+            window.addInteraction(drops)
+        }
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        drops.view?.removeInteraction(drops)
     }
 
     private static func isAlt(_ key: UIKey) -> Bool {
@@ -995,6 +1054,9 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.toggleBars()
             case .fit:
                 model.settleToFit()
+            // fingers that turned the canvas a little by accident: it eases back
+            case let .unturn(x, y, turn):
+                model.settleTurn(x: x, y: y, turn: turn)
             case let .layerSelect(x, y):
                 model.layerSelect(x: x, y: y)
             case .quickShapeLast:
@@ -1068,6 +1130,8 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.selection.freehandChanged()
             case .selectionChanged:
                 model.selection.touched()
+            case .shapeFilled:
+                model.selection.shapeFilled()
             case let .pourAt(x, y, fill):
                 model.drop.tapFill(x: x, y: y, fill: fill)
             case let .fillThreshold(threshold):
@@ -1077,7 +1141,9 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             case .filled:
                 model.drop.filled()
             case let .quickMenu(x, y):
-                model.toggleQuickMenu(at: CGPoint(x: CGFloat(x) / model.pixels, y: CGFloat(y) / model.pixels))
+                model.toggleQuickMenu(
+                    at: CGPoint(x: CGFloat(x) / model.pixels, y: CGFloat(y) / model.pixels), held: canvas.touching
+                )
             case .adjustChanged:
                 model.adjustModesOpen = false
                 model.readAdjust()
@@ -1113,7 +1179,9 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
         let session = model.session
         let dir = model.dir
         model.noteTime()
+        model.hearsStrokes = false
         model.keepChoicesNow()
+        drops.view?.removeInteraction(drops)
         leaving = true
         // off the main thread: a large artwork takes a while
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1232,11 +1300,13 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             return
         }
         canvas.pencilDoubleTapped(at: nil, action: UIPencilInteraction.preferredTapAction)
+        model.penGestureDone()
     }
 
     @available(iOS 17.5, *)
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
         canvas.pencilDoubleTapped(at: tap.hoverPose?.location, action: UIPencilInteraction.preferredTapAction)
+        model.penGestureDone()
     }
 
     @available(iOS 17.5, *)
@@ -1249,6 +1319,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             model.closePopovers()
         }
         canvas.pencilSqueezed(squeeze, action: action)
+        model.penGestureDone()
     }
 }
 

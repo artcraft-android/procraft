@@ -441,6 +441,7 @@ fn tool_number(tool: ToolKind) -> u8 {
         ToolKind::Paint => 0,
         ToolKind::Erase => 1,
         ToolKind::Smudge => 2,
+        ToolKind::Light => 3,
     }
 }
 
@@ -575,6 +576,7 @@ impl Item {
                     item.tool = match bytes.first() {
                         Some(1) => ToolKind::Erase,
                         Some(2) => ToolKind::Smudge,
+                        Some(3) => ToolKind::Light,
                         _ => ToolKind::Paint,
                     }
                 }
@@ -673,6 +675,7 @@ impl Item {
             ToolKind::Erase => "Erase stroke",
             ToolKind::Smudge => "Smudge stroke",
             ToolKind::Paint => "Paint stroke",
+            ToolKind::Light => "Light stroke",
         }
     }
 }
@@ -1176,7 +1179,7 @@ impl State {
             whole_pixels,
             alpha_lock: self.doc.layer(layer).is_some_and(|l| l.alpha_lock),
             input: self.input.clone(),
-            symmetry: Symmetry::of(&self.doc.stroke_guide()),
+            symmetry: Symmetry::of(&crate::guide::stroke_guide(&self.doc, self.guide_paused)),
             batches: Vec::new(),
             started: 0.0,
             id: None,
@@ -1205,7 +1208,7 @@ impl State {
         let Recording { layer, kind, item, laid, .. } = recording;
         // (the stroke shown as it went changed the layer's pixels' version, not what they hold)
         let laid_before = self.laid.get(&layer).filter(|_| laid).map(|l| Arc::clone(&l.items));
-        let guide = self.doc.stroke_guide().into_owned();
+        let guide = crate::guide::stroke_guide(&self.doc, self.guide_paused).into_owned();
         let before = self.doc.layer(layer).and_then(|l| l.plugin.as_ref()).and_then(|p| p.data.clone());
         let record = item.record();
         let answer = self.hooks.as_ref().and_then(|hooks| {

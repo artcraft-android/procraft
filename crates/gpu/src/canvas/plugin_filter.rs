@@ -2,6 +2,11 @@
 //! (the template in `shaders/plugin_filter_1.wgsl`). It takes a pixel of the layer and hands one
 //! back; premultiplying, the selection, the alpha lock and the layer's copy are the app's.
 //!
+//! On an HDR canvas a filter sees what it was written for, colour from black to white: each pixel
+//! cut at white on its way in (and through `layer_at`), and what it gives back taken as 0..1 too.
+//! A pixel it gives back as it was given keeps its light above white, so a filter that changes
+//! only part of a layer (a vignette's middle, a selection's outside) leaves the rest as it was.
+//!
 //! The file is hostile until it has held up, and a GPU can't be interrupted, so what it can do is
 //! bounded before it runs:
 //! - Its text may declare functions, constants and types, nothing else, and reach nothing of the
@@ -28,8 +33,11 @@ use std::time::{Duration, Instant};
 
 use wgpu::naga::{self, Arena, BinaryOperator, Block, Expression, Function, Handle, Literal, Module, Span, Statement};
 
+use procraft_engine::document::DynamicRange;
+
 use super::{
-    Canvas, FilterUniform, LAYER_FORMAT, Op, UniformData, blended_pipeline, copy_at, extent, render_pass, texture,
+    Canvas, FilterUniform, LAYER_FORMAT, Op, UniformData, blended_pipeline, copy_at, extent, layer_format, render_pass,
+    texture,
 };
 use crate::{Gpu, GpuError};
 
@@ -559,6 +567,8 @@ fn paying(expressions: &mut Arena<Expression>, budget: Handle<naga::GlobalVariab
 
 /// A filter ready to draw on this device.
 pub struct FilterProgram {
+    /// Draws into a layer of a canvas of this range's.
+    range: DynamicRange,
     draw: wgpu::RenderPipeline,
     probe: wgpu::RenderPipeline,
     probe_target: wgpu::Texture,
@@ -599,6 +609,9 @@ pub enum FilterRun {
     TooLong,
     /// The device was lost: nothing it held can be read.
     Lost,
+    /// Not drawn: it was made for a canvas of the other range (standard or HDR), and needs making
+    /// again for this one. The layer is as it was.
+    OtherRange,
 }
 
 impl Gpu {
@@ -606,16 +619,21 @@ impl Gpu {
     /// the file holds, and waited for only so long. Its errors come back here, not to the device's
     /// count. What a driver does on it nothing can catch: see the core's record of it.
     pub fn make_filter(&self, code: FilterCode) -> Result<Arc<FilterProgram>, GpuError> {
+        self.make_filter_for(code, DynamicRange::Standard)
+    }
+
+    /// [`Gpu::make_filter`] for a canvas of `range`'s.
+    pub fn make_filter_for(&self, code: FilterCode, range: DynamicRange) -> Result<Arc<FilterProgram>, GpuError> {
         let (done, came) = mpsc::channel();
         let gpu = self.clone();
         let started = std::thread::Builder::new().name("plugin filter".into()).stack_size(BIG_STACK).spawn(move || {
-            let _ = done.send(gpu.filter_pipelines(code));
+            let _ = done.send(gpu.filter_pipelines(code, range));
         });
         started.map_err(|e| GpuError::Failed(e.to_string()))?;
         came.recv_timeout(COMPILE_LIMIT).map_err(|e| GpuError::Failed(format!("compiling a filter: {e}")))?
     }
 
-    fn filter_pipelines(&self, code: FilterCode) -> Result<Arc<FilterProgram>, GpuError> {
+    fn filter_pipelines(&self, code: FilterCode, range: DynamicRange) -> Result<Arc<FilterProgram>, GpuError> {
         let layout = self.canvas_pipelines().filter_layout.clone();
         let (worst, loops) = (code.worst, code.loops);
         self.checked(|| {
@@ -624,23 +642,15 @@ impl Gpu {
                 label: Some("plugin filter"),
                 source: wgpu::ShaderSource::Naga(Cow::Owned(code.module)),
             });
-            let pipeline = |entry: &str| {
+            let pipeline = |entry: &str, format| {
                 // a plugin's own code: not kept for the next run
-                blended_pipeline(
-                    device,
-                    None,
-                    &layout,
-                    &module,
-                    "plugin filter",
-                    ("host_vs", entry),
-                    LAYER_FORMAT,
-                    None,
-                )
+                blended_pipeline(device, None, &layout, &module, "plugin filter", ("host_vs", entry), format, None)
             };
             let probe_target = texture(self, "plugin filter probe", PROBE_SIZE, PROBE_SIZE, LAYER_FORMAT);
             Arc::new(FilterProgram {
-                draw: pipeline("host_main"),
-                probe: pipeline("host_probe"),
+                range,
+                draw: pipeline("host_main", layer_format(range)),
+                probe: pipeline("host_probe", LAYER_FORMAT),
                 probe_target,
                 worst,
                 loops,
@@ -695,14 +705,24 @@ impl Canvas {
         filter: &FilterValues,
     ) {
         let Some(t) = &self.transforming else { return };
+        if layer_format(filter.program.range) != self.format {
+            self.filter_run = Some(FilterRun::OtherRange);
+            return;
+        }
+        let hdr = if self.format == super::HDR_FORMAT { 1.0 } else { 0.0 };
         let Some(layer) = self.layers.get(&t.layer) else { return };
         let (w, h) = (self.width as f32, self.height as f32);
         let chosen = if t.masked { 1.0 } else { 0.0 };
         let locked = if filter.alpha_locked { 1.0 } else { 0.0 };
         let [a @ .., _, _, _, _] = filter.values;
         let [_, _, _, _, b @ ..] = filter.values;
-        let uniform =
-            FilterUniform { a, b, size: [w, h, chosen, locked], c: [PROBE_SIZE as f32, PROBE_SIZE as f32, 0.0, 0.0] };
+        let uniform = FilterUniform {
+            a,
+            b,
+            size: [w, h, chosen, locked],
+            c: [PROBE_SIZE as f32, PROBE_SIZE as f32, hdr, 0.0],
+            ..FilterUniform::ZERO
+        };
         let draw = |encoder: &mut wgpu::CommandEncoder,
                     uniforms: &mut UniformData,
                     target: &wgpu::TextureView,

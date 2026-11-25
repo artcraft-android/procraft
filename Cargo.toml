@@ -35,13 +35,17 @@ pollster = "0.4"
 log = "0.4"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# (numbers read back exactly as written: a vector stroke's placement is kept to the last bit)
+serde_json = { version = "1", features = ["float_roundtrip"] }
 png = "0.18"
 miniz_oxide = "0.8"
 parking_lot = "0.12"
 
 [profile.dev]
 opt-level = 1
+# Line numbers in backtraces and the debugger, but no variable or type info:
+# keeps target/debug a fraction of the size, which matters with a build per worktree.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2

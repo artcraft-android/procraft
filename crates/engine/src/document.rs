@@ -428,6 +428,11 @@ pub struct Layer {
     /// Strokes on it follow the drawing guide (drawing assist).
     #[serde(default)]
     pub assisted: bool,
+    /// A vector layer's strokes, kept as strokes (see [`crate::vector`]): its pixels are what
+    /// they draw, until they are changed some other way. Not in the document's own file: an
+    /// artwork's file keeps them apart.
+    #[serde(skip)]
+    pub vector: Option<std::sync::Arc<crate::vector::VectorContent>>,
     /// A layer of a kind a plugin adds (a vector layer, say): what the plugin keeps for it besides
     /// its pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -440,6 +445,146 @@ pub struct Layer {
     /// and undone with it, gone with it, and kept as they are while their plugin is off or gone.
     #[serde(default, deserialize_with = "or_default", skip_serializing_if = "BTreeMap::is_empty")]
     pub marks: BTreeMap<String, i64>,
+    /// An adjustment layer's adjustment: it has no pixels of its own to show, but redraws what is
+    /// below it in its group through this as the canvas composites (see [`LayerAdjustment`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjustment: Option<LayerAdjustment>,
+    /// Its outline, drop shadow and glows, drawn around (and inside) what it shows as it
+    /// composites; none, or none of them on, for a plain layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<LayerStyle>,
+    /// A comic panel's frame: the shape the art above it in its panel is clipped to (see
+    /// [`crate::panels`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<crate::panels::PanelFrame>,
+}
+
+/// What an adjustment layer does: the adjustment it redraws what is below it through, with its
+/// table (curves and gradient map), and its settings as the app's panels show them.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LayerAdjustment {
+    pub filter: crate::filter::Filter,
+    /// The 256 entries (RGBA8, 1024 bytes) curves and gradient map read; empty for the others.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table: Vec<u8>,
+    /// The app's settings for it (its sliders and choices), kept as the app wrote them so its
+    /// panel opens on them again.
+    #[serde(default)]
+    pub settings: serde_json::Value,
+}
+
+/// The most a layer style's size or shadow distance can be (canvas pixels): what it reaches beyond
+/// the layer's own pixels.
+pub const STYLE_MOST_SIZE: f32 = 100.0;
+
+/// One of a layer's styles: on or off, its colour (sRGB 0..1), opacity (0..1), size (canvas
+/// pixels) and softness (0 a crisp edge, 1 fading all the way across it). A drop shadow also has a
+/// distance (canvas pixels) and angle (degrees, 0 to the right, 90 down).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LayerEffect {
+    pub on: bool,
+    pub color: [f32; 3],
+    pub opacity: f32,
+    pub size: f32,
+    pub softness: f32,
+    pub distance: f32,
+    pub angle: f32,
+}
+
+impl Default for LayerEffect {
+    fn default() -> LayerEffect {
+        LayerEffect { on: false, color: [0.0; 3], opacity: 1.0, size: 4.0, softness: 0.0, distance: 0.0, angle: 0.0 }
+    }
+}
+
+impl LayerEffect {
+    /// Whether it draws anything.
+    pub fn shows(&self) -> bool {
+        self.on && self.opacity > 0.0 && (self.size > 0.0 || self.distance > 0.0)
+    }
+
+    /// Whether, as a layer's Color, it colours anything: it has no size to it, only how strong.
+    pub fn colours(&self) -> bool {
+        self.on && self.opacity > 0.0
+    }
+
+    /// Its values kept to what they can be (a file's, say).
+    pub fn tidied(self) -> LayerEffect {
+        let unit = |v: f32, or: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { or };
+        let size = |v: f32| if v.is_finite() { v.clamp(0.0, STYLE_MOST_SIZE) } else { 0.0 };
+        LayerEffect {
+            on: self.on,
+            color: self.color.map(|c| unit(c, 0.0)),
+            opacity: unit(self.opacity, 1.0),
+            size: size(self.size),
+            softness: unit(self.softness, 0.0),
+            distance: size(self.distance),
+            angle: if self.angle.is_finite() { self.angle.rem_euclid(360.0) } else { 0.0 },
+        }
+    }
+}
+
+/// A layer's styles: an outline, a drop shadow, glows outside and inside its edge, and a colour
+/// all that it shows is made (as opaque as it was: only its colour and opacity count). Each is off
+/// until turned on, with values that look right as soon as it is.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LayerStyle {
+    pub outline: LayerEffect,
+    pub shadow: LayerEffect,
+    pub outer_glow: LayerEffect,
+    pub inner_glow: LayerEffect,
+    pub color: LayerEffect,
+}
+
+impl Default for LayerStyle {
+    fn default() -> LayerStyle {
+        let effect = LayerEffect::default();
+        LayerStyle {
+            outline: LayerEffect { size: 4.0, ..effect },
+            shadow: LayerEffect { opacity: 0.6, size: 8.0, softness: 0.7, distance: 12.0, angle: 45.0, ..effect },
+            outer_glow: LayerEffect { color: [1.0, 0.92, 0.6], opacity: 0.8, size: 24.0, softness: 1.0, ..effect },
+            inner_glow: LayerEffect { color: [1.0, 1.0, 1.0], opacity: 0.75, size: 12.0, softness: 1.0, ..effect },
+            color: LayerEffect { size: 0.0, ..effect },
+        }
+    }
+}
+
+impl LayerStyle {
+    /// The five, in the order they are listed: outline, drop shadow, outer glow, inner glow,
+    /// color.
+    pub fn effects(&self) -> [LayerEffect; 5] {
+        [self.outline, self.shadow, self.outer_glow, self.inner_glow, self.color]
+    }
+
+    /// The effect at `index` in [`Self::effects`]'s order.
+    pub fn effect_mut(&mut self, index: usize) -> Option<&mut LayerEffect> {
+        match index {
+            0 => Some(&mut self.outline),
+            1 => Some(&mut self.shadow),
+            2 => Some(&mut self.outer_glow),
+            3 => Some(&mut self.inner_glow),
+            4 => Some(&mut self.color),
+            _ => None,
+        }
+    }
+
+    /// Whether any of them draws anything.
+    pub fn shows(&self) -> bool {
+        [self.outline, self.shadow, self.outer_glow, self.inner_glow].iter().any(LayerEffect::shows)
+            || self.color.colours()
+    }
+
+    /// How far beyond the layer's own pixels they reach (canvas pixels, whole): what a change
+    /// to its pixels changes around it.
+    pub fn reach(&self) -> u32 {
+        let shadow = if self.shadow.shows() { self.shadow.size + self.shadow.distance } else { 0.0 };
+        let outline = if self.outline.shows() { self.outline.size } else { 0.0 };
+        let glow = if self.outer_glow.shows() { self.outer_glow.size } else { 0.0 };
+        let inner = if self.inner_glow.shows() { self.inner_glow.size } else { 0.0 };
+        (shadow.max(outline).max(glow).max(inner).ceil() as u32).saturating_add(2)
+    }
 }
 
 /// What makes a layer a filter layer: the filter it runs over what is below it, as
@@ -554,10 +699,21 @@ impl Layer {
             text: None,
             private: false,
             assisted: false,
+            vector: None,
             plugin: None,
+            adjustment: None,
+            style: None,
+            panel: None,
             filter: None,
             marks: BTreeMap::new(),
         }
+    }
+
+    /// Whether the layer is made of more than its pixels (a text layer's text, a vector layer's
+    /// strokes): what changes pixels alone leaves it be, until it is rasterized. The same as
+    /// [`Self::drawn_from_data`].
+    pub fn is_made(&self) -> bool {
+        self.drawn_from_data()
     }
 
     /// The number plugin `owner` keeps with it: 0 for none.
@@ -565,11 +721,26 @@ impl Layer {
         self.marks.get(owner).copied().unwrap_or(0)
     }
 
-    /// Whether its pixels are drawn from what it holds besides them (its text, or a plugin's items),
-    /// or it has none (a filter layer): only that changes them, so edits to its pixels alone (a
-    /// fill, an adjustment, a transform) wait until it is rasterized.
+    /// Whether its pixels are drawn from what it holds besides them (its text, a vector layer's
+    /// strokes, or a plugin's items), or it has none (a filter or adjustment layer): only that
+    /// changes them, so edits to its pixels alone (a fill, an adjustment, a transform) wait until it
+    /// is rasterized.
     pub fn drawn_from_data(&self) -> bool {
-        self.text.is_some() || self.plugin.is_some() || self.filter.is_some()
+        self.text.is_some()
+            || self.vector.is_some()
+            || self.plugin.is_some()
+            || self.adjustment.is_some()
+            || self.filter.is_some()
+    }
+
+    /// Whether it is an adjustment layer: no pixels of its own, it redraws what is below it.
+    pub fn is_adjustment(&self) -> bool {
+        self.adjustment.is_some()
+    }
+
+    /// Its styles, if any of them shows.
+    pub fn shown_style(&self) -> Option<&LayerStyle> {
+        self.style.as_ref().filter(|s| s.shows() && self.adjustment.is_none() && self.kind == LayerKind::Paint)
     }
 
     /// A group as groups are made (normal, fully opaque): its members blend with what is below
@@ -664,6 +835,38 @@ pub fn set_layer_budget(bytes: u64) {
     BUDGET.store(bytes.clamp(256 << 20, 64 << 30), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// What a canvas's layers take, as the canvas showing them measured it ([`Document::set_layer_memory`]).
+/// A canvas that keeps the layers not worked on compressed off the GPU holds textures for only so
+/// many: the rest take what their pixels compress to, so a mostly empty layer takes little, and
+/// the layers a canvas holds are counted by that rather than each at its full size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerMemory {
+    /// How many layers' textures (each the canvas's size) the canvas keeps at once.
+    pub resident: usize,
+    /// What the layers' compressed copies take, bytes, each counted as at least
+    /// [`least_layer_bytes`] (a layer with a texture and no copy too: its texture is one of the
+    /// textures counted, and once it is let go its copy is measured).
+    pub compressed: u64,
+    /// How many layers with pixels were measured: each one added since takes the least.
+    pub layers: usize,
+}
+
+/// The least a layer is counted as taking, of `full` (its whole texture's bytes), however little
+/// its pixels compress to: its small pictures and the room to draw something on it.
+pub fn least_layer_bytes(full: u64) -> u64 {
+    (full / 64).max(1)
+}
+
+/// A measure kept with a document that never makes two documents differ.
+#[derive(Clone, Copy, Debug, Default)]
+struct Measured(Option<LayerMemory>);
+
+impl PartialEq for Measured {
+    fn eq(&self, _: &Measured) -> bool {
+        true
+    }
+}
+
 /// Where layers brought into a document go ([`Document::insert_copies`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Landing {
@@ -713,6 +916,15 @@ pub struct Document {
     /// Animation Assist's settings while it is on.
     #[serde(default, deserialize_with = "or_default")]
     pub animation: Option<crate::animation::Animation>,
+    /// Its timeline, if it is animated on one (which takes over from Animation Assist): tracks of
+    /// clips, each drawing one of the top-level layers or groups. None: a still canvas.
+    #[serde(default, deserialize_with = "or_default", skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<crate::timeline::Timeline>,
+    /// The timeline it was on when it was last taken off one (`Document::stop_timeline`), kept
+    /// whole so that going back on a timeline brings its tracks, timing, keys, sounds and videos
+    /// back (`Document::start_timeline`). Nothing reads it meanwhile: the canvas is a still one.
+    #[serde(default, deserialize_with = "or_default", skip_serializing_if = "Option::is_none")]
+    pub timeline_off: Option<crate::timeline::Timeline>,
     /// The colour profile its pixels and colours are in.
     #[serde(default, deserialize_with = "or_default")]
     pub profile: crate::profile::Profile,
@@ -733,6 +945,44 @@ pub struct Document {
     /// that upright screen has them, turned with it (see `StrokeBuilder::on_canvas_made_turned`).
     #[serde(default, deserialize_with = "or_default", skip_serializing_if = "is_upright")]
     pub made_turns: u8,
+    /// How much light its pixels keep: standard (nothing past white) or high (HDR, light above
+    /// white kept). Chosen as the canvas is made; its canvas's pixel format follows it.
+    #[serde(default, skip_serializing_if = "DynamicRange::is_standard")]
+    pub range: DynamicRange,
+    /// What its layers take, as its canvas last measured them (see [`LayerMemory`]); none (no
+    /// canvas yet, or one that keeps every layer's texture) counts each at its full size.
+    #[serde(skip)]
+    memory: Measured,
+}
+
+/// How much light a document's pixels keep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DynamicRange {
+    /// Nothing past white: 8 bits a channel.
+    #[default]
+    Standard,
+    /// HDR: light above white kept (half floats a channel), shown with the screen's extended range
+    /// where it has one.
+    High,
+}
+
+impl DynamicRange {
+    pub fn is_standard(&self) -> bool {
+        *self == DynamicRange::Standard
+    }
+
+    pub fn is_high(self) -> bool {
+        self == DynamicRange::High
+    }
+
+    /// Bytes a pixel of a layer takes on the GPU.
+    pub fn bytes_per_pixel(self) -> u64 {
+        match self {
+            DynamicRange::Standard => 4,
+            DynamicRange::High => 8,
+        }
+    }
 }
 
 /// Whether a canvas was made with the screen upright (see [`Document::made_turns`]).
@@ -817,10 +1067,14 @@ impl Document {
             guide: crate::guide::Guide::new(width.clamp(1, MAX_CANVAS_EDGE), height.clamp(1, MAX_CANVAS_EDGE)),
             dpi: default_dpi(),
             animation: None,
+            timeline: None,
+            timeline_off: None,
             profile: crate::profile::Profile::Srgb,
             icc: None,
             solo: None,
             text_style: None,
+            range: DynamicRange::Standard,
+            memory: Measured::default(),
             made_turns: 0,
         };
         doc.add_layer();
@@ -857,9 +1111,53 @@ impl Document {
         self.width
     }
 
-    /// How many layers with pixels (paint layers and masks) a canvas this size holds.
+    /// How many layers with pixels (paint layers and masks) this canvas holds: by what its layers
+    /// take as last measured (more layers each taking the least), else as many as its size holds
+    /// each taking its whole texture.
     pub fn layer_cap(&self) -> usize {
-        layer_cap_for(self.width, self.height)
+        let Some(m) = self.memory.0.filter(|m| m.resident != usize::MAX) else {
+            // an HDR layer takes twice the memory
+            let cap = layer_cap_for(self.width, self.height);
+            return if self.range.is_high() { cap.div_ceil(2) } else { cap };
+        };
+        let full = self.full_layer_bytes();
+        let room = layer_budget().saturating_sub(full.saturating_mul(LAYERS_KEPT_BACK));
+        // the most whose bytes fit (they grow with the count)
+        let (mut fits, mut over) = (0, MOST_LAYERS + 1);
+        while over - fits > 1 {
+            let mid = fits + (over - fits) / 2;
+            if self.layers_bytes(&m, mid) <= room {
+                fits = mid;
+            } else {
+                over = mid;
+            }
+        }
+        fits.max(1)
+    }
+
+    /// What `count` layers with pixels take as `m` measured them, bytes: their textures, those
+    /// kept compressed, and each one more than measured the least.
+    fn layers_bytes(&self, m: &LayerMemory, count: usize) -> u64 {
+        let full = self.full_layer_bytes();
+        let textures = full.saturating_mul(count.min(m.resident) as u64);
+        let added = count.saturating_sub(m.layers) as u64;
+        textures.saturating_add(m.compressed).saturating_add(added.saturating_mul(least_layer_bytes(full)))
+    }
+
+    /// Bytes a layer's whole texture takes.
+    fn full_layer_bytes(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height) * self.range.bytes_per_pixel()
+    }
+
+    /// Keeps what its canvas measured its layers to take (none: each counted at its full size),
+    /// for [`Document::layer_cap`].
+    pub fn set_layer_memory(&mut self, memory: Option<LayerMemory>) {
+        self.memory = Measured(memory);
+    }
+
+    /// What its canvas last measured its layers to take.
+    pub fn layer_memory(&self) -> Option<LayerMemory> {
+        self.memory.0
     }
 
     /// Whether `more` more layers with pixels fit under [`Document::layer_cap`].
@@ -873,6 +1171,8 @@ impl Document {
         let mut d = self.clone();
         d.width = width.clamp(1, MAX_CANVAS_EDGE);
         d.height = height.clamp(1, MAX_CANVAS_EDGE);
+        // measured at the old size
+        d.memory = Measured::default();
         d.guide.centre = [d.width as f32 / 2.0, d.height as f32 / 2.0];
         d.guide.vanishing.clear();
         d
@@ -1067,7 +1367,7 @@ impl Document {
         self.layers.iter().find(|l| l.id == id)
     }
 
-    fn layer_mut(&mut self, id: LayerId) -> Option<&mut Layer> {
+    pub(crate) fn layer_mut(&mut self, id: LayerId) -> Option<&mut Layer> {
         self.layers.iter_mut().find(|l| l.id == id)
     }
 
@@ -1532,10 +1832,13 @@ impl Document {
             return None;
         }
         let items = self.chosen_items();
-        let painted = |id: LayerId| match self.layer(id).map(|l| l.kind) {
-            Some(LayerKind::Paint) => 1,
-            Some(LayerKind::Group) => {
-                self.contents(id).iter().filter(|c| self.layer(**c).is_some_and(|l| l.kind == LayerKind::Paint)).count()
+        // (an adjustment layer has no pixels: it is never the one the others' go into, and one
+        // below them has nothing among them to redraw, and stays as it is)
+        let paint = |l: &Layer| l.kind == LayerKind::Paint && !l.is_adjustment();
+        let painted = |id: LayerId| match self.layer(id) {
+            Some(l) if paint(l) => 1,
+            Some(l) if l.kind == LayerKind::Group => {
+                self.contents(id).iter().filter(|c| self.layer(**c).is_some_and(paint)).count()
             }
             _ => 0,
         };
@@ -1564,9 +1867,10 @@ impl Document {
             }
         }
         self.layers.retain(|l| Some(l.id) != mask);
-        // merged, it shows at full: its opacity went into its pixels (a hidden one's were let go)
+        // merged, it shows at full: its opacity and styles went into its pixels (a hidden one's
+        // were let go)
         if let Some(l) = self.layer_mut(lower) {
-            (l.visible, l.opacity) = (true, 1.0);
+            (l.visible, l.opacity, l.style) = (true, 1.0, None);
         }
         self.current = lower;
         self.picked.clear();
@@ -1611,14 +1915,27 @@ impl Document {
         true
     }
 
-    /// Makes a text layer, or a layer of a plugin's kind, an ordinary one, its pixels kept; false
+    /// Makes a text layer, a layer of a plugin's kind or a panel's frame an ordinary one, its pixels kept; false
     /// if it wasn't one.
     pub fn rasterize(&mut self, id: LayerId) -> bool {
         self.layer_mut(id).is_some_and(|l| {
+            // (all taken, whichever it has)
             let text = l.text.take().is_some();
+            let vector = l.vector.take().is_some();
             let plugin = l.plugin.take().is_some();
-            text || plugin
+            let panel = l.panel.take().is_some();
+            text || vector || plugin || panel
         })
+    }
+
+    /// Adds a vector layer above the current one (in its group) and makes it current: an empty
+    /// layer whose strokes are kept as strokes.
+    pub fn add_vector_layer(&mut self) -> LayerId {
+        let id = self.add_layer();
+        if let Some(l) = self.layer_mut(id) {
+            l.vector = Some(std::sync::Arc::default());
+        }
+        id
     }
 
     /// Adds a layer of a plugin's `kind` (`<plugin id>.<key>`) above the current one (in its
@@ -1666,6 +1983,81 @@ impl Document {
         self.layer_mut(id).and_then(|l| l.plugin.as_mut()).map(|p| p.data = data).is_some()
     }
 
+    /// Layer `id` made a vector layer holding `content` (as read back from where it was kept);
+    /// false if there is no such layer, or it is a group, a mask or text.
+    pub fn set_vector(&mut self, id: LayerId, content: crate::vector::VectorContent) -> bool {
+        let Some(l) = self.layer_mut(id).filter(|l| l.kind == LayerKind::Paint && l.text.is_none()) else {
+            return false;
+        };
+        l.vector = Some(std::sync::Arc::new(content));
+        true
+    }
+
+    /// Whether layer `id` keeps its strokes as strokes.
+    pub fn is_vector(&self, id: LayerId) -> bool {
+        self.layer(id).is_some_and(|l| l.vector.is_some())
+    }
+
+    /// A new vector layer holding `content`, called `name`, just below paint layer `id` in the
+    /// group it is in, as opaque, blended, clipped and shown as it is: what was part of that layer
+    /// given a layer of its own under it. On a timeline a drawing of one layer is put in a group
+    /// first (as [`Document::add_layer_to_drawing`] puts it), so the new layer is in its drawing.
+    /// The current layer stays current. None if `id` is no paint layer, or there is no room.
+    pub fn add_vector_layer_below(
+        &mut self,
+        id: LayerId,
+        name: String,
+        content: crate::vector::VectorContent,
+    ) -> Option<LayerId> {
+        let from = self.layer(id).filter(|l| l.kind == LayerKind::Paint)?;
+        let (opacity, blend, clipped, visible) = (from.opacity, from.blend, from.clipped, from.visible);
+        if !self.has_room(1) {
+            return None;
+        }
+        if self.timeline.as_ref().is_some_and(|tl| tl.drawing_of(id).is_some()) {
+            self.drawing_group(id)?;
+        }
+        let (at, parent) = (self.index_of(id)?, self.group_of(id));
+        let mut layer = self.blank(LayerKind::Paint, name, parent);
+        layer.opacity = opacity;
+        layer.blend = blend;
+        layer.clipped = clipped;
+        layer.visible = visible;
+        layer.vector = Some(std::sync::Arc::new(content));
+        let made = layer.id;
+        self.layers.insert(at, layer);
+        self.fix_clips();
+        Some(made)
+    }
+
+    /// Vector layer `id`'s strokes all gone: whether it had any, none if it isn't one.
+    pub fn clear_strokes(&mut self, id: LayerId) -> Option<bool> {
+        let content = self.layer_mut(id)?.vector.as_mut()?;
+        let had = !content.is_empty();
+        if had {
+            *content = std::sync::Arc::default();
+        }
+        Some(had)
+    }
+
+    /// Vector layer `id`'s content changed by `change`, which says whether it changed anything
+    /// (and leaves it alone otherwise); none if it isn't a vector layer.
+    pub fn change_vector<T>(
+        &mut self,
+        id: LayerId,
+        change: impl FnOnce(&mut crate::vector::VectorContent) -> T,
+    ) -> Option<T> {
+        let content = self.layer_mut(id)?.vector.as_mut()?;
+        Some(change(std::sync::Arc::make_mut(content)))
+    }
+
+    /// `stroke` kept on top of vector layer `id`'s strokes; false if it isn't one.
+    pub fn keep_stroke(&mut self, id: LayerId, stroke: crate::vector::VectorStroke) -> bool {
+        let Some(content) = self.layer_mut(id).and_then(|l| l.vector.as_mut()) else { return false };
+        std::sync::Arc::make_mut(content).push(stroke);
+        true
+    }
+
     /// Adds an empty layer above the current one (in its group) and makes it current. It is named
     /// after the number of entries the stack will have, so a deleted layer's number comes back.
     pub fn add_layer(&mut self) -> LayerId {
@@ -1683,7 +2075,56 @@ impl Document {
         let id = layer.id;
         self.layers.insert(at.min(self.layers.len()), layer);
         self.current = id;
+        // a comic panel's art is clipped to its frame
+        if parent.is_some_and(|g| self.frame_of_panel(g).is_some())
+            && self.can_clip(id)
+            && let Some(l) = self.layer_mut(id)
+        {
+            l.clipped = true;
+        }
         id
+    }
+
+    /// A new adjustment layer above the current one (as [`Self::add_layer`] puts a layer), named
+    /// `name`, redrawing what is below it through `adjustment`; it becomes current.
+    pub fn add_adjustment_layer(&mut self, name: String, adjustment: LayerAdjustment) -> LayerId {
+        let id = self.add_layer();
+        if let Some(l) = self.layer_mut(id) {
+            l.name = name;
+            l.adjustment = Some(adjustment);
+        }
+        id
+    }
+
+    /// Adjustment layer `id`'s adjustment set to `adjustment`; false if it is not one, or nothing
+    /// changed.
+    pub fn set_adjustment(&mut self, id: LayerId, adjustment: LayerAdjustment) -> bool {
+        match self.layer_mut(id) {
+            Some(l) if l.adjustment.is_some() && l.adjustment.as_ref() != Some(&adjustment) => {
+                l.adjustment = Some(adjustment);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Layer `id`'s styles set to `style` (each effect's values kept to what they can be); false
+    /// for a layer that takes none (a group, a mask, an adjustment layer), or when nothing changed.
+    pub fn set_style(&mut self, id: LayerId, style: Option<LayerStyle>) -> bool {
+        let style = style.map(|s| LayerStyle {
+            outline: s.outline.tidied(),
+            shadow: s.shadow.tidied(),
+            outer_glow: s.outer_glow.tidied(),
+            inner_glow: s.inner_glow.tidied(),
+            color: s.color.tidied(),
+        });
+        match self.layer_mut(id) {
+            Some(l) if l.kind == LayerKind::Paint && l.adjustment.is_none() && l.style != style => {
+                l.style = style;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The mask of layer `id`, if it has one.
@@ -1932,6 +2373,84 @@ impl Document {
         Some((copy, pairs))
     }
 
+    /// Layer or group `id` as it is, with its mask or everything in it (bottom first), to put a
+    /// copy of back later with [`Document::insert_copy`].
+    pub fn unit_layers(&self, id: LayerId) -> Option<Vec<Layer>> {
+        if self.layer(id)?.kind == LayerKind::Mask {
+            return None;
+        }
+        Some(self.layers.get(self.unit(id)?)?.to_vec())
+    }
+
+    /// A copy of `layers` (layer or group `root` as [`Document::unit_layers`] gave it, though it
+    /// may be gone from the document since) on top of the others at the top level, with new ids;
+    /// returns the copy of `root` and each (original, copy) pair of layers whose pixels the
+    /// renderer copies.
+    pub fn insert_copy(&mut self, layers: &[Layer], root: LayerId) -> Option<(LayerId, Vec<(LayerId, LayerId)>)> {
+        if !layers.iter().any(|l| l.id == root && l.kind != LayerKind::Mask) {
+            return None;
+        }
+        let mut new_ids = std::collections::HashMap::new();
+        for l in layers {
+            let copy = self.new_id();
+            new_ids.insert(l.id, copy);
+        }
+        let renamed = |old: LayerId| new_ids.get(&old).copied().unwrap_or(old);
+        let copies: Vec<Layer> = layers
+            .iter()
+            .map(|l| {
+                let mut c = l.clone();
+                c.id = renamed(l.id);
+                c.reference = false;
+                if l.id == root {
+                    c.parent = None;
+                    c.clipped = false;
+                } else {
+                    c.parent = l.parent.map(renamed);
+                }
+                c
+            })
+            .collect();
+        let pairs = layers.iter().filter(|l| l.kind != LayerKind::Group).map(|l| (l.id, renamed(l.id))).collect();
+        self.layers.extend(copies);
+        Some((renamed(root), pairs))
+    }
+
+    /// Paint layer `id` (with its mask) put in a new group where it was, the group taking its
+    /// name and the layer renamed `inner`. Returns the group; none if `id` isn't a paint layer.
+    pub fn wrap_in_group(&mut self, id: LayerId, inner: &str) -> Option<LayerId> {
+        let layer = self.layer(id).filter(|l| l.kind == LayerKind::Paint)?;
+        let (name, parent) = (layer.name.clone(), self.group_of(id));
+        let end = self.unit(id)?.end;
+        let group = self.blank(LayerKind::Group, name, parent);
+        let gid = group.id;
+        if let Some(l) = self.layer_mut(id) {
+            l.parent = Some(gid);
+            l.name = inner.to_owned();
+            l.clipped = false;
+        }
+        self.layers.insert(end.min(self.layers.len()), group);
+        self.fix_clips();
+        Some(gid)
+    }
+
+    /// A new empty layer in group `group`: above the current layer when that is inside it, else
+    /// on top of the group's own. It becomes current. None if `group` isn't a group.
+    pub fn add_layer_into(&mut self, group: LayerId) -> Option<LayerId> {
+        self.layer(group).filter(|l| l.kind == LayerKind::Group)?;
+        if self.is_inside(self.current, group) {
+            return Some(self.add_layer());
+        }
+        let name = format!("Layer {}", self.layers.len() + 1);
+        // a group's own entry comes after everything in it
+        let at = self.index_of(group)?;
+        let layer = self.blank(LayerKind::Paint, name, Some(group));
+        let id = layer.id;
+        self.layers.insert(at, layer);
+        self.current = id;
+        Some(id)
+    }
+
     /// Removes a layer, with its mask, or a group with everything in it; the last paint layer
     /// can't be removed. The layer below (or above) becomes current.
     pub fn delete_layer(&mut self, id: LayerId) -> bool {
@@ -2011,8 +2530,11 @@ impl Document {
     pub fn merge_target(&self, id: LayerId) -> Option<LayerId> {
         // a filter layer takes nothing merged into it; merged down itself, its filter goes into the
         // layer below
-        let paint = |id: LayerId| self.layer(id).is_some_and(|l| l.kind == LayerKind::Paint && l.filter.is_none());
+        let paint = |id: LayerId| {
+            self.layer(id).is_some_and(|l| l.kind == LayerKind::Paint && l.filter.is_none() && !l.is_adjustment())
+        };
         match self.layer(id)?.kind {
+            // an adjustment layer merges what it does into the layer below; none takes pixels
             LayerKind::Paint => self.below(id).filter(|b| paint(*b)),
             LayerKind::Group => {
                 self.group_merge_pair(id).filter(|(top, into)| paint(*top) && paint(*into)).map(|(_, into)| into)
@@ -2041,7 +2563,7 @@ impl Document {
         let start = self.unit(top)?.start;
         let under = self.layers.get(start.checked_sub(1)?)?;
         let under = if under.kind == LayerKind::Mask { self.layer(under.parent?)? } else { under };
-        (under.kind == LayerKind::Paint).then_some((top, under.id))
+        (under.kind == LayerKind::Paint && !under.is_adjustment()).then_some((top, under.id))
     }
 
     /// Removes `id` after it was merged down; the layer below becomes current. For a group, its
@@ -2063,9 +2585,10 @@ impl Document {
         let mask = self.mask_of(lower);
         self.layers.drain(unit);
         self.layers.retain(|l| Some(l.id) != mask);
-        // merged, it shows at full: its opacity went into its pixels (a hidden one's were let go)
+        // merged, it shows at full: its opacity and styles went into its pixels (a hidden one's
+        // were let go)
         if let Some(l) = self.layer_mut(lower) {
-            (l.visible, l.opacity) = (true, 1.0);
+            (l.visible, l.opacity, l.style) = (true, 1.0, None);
         }
         self.current = current;
         // merged into, a text layer's pixels are no longer just its text
@@ -2081,7 +2604,7 @@ impl Document {
             && self
                 .below(id)
                 .and_then(|b| self.layer(b))
-                .is_some_and(|b| b.kind == LayerKind::Paint && (b.filter.is_none() || b.clipped))
+                .is_some_and(|b| b.kind == LayerKind::Paint && !b.is_adjustment() && (b.filter.is_none() || b.clipped))
     }
 
     /// The layer `id` is clipped to: the nearest unclipped paint layer below it in its group.
@@ -2261,6 +2784,9 @@ impl Document {
         }
         let (current, ids): (LayerId, Vec<LayerId>) = (self.current, self.layers.iter().map(|l| l.id).collect());
         self.picked.retain(|p| *p != current && ids.contains(p));
+        let top = self.members(None);
+        self.timeline = self.timeline.take().map(|t| t.repaired(&top));
+        self.mark_adjustment_clips();
         self
     }
 
@@ -2459,6 +2985,33 @@ mod tests {
     }
 
     #[test]
+    fn layers_kept_compressed_are_counted_by_what_they_take() {
+        const MIB: u64 = 1 << 20;
+        // 2048 square: 16 MiB a texture, a quarter of a MiB the least; (2048 - 4 x 16) MiB of room
+        let mut d = Document::new(2048, 2048);
+        let measured = |resident, compressed_mib: u64, layers| {
+            Some(LayerMemory { resident, compressed: compressed_mib * MIB, layers })
+        };
+        // fifty textures (800 MiB) and empty layers past them: as many as any canvas holds
+        d.set_layer_memory(measured(50, 0, 1));
+        assert_eq!(d.layer_cap(), MOST_LAYERS);
+        assert!(d.has_room(500), "five hundred empty layers fit");
+        // a hundred layers drawn on, compressed to 1100 MiB: 84 MiB left, a quarter MiB each more
+        d.set_layer_memory(measured(50, 1100, 100));
+        assert_eq!(d.layer_cap(), 100 + 336);
+        // more than the room: as many textures as fit beside what is kept
+        d.set_layer_memory(measured(50, 1500, 100));
+        assert_eq!(d.layer_cap(), 30);
+        // a canvas keeping every texture: each layer its full size, as unmeasured
+        d.set_layer_memory(measured(usize::MAX, 0, 1));
+        assert_eq!(d.layer_cap(), 124);
+        // the measure never makes documents differ, and isn't kept at another size
+        d.set_layer_memory(measured(50, 0, 1));
+        assert_eq!(d, Document::new(2048, 2048));
+        assert_eq!(d.resized(1024, 1024).layer_memory(), None);
+    }
+
+    #[test]
     fn the_layer_cap_is_as_measured_on_a_device_of_8_gb() {
         // Maximum Layers on a device of 8 GB, whose layers may take 4000 MiB, as measured: 306 at
         // 1488 x 2266, 894 at 1080 x 1080, the most (1000) at 600 x 600
@@ -2504,6 +3057,86 @@ mod tests {
         assert!(d.finish_merge_down(copy));
         assert!(d.layer(t).unwrap().text.is_none());
         assert!(!d.rasterize(t));
+    }
+
+    fn hsb_adjustment(hue: f32) -> LayerAdjustment {
+        LayerAdjustment {
+            filter: crate::filter::Filter::Hsb { hue, saturation: 1.0, brightness: 0.0 },
+            table: Vec::new(),
+            settings: serde_json::json!({ "hsb": [0.6, 0.5, 0.5] }),
+        }
+    }
+
+    #[test]
+    fn an_adjustment_layer_is_kept_in_the_file_with_its_settings() {
+        let mut d = Document::new(100, 100);
+        let base = d.current();
+        let a = d.add_adjustment_layer("Hue, Saturation, Brightness".to_owned(), hsb_adjustment(0.5));
+        assert_eq!(d.current(), a);
+        assert_eq!(d.index_of(a), d.index_of(base).map(|i| i + 1), "above the current layer");
+        let l = d.layer(a).unwrap();
+        assert!(l.is_adjustment() && l.drawn_from_data() && l.kind == LayerKind::Paint);
+        // changed, then back from a file as it was
+        assert!(d.set_adjustment(a, hsb_adjustment(1.0)));
+        assert!(!d.set_adjustment(a, hsb_adjustment(1.0)), "nothing changed");
+        assert!(!d.set_adjustment(base, hsb_adjustment(1.0)), "an ordinary layer has none");
+        let back: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.layer(a).unwrap().adjustment, Some(hsb_adjustment(1.0)));
+        // an ordinary layer writes none, and a file from before reads as none
+        let plain = serde_json::to_string(d.layer(base).unwrap()).unwrap();
+        assert!(!plain.contains("adjustment") && !plain.contains("style"));
+        let read: Layer = serde_json::from_str(&plain).unwrap();
+        assert!(read.adjustment.is_none() && read.style.is_none());
+    }
+
+    #[test]
+    fn an_adjustment_layer_merges_down_but_is_neither_merged_into_nor_clipped_to() {
+        let mut d = Document::new(100, 100);
+        let base = d.current();
+        let a = d.add_adjustment_layer("Curves".to_owned(), hsb_adjustment(0.5));
+        assert_eq!(d.merge_target(a), Some(base), "baked into the layer below");
+        let top = d.add_layer();
+        assert_eq!(d.merge_target(top), None, "nothing to merge into");
+        assert!(!d.can_clip(top), "an adjustment layer is no base");
+        assert!(d.can_clip(a), "but it may be clipped to the layer under it");
+        assert_eq!(d.merge_target(base), None);
+    }
+
+    #[test]
+    fn a_layer_s_style_is_kept_to_what_it_can_be() {
+        let mut d = Document::new(100, 100);
+        let l = d.current();
+        assert_eq!(d.layer(l).unwrap().shown_style(), None);
+        let mut style = LayerStyle::default();
+        assert!(!style.shows(), "every effect starts off");
+        style.outline.on = true;
+        style.outline.size = 1000.0;
+        style.shadow.angle = -90.0;
+        style.shadow.opacity = f32::NAN;
+        assert!(d.set_style(l, Some(style)));
+        let kept = d.layer(l).unwrap().style.unwrap();
+        assert_eq!(kept.outline.size, STYLE_MOST_SIZE);
+        assert_eq!(kept.shadow.angle, 270.0);
+        assert_eq!(kept.shadow.opacity, 1.0);
+        assert!(d.layer(l).unwrap().shown_style().is_some());
+        assert_eq!(kept.reach(), 102);
+        assert!(!d.set_style(l, Some(style)), "nothing changed");
+        let back: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.layer(l).unwrap().style, Some(kept));
+        // groups and adjustment layers take none
+        let a = d.add_adjustment_layer("HSB".to_owned(), hsb_adjustment(0.5));
+        assert!(!d.set_style(a, Some(style)));
+        d.set_current(l);
+        let g = d.group_chosen().unwrap();
+        assert!(!d.set_style(g, Some(style)));
+        assert!(d.set_style(l, None));
+        // a colour alone shows too, and reaches no further than the layer
+        let mut style = LayerStyle::default();
+        style.color.on = true;
+        assert!(style.shows());
+        assert_eq!(style.reach(), 2);
+        style.color.opacity = 0.0;
+        assert!(!style.shows());
     }
 
     #[test]

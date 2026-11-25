@@ -31,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
@@ -52,6 +53,7 @@ import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.SelectionKind
 import io.github.artcraftandroid.procraft.canvas.SelectionPopup
+import io.github.artcraftandroid.procraft.core.ToolKind
 import io.github.artcraftandroid.procraft.canvas.toScreen
 import kotlin.math.roundToInt
 
@@ -61,6 +63,7 @@ private val SelectionIcon = 44.dp
 private val SelectionPill = 524.dp
 private val FeatherWidth = 250.dp
 private val StartDot = Color(0xFFC7C7C7)
+private val LassoErasePreview = Color(0xFF808080)
 private val SavedThumb = Color(0xFF000000)
 /** A kept selection's row slid left this far shows Delete (59 x 38, 13 in from the right) beside it. */
 private val SavedReveal = 82.dp
@@ -100,39 +103,74 @@ fun SelectionToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
         ToolbarButton(PcIcons.SelectRemove, "Remove", active = removable && vm.selectionRemoves, enabled = removable, width = w, iconSize = 44.dp) { vm.chooseSelectionRemoves(true) }
         ToolbarButton(PcIcons.Invert, "Invert", enabled = has, width = w, iconSize = 44.dp) { vm.invertSelection() }
         ToolbarButton(PcIcons.SelectCopyPaste, "Copy & Paste", enabled = has || drawing, width = w, iconSize = 44.dp, labelSize = long) { vm.copySelectionToLayer() }
-        ToolbarButton(PcIcons.Feather, "Feather", active = vm.selectionPopup == SelectionPopup.FEATHER, enabled = has || drawing, width = w, iconSize = 44.dp) {
+        // always there to tap: its Pixelated is for the shapes yet to be drawn
+        ToolbarButton(PcIcons.Feather, "Feather", active = vm.selectionPopup == SelectionPopup.FEATHER, width = w, iconSize = 44.dp) {
             vm.openSelectionPopup(SelectionPopup.FEATHER)
         }
         ToolbarButton(PcIcons.SaveLoad, "Save & Load", active = vm.selectionPopup == SelectionPopup.SAVED, enabled = has || drawing, width = w, iconSize = 44.dp, labelSize = long) {
             vm.openSelectionPopup(SelectionPopup.SAVED)
         }
-        ToolbarButton(PcIcons.ColorFill, "Color Fill", active = vm.colorFill, width = w, iconSize = 37.dp) { vm.toggleColorFill() }
+        // held: Color Fill's settings (Lasso Fill)
+        ToolbarButton(
+            PcIcons.ColorFill, "Color Fill", active = vm.colorFill, width = w, iconSize = 37.dp,
+            onHold = { vm.openSelectionPopup(SelectionPopup.COLOR_FILL) },
+        ) { vm.toggleColorFill() }
         // on a model: a selection reaches every surface under it
         if (vm.modelOpen) ToolbarButton(PcIcons.XRay, "X-Ray", active = vm.selectionXRay, width = w, iconSize = 44.dp) { vm.toggleSelectionXRay() }
         ToolbarButton(PcIcons.ClearSelection, "Clear", enabled = has || drawing, width = w, iconSize = 44.dp) { vm.clearSelection() }
     }
 }
 
-/** A popover over the selection toolbar: feathering the selection, or the selections kept. */
+/** A popover over the selection toolbar: feathering the selection, the selections kept, or Color Fill's settings. */
 @Composable
 fun SelectionPopover(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
     val popup = vm.selectionPopup
     if (popup == SelectionPopup.NONE) return
     val width = if (popup == SelectionPopup.FEATHER) FeatherWidth else MenuWidth
     val layout = toolbarLayout(screenWidth, 8, SelectionButtonRoomy, SelectionIcon, SelectionPill)
-    val centre = toolbarButtonCentre(screenWidth, layout, if (popup == SelectionPopup.FEATHER) 4 else 5, 8)
+    val index = when (popup) {
+        SelectionPopup.FEATHER -> 4
+        SelectionPopup.COLOR_FILL -> 6
+        else -> 5
+    }
+    val centre = toolbarButtonCentre(screenWidth, layout, index, 8)
     val left = (centre - width / 2).coerceIn(0.dp, screenWidth - width)
     MenuPopover(centre - left, left, toolbarButtonsTop(screenHeight), width) {
         when (popup) {
             SelectionPopup.FEATHER -> {
                 MenuTitle("Feather")
                 Spacer(Modifier.height(4.dp))
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup).padding(vertical = 8.dp)) {
+                // the amount softens what is selected: nothing to soften, it waits
+                val softens = vm.hasSelection || vm.freehand.isNotEmpty()
+                Column(Modifier.fillMaxWidth().alpha(if (softens) 1f else 0.4f).clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup).padding(vertical = 8.dp)) {
                     val amount = vm.featherAmount
-                    SliderRow("Amount", amount, if (amount <= 0f) "None" else "${(amount * 100).roundToInt()}%", onEnd = { vm.featherLetGo() }) { vm.featherTo(it) }
+                    SliderRow("Amount", amount, if (amount <= 0f) "None" else "${(amount * 100).roundToInt()}%", onEnd = { vm.featherLetGo() }) { if (softens) vm.featherTo(it) }
+                }
+                Spacer(Modifier.height(10.dp))
+                // the other end of the same thing: no soft edge at all, for pixel art (shapes on
+                // whole pixels, taking whole pixels only), while the Pixel art plugin is on
+                if (vm.has(io.github.artcraftandroid.procraft.core.Feature.PIXEL_ART)) {
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+                        SwitchRow("Pixelated", vm.selectionPixelated) { vm.toggleSelectionPixelated() }
+                    }
                 }
             }
             SelectionPopup.SAVED -> SavedSelections(vm)
+            SelectionPopup.COLOR_FILL -> {
+                MenuTitle("Color Fill")
+                Spacer(Modifier.height(4.dp))
+                // (Lasso Fill is the Lasso Fill plugin's)
+                if (vm.lassoFills) {
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+                        SwitchRow("Lasso Fill", vm.lassoFill) { vm.toggleLassoFill() }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+                    val opacity = vm.fillOpacity
+                    SliderRow("Opacity", opacity, "${(opacity * 100).roundToInt()}%") { vm.fillOpacityTo(it) }
+                }
+            }
             SelectionPopup.NONE -> Unit
         }
     }
@@ -212,8 +250,9 @@ private fun SavedSelectionRow(vm: CanvasViewModel, i: Int, open: Boolean, onOpen
 
 /**
  * What the selection tool shows while a shape is made: the rectangle or ellipse being dragged and
- * the freehand path (dashed, its first point a dot to close it on), and the bar and crosshair while
- * a colour selection's threshold is dragged.
+ * the freehand path (dashed, its first point a dot to close it on; with Lasso Fill, filled with the
+ * paint colour at half Color Fill's opacity, as it will fill, with no dot), and the bar and
+ * crosshair while a colour selection's threshold is dragged.
  */
 @Composable
 fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
@@ -223,6 +262,17 @@ fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
     val taken = vm.takenBox
     val outlines = vm.selectionOutlines
     if (drag == null && path.isEmpty() && threshold == null && taken.size != 8 && outlines.isEmpty()) return
+    // Lasso Fill: the shape shows as it will fill, at half its strength (the Paint tool's lasso at
+    // its opacity slider's, times the Lasso's Preview; the Erase tool's grey, as what it takes away).
+    // The tools' own lassos show on the canvas itself, but for a sharp vector layer's: here.
+    val strength = vm.lassoPreviewOpacity * vm.opacity
+    val preview = when {
+        vm.lassoToolOn && !vm.lassoPreviewOnScreen -> null
+        vm.lassoToolOn && vm.tool == ToolKind.ERASE -> LassoErasePreview.copy(alpha = strength)
+        vm.lassoToolOn -> CanvasSpace.color(vm.colorRgb()).copy(alpha = strength)
+        vm.lassoFilling -> CanvasSpace.color(vm.colorRgb()).copy(alpha = 0.5f * vm.fillOpacity)
+        else -> null
+    }
     Canvas(Modifier.fillMaxSize()) {
         // the shapes joined to the selection while the tool is open: their paths, dashed
         for (outline in outlines) {
@@ -256,7 +306,7 @@ fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
                 val r = Rect(minOf(a.x, b.x), minOf(a.y, b.y), maxOf(a.x, b.x), maxOf(a.y, b.y))
                 if (vm.selectionKind == SelectionKind.ELLIPSE) addOval(r) else addRect(r)
             }
-            dashed(outline)
+            if (preview != null) drawPath(outline, preview) else dashed(outline)
         }
         if (path.isNotEmpty()) {
             val points = path.map { vm.canvasToWindow(it) }
@@ -264,8 +314,14 @@ fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
                 moveTo(points[0].x, points[0].y)
                 for (p in points.drop(1)) lineTo(p.x, p.y)
             }
-            dashed(line)
-            drawCircle(StartDot, 5.5.dp.toPx(), points[0])
+            if (preview != null) {
+                // closed back to the first point, as lifting closes it (non-zero, as the fill);
+                // no dot to close it on, as it is drawing
+                drawPath(Path().apply { addPath(line); close() }, preview)
+            } else {
+                dashed(line)
+                drawCircle(StartDot, 5.5.dp.toPx(), points[0])
+            }
         }
         threshold?.let { (p, _) ->
             // a thin cross where the colour is picked

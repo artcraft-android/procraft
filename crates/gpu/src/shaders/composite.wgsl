@@ -8,7 +8,10 @@ struct LayerUniform {
     // 0: no stroke on this layer, 1: the stroke paints, 2: it erases, 3: it paints alpha-locked,
     // 4: it takes the layer's place where it reaches (5: the same, 8 bits a channel); 6: the
     // colour `solid` fills what is selected (the selection bound as the stroke), 7: the same
-    // alpha-locked
+    // alpha-locked,
+    // 8: it changes the light (see `lit`), 9: it has changed the layer itself and shows fainter
+    // than that: stroke_tex is the layer as it was before it, and the layer shows `stroke_opacity`
+    // of the way from that
     stroke_mode: u32,
     stroke_opacity: f32,
     blend: u32,
@@ -54,6 +57,12 @@ struct LayerUniform {
     // where this one's top left is in those (x: the scale, yz: the point): grain fixed to the
     // canvas is read where it is on that canvas
     scaled: vec4<f32>,
+    // a light stroke's mode (0 brighten, 1 dim, 2 tame), how many stops a stroke covering fully
+    // moves the light, and the brightest a brightened colour's strongest channel goes (linear)
+    light: vec4<f32>,
+    // a lasso's fill (premultiplied; none at 0 alpha), laid over the layer as much as lasso_tex
+    // covers, under the stroke
+    lasso: vec4<f32>,
     // the paper: how strongly its hollows take the stroke's paint away (0: the stroke takes no
     // paper), how many canvas pixels a pixel of its tile covers, how deep it shows in the
     // background (0: a flat colour), and its tooth (0: soft, 1: only what stands above the
@@ -84,6 +93,7 @@ const CLIP_BASE: u32 = 3u;
 @group(0) @binding(7) var second_tex: texture_2d<f32>;
 @group(0) @binding(8) var clip_mask_tex: texture_2d<f32>;
 @group(0) @binding(9) var paper_tex: texture_2d<f32>;
+@group(0) @binding(10) var lasso_tex: texture_2d<f32>;
 @group(1) @binding(0) var<uniform> lu: LayerUniform;
 
 // one triangle covering the target
@@ -219,6 +229,39 @@ fn burnt(under: vec4<f32>, r: vec4<f32>, w: f32) -> vec4<f32> {
     return mix(r, vec4<f32>(unpremultiply(b) * r.a, r.a), clamp(w, 0.0, 1.0));
 }
 
+// sRGB to linear light and back, carried on past white as it goes (for light above white)
+fn light_of(v: f32) -> f32 {
+    return select(v / 12.92, pow((v + 0.055) / 1.055, 2.4), v > 0.04045);
+}
+
+fn encoded(v: f32) -> f32 {
+    return select(v * 12.92, 1.055 * pow(v, 1.0 / 2.4) - 0.055, v > 0.0031308);
+}
+
+// the light tool on premultiplied colour `c`, as far as the stroke covers it (`amount`): its
+// channels scaled alike in linear light, so its hue and saturation stay. Brightening goes no
+// further than the ceiling (nor lowers what is above it), dimming halves the light for each stop,
+// taming draws only what is above white back towards it. Black has no light to scale. (One way
+// out: see `stroke_into`.)
+fn lit(c: vec4<f32>, amount: f32) -> vec4<f32> {
+    let straight = max(c.rgb / max(c.a, 1e-6), vec3<f32>(0.0));
+    let linear = vec3<f32>(light_of(straight.r), light_of(straight.g), light_of(straight.b));
+    let peak = max(linear.r, max(linear.g, linear.b));
+    let k = clamp(amount, 0.0, 1.0);
+    let stops = lu.light.y * k;
+    var goal = peak;
+    if (lu.light.x < 0.5) {
+        goal = max(peak, min(peak * exp2(stops), lu.light.z));
+    } else if (lu.light.x < 1.5) {
+        goal = peak * exp2(-stops);
+    } else if (peak > 1.0) {
+        goal = mix(peak, 1.0, k);
+    }
+    let scaled = linear * (goal / max(peak, 1e-6));
+    let out = vec3<f32>(encoded(scaled.r), encoded(scaled.g), encoded(scaled.b));
+    return select(c, vec4<f32>(out * c.a, c.a), c.a > 1e-4 && peak > 1e-5 && k > 0.0);
+}
+
 // a layer with the stroke in progress on it applied
 fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
     var c = c0;
@@ -231,6 +274,10 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
         // the same in a stroke of 8 bits a channel: its alpha a half more, halved
         let t = textureLoad(stroke_tex, p, 0);
         return select(c0, vec4<f32>(t.rgb, 2.0 * t.a - 1.0), t.a >= 0.25);
+    }
+    if (lu.stroke_mode == 9u) {
+        // laid in place, shown fainter: part of the way from the layer as it was
+        return mix(textureLoad(stroke_tex, p, 0), c0, lu.stroke_opacity);
     }
     if (lu.stroke_mode == 6u || lu.stroke_mode == 7u) {
         // a colour (solid) filling what is selected (the stroke's red): over the layer as much as
@@ -249,6 +296,8 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
         }
         if (lu.stroke_mode == 2u) {
             c = c * (1.0 - s.a);
+        } else if (lu.stroke_mode == 8u) {
+            c = lit(c, s.a);
         } else {
             // painted (1), or recoloured keeping the layer's alpha (3): the blend written once, as
             // Direct3D 12's compiler takes a long while over each copy of its modes
@@ -265,6 +314,11 @@ fn layer_color(p: vec2<i32>) -> vec4<f32> {
     var m = vec4<f32>(1.0);
     if (lu.masked > 0.5) {
         m = textureLoad(mask_tex, p, 0);
+    }
+    // a lasso being drawn shows its fill on the layer, under the stroke, as much as it covers
+    if (lu.lasso.a > 0.0) {
+        let k = textureLoad(lasso_tex, p, 0).r;
+        c = lu.lasso * k + c * (1.0 - lu.lasso.a * k);
     }
     // the stroke goes into the layer, or into its mask: one place for it (its blend written once)
     let into_mask = lu.stroke_on_mask > 0.5;
@@ -409,7 +463,7 @@ fn stroke_into(b: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
     if ((lu.stroke_blend & STROKE_LUMINANCE) != 0u && mode != 26u && mode != 29u && s.a > 0.0) {
         let cb = unpremultiply(b);
         let cs = unpremultiply(s);
-        let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
+        let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(CEILING));
         let full = vec4<f32>((1.0 - b.a) * cs + b.a * mixed, 1.0);
         into = unsquared(mix(squared(b), squared(full), s.a));
     }

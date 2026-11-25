@@ -18,8 +18,10 @@ const QUEUE_STACK: usize = 512 * 1024;
 /// Half that: the margin these keep.
 const HALF_QUEUE_STACK: usize = 256 * 1024;
 /// The most the session's state may take, moved as a whole: it is built once, and the frame that
-/// builds it holds a copy or two.
-const STATE_MOST: usize = 16 * 1024;
+/// builds it holds a copy or two. (This app's state, with its timeline, media, HDR and vector
+/// layers, takes about 48 KB: it is built on a roomy thread of its own, `on_roomy_stack`, so the
+/// small stacks the tests below try never hold it.)
+const STATE_MOST: usize = 64 * 1024;
 /// What [`stack_probe`] is told to do, by the measuring test: "<work> <stack bytes> <path>".
 const PROBE: &str = "PROCRAFT_STACK_PROBE";
 

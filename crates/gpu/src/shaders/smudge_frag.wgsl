@@ -14,6 +14,9 @@
 // wet paint's plots for the pass (PLOTS_ROW texels a row), or a dulling stamp's parts' sums
 @group(2) @binding(1) var plots_tex: texture_2d<u32>;
 
+// (what is laid is rounded to the window's 8 bits a channel at random: see smudge.wgsl)
+const DITHER: f32 = 1.0;
+
 // texels a row of the pass's plots, and of a carried-over plot
 const PLOTS_ROW: u32 = 1024u;
 const CARRIED_ROW: u32 = 128u;

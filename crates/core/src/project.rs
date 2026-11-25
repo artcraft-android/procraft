@@ -65,7 +65,7 @@ const VERSION: u32 = 1;
 pub fn artwork_plays(dir: String) -> bool {
     let text = fs::read_to_string(Path::new(&dir).join("artwork.json"));
     let file = text.ok().and_then(|t| serde_json::from_str::<ArtworkFile>(&t).ok());
-    file.is_some_and(|f| f.document.animation.is_some() || f.model.is_some())
+    file.is_some_and(|f| f.document.animation.is_some() || f.document.timeline.is_some() || f.model.is_some())
 }
 
 /// The longest side Preview's picture of an artwork is ever made at, pixels: past a screen's, it
@@ -181,6 +181,15 @@ struct ArtworkFile {
 /// A plugin's artwork's data in its folder.
 pub(crate) const PLUGIN_DATA: &str = "plugin-data.bin";
 
+/// The folder of an artwork's folder that keeps its vector layers' strokes and fills, a file each
+/// (see `vector_file.rs`).
+pub(crate) const VECTORS: &str = "vectors";
+
+/// Where vector layer `id`'s strokes and fills are kept in artwork folder `dir`.
+pub(crate) fn vector_path(dir: &Path, id: LayerId) -> PathBuf {
+    dir.join(VECTORS).join(format!("{}.json", id.0))
+}
+
 /// The view an artwork was left with, as earlier versions kept it: of it only its turn counts now
 /// (`rotation`, radians clockwise on screen), less what of that was the view turning with the
 /// device (`followed`); where on the canvas it was and its zoom are not kept.
@@ -267,9 +276,13 @@ pub(crate) struct SaveSnapshot {
     more_pictures: Vec<Option<Arc<Vec<u8>>>>,
     /// A plugin's artwork's data, if it is one.
     plugin_data: Option<Vec<u8>>,
+    /// Each vector layer's strokes and fills, as its file keeps them.
+    vectors: Vec<(LayerId, Arc<Vec<u8>>)>,
     /// The data of each plugin's layer (empty while it has none yet), for its file beside the
     /// layer's pixels; those whose data couldn't be read left out.
     layer_data: Vec<(LayerId, Arc<Vec<u8>>)>,
+    /// The timeline's sound and video files, to copy in.
+    media: crate::media::MediaToSave,
     /// The layers' stores (see `layer_store.rs`): those changed, their kind and their planes on
     /// their way back from the GPU; and those whose files there stay as they are.
     stores: Vec<(LayerId, u32, Vec<procraft_gpu::Readback>)>,
@@ -362,6 +375,8 @@ pub(crate) struct Saved {
     /// A hash of the Reference window's picture as the folder has it, if it has one, and of each
     /// picture of the windows opened besides it.
     reference_picture: Option<u64>,
+    /// A hash of each vector layer's file as the folder has it.
+    vectors: std::collections::HashMap<LayerId, u64>,
     more_pictures: Vec<Option<u64>>,
     /// A hash of each plugin's layer's data as its file in the folder has it.
     pub(crate) layer_data: std::collections::HashMap<LayerId, u64>,
@@ -378,6 +393,7 @@ impl Saved {
     pub(crate) fn opened(&mut self, dir: &Path) {
         self.dir = dir.to_path_buf();
         self.layers.clear();
+        self.vectors.clear();
         self.reference_picture = None;
         self.more_pictures.clear();
         self.layer_data.clear();
@@ -434,6 +450,8 @@ impl crate::State {
             && self.selection_before.is_none()
             // a ColorDrop's fill still open
             && self.pour.is_none()
+            && self.vector_pour.is_none()
+            && self.vector_reshape.is_none()
     }
 
     /// Nothing under way that saving would end or cut short: nothing long ([`State::settled`]) and
@@ -501,6 +519,8 @@ impl crate::State {
         let mut composite = None;
         let mut unshown = None;
         let mut changed_ids = Vec::new();
+        // an HDR artwork's layers are saved with their light above white (see `crate::hdr`)
+        let hdr = self.doc.range.is_high();
         let (mut stores, mut stores_kept, mut store_files) = (Vec::new(), Vec::new(), Vec::new());
         // shown but its canvas still being made (on another thread): made now, so the save has its
         // picture for the gallery
@@ -560,7 +580,8 @@ impl crate::State {
                     if after + read.bytes() <= read_after_lock() || bounded {
                         reading.push((id, read));
                     } else {
-                        let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
+                        let rgba = crate::hdr::layer_pixels(read, hdr, (self.doc.width(), self.doc.height()))
+                            .map_err(|e| file_error("reading a layer", e))?;
                         layers.extend(changed(id, rgba));
                     }
                 }
@@ -614,7 +635,8 @@ impl crate::State {
                             files.push((*id, bytes.clone()));
                         }
                     }
-                    Opened::Pixels(rgba) => layers.extend(changed(*id, rgba.clone())),
+                    Opened::Pixels(rgba) => layers
+                        .extend(changed(*id, crate::hdr::as_saved(rgba, hdr, (self.doc.width(), self.doc.height())))),
                 }
             }
             for (id, bytes) in &self.pending_stores {
@@ -652,6 +674,9 @@ impl crate::State {
             .as_ref()
             .map(|a| a.kept.clone())
             .or_else(|| self.plugin_opened.as_ref().and_then(|o| o.data.clone()));
+        let vector_layers: Vec<LayerId> =
+            self.doc.layers().iter().filter(|l| l.vector.is_some()).map(|l| l.id).collect();
+        let vectors = vector_layers.into_iter().filter_map(|id| Some((id, self.vector_file_kept(id)?))).collect();
         let layer_data = self
             .doc
             .layers()
@@ -672,7 +697,9 @@ impl crate::State {
             reference_picture,
             more_pictures,
             plugin_data,
+            vectors,
             layer_data,
+            media: crate::media::MediaToSave::of(&self.media, &self.doc),
             stores,
             stores_kept,
             store_files,
@@ -1013,15 +1040,19 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         reference_picture,
         more_pictures,
         plugin_data,
+        vectors,
         layer_data,
+        media,
         stores,
         stores_kept,
         store_files,
         ..
     } = snapshot;
     // what was still on its way back: those unchanged since the last save there are let go
+    let hdr = file.document.range.is_high();
+    let size = (file.document.width(), file.document.height());
     for (id, read) in reading {
-        let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
+        let rgba = crate::hdr::layer_pixels(read, hdr, size).map_err(|e| file_error("reading a layer", e))?;
         let hash = pixels_hash(&rgba);
         let there = saved.dir == dir && saved.layers.get(&id) == Some(&hash) && layer_path(dir, id).exists();
         if !there {
@@ -1039,6 +1070,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     if saved.dir != dir {
         saved.dir = dir.to_path_buf();
         saved.layers.clear();
+        saved.vectors.clear();
         saved.sets.clear();
         saved.reference_picture = None;
         saved.more_pictures.clear();
@@ -1066,7 +1098,9 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         // layer's PNG made in memory before it is written
         let each = w as usize * h as usize * 4;
         let results = procraft_engine::par::side_by_side_within(&layers, each, |(id, _, rgba)| {
-            stage_beside(&layer_path(dir, *id), |p| write_png(p, w, h, rgba, &[]))
+            stage_beside(&layer_path(dir, *id), |p| {
+                if hdr { crate::hdr::write_half_png(p, w, h, rgba) } else { write_png(p, w, h, rgba, &[]) }
+            })
         });
         // every one written kept track of, so a failure among them leaves none of them beside
         let mut failed = None;
@@ -1129,6 +1163,21 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             });
             stage(written, path, &mut staged)?;
         }
+        // each vector layer's strokes and fills, where they changed since the folder's were
+        // written (the layers' pixels above are what they draw)
+        if !vectors.is_empty() {
+            fs::create_dir_all(dir.join(VECTORS)).map_err(|e| file_error("making the folder", e))?;
+        }
+        for (id, bytes) in &vectors {
+            let path = vector_path(dir, *id);
+            if saved.vectors.get(id) == Some(&pixels_hash(bytes)) && path.exists() {
+                continue;
+            }
+            let written = write_beside(&path, |p| {
+                fs::write(p, bytes.as_slice()).map_err(|e| file_error("writing a vector layer", e))
+            });
+            stage(written, path, &mut staged)?;
+        }
         // plugins' layers' data, each whole, unless its file there has it already
         for (id, data) in &layer_data {
             let path = layer_data_path(dir, *id);
@@ -1140,6 +1189,8 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             });
             stage(written, path, &mut staged)?;
         }
+        // the sounds and videos it plays that the folder hasn't got yet
+        media.write(dir, &mut staged)?;
         // the layers' stores, each whole with the hash of its layer's pixels as saved now (one whose
         // layer's isn't known can't be told from a stale one when opened, so it isn't saved)
         for (id, kind, reads) in stores {
@@ -1201,9 +1252,23 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     for (id, hash, _) in &layers {
         saved.layers.insert(*id, *hash);
     }
+    // vector layers' files as they are now; those of layers that are vector layers no longer go,
+    // now that the document is in place (a layer with no file there opens as its pixels)
+    saved.vectors = vectors.iter().map(|(id, bytes)| (*id, pixels_hash(bytes))).collect();
+    if let Ok(entries) = fs::read_dir(dir.join(VECTORS)) {
+        let keep: Vec<PathBuf> = vectors.iter().map(|(id, _)| vector_path(dir, *id)).collect();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !keep.contains(&path) {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
     for (id, data) in &layer_data {
         saved.layer_data.insert(*id, pixels_hash(data));
     }
+    // media files it no longer plays go, now that the document without them is in place
+    media.tidy(dir);
     // a picture taken away goes once the document without it is in place
     saved.reference_picture = reference_picture.as_deref().map(|png| pixels_hash(png));
     if reference_picture.is_none() {
@@ -1367,6 +1432,9 @@ impl CanvasSession {
                 pngs.push((layer.id, Opened::File(path)));
             }
         }
+        // each vector layer's strokes and fills, for the layers that have a file of them
+        let vectors: Vec<(LayerId, Vec<u8>)> =
+            doc.layer_ids().filter_map(|id| Some((id, fs::read(vector_path(&dir, id)).ok()?))).collect();
         let scene = file.model.as_ref().map(|m| crate::scene3d::open_saved_model(&dir, m)).transpose()?;
         let session = CanvasSession::with_document(doc, file.name, Vec::new());
         // its files are as the last save left them: one unchanged since isn't written again
@@ -1393,6 +1461,12 @@ impl CanvasSession {
             let mut st = session.shared.lock();
             st.open_mark = open_mark;
             st.pending_pixels = pngs;
+            // (a file that can't be read leaves its layer as the pixels it has)
+            for (id, bytes) in &vectors {
+                if !st.vector_opened(*id, bytes) {
+                    log::error!("layer {id:?}: its strokes could not be read");
+                }
+            }
             st.pending_stores = stores;
             st.layer_data_unread.extend(data_unread);
             st.info = file.info;
@@ -1400,6 +1474,10 @@ impl CanvasSession {
             st.scene = scene.map(Box::new);
             st.reference_window = file.reference.unwrap_or_default();
             st.reference_picture = reference_picture.map(Arc::new);
+            // its sounds and videos from its media folder
+            st.media.look_in(&dir);
+            let store = st.media.clone();
+            store.know(&st.doc);
             st.more_references = more_references;
             st.plugin_values = file.plugin_values.into_iter().filter(|(_, v)| v.is_finite()).collect();
             // a plugin's artwork: its kind and data, for the app to open it with its plugin
@@ -1596,6 +1674,13 @@ impl CanvasSession {
         let session = CanvasSession::with_document(imported.document, imported.name, imported.pixels);
         {
             let mut st = session.shared.lock();
+            // its vector layers are vector layers still (one whose strokes can't be read is the
+            // pixels it came with)
+            for (id, bytes) in &imported.vectors {
+                if !st.vector_opened(*id, bytes) {
+                    log::error!("layer {id:?}: its strokes could not be read");
+                }
+            }
             st.info.strokes = imported.strokes;
             st.info.tracked_ms = (imported.tracked_seconds * 1000.0) as u64;
             st.info.author = imported.author;
@@ -1606,6 +1691,32 @@ impl CanvasSession {
             });
         }
         Ok(session)
+    }
+
+    /// The artwork in our own format at `path`, for the Share menu's first row: on a timeline, its
+    /// folder `dir` zipped whole (saved first, with `save_first`), as a layered package can't hold
+    /// the timeline (its tracks, keys, sounds and videos); otherwise the layered package, as
+    /// [`CanvasSession::export_package`] writes it. Import brings either back.
+    pub fn export_artwork(
+        &self,
+        dir: String,
+        save_first: bool,
+        path: String,
+        seed: u64,
+        time_lapse: Option<PackageTimeLapse>,
+    ) -> Result<(), MobileError> {
+        if self.shared.lock().doc.timeline.is_none() {
+            return self.export_package(path, seed, time_lapse);
+        }
+        self.exported(0.0);
+        if save_first {
+            self.save(dir.clone())?;
+        }
+        // the files packed are most of the work (a save writes only what changed)
+        self.exported(0.1);
+        crate::scene3d::zip_artwork_folder(Path::new(&dir), Path::new(&path), |done| self.exported(0.1 + 0.85 * done))?;
+        self.exported(1.0);
+        Ok(())
     }
 
     /// The artwork as a layered package at `path`, with its time-lapse; `seed` makes its layers' ids.
@@ -1653,6 +1764,7 @@ impl CanvasSession {
         if !idle_only {
             self.exported(0.0);
         }
+        let vectors: std::collections::HashMap<LayerId, Vec<u8>>;
         let (doc, composite, name, info, reference, reference_picture, turns, edits) = {
             let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
@@ -1671,6 +1783,9 @@ impl CanvasSession {
                 .map_err(|e| file_error("reading the picture", e))?;
             let reference = (st.reference_window.clone(), st.reference_picture.clone());
             st.count_tracked_time();
+            // each vector layer's strokes and fills go with it
+            let ids: Vec<LayerId> = st.doc.layers().iter().filter(|l| l.vector.is_some()).map(|l| l.id).collect();
+            vectors = ids.into_iter().filter_map(|id| Some((id, st.vector_file(id)?))).collect();
             let turns = st.shown_turns();
             let edits = st.edits();
             (st.doc.clone(), composite, st.name.clone(), st.info.clone(), reference.0, reference.1, turns, edits)
@@ -1706,7 +1821,9 @@ impl CanvasSession {
             reference_picture: reference_picture.as_deref().map(Vec::as_slice),
             turns: u32::from(turns),
         };
-        write_file_atomically(Path::new(&path), |out| procraft_engine::native::write_to(&export, out).map(|_| ()))?;
+        write_file_atomically(Path::new(&path), |out| {
+            procraft_engine::native::write_to_with_vectors(&export, &vectors, out).map(|_| ())
+        })?;
         if !idle_only {
             self.exported(1.0);
         }
@@ -1721,16 +1838,29 @@ impl CanvasSession {
     pub fn export_psd(&self, path: String) -> Result<(), MobileError> {
         let (p, edits) = self.picture()?;
         let (w, h) = (p.width, p.height);
-        let (layers, from) = psd_layers(&p.doc);
-        let (icc, inks) = file_colours(&p.doc);
-        let count = from.iter().map(|f| f.reads()).sum();
+        // adjustment layers: a PSD's own kind where it has one like them (their masks at hand as
+        // their records are made), the rest flattened into pixels
+        let flattened = self.flattened_adjustments(&p.doc)?;
+        let own_masks = crate::psd_adjustments::kept_masks(&p.doc);
+        let none = std::collections::HashMap::new();
+        let count = psd_layers(&p.doc, &flattened, &none).1.iter().map(PsdFrom::reads).sum::<usize>() + own_masks.len();
         let reader = ExportLayers::new(self, edits, count, (0.1, 0.9));
+        let mut masks = std::collections::HashMap::new();
+        for m in own_masks {
+            masks.insert(m, reader.grey(m)?);
+        }
+        let (layers, from) = psd_layers(&p.doc, &flattened, &masks);
+        let (icc, inks) = file_colours(&p.doc);
         let [r, g, b] = p.doc.background.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
         let mut read = |i: usize| -> std::io::Result<formats::PsdPixels> {
             let pixels = match from.get(i) {
                 Some(PsdFrom::Layer(id, mask)) => {
                     formats::PsdPixels { rgba: reader.straight(*id)?, mask: mask.map(|m| reader.grey(m)).transpose()? }
                 }
+                Some(PsdFrom::Flattened(id, mask)) => formats::PsdPixels {
+                    rgba: flattened.get(id).cloned().ok_or_else(|| std::io::Error::other("no such layer"))?,
+                    mask: mask.map(|m| reader.grey(m)).transpose()?,
+                },
                 Some(PsdFrom::Background) => {
                     formats::PsdPixels { rgba: [r, g, b, 255].repeat(w as usize * h as usize), mask: None }
                 }
@@ -2053,9 +2183,11 @@ impl CanvasSession {
 }
 
 /// Where a PSD's layer's pixels are read from as it is written: a paint layer (and its mask, if
-/// it has one shown), or the background colour.
+/// it has one shown), an adjustment layer flattened into pixels (and its mask), or the background
+/// colour.
 enum PsdFrom {
     Layer(LayerId, Option<LayerId>),
+    Flattened(LayerId, Option<LayerId>),
     Background,
     /// A group's start or end: no pixels.
     Nothing,
@@ -2066,6 +2198,7 @@ impl PsdFrom {
     fn reads(&self) -> usize {
         match self {
             PsdFrom::Layer(_, mask) => 1 + usize::from(mask.is_some()),
+            PsdFrom::Flattened(_, mask) => usize::from(mask.is_some()),
             _ => 0,
         }
     }
@@ -2073,8 +2206,13 @@ impl PsdFrom {
 
 /// The PSD's layers, top first: groups as a start, their layers and an end; masks with their
 /// layers; the background colour, when shown, at the bottom. Their pixels are read as the file is
-/// written, from where the second list says (by place).
-fn psd_layers(doc: &Document) -> (Vec<PsdLayer<'_>>, Vec<PsdFrom>) {
+/// written, from where the second list says (by place). An adjustment layer goes as a PSD's own
+/// kind where it has one like it (its mask from `masks`), or else as the pixels in `flattened`.
+fn psd_layers<'a>(
+    doc: &'a Document,
+    flattened: &crate::psd_adjustments::Flattened,
+    masks: &'a std::collections::HashMap<LayerId, Vec<u8>>,
+) -> (Vec<PsdLayer<'a>>, Vec<PsdFrom>) {
     let end = || PsdLayer {
         name: "",
         kind: PsdKind::GroupEnd,
@@ -2105,8 +2243,19 @@ fn psd_layers(doc: &Document) -> (Vec<PsdLayer<'_>>, Vec<PsdFrom>) {
             }
             _ => {
                 let mask = doc.mask_of(l.id).filter(|m| doc.layer(*m).is_some_and(|m| m.visible));
-                from.push(PsdFrom::Layer(l.id, mask));
-                PsdKind::Read { masked: mask.is_some() }
+                let own = l.adjustment.as_ref().and_then(|a| formats::psd_adjustment(&a.filter, &a.table));
+                match own {
+                    Some((key, data)) => {
+                        from.push(PsdFrom::Nothing);
+                        let mask = mask.and_then(|m| masks.get(&m)).map(Vec::as_slice);
+                        PsdKind::Adjustment { key, data, mask }
+                    }
+                    None => {
+                        let flat = l.adjustment.is_some() && flattened.contains_key(&l.id);
+                        from.push(if flat { PsdFrom::Flattened(l.id, mask) } else { PsdFrom::Layer(l.id, mask) });
+                        PsdKind::Read { masked: mask.is_some() }
+                    }
+                }
             }
         };
         out.push(PsdLayer {
@@ -2457,7 +2606,7 @@ pub(crate) fn png_pixels(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8
 }
 
 /// A PNG of straight RGBA8 pixels, carrying `icc` if it isn't empty.
-fn png_bytes(width: u32, height: u32, rgba: &[u8], icc: &[u8]) -> Result<Vec<u8>, MobileError> {
+pub(crate) fn png_bytes(width: u32, height: u32, rgba: &[u8], icc: &[u8]) -> Result<Vec<u8>, MobileError> {
     let mut out = Vec::new();
     let mut info = png::Info::with_size(width, height);
     info.color_type = png::ColorType::Rgba;
@@ -2664,6 +2813,10 @@ fn decode_png_into(
     let (color, depth) = reader.output_color_type();
     let (w, h, interlaced) = (reader.info().width, reader.info().height, reader.info().interlaced);
     let sized = w == width && h == height;
+    // an HDR artwork's layer: its half floats as they are
+    if sized && color == png::ColorType::Rgba && depth == png::BitDepth::Sixteen && !interlaced {
+        return crate::hdr::read_half_png(reader, width, height);
+    }
     if (!sized && !fit) || color != png::ColorType::Rgba || depth != png::BitDepth::Eight {
         return Err(file_error("opening a layer", format!("{w}×{h} {color:?}")));
     }
@@ -2721,7 +2874,13 @@ impl CanvasSession {
                 return Err(file_error("reading the picture", "the canvas is not shown yet"));
             };
             canvas.render_finished(gpu, &mut st.doc);
-            let rgba = canvas.read_composite(gpu).map_err(|e| file_error("reading the picture", e))?;
+            // an HDR canvas's light above white rolled off into the standard picture
+            let rgba = if canvas.is_hdr() {
+                canvas.read_composite_wide(gpu).map(|half| procraft_engine::hdr::tone_mapped(&half))
+            } else {
+                canvas.read_composite(gpu)
+            };
+            let rgba = rgba.map_err(|e| file_error("reading the picture", e))?;
             (w, h, rgba, (icc, proof))
         };
         let (icc, proof) = icc;
@@ -2858,7 +3017,11 @@ pub fn import_pages(
             text: None,
             private: false,
             assisted: false,
+            vector: None,
             plugin: None,
+            adjustment: None,
+            style: None,
+            panel: None,
             filter: None,
             marks: Default::default(),
         });

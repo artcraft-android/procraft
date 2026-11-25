@@ -25,6 +25,7 @@ const FOLLOWS_A_FINGER: Duration = Duration::from_millis(150);
 const STOPPED_SLOW: &str = "Switched off: it took too long.";
 const STOPPED_DEVICE: &str = "Switched off: it can't run on this device.";
 const TOO_BIG: &str = "This filter takes too long on a canvas this big.";
+const OTHER_RANGE: &str = "Open the filter again.";
 const NO_DEVICE: &str = "The canvas isn't ready for a filter yet.";
 
 /// What a filter's panel shows.
@@ -138,6 +139,7 @@ impl State {
             FilterRun::Spent => (Some(STOPPED_SLOW), STOPPED_SLOW),
             FilterRun::Cut | FilterRun::Lost => (Some(STOPPED_DRIVER), STOPPED_DRIVER),
             FilterRun::TooLong => (None, TOO_BIG),
+            FilterRun::OtherRange => (None, OTHER_RANGE),
         };
         log::warn!("a plugin filter stopped: {}: {run:?}", open.id);
         if let Some(why) = stopped {
@@ -215,9 +217,9 @@ impl CanvasSession {
         };
         // (one of several a plugin lists stands and stops with its plugin)
         let id = ready.plugin.clone();
-        let (gpu, first) = {
+        let (gpu, first, range) = {
             let mut st = self.shared.lock();
-            (st.gpu.clone(), !std::mem::replace(&mut st.filters.saved, true))
+            (st.gpu.clone(), !std::mem::replace(&mut st.filters.saved, true), st.doc.range)
         };
         let Some(gpu) = gpu else { return Some(NO_DEVICE.to_owned()) };
         // all a hang or a crash can then cost is what came after this
@@ -229,7 +231,8 @@ impl CanvasSession {
         }
         // a driver that falls over compiling it takes the app with it, leaving only this
         plugins.filter_trying(&id);
-        let program = match gpu.make_filter(ready.code) {
+        // for the canvas's range: an HDR canvas's layers are half floats
+        let program = match gpu.make_filter_for(ready.code, range) {
             Ok(program) => program,
             Err(e) => {
                 log::warn!("a plugin filter wouldn't compile: {e}");

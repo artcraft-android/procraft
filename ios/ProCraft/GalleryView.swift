@@ -120,6 +120,9 @@ struct GalleryView: View {
     @State private var selected: Set<String> = []
     @State private var moreOpen = false
     @State private var newCanvasOpen = false
+    @State private var workspacesOpen = false
+    @State private var namingWorkspace: WorkspaceNaming?
+    @State private var deletingWorkspace: WorkspaceDeleting?
     @State private var sharing: GalleryShare?
     /// Artworks waiting for their PDF's quality (several go into one, named as the share says).
     @State private var pdfFor: GalleryShare?
@@ -211,7 +214,8 @@ struct GalleryView: View {
     /// is it zooming into an artwork or out of one.
     private func quiet() -> Bool {
         guard GalleryZoomer.shared.zoom == nil, !selecting, !newCanvasOpen, !model.customOpen, sharing == nil, renaming == nil, deleting == nil,
-              deletingStack == nil, model.endedOpening == nil, pdfFor == nil, previewing == nil, opening == nil, !about
+              deletingStack == nil, model.endedOpening == nil, pdfFor == nil, previewing == nil, opening == nil, !about,
+              !workspacesOpen, namingWorkspace == nil, deletingWorkspace == nil
         else { return false }
         return true
     }
@@ -365,6 +369,8 @@ struct GalleryView: View {
         }
         .scrollIndicators(.hidden)
         .scrollDisabled(opening != nil)
+        // each workspace's grid is its own, from its top
+        .id(model.workspace.root)
         // back from an artwork, the gallery is where it was
         .scrollPosition(id: Binding(get: { model.scrolledTo }, set: { model.scrolledTo = $0 }), anchor: .top)
         // a stack left: the gallery grows back into place, fading in
@@ -388,7 +394,9 @@ struct GalleryView: View {
         let titleX: Float = model.openStack != nil && !selecting ? 60 : 32
         return galleryHeaderFit(
             width: Float(screen.width), titleX: titleX, titleWidth: Float(width.rounded(.up)),
-            selecting: selecting, landscape: screen.width > screen.height, inStack: model.openStack != nil
+            // (no Stack while the Gallery stacks plugin is off, as in a stack)
+            selecting: selecting, landscape: screen.width > screen.height,
+            inStack: model.openStack != nil || !PluginsModel.shared.has(.galleryStacks)
         )
     }
 
@@ -457,6 +465,12 @@ struct GalleryView: View {
         } else {
             GalleryHeader(
                 stack: model.openStack?.name,
+                workspace: model.workspace.name,
+                width: screen.width,
+                onWorkspaces: {
+                    swiped = nil
+                    withAnimation(workspacesOpen ? Motion.menuClose : Motion.menuOpen) { workspacesOpen.toggle() }
+                },
                 fit: fit,
                 backLit: drag.backLit,
                 onBackPlaced: { model.backAt = $0 },
@@ -515,6 +529,33 @@ struct GalleryView: View {
 
     /// The menus and panels over the gallery.
     @ViewBuilder private func overlays(_ screen: CGSize) -> some View {
+        if workspacesOpen {
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { closeWorkspaces() }
+            WorkspacesPanel(
+                screen: screen, workspaces: model.workspaces, showing: model.workspace,
+                onPick: { picked in
+                    closeWorkspaces()
+                    withAnimation(Motion.easeInOut(0.22)) { model.showWorkspace(picked) }
+                },
+                onNew: {
+                    closeWorkspaces()
+                    namingWorkspace = WorkspaceNaming()
+                },
+                onRename: { renamed in
+                    closeWorkspaces()
+                    namingWorkspace = WorkspaceNaming(renamed: renamed)
+                },
+                onDelete: { gone in
+                    closeWorkspaces()
+                    deletingWorkspace = WorkspaceDeleting(
+                        workspace: gone, count: Gallery.workspaces.artworkCount(workspace: gone)
+                    )
+                }
+            )
+            .menuTransition(.top)
+        }
         if newCanvasOpen {
             Color.clear
                 .contentShape(Rectangle())
@@ -631,6 +672,32 @@ struct GalleryView: View {
             onExtra: { sharePdf(PdfQuality.better) },
             onFirst: { sharePdf(PdfQuality.good) }
         )
+        AlertView(
+            content: deletingWorkspace?.alert,
+            onCancel: { deletingWorkspace = nil },
+            onAction: {
+                if let gone = deletingWorkspace?.workspace {
+                    model.deleteWorkspace(gone)
+                }
+                deletingWorkspace = nil
+            }
+        )
+        NameCard(
+            asked: namingWorkspace?.asked,
+            onCancel: { namingWorkspace = nil },
+            onDone: { name in
+                if let renamed = namingWorkspace?.renamed {
+                    model.renameWorkspace(renamed, name)
+                } else {
+                    withAnimation(Motion.easeInOut(0.22)) { model.newWorkspace(name) }
+                }
+                namingWorkspace = nil
+            }
+        )
+    }
+
+    private func closeWorkspaces() {
+        withAnimation(Motion.menuClose) { workspacesOpen = false }
     }
 
     /// The log as a text file, to the share sheet (made off the main thread): what the question about
@@ -657,6 +724,7 @@ struct GalleryView: View {
         cards(catchers(GeometryReader { place in screenContent(place) }.ignoresSafeArea(.container, edges: .vertical)))
             .onAppear {
                 model.onOpen = onOpen
+                model.followWorkspacesPlugin()
                 model.reload()
                 model.bringIn()
                 #if DEBUG
@@ -708,6 +776,7 @@ struct GalleryView: View {
             }
             .background { GalleryDragCatcher(model: model, shown: drag, canStart: quiet) }
             .background { PressCatcher(model: model, presses: presses) { quiet() || selecting } }
+            .onChange(of: PluginsModel.shared.features) { model.followWorkspacesPlugin() }
             .onChange(of: model.leftStack) {
                 regrown = 0
                 flown = 0
@@ -846,6 +915,12 @@ struct GalleryView: View {
                 selecting = true
                 selected = Set(model.artworks.prefix(2).map(\.dir))
                 moreOpen = true
+            case "gallery-workspaces":
+                workspacesOpen = true
+            case "gallery-workspace-new":
+                namingWorkspace = WorkspaceNaming()
+            case "gallery-workspace-delete":
+                deletingWorkspace = WorkspaceDeleting(workspace: model.workspace, count: UInt32(model.artworks.count))
             case "gallery-about":
                 about = true
             case "gallery-recovery":
@@ -952,6 +1027,10 @@ private struct HeaderCapsule: View {
 /// some or all of the buttons go under More and the title shrinks to fit, never wrapping.
 private struct GalleryHeader: View {
     let stack: String?
+    /// The workspace showing, for its button in the middle, and the screen's width.
+    let workspace: String
+    let width: CGFloat
+    let onWorkspaces: () -> Void
     let fit: GalleryHeaderFit
     /// An artwork dragged rests on the way back, to go back.
     let backLit: Bool
@@ -1008,6 +1087,12 @@ private struct GalleryHeader: View {
             }
             .padding(.top, 10)
             .padding(.trailing, 20)
+            // the workspaces are the gallery's: in a stack the middle is its name's
+            if stack == nil, PluginsModel.shared.has(.workspaces) {
+                WorkspaceButton(name: workspace, room: workspaceButtonRoom(width), action: onWorkspaces)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 10)
+            }
         }
         .frame(height: 55, alignment: .top)
     }
@@ -1289,7 +1374,20 @@ enum Gallery {
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
     }
 
-    static let store: ArtworkStore = ArtworkStore.open(root: support.appendingPathComponent("gallery").path)
+    /// The gallery's workspaces: the first is the gallery there has always been, the others are
+    /// kept beside it.
+    static let workspaces = Workspaces.open(
+        defaultRoot: support.appendingPathComponent("gallery").path,
+        others: support.appendingPathComponent("workspaces").path
+    )
+
+    /// The artworks of the workspace showing: where new ones go too.
+    private(set) static var store = ArtworkStore.open(root: workspaces.selected().root)
+
+    /// The store reads `workspace` from now on, on the main thread.
+    static func show(_ workspace: Workspace) {
+        store = ArtworkStore.open(root: workspace.root)
+    }
 
     /// Where the artworks being opened are noted until each shows, outside the gallery: one whose
     /// opening ended the app is asked about when next picked.

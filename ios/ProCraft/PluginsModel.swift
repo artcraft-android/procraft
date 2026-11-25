@@ -88,6 +88,27 @@ final class PluginsModel {
     private(set) var plugins: [PluginInfo] = []
     /// Goes up with any change that may move what a plugin answers, for what asks it again.
     private(set) var changes = 0
+    /// Whether a plugin draws in-betweens (the frame options then offer In-between).
+    private(set) var tweens = false
+    /// Whether a plugin has the colour panel's Classic show a triangle in place of its square.
+    private(set) var colourTriangle = false
+    /// Whether a picker plugin draws Classic's square (and says where touches land on it).
+    private(set) var pickerOn = false
+    /// Whether a plugin sets brushes' settings at random (the brush studio shows Randomise).
+    private(set) var randomisesBrushes = false
+    /// Whether a plugin pins panels open: a touch on the canvas paints and leaves the panel up.
+    private(set) var pinsPanels = false
+    /// Whether a plugin offers Lasso Fill: Color Fill's Lasso Fill and the Paint and Erase tools'
+    /// lassos show.
+    private(set) var lassoFills = false
+    /// The app's own features that show: each built-in plugin on, and the switch a part comes
+    /// under (see `has`).
+    private(set) var features: Set<Feature> = []
+    /// The meshes plugins lay and bend for Transform (Puppet while there is one), and their tools.
+    private(set) var warps: [PluginWarp] = []
+    private(set) var tools: [PluginTool] = []
+    /// The artwork open, whose GPU draws a picker plugin's picture.
+    @ObservationIgnored weak var pickerSession: CanvasSession?
     /// Words for someone who changed a setting that now comes as a plugin, said once.
     private(set) var movedNotice: String?
     /// A plugin file waiting on the one screen that asks about it, and what it holds.
@@ -153,6 +174,42 @@ final class PluginsModel {
     /// The list as it stands: a plugin may have stopped on a stroke since it was read.
     func read() {
         plugins = store.plugins()
+        // what the plugins change in how the interface looks, and what it offers
+        tweens = store.tweens()
+        colourTriangle = store.colourTriangle()
+        pickerOn = store.pickerOn()
+        randomisesBrushes = store.randomisesBrushes()
+        pinsPanels = store.pinsPanels()
+        lassoFills = store.lassoFills()
+        features = Set(store.features())
+        warps = store.warps()
+        tools = store.tools()
+    }
+
+    /// Whether the app's own `feature` shows: its built-in plugin on, and its switch if it has one.
+    /// Off, only the ways in to it are hidden; an artwork that uses it opens and plays as saved.
+    func has(_ feature: Feature) -> Bool {
+        features.contains(feature)
+    }
+
+    /// Whether QuickMenu action `a` shows: none of the app's own features, or one that shows.
+    func shows(_ a: QuickAction) -> Bool {
+        quickActionFeature(action: a).map(has) ?? true
+    }
+
+    /// Whether the Adjustments menu lists `a`.
+    func shows(_ a: Adjustment) -> Bool {
+        adjustmentFeature(adjustment: a).map(has) ?? true
+    }
+
+    /// Whether a layer's options list `option`.
+    func shows(_ option: LayerOption) -> Bool {
+        layerOptionFeature(option: option).map(has) ?? true
+    }
+
+    /// Whether Gesture controls has a page for `purpose`.
+    func shows(_ purpose: GesturePurpose) -> Bool {
+        gesturePurposeFeature(purpose: purpose).map(has) ?? true
     }
 
     private func changed() {

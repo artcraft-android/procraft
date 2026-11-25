@@ -15,8 +15,13 @@ final class PencilHold {
     private let move: ([PenSample]) -> Void
     private let ahead: ([PenSample]) -> Void
     private let end: ([PenSample]) -> Void
+    /// Runs what one release sends the core as one piece of input (no frame drawn halfway).
+    private let together: (() -> Void) -> Void
 
     private var held = HeldSamples<PenSample>()
+    /// Where the system last predicted the Pencil goes: still ahead of it when samples become
+    /// firm in between (their true force coming), so the tip stays at the pen meanwhile.
+    private var predicted: [PenSample] = []
     /// The touch, until it lifts.
     private var touch: ObjectIdentifier?
     /// The stroke has begun, and the Pencil has lifted with samples still held.
@@ -28,12 +33,14 @@ final class PencilHold {
         begin: @escaping ([PenSample]) -> Void,
         move: @escaping ([PenSample]) -> Void,
         ahead: @escaping ([PenSample]) -> Void,
-        end: @escaping ([PenSample]) -> Void
+        end: @escaping ([PenSample]) -> Void,
+        together: @escaping (() -> Void) -> Void = { $0() }
     ) {
         self.begin = begin
         self.move = move
         self.ahead = ahead
         self.end = end
+        self.together = together
     }
 
     /// Whether this is the touch being held.
@@ -69,23 +76,29 @@ final class PencilHold {
     }
 
     /// Sends on what is firm, and draws what is held (and where the system predicts the Pencil
-    /// goes) ahead of it.
-    func release(predicted: [PenSample] = []) {
+    /// goes: `predicted`, new with each move; none, as last predicted) ahead of it.
+    func release(predicted: [PenSample]? = nil) {
+        if let predicted {
+            self.predicted = predicted
+        }
         let firm = held.takeFirm()
         if lifting, held.isEmpty {
             close(firm)
             return
         }
-        if !firm.isEmpty {
-            if started {
-                move(firm)
-            } else {
-                started = true
-                begin(firm)
+        together {
+            if !firm.isEmpty {
+                if started {
+                    move(firm)
+                } else {
+                    started = true
+                    begin(firm)
+                }
             }
-        }
-        if started, !held.isEmpty || !predicted.isEmpty {
-            ahead(held.waiting + predicted)
+            // (the firm samples just drawn end the stroke's tip at them: it goes on to the pen)
+            if started, !held.isEmpty || !self.predicted.isEmpty {
+                ahead(held.waiting + self.predicted)
+            }
         }
         keepTime()
     }
@@ -94,6 +107,7 @@ final class PencilHold {
     func lift() {
         touch = nil
         lifting = true
+        predicted = []
         release()
     }
 
@@ -124,6 +138,7 @@ final class PencilHold {
 
     private func reset() {
         held.clear()
+        predicted = []
         touch = nil
         started = false
         lifting = false

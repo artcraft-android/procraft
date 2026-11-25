@@ -4,7 +4,7 @@ use crate::geom::{Affine, Vec2};
 
 /// Zoom limits (screen pixels per canvas pixel).
 pub const MIN_ZOOM: f32 = 0.02;
-pub const MAX_ZOOM: f32 = 64.0;
+pub const MAX_ZOOM: f32 = 128.0;
 
 /// A canvas let go within this of a right angle (radians, 5°) turns the rest of the way onto it.
 pub const TURN_SNAP: f32 = 5.0 * std::f32::consts::PI / 180.0;

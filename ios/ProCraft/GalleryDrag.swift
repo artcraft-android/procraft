@@ -20,7 +20,8 @@ private let artworkLifted: CGFloat = 1.07
 /// What an artwork dragged out to another app becomes, as Settings says: the file, and a picture for
 /// those that can't read it.
 private var dragFormats: [String] {
-    let file = SystemSettings.dragFormat
+    // (our own instead of PSD while the PSD plugin's export is off)
+    let file = SystemSettings.dragFormat == "PSD" && !PluginsModel.shared.has(.psdExport) ? "ProCraft" : SystemSettings.dragFormat
     return ["JPEG", "PNG", "TIFF"].contains(file) ? [file] : [file, SystemSettings.dragImageFormat]
 }
 
@@ -62,13 +63,59 @@ private extension GalleryEntry {
     }
 }
 
+/// What a dragged item can come as. Another app's item often comes in several forms at once (an
+/// artwork as its own file and as a picture of it): which is taken goes by where it is dropped.
+enum DroppedForm {
+    case brushes, palette, artwork, picture, other
+
+    /// The form a type's files are, by the extensions its files have (and, for an app's own types
+    /// that say none, by its name).
+    init(type identifier: String) {
+        let type = UTType(identifier)
+        let extensions = Set((type?.tags[.filenameExtension] ?? []).map { $0.lowercased() })
+        let named = identifier.lowercased()
+        if !extensions.isDisjoint(with: droppedBrushExtensions) || named.contains("brush") {
+            self = .brushes
+        } else if !extensions.isDisjoint(with: droppedPaletteExtensions) || named.contains("swatches") {
+            self = .palette
+        } else if !extensions.isDisjoint(with: droppedArtworkExtensions) || named.contains("procreate") || type?.conforms(to: .pdf) == true {
+            self = .artwork
+        } else if type?.conforms(to: .image) == true {
+            self = .picture
+        } else {
+            self = .other
+        }
+    }
+}
+
+let droppedBrushExtensions: Set<String> = ["brush", "brushset", "abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut"]
+let droppedPaletteExtensions: Set<String> = ["swatches", "aco", "ase"]
+/// Artworks with their layers: ours, other apps', and what is brought in as one.
+let droppedArtworkExtensions: Set<String> = ["procraft", "procreate", "psd", "psb"]
+
 /// A copy of a dropped file, which goes when its reader returns: in a folder of its own, as two may
-/// have one name.
-private func keepDropped(_ url: URL, in folder: URL) -> URL? {
+/// have one name. A name without an extension takes its `type`'s, as what reads it goes by it.
+private func keepDropped(_ url: URL, in folder: URL, type: String) -> URL? {
     let inside = folder.appendingPathComponent(UUID().uuidString)
-    let copy = inside.appendingPathComponent(url.lastPathComponent)
+    var name = url.lastPathComponent
+    if url.pathExtension.isEmpty, let ending = UTType(type)?.preferredFilenameExtension {
+        name += "." + ending
+    }
+    let copy = inside.appendingPathComponent(name)
     try? FileManager.default.createDirectory(at: inside, withIntermediateDirectories: true)
     return (try? FileManager.default.copyItem(at: url, to: copy)) != nil ? copy : nil
+}
+
+/// A dropped item that came as bytes, not as a file, kept as a file named for it.
+private func keepDropped(_ data: Data, named: String?, in folder: URL, type: String) -> URL? {
+    let inside = folder.appendingPathComponent(UUID().uuidString)
+    var name = Sharing.safeName(named ?? "", otherwise: "Dropped")
+    if let ending = UTType(type)?.preferredFilenameExtension, !name.lowercased().hasSuffix("." + ending) {
+        name += "." + ending
+    }
+    let copy = inside.appendingPathComponent(name)
+    try? FileManager.default.createDirectory(at: inside, withIntermediateDirectories: true)
+    return (try? data.write(to: copy)) != nil ? copy : nil
 }
 
 /// Copies of what another app dropped, gathered as they arrive.
@@ -76,21 +123,35 @@ private final class Dropped {
     var urls: [URL] = []
 }
 
-/// What `session` holds copied while it lasts, then `done` with the copies and the folder they are in.
-func loadDropped(_ session: any UIDropSession, done: @escaping ([URL], URL) -> Void) {
+/// What `session` holds copied while it lasts, then `done` with the copies and the folder they are
+/// in. Of the forms an item comes in, the first of `taking` it has is the one copied (the item's
+/// own first among those alike); one that comes in none of them, as its own first.
+func loadDropped(_ session: any UIDropSession, taking: [DroppedForm], done: @escaping ([URL], URL) -> Void) {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent("drop-\(UUID().uuidString)")
     let dropped = Dropped()
     let group = DispatchGroup()
     for item in session.items {
-        guard let type = item.itemProvider.registeredTypeIdentifiers.first else { continue }
+        let provider = item.itemProvider
+        let types = provider.registeredTypeIdentifiers
+        let rank = { (type: String) in taking.firstIndex(of: DroppedForm(type: type)) ?? taking.count }
+        guard let type = types.min(by: { rank($0) < rank($1) }) else { continue }
         group.enter()
-        _ = item.itemProvider.loadFileRepresentation(forTypeIdentifier: type) { url, _ in
-            let kept = url.flatMap { keepDropped($0, in: folder) }
+        let keep = { (kept: URL?) in
             DispatchQueue.main.async {
                 if let kept {
                     dropped.urls.append(kept)
                 }
                 group.leave()
+            }
+        }
+        _ = provider.loadFileRepresentation(forTypeIdentifier: type) { url, _ in
+            if let url {
+                keep(keepDropped(url, in: folder, type: type))
+                return
+            }
+            // no file of it: its bytes, then
+            _ = provider.loadDataRepresentation(forTypeIdentifier: type) { data, _ in
+                keep(data.flatMap { keepDropped($0, named: provider.suggestedName, in: folder, type: type) })
             }
         }
     }
@@ -311,7 +372,8 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
         scroll(point.y < grid.minY + dragScrollEdge ? -1 : point.y > grid.maxY - dragScrollEdge ? 1 : 0, on: window)
         var stacking = false
         if case .artwork = entry {
-            stacking = model.openStack == nil
+            // (onto another only while the Gallery stacks plugin is on)
+            stacking = model.openStack == nil && PluginsModel.shared.has(.galleryStacks)
         }
         at = dropAt(point, dragged: entry.dir, stacking: stacking)
         showOnto(at?.onto)
@@ -380,7 +442,8 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
 
     /// Files from another app: each copied while it lasts, then brought in as Import's.
     private func bringIn(_ session: any UIDropSession) {
-        loadDropped(session) { [model] urls, folder in
+        // an artwork with its layers before a picture of it
+        loadDropped(session, taking: [.brushes, .palette, .artwork, .picture]) { [model] urls, folder in
             model.importDropped(urls, from: folder)
         }
     }

@@ -3,10 +3,11 @@
 
 use procraft_engine::document::{Document, Layer, LayerId, LayerKind};
 use procraft_engine::geom::{Affine, Homography, IRect, Vec2};
-use procraft_engine::transform::{Guides, Handle, Transform, TransformMode, convex_hull};
+use procraft_engine::transform::{Bend, Guides, Handle, Transform, TransformMode, convex_hull};
 use procraft_engine::warp;
 use procraft_gpu::Resample;
 
+use crate::vector_layer::Carried;
 use crate::{CanvasSession, State};
 
 /// How transformed pixels are resampled.
@@ -34,6 +35,7 @@ pub enum TransformKind {
     Uniform,
     Distort,
     Warp,
+    Puppet,
 }
 
 impl From<TransformKind> for TransformMode {
@@ -43,6 +45,7 @@ impl From<TransformKind> for TransformMode {
             TransformKind::Uniform => TransformMode::Uniform,
             TransformKind::Distort => TransformMode::Distort,
             TransformKind::Warp => TransformMode::Warp,
+            TransformKind::Puppet => TransformMode::Puppet,
         }
     }
 }
@@ -67,6 +70,16 @@ pub enum TransformHandle {
     Mesh {
         index: u8,
     },
+    /// A puppet's pin, by its place among them.
+    Pin {
+        index: u32,
+    },
+    /// The ring around the puppet's chosen pin.
+    PinRing {
+        index: u32,
+    },
+    /// A puppet's mesh away from its pins.
+    OnMesh,
 }
 
 impl From<TransformHandle> for Handle {
@@ -78,8 +91,57 @@ impl From<TransformHandle> for Handle {
             TransformHandle::TurnBox => Handle::TurnBox,
             TransformHandle::Move => Handle::Move,
             TransformHandle::Mesh { index } => Handle::Mesh(index),
+            TransformHandle::Pin { index } => Handle::Pin(index),
+            TransformHandle::PinRing { index } => Handle::PinRing(index),
+            TransformHandle::OnMesh => Handle::OnMesh,
         }
     }
+}
+
+/// How a puppet's mesh is laid and its pins turn: how far past what is painted the mesh reaches
+/// (canvas pixels, 0 to [`puppet_expansion_max`]), about how many triangles across it (the
+/// range [`puppet_density_range`] gives), and whether pins turn as the mesh bends.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct PuppetSettings {
+    pub expansion: f32,
+    pub density: u32,
+    pub auto_rotate: bool,
+}
+
+impl Default for PuppetSettings {
+    fn default() -> PuppetSettings {
+        PuppetSettings { expansion: 4.0, density: 40, auto_rotate: true }
+    }
+}
+
+impl PuppetSettings {
+    /// How the mesh is laid, as the plugin is told (pins turning is the app's).
+    fn laid(self) -> (u32, u32) {
+        (self.expansion.to_bits(), self.density)
+    }
+}
+
+/// The furthest a puppet's mesh reaches past what is painted (canvas pixels).
+const PUPPET_EXPANSION_MAX: f32 = 64.0;
+/// The fewest and most triangles across a puppet's mesh Transform offers.
+const PUPPET_DENSITY_RANGE: (u32, u32) = (12, 80);
+
+/// The fewest and most triangles across a puppet's mesh.
+#[uniffi::export]
+pub fn puppet_density_range() -> Vec<u32> {
+    vec![PUPPET_DENSITY_RANGE.0, PUPPET_DENSITY_RANGE.1]
+}
+
+/// The furthest a puppet's mesh reaches past what is painted (canvas pixels).
+#[uniffi::export]
+pub fn puppet_expansion_max() -> f32 {
+    PUPPET_EXPANSION_MAX
+}
+
+/// How far out from a puppet's chosen pin its ring is drawn (points): where a touch turns it.
+#[uniffi::export]
+pub fn puppet_ring_radius() -> f32 {
+    PIN_RING_RADIUS
 }
 
 /// The transform toolbar's one-tap changes.
@@ -132,6 +194,12 @@ pub struct TransformBox {
     /// The lines the box held in a move has snapped onto, as guides across the canvas: segments
     /// (x0, y0, x1, y1 in turn, canvas pixels); none while it isn't snapped.
     pub snap_lines: Vec<f32>,
+    /// A puppet's pins (x, y in canvas pixels, then the angle each holds or the bend gives it, in
+    /// degrees clockwise: three numbers a pin), the one chosen (-1 for none), and its mesh as it is
+    /// bent (segments x0, y0, x1, y1 in turn); empty without a puppet.
+    pub pins: Vec<f32>,
+    pub selected_pin: i32,
+    pub puppet_edges: Vec<f32>,
 }
 
 /// How finely a warp's lines are sampled for drawing, and its triangles for rendering.
@@ -198,6 +266,8 @@ pub(crate) fn transform_area(
 /// The shape of what `targets` hold together within `area` (on the canvas, holding all of it), as
 /// far as `selection` takes it (see [`content_shape`]), measured from `area`'s corner: found on the
 /// GPU, each row's ends sent back, not the pixels, where it can; else read back.
+// (not used while the transform reads its pixels back for a puppet's mesh, see `transform_begin`)
+#[allow(dead_code)]
 fn targets_shape(
     canvas: &procraft_gpu::Canvas,
     gpu: &procraft_gpu::Gpu,
@@ -213,6 +283,8 @@ fn targets_shape(
 
 /// [`targets_shape`] found on the GPU (see [`procraft_gpu::Canvas::row_ends`]): none if it can't
 /// be (a layer parked, or the GPU didn't say), else the shape if there is one.
+// (not used while the transform reads its pixels back for a puppet's mesh, see `transform_begin`)
+#[allow(dead_code)]
 pub(crate) fn shape_on_gpu(
     canvas: &procraft_gpu::Canvas,
     gpu: &procraft_gpu::Gpu,
@@ -232,6 +304,8 @@ pub(crate) fn shape_on_gpu(
 }
 
 /// [`targets_shape`] found from the pixels, read back.
+// (not used while the transform reads its pixels back for a puppet's mesh, see `transform_begin`)
+#[allow(dead_code)]
 pub(crate) fn shape_read_back(
     canvas: &procraft_gpu::Canvas,
     gpu: &procraft_gpu::Gpu,
@@ -299,7 +373,7 @@ fn snap_bounds(
 /// The affine map taking corners `from` to corners `to` (top left, top right, bottom right, bottom
 /// left): exact where they are a parallelogram moved as one, else what the top left, top right and
 /// bottom left corners say.
-fn corners_affine(from: [Vec2; 4], to: [Vec2; 4]) -> Option<Affine> {
+pub(crate) fn corners_affine(from: [Vec2; 4], to: [Vec2; 4]) -> Option<Affine> {
     let ([s0, s1, _, s3], [c0, c1, _, c3]) = (from, to);
     let (u, v, u2, v2) = (s1 - s0, s3 - s0, c1 - c0, c3 - c0);
     let det = u.x * v.y - u.y * v.x;
@@ -321,7 +395,50 @@ impl State {
     /// A plugin's layer's items are moved as items, by where the box's corners went, and the layer
     /// laid again exactly.
     pub(crate) fn end_transform(&mut self, commit: bool) {
+        // keying a clip's pose (autokey), nothing was taken up: its keys are kept or put back
+        self.transform_alpha = None;
+        if self.posing() {
+            self.autokey_end(commit);
+            return;
+        }
         self.snap_pending = None;
+        // a vector layer's transform is of its strokes and fills: what was shown moving was only
+        // their picture, which is put back, and they are carried to where it was moved and drawn
+        // again there
+        if let Some(layer) = self.vector_transform.take() {
+            // (warped, they are bent through the mesh as the picture of them was)
+            let map = self.transform.as_ref().and_then(|t| match t.bend() {
+                Some(bend) => Some(Carried::Bent(bend)),
+                None => Homography::quad_to_quad(t.source(), t.content()).map(Carried::By),
+            });
+            let name = match self.transform_mode {
+                procraft_engine::transform::TransformMode::Uniform => "uniform transform",
+                procraft_engine::transform::TransformMode::Distort => "distort transform",
+                procraft_engine::transform::TransformMode::Warp => "warp transform",
+                procraft_engine::transform::TransformMode::Puppet => "puppet warp",
+                procraft_engine::transform::TransformMode::Freeform => "non-uniform transform",
+            };
+            // (a warp shown as its strokes bent held the layer's pixels: they are back as they were,
+            // and no picture of them is being moved)
+            let warped = self.vector_warp_end().is_some();
+            if self.transform.take().is_some()
+                && !warped
+                && let Some(canvas) = self.canvas.as_mut()
+            {
+                canvas.end_transform(false);
+            }
+            match self.vector_lifted.take() {
+                // (those picked up onto a layer of their own are set down where it was moved to,
+                // or put back)
+                Some(lifted) => self.vector_set_down(layer, lifted, map.filter(|_| commit), name),
+                None => {
+                    if commit && let Some(map) = map {
+                        self.vector_place(layer, map, name);
+                    }
+                }
+            }
+            return;
+        }
         if let Some((layer, ids, laid)) = self.transform_items.take()
             && let Some(t) = self.transform.take()
         {
@@ -353,6 +470,7 @@ impl State {
                     procraft_engine::transform::TransformMode::Uniform => "uniform transform",
                     procraft_engine::transform::TransformMode::Distort => "distort transform",
                     procraft_engine::transform::TransformMode::Warp => "warp transform",
+                    procraft_engine::transform::TransformMode::Puppet => "puppet warp",
                 });
             }
             match within {
@@ -373,13 +491,51 @@ impl State {
 
     /// Redraws the layer with the content where the transform has it now, from the pixels it
     /// began with (however many changes it has had, each pixel is filtered once).
-    fn show_transform(&mut self) {
+    pub(crate) fn show_transform(&mut self) {
+        if self.posing() {
+            self.autokey_show();
+            return;
+        }
+        // a vector layer's warp is shown as its strokes bent, drawn with the next frame, not as
+        // their picture pulled through the mesh (which would widen and narrow them with it)
+        let warped = self.transform.as_ref().is_some_and(|t| t.bend().is_some());
+        if warped && self.vector_transform.is_some() && self.vector_warp_begin() {
+            return;
+        }
+        // (the mesh taken back, by Reset or the transform's undo: their picture is moved again)
+        if let Some(moved) = self.vector_warp_end()
+            && let Some(canvas) = self.canvas.as_mut()
+        {
+            canvas.begin_transform_layers(&moved);
+        }
+        self.show_placed();
+    }
+
+    /// The picture taken up to be transformed drawn where the transform has it now.
+    pub(crate) fn show_placed(&mut self) {
         let (Some(t), Some(canvas)) = (self.transform.as_ref(), self.canvas.as_mut()) else { return };
-        if let Some(mesh) = t.warp() {
-            canvas.set_transform_mesh(&warp::triangles(&mesh, t.source(), MESH_STEPS), self.interpolation.into());
-        } else if let Some(to_source) = Homography::quad_to_quad(t.placed(), t.source()) {
+        // pixel art blends nothing, whatever Interpolation says: along the canvas's own axes (and
+        // in a warp) each pixel is the copy's nearest; turned or pulled out of square, the nearest
+        // of the copy enlarged, which keeps its lines clean
+        let resample = match self.transform_pixelated {
+            false => self.interpolation.into(),
+            true if t.is_upright() || t.bend().is_some() => Resample::Nearest,
+            true => Resample::PixelArt,
+        };
+        match t.bend() {
+            Some(Bend::Grid { mesh, source }) => {
+                canvas.set_transform_mesh(&warp::triangles(&mesh, source, MESH_STEPS), resample);
+                return;
+            }
+            Some(Bend::Puppet(frame)) => {
+                canvas.set_transform_mesh(&frame.triangles(), resample);
+                return;
+            }
+            None => {}
+        }
+        if let Some(to_source) = Homography::quad_to_quad(t.placed(), t.source()) {
             // each layer pixel looks up where it came from: a move lands on whole pixels
-            canvas.set_transform(to_source.to_f32(), self.interpolation.into());
+            canvas.set_transform(to_source.to_f32(), resample);
         }
     }
 
@@ -400,6 +556,9 @@ impl State {
                 let [x, y] = t.snapped();
                 x.map(|x| [x, 0.0, x, h]).into_iter().chain(y.map(|y| [0.0, y, w, y])).flatten().collect()
             },
+            pins: t.puppet_pins().iter().flat_map(|(p, a)| [p.x, p.y, a.to_degrees()]).collect(),
+            selected_pin: t.selected_pin().and_then(|i| i32::try_from(i).ok()).unwrap_or(-1),
+            puppet_edges: if self.transform_mode == TransformMode::Puppet { t.puppet_edges() } else { Vec::new() },
         })
     }
 
@@ -427,14 +586,73 @@ impl State {
     pub(crate) fn window_to_canvas(&self, x: f32, y: f32) -> Option<Vec2> {
         self.view?.screen_to_canvas(Vec2::new(x, y)).filter(|p| p.is_finite())
     }
+
+    /// Lays the open transform's puppet mesh over what it took up, as the puppet's settings say,
+    /// by the plugin's mesh warp: none without one.
+    pub(crate) fn lay_puppet(&mut self) {
+        let (Some((area, alpha)), Some(warp)) = (self.transform_alpha.as_ref(), self.mesh_warp()) else { return };
+        let PuppetSettings { expansion, density, .. } = self.puppet_settings;
+        let mesh = warp.lay(*area, alpha, expansion.clamp(0.0, PUPPET_EXPANSION_MAX), density);
+        if let (Some(mesh), Some(t)) = (mesh, self.transform.as_mut()) {
+            t.start_puppet(mesh, warp);
+            if t.puppet_auto_rotate() != self.puppet_settings.auto_rotate {
+                t.set_puppet_auto_rotate(self.puppet_settings.auto_rotate);
+            }
+        }
+    }
+
+    /// What a touch at window point `at` takes in a puppet: a pin (or the chosen one's ring),
+    /// else the mesh, else nothing (a move, which a puppet ignores).
+    pub(crate) fn puppet_handle_at(&self, at: (f32, f32)) -> TransformHandle {
+        let (Some(t), Some(view)) = (self.transform.as_ref(), self.view) else { return TransformHandle::Move };
+        let m = view.to_screen();
+        let view = [m.a, m.b, m.c, m.d, m.e, m.f];
+        let density = self.interface_scale();
+        let selected = t.selected_pin();
+        let pins = t.puppet_pins();
+        // the nearest pin within reach, its ring (the chosen one's) a little further out
+        let mut best: Option<(TransformHandle, f32)> = None;
+        for (i, (p, _)) in pins.iter().enumerate() {
+            let Some((px, py)) = to_screen(p.x, p.y, &view) else { continue };
+            let d = (px - at.0).hypot(py - at.1);
+            let index = u32::try_from(i).unwrap_or(u32::MAX);
+            let ring = (d - PIN_RING_RADIUS * density).abs();
+            let hit = if d <= PIN_GRAB_RADIUS * density {
+                Some((TransformHandle::Pin { index }, d))
+            } else if selected == Some(i) && ring <= PIN_RING_REACH * density {
+                Some((TransformHandle::PinRing { index }, ring))
+            } else {
+                None
+            };
+            if let Some((h, d)) = hit
+                && best.is_none_or(|(_, b)| d < b)
+            {
+                best = Some((h, d));
+            }
+        }
+        if let Some((h, _)) = best {
+            return h;
+        }
+        match self.window_to_canvas(at.0, at.1) {
+            Some(p) if t.on_puppet(p) => TransformHandle::OnMesh,
+            _ => TransformHandle::Move,
+        }
+    }
 }
+
+/// How near (points) a touch takes a puppet's pin, how far out the chosen pin's ring is drawn,
+/// and how near it a touch takes the ring.
+const PIN_GRAB_RADIUS: f32 = 18.0;
+const PIN_RING_RADIUS: f32 = 36.0;
+const PIN_RING_REACH: f32 = 12.0;
 
 impl CanvasSession {
     /// Whether two fingers at these window points take what the box holds: any of them on it,
     /// though never a warp's, whose fingers move the canvas.
     pub(crate) fn fingers_on_box(&self, fingers: impl Iterator<Item = (f32, f32)>) -> bool {
         let st = self.shared.lock();
-        let Some(t) = st.transform.as_ref().filter(|_| st.transform_mode != TransformMode::Warp) else {
+        let bending = matches!(st.transform_mode, TransformMode::Warp | TransformMode::Puppet);
+        let Some(t) = st.transform.as_ref().filter(|_| !bending) else {
             return false;
         };
         let frame = t.frame();
@@ -487,6 +705,39 @@ impl CanvasSession {
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
+        // with autokey on a timeline, the drawing at the playhead is keyed where it is moved
+        if let Some(posed) = st.autokey_begin() {
+            self.shared.frame(st);
+            return posed;
+        }
+        // on a timeline with nothing of the track drawn on at the playhead, there is nothing here
+        // to transform (the current layer is another frame's)
+        if !st.current_shows_here() {
+            return None;
+        }
+        // a vector layer's selected strokes and fills are picked up onto a layer of their own, which
+        // is what is then transformed (and shown moving, the rest of their layer whole under them)
+        let vector = st.doc.current();
+        let lifted = st.vector_lift(vector);
+        let began = self.begin_transform_of_current(st);
+        match (lifted, began.is_some()) {
+            // (nothing to move after all: they are put back)
+            (true, false) => {
+                if let Some(lifted) = st.vector_lifted.take() {
+                    st.vector_set_down(vector, lifted, None, "");
+                }
+            }
+            (true, true) => st.vector_transform = Some(vector),
+            _ => {}
+        }
+        began
+    }
+}
+
+impl CanvasSession {
+    /// [`CanvasSession::transform_begin`], once what is open is kept: the current layer (or the
+    /// layers chosen) taken up to be transformed.
+    fn begin_transform_of_current(&self, st: &mut State) -> Option<TransformBox> {
         let current = st.doc.current();
         // with layers picked or a group current, every paint layer chosen (those in a chosen
         // group too) moves
@@ -501,7 +752,14 @@ impl CanvasSession {
             }
             st.transform_items = Some((current, ids, false));
         }
-        let targets = st.edited_layers_but(|id| st.transform_items.as_ref().is_some_and(|(items, ..)| *items == id));
+        // (a vector layer alone is transformed on its own, as its strokes and fills: see
+        // `end_transform`; among several chosen it stays as it is)
+        let vector_alone = chosen.len() <= 1
+            && st.doc.layer(current).is_some_and(|l| l.vector.is_some() && l.visible)
+            && !st.doc.is_locked(current);
+        let targets = st.edited_layers_but(|id| {
+            st.transform_items.as_ref().is_some_and(|(items, ..)| *items == id) || (vector_alone && id == current)
+        });
         if targets.is_empty() {
             st.transform_items = None;
             return None;
@@ -519,7 +777,30 @@ impl CanvasSession {
         if area.is_empty() {
             return None;
         }
-        let ([x, y, w, h], hull) = targets_shape(canvas, gpu, &targets, area, st.selection.as_ref())?;
+        // what all of them hold together there
+        let mut pixels: Vec<u8> = Vec::new();
+        for id in &targets {
+            let layer = canvas.read_layer_part(gpu, *id, area).ok()?;
+            if pixels.is_empty() {
+                pixels = layer;
+            } else {
+                for (p, q) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(layer.as_chunks::<4>().0) {
+                    p[3] = p[3].max(q[3]);
+                }
+            }
+        }
+        // with a selection, only what it takes moves
+        let (left, top, across) = (area.x0.max(0) as usize, area.y0.max(0) as usize, area.width().max(1) as usize);
+        if let Some(mask) = st.selection.as_ref() {
+            for (i, px) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let at = (top + i / across) * mask.width as usize + left + i % across;
+                let m = mask.data.get(at).copied().unwrap_or(0);
+                px[3] = ((u16::from(px[3]) * u16::from(m) + 127) / 255) as u8;
+            }
+        }
+        let ([x, y, w, h], hull) = content_shape(&pixels, area.width())?;
+        // what a puppet's mesh is laid over, should one be
+        st.transform_alpha = Some((area, pixels.as_chunks::<4>().0.iter().map(|&[.., a]| a).collect()));
         let corner = Vec2::new(area.x0 as f32, area.y0 as f32);
         let (x, y, hull) = (x + corner.x, y + corner.y, hull.into_iter().map(|p| p + corner).collect());
         // the other layers shown are snapped onto by their bounds: found now with snapping on,
@@ -531,20 +812,33 @@ impl CanvasSession {
         let moved: Vec<LayerId> = targets.iter().flat_map(|&t| std::iter::once(t).chain(st.doc.mask_of(t))).collect();
         canvas.begin_transform_layers(&moved);
         let mut t = Transform::new(x, y, w, h, hull);
+        t.set_pixelated(st.transform_pixelated);
         t.set_snap_targets(&bounds);
         st.transform = Some(t);
+        st.vector_transform = match targets.as_slice() {
+            [only] if st.doc.is_vector(*only) => Some(*only),
+            _ => None,
+        };
         st.scene_flat_for_tool();
         self.shared.frame(st);
         st.transform_box()
     }
+}
 
+#[uniffi::export]
+impl CanvasSession {
     /// Why a transform didn't begin ([`CanvasSession::transform_begin`] gave none), as the message
     /// says it: a text layer must be rasterized first, a selection holds nothing of the layer, or
     /// the layer is empty.
     pub fn transform_refusal(&self) -> String {
-        let st = self.shared.lock();
+        let mut st = self.shared.lock();
+        if let Some(why) = st.autokey_refusal() {
+            return why;
+        }
         let current = st.doc.layer(st.doc.current());
-        if current.is_some_and(|l| l.text.is_some()) {
+        if !st.current_shows_here() {
+            "Nothing on this track at this frame to transform"
+        } else if current.is_some_and(|l| l.text.is_some()) {
             "Rasterize the text to transform it"
         } else if current.is_some_and(|l| l.plugin.is_some()) {
             "Rasterize the layer to transform it"
@@ -563,6 +857,10 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         let Some(at) = st.window_to_canvas(x, y) else { return };
         st.last_drag = None;
+        st.autokey_anchor();
+        if st.autokey_ignores(handle) {
+            return;
+        }
         if let Some(t) = st.transform.as_mut() {
             t.grab(handle.into(), at);
         }
@@ -573,7 +871,7 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let to = st.window_to_canvas(x, y)?;
-        let mode = st.transform_mode;
+        let mode = st.posed_mode();
         let guides = st.guides(Vec2::new(x, y));
         if st.transform.as_mut()?.drag(mode, to, &guides) {
             st.show_transform();
@@ -584,8 +882,14 @@ impl CanvasSession {
 
     /// The drag ends: its change becomes a step the transform's undo takes back.
     pub fn transform_release(&self) -> Option<TransformBox> {
-        let mut st = self.shared.lock();
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
         st.transform.as_mut()?.release();
+        st.autokey_settle(true);
+        // a vector layer's warp, drawn roughly while the handle was held, is drawn exactly now
+        if st.vector_warp.is_some() {
+            self.shared.frame(st);
+        }
         st.transform_box()
     }
 
@@ -601,6 +905,10 @@ impl CanvasSession {
 
     /// One of the toolbar's changes. Returns the box.
     pub fn transform_apply(&self, action: TransformAction) -> Option<TransformBox> {
+        // keying a pose, its undo takes back the keys it made
+        if action == TransformAction::Undo && self.autokey_undo() {
+            return self.shared.lock().transform_box();
+        }
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let (width, height) = (st.doc.width() as f32, st.doc.height() as f32);
@@ -671,15 +979,81 @@ impl CanvasSession {
         }
     }
 
-    /// How the handles act from now on; a warp lays its mesh over the content. Returns the box.
+    /// How the handles act from now on; a warp lays its mesh over the content, a puppet its mesh
+    /// of triangles over what is painted (each taking the other's bend away). Returns the box.
     pub fn transform_set_kind(&self, kind: TransformKind) -> Option<TransformBox> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.transform_mode = kind.into();
         if kind == TransformKind::Warp
+            && !st.posing()
             && let Some(t) = st.transform.as_mut()
         {
             t.start_warp();
+            st.show_transform();
+            self.shared.frame(st);
+        }
+        if kind == TransformKind::Puppet && !st.posing() && st.transform.as_ref().is_some_and(|t| !t.has_puppet()) {
+            st.lay_puppet();
+            st.show_transform();
+            self.shared.frame(st);
+        }
+        st.transform_box()
+    }
+
+    /// How a puppet's mesh is laid and its pins turn from now on: an open puppet's mesh is laid
+    /// again (its pins with it) when how it is laid changes. Returns the box.
+    pub fn transform_puppet_settings(&self, settings: PuppetSettings) -> Option<TransformBox> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let was = std::mem::replace(&mut st.puppet_settings, settings);
+        let Some(t) = st.transform.as_mut().filter(|t| t.has_puppet()) else { return st.transform_box() };
+        if settings.auto_rotate != t.puppet_auto_rotate() {
+            t.set_puppet_auto_rotate(settings.auto_rotate);
+        }
+        if was.laid() != settings.laid() {
+            st.lay_puppet();
+        }
+        st.show_transform();
+        self.shared.frame(st);
+        st.transform_box()
+    }
+
+    /// A tap at window point (`x`, `y`) in a puppet: on a pin, chooses it (or, chosen already,
+    /// takes it away); elsewhere on the mesh, puts a pin there; off it, chooses none. Returns the
+    /// box.
+    pub fn transform_puppet_tap(&self, x: f32, y: f32) -> Option<TransformBox> {
+        let handle = self.shared.lock().puppet_handle_at((x, y));
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let at = st.window_to_canvas(x, y)?;
+        let t = st.transform.as_mut()?;
+        match handle {
+            TransformHandle::Pin { index } | TransformHandle::PinRing { index } => {
+                let i = index as usize;
+                if t.selected_pin() == Some(i) {
+                    t.remove_pin(i);
+                } else {
+                    t.select_pin(Some(i));
+                }
+            }
+            TransformHandle::OnMesh => {
+                t.add_pin(at);
+            }
+            _ => t.select_pin(None),
+        }
+        st.show_transform();
+        self.shared.frame(st);
+        st.transform_box()
+    }
+
+    /// Takes a puppet's chosen pin away. Returns the box.
+    pub fn transform_puppet_delete_pin(&self) -> Option<TransformBox> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let t = st.transform.as_mut()?;
+        if let Some(i) = t.selected_pin() {
+            t.remove_pin(i);
             st.show_transform();
             self.shared.frame(st);
         }
@@ -695,6 +1069,24 @@ impl CanvasSession {
             st.show_transform();
             self.shared.frame(st);
         }
+    }
+
+    /// Transform's Pixelated, for pixel art, from now on (an open transform's content goes onto
+    /// whole pixels at once): the content moves by whole pixels and is sized onto them, nothing is
+    /// blended whatever [`CanvasSession::transform_set_interpolation`] says, and content turned or
+    /// pulled out of square keeps its lines clean ([`Resample::PixelArt`]). Returns the box as it
+    /// now is, if a transform is open.
+    pub fn transform_set_pixelated(&self, on: bool) -> Option<TransformBox> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.transform_pixelated = on;
+        if st.posing() {
+            return st.transform_box();
+        }
+        st.transform.as_mut()?.set_pixelated(on);
+        st.show_transform();
+        self.shared.frame(st);
+        st.transform_box()
     }
 
     /// Ends the transform: `commit` keeps it as one undo step, otherwise the layer is put back.

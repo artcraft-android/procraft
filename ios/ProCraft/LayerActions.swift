@@ -11,7 +11,17 @@ extension CanvasModel {
 
     /// Layer `l`'s options menu, as the core lists it.
     func layerOptions(_ l: LayerInfo) -> [LayerOptionRow] {
-        session.layerOptions(id: l.id)
+        // Layer Style and an adjustment layer's settings while the Effects plugin's switches for
+        // them are on
+        let plugins = PluginsModel.shared
+        return session.layerOptions(id: l.id).filter { row in
+            switch row.option {
+            case .layerStyle: plugins.has(.layerStyles)
+            case .adjustmentSettings: plugins.has(.adjustmentLayers)
+            // Edit Text, Clipping Mask and Drawing Assist while their built-in plugins are on
+            default: plugins.shows(row.option)
+            }
+        }
     }
 
     /// Closed group `group`'s layers, top first, as the panel would list them open: a group closed
@@ -39,6 +49,12 @@ extension CanvasModel {
     /// The rows a drag of `l` takes along, it among them (the shared core decides).
     func movingWith(_ l: LayerInfo) -> Set<UInt64> {
         Set(session.movingWith(id: l.id))
+    }
+
+    /// Moves `l` (with what goes with it) just above or below `target`'s row; a chosen layer with
+    /// others picked takes them along, in their order (the shared core decides).
+    func moveNextTo(_ l: LayerInfo, _ target: LayerInfo, above: Bool) {
+        _ = session.dropRow(id: l.id, place: above ? .above(target: target.id) : .below(target: target.id))
     }
 
     /// Where `l`, dragged with what goes with it, lands if let go with its middle at `y`: `rows`
@@ -199,6 +215,16 @@ extension CanvasModel {
         _ = session.rasterizeLayer(id: l.id)
         refresh()
         showNotice(l.text ? "Text rasterized" : "Layer rasterized", warning: true)
+    }
+
+    /// Vector layer `l`'s lines, lassos and fills each given a vector layer of its own: it keeps
+    /// its lines, the others go to new layers just under it.
+    func separateObjects(_ l: LayerInfo) {
+        if session.separateVectorObjects(id: l.id) {
+            refresh()
+        } else {
+            showNotice("Nothing to separate: this layer holds one kind of object, or there is no room for more layers.", warning: true)
+        }
     }
 
     /// A plugin's layer `l`: the strokes the selection takes (every one with nothing selected)

@@ -21,7 +21,7 @@ private var libraryEdge: Color { themed(0xFF5A_5A5A, 0xFFC8_C8C8) }
 private var librarySearchFill: Color { themed(0xFF1B_1B1B, 0xFFE6_E6EA) }
 private var librarySearchEdge: Color { themed(0xFF36_3636, 0xFFD8_D8DC) }
 private var libraryHint: Color { themed(0xFF78_7878, 0xFF8A_8A8E) }
-private let menuBlue = Color(argb: 0xFF0A_84FF)
+private var menuBlue: Color { Pc.tinted(Color(argb: 0xFF0A_84FF)) }
 
 /// The space the editor's Import button and its menu are placed in.
 private let editorSpace = "sourceEditor"

@@ -5,7 +5,8 @@
 //! which only answers; what an action changes is one step undo takes back.
 //!
 //! Besides them, any plugin may import the utilities (interface 4): work on bytes it hands over,
-//! done by the app faster than its own code would, at a hook as in an action.
+//! done by the app faster than its own code would, at a hook as in an action. From interface 24,
+//! banded least-squares solves among them (`plugin_band.rs`).
 
 use std::sync::Arc;
 
@@ -33,6 +34,9 @@ pub enum PluginPermission {
     BrushData,
     /// How the canvas is turned on the screen, to read and set (interface 8).
     View,
+    /// Its tools' edits to the layers: groups made, their shapes and what is clipped to them
+    /// (interface 24). It gives no function to import: a tool answers with its edits.
+    LayersEdit,
 }
 
 impl PluginPermission {
@@ -46,6 +50,7 @@ impl PluginPermission {
             "panel" => Some(PluginPermission::Panel),
             "brush.data" => Some(PluginPermission::BrushData),
             "view" => Some(PluginPermission::View),
+            "layers.edit" => Some(PluginPermission::LayersEdit),
             _ => None,
         }
     }
@@ -66,6 +71,9 @@ impl PluginPermission {
                 "It can read and change the settings of brushes it draws, in a studio of its own."
             }
             PluginPermission::View => "It can turn the canvas on the screen when you tap one of its actions.",
+            PluginPermission::LayersEdit => {
+                "It can change your artwork's layers as you use its tools: make groups, shape them and clip layers to them, one step undo takes back."
+            }
         }
     }
 }
@@ -94,6 +102,8 @@ pub(crate) struct Host {
     pub(crate) cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) file_span: Option<(usize, usize)>,
     pub(crate) read: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// The matrices the band utilities factored for it, kept to solve.
+    pub(crate) bands: crate::plugin_band::Bands,
 }
 
 impl Host {
@@ -110,6 +120,7 @@ impl Host {
             cancel: None,
             file_span: None,
             read: None,
+            bands: crate::plugin_band::Bands::default(),
         }
     }
 
@@ -181,8 +192,14 @@ const COMMANDS: &[(&str, PluginPermission, &[ValType], &[ValType])] = &[
 const MOST_BRUSH_DATA: usize = 64 << 20;
 
 /// The utilities, which need no permission: their names, parameters and results.
-const UTILITIES: &[(&str, &[ValType], &[ValType])] =
-    &[("inflate", &[I32, I32, I32], &[I32]), ("decode_image", &[I32, I32], &[I64]), ("read_answer", &[I32], &[I32])];
+const UTILITIES: &[(&str, &[ValType], &[ValType])] = &[
+    ("inflate", &[I32, I32, I32], &[I32]),
+    ("decode_image", &[I32, I32], &[I64]),
+    ("read_answer", &[I32], &[I32]),
+    ("band_factor", &[I32, I32, I32], &[I32]),
+    ("band_solve", &[I32, I32, I32], &[I32]),
+    ("band_drop", &[I32], &[]),
+];
 
 /// The most bytes a utility makes (what unpacks to more, or a larger picture, is refused), and
 /// the most a plugin may hand one.
@@ -259,6 +276,44 @@ fn link_utilities(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
         let answer = std::mem::take(&mut caller.data_mut().answer);
         let (Some(memory), Ok(at)) = (memory(&caller), usize::try_from(to)) else { return 0 };
         i32::from(memory.write(&mut caller, at, &answer).is_ok())
+    })?;
+    // a matrix kept by its envelope, factored: the number it is kept by (0: it couldn't be)
+    linker.func_wrap(FROM, "band_factor", |mut caller: Caller<'_, Host>, first: i32, n: i32, values: i32| -> i32 {
+        let factored = (|| {
+            let n = usize::try_from(n).ok()?;
+            let first: Vec<u32> = read_bytes(&caller, first, n.checked_mul(4)?)?
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b))
+                .collect();
+            let entries = first
+                .iter()
+                .enumerate()
+                .try_fold(0_usize, |sum, (i, &f)| sum.checked_add(i.checked_sub(f as usize)?.checked_add(1)?))?;
+            let bytes = entries.checked_mul(8).filter(|&b| b <= MOST_HANDED)?;
+            let a =
+                read_bytes(&caller, values, bytes)?.as_chunks::<8>().0.iter().map(|b| f64::from_le_bytes(*b)).collect();
+            let mut band = crate::plugin_band::Band::new(&first, a)?;
+            band.factor().then_some(band)
+        })();
+        factored.map_or(0, |band| caller.data_mut().bands.keep(band))
+    })?;
+    // the `n` numbers at `b` solved, in place, by the matrix kept by number `band`: 1 if done
+    linker.func_wrap(FROM, "band_solve", |mut caller: Caller<'_, Host>, band: i32, b: i32, n: i32| -> i32 {
+        let solved = (|| {
+            let kept = caller.data().bands.get(band)?;
+            let n = usize::try_from(n).ok().filter(|&n| n == kept.n())?;
+            let mut x: Vec<f64> =
+                read_bytes(&caller, b, n * 8)?.as_chunks::<8>().0.iter().map(|v| f64::from_le_bytes(*v)).collect();
+            kept.solve(&mut x);
+            let bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
+            memory(&caller)?.write(&mut caller, usize::try_from(b).ok()?, &bytes).ok()
+        })();
+        i32::from(solved.is_some())
+    })?;
+    linker.func_wrap(FROM, "band_drop", |mut caller: Caller<'_, Host>, band: i32| {
+        caller.data_mut().bands.drop_one(band);
     })?;
     Ok(())
 }

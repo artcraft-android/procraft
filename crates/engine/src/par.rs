@@ -69,7 +69,14 @@ fn try_spawn<'scope, F: FnOnce() + Send + 'scope>(
     if NO_THREADS.load(Ordering::Relaxed) {
         return None;
     }
-    std::thread::Builder::new().spawn_scoped(scope, f).ok()
+    // (as urgent as the thread that waits for it: see `qos`)
+    let qos = crate::qos::Qos::current();
+    std::thread::Builder::new()
+        .spawn_scoped(scope, move || {
+            qos.adopt();
+            f();
+        })
+        .ok()
 }
 
 /// Runs `f` on a thread of `scope`'s, or in this one where none can be made.

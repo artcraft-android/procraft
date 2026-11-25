@@ -153,7 +153,7 @@ private fun fileSize(bytes: Long): String =
  * beside it closing it again. Cancel and the round Done are at the top right.
  */
 @Composable
-private fun ExportScreen(
+internal fun ExportScreen(
     title: String,
     name: String,
     size: String?,
@@ -292,7 +292,7 @@ private const val PREVIEW_FPS = 15
 
 /** Two or more choices side by side in a grey track 384 wide, 12 apart, the chosen one blue. */
 @Composable
-private fun Segments(labels: List<String>, chosen: Int, onChoose: (Int) -> Unit) {
+internal fun Segments(labels: List<String>, chosen: Int, onChoose: (Int) -> Unit) {
     Row(
         Modifier.padding(start = 7.5.dp).width(384.dp).height(34.dp).clip(CircleShape).background(SegmentTrack).padding(2.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -310,7 +310,7 @@ private fun Segments(labels: List<String>, chosen: Int, onChoose: (Int) -> Unit)
 
 /** A setting's name and its switch, 52 tall. */
 @Composable
-private fun SettingRow(label: String, on: Boolean, onChange: (Boolean) -> Unit) {
+internal fun SettingRow(label: String, on: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.height(52.dp).clickable { onChange(!on) }.padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, color = RowInk, fontSize = 17.sp, maxLines = 1, modifier = Modifier.width(307.dp))
         Switch(on, enabled = true)

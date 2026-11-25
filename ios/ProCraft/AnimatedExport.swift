@@ -12,7 +12,7 @@ private var capsuleFill: Color { Look.shared.light ? Color(argb: 0xFFFB_FBFB) : 
 private var capsuleEdge: Color { Look.shared.light ? Color(argb: 0xFFE0_E0E0) : Color(argb: 0xFF37_3737) }
 private var sizeInk: Color { Look.shared.light ? Color(argb: 0xFF3F_3F3F) : Color(argb: 0xFF8E_8E8E) }
 private var fpsTrack: Color { Look.shared.light ? Color(argb: 0xFFDD_DDDD) : Color(argb: 0xFF33_3333) }
-private let doneBlue = Color(argb: 0xFF01_90FF)
+private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 private let panelWidth: CGFloat = 400
 /// Web Ready fits this, else the canvas's size (a video as large as it can be, up to the most).
 private let webReadySide = 480
@@ -88,6 +88,15 @@ extension CanvasModel {
                 // the played frames in order, each as often as it is held: a background or foreground
                 // frame is drawn with each, not as one of its own
                 let order = session.animationPlayOrder()
+                // an HDR artwork's HEVC keeps its light above white (10-bit HLG)
+                if format == .hevc, session.isHdr() {
+                    let made = VideoWriter.writeHlg(to: url, width: width, height: height, count: order.count, fps: choices.fps) { n in
+                        guard !cancelled() else { return nil }
+                        meter?.share = Float(n) / Float(max(order.count, 1))
+                        return session.animationFrameHlg(index: order[n], width: UInt32(width), height: UInt32(height))
+                    }
+                    return made ? url : nil
+                }
                 let made = VideoWriter.write(
                     to: url, width: width, height: height, count: order.count, hevc: format == .hevc,
                     bitsPerPixel: 4, fps: choices.fps
@@ -101,7 +110,8 @@ extension CanvasModel {
                     context.draw(picture, in: CGRect(x: 0, y: 0, width: width, height: height))
                     return true
                 }
-                if !made {
+                // the timeline's sounds under it
+                if !made || !MediaExport.addSounds(to: url, session: session, fps: choices.fps, hevc: format == .hevc) {
                     return nil
                 }
             }
@@ -119,7 +129,7 @@ extension CanvasModel {
 
     /// The artwork's own frame rate, which an animated export starts at: Animation Assist's, else 15.
     var artworkFps: Float {
-        Float(session.animationSettings()?.fps ?? 15)
+        Float(session.timelineInfo()?.fps ?? session.animationSettings()?.fps ?? 15)
     }
 
     /// The animation made and shared, with the export card showing how far it has come.
@@ -221,49 +231,16 @@ struct AnimatedExport: View {
 
     /// Max Resolution or Web Ready, side by side in a grey track, the chosen one blue.
     private var segments: some View {
-        HStack(spacing: 12) {
-            ForEach(["Max Resolution", "Web Ready"].indices, id: \.self) { i in
-                let on = choices.webReady == (i == 1)
-                Text(verbatim: i == 0 ? "Max Resolution" : "Web Ready")
-                    .font(.system(size: 15))
-                    .foregroundStyle(on ? Color.white : rowInk)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Capsule().fill(on ? Pc.accent : Color.clear))
-                    .contentShape(Capsule())
-                    .onTapGesture { choices.webReady = i == 1 }
-            }
-        }
-        .padding(2)
-        .frame(width: 384, height: 34)
-        .background(Capsule().fill(segmentTrack))
-        .padding(.leading, 7.5)
+        Segments(labels: ["Max Resolution", "Web Ready"], chosen: choices.webReady ? 1 : 0) { choices.webReady = $0 == 1 }
     }
 
     private var buttons: some View {
-        HStack(spacing: 13) {
-            Text(verbatim: "Cancel")
-                .font(.system(size: 17))
-                .foregroundStyle(Color(argb: 0xFFA5_A5A5))
-                .padding(.horizontal, 13)
-                .frame(height: 43)
-                .background(Capsule().fill(capsuleFill))
-                .overlay(Capsule().strokeBorder(capsuleEdge, lineWidth: 1))
-                .contentShape(Capsule())
-                .onTapGesture(perform: close)
-            PcIconView(PcIcons.doneTick, size: 40, color: .white)
-                .frame(width: 44, height: 45)
-                .background(Capsule().fill(doneBlue))
-                .contentShape(Capsule())
-                .onTapGesture {
-                    guard !exporting else { return }
-                    exporting = true
-                    model.shareAnimation(format, choices) { close() }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exporting = false }
-                }
+        ExportButtons(cancel: close) {
+            guard !exporting else { return }
+            exporting = true
+            model.shareAnimation(format, choices) { close() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exporting = false }
         }
-        .padding(.top, 16)
-        .padding(.trailing, 16)
     }
 
     var body: some View {
@@ -360,6 +337,60 @@ struct AnimatedExport: View {
     }
 }
 
+/// Choices side by side in a grey track, the chosen one blue.
+private struct Segments: View {
+    let labels: [String]
+    let chosen: Int
+    let pick: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ForEach(labels.indices, id: \.self) { i in
+                let on = chosen == i
+                Text(verbatim: labels[i])
+                    .font(.system(size: 15))
+                    .foregroundStyle(on ? Color.white : rowInk)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Capsule().fill(on ? Pc.accent : Color.clear))
+                    .contentShape(Capsule())
+                    .onTapGesture { pick(i) }
+            }
+        }
+        .padding(2)
+        .frame(width: 384, height: 34)
+        .background(Capsule().fill(segmentTrack))
+        .padding(.leading, 7.5)
+    }
+}
+
+/// An export screen's Cancel and its round blue Done.
+private struct ExportButtons: View {
+    let cancel: () -> Void
+    let done: () -> Void
+
+    var body: some View {
+        HStack(spacing: 13) {
+            Text(verbatim: "Cancel")
+                .font(.system(size: 17))
+                .foregroundStyle(Color(argb: 0xFFA5_A5A5))
+                .padding(.horizontal, 13)
+                .frame(height: 43)
+                .background(Capsule().fill(capsuleFill))
+                .overlay(Capsule().strokeBorder(capsuleEdge, lineWidth: 1))
+                .contentShape(Capsule())
+                .onTapGesture(perform: cancel)
+            PcIconView(PcIcons.doneTick, size: 40, color: .white)
+                .frame(width: 44, height: 45)
+                .background(Capsule().fill(doneBlue))
+                .contentShape(Capsule())
+                .onTapGesture(perform: done)
+        }
+        .padding(.top, 16)
+        .padding(.trailing, 16)
+    }
+}
+
 /// A setting's name and its switch, 52 tall.
 private struct SettingLine: View {
     let label: String
@@ -436,6 +467,260 @@ private struct FpsSlider: View {
             .offset(y: 36)
         }
         .frame(height: 72.5, alignment: .topLeading)
+    }
+}
+
+extension CanvasModel {
+    /// A plugin's export (`share`) made into a folder of its own in the exports folder: the files
+    /// it wrote, and what it said; none if it couldn't be. A sound it takes that it can't read as
+    /// it is goes over as a WAV copy. Slow: off the main thread.
+    static func exportPluginShare(_ session: CanvasSession, _ share: PluginShare) -> ([URL], String?)? {
+        let plugins = PluginsModel.shared.store
+        let folder = Sharing.exportsDir.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let wav = SoundCopies.wavCopies(session.pluginShareSounds(plugins: plugins, key: share.key))
+        defer { SoundCopies.forget(wav) }
+        guard let made = try? session.pluginShare(plugins: plugins, key: share.key, dir: folder.path, wav: wav) else { return nil }
+        return (made.files.map { URL(fileURLWithPath: $0) }, made.said)
+    }
+
+    /// Share's export `share` of a plugin's: its screen if it has settings, over everything, the
+    /// panel fading away; otherwise made and shared at once.
+    func openPluginShare(_ share: PluginShare) {
+        guard !share.controls.isEmpty else {
+            sharePluginExport(share)
+            return
+        }
+        fadePanels()
+        withAnimation(Motion.studioIn) { pluginShare = share }
+    }
+
+    /// A plugin's export `share` made, to share; `done` once it is.
+    func sharePluginExport(_ share: PluginShare, done: (() -> Void)? = nil) {
+        exporting(failed: "\(share.label) couldn't be made.") { session in
+            let files = Self.exportPluginShare(session, share)?.0 ?? []
+            if !files.isEmpty, let done {
+                DispatchQueue.main.async(execute: done)
+            }
+            return files
+        }
+    }
+}
+
+/// A plugin's export with settings (a sprite sheet): what it makes as they stand, the settings as
+/// its plugin lists them (a slider with names as choices side by side, another as a count with −
+/// and +, a switch as a switch), Cancel, and the round Done that shares what it makes. The
+/// settings are the plugin's own, kept with it as on its card.
+struct PluginShareScreen: View {
+    let model: CanvasModel
+    let share: PluginShare
+
+    @State private var preview: UIImage?
+    @State private var said: String?
+    @State private var settingsOpen = false
+    @State private var exporting = false
+
+    /// The export as its controls are set now.
+    private var current: PluginShare {
+        // (read again as the plugins change)
+        _ = PluginsModel.shared.changes
+        return PluginsModel.shared.store.shares().first { $0.key == share.key } ?? share
+    }
+
+    private var title: String {
+        let name = model.session.name().trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? "Untitled Artwork" : name
+    }
+
+    private func close() {
+        withAnimation(Motion.studioOut) { model.pluginShare = nil }
+    }
+
+    /// The settings as a key, so what it makes is made again as they change.
+    private var asked: String {
+        current.controls.map { control in
+            switch control {
+            case let .switch(one): "\(one.on)"
+            case let .slider(one): "\(one.value)"
+            case .file, .texture, .folder: ""
+            }
+        }.joined(separator: "-")
+    }
+
+    @ViewBuilder private func row(_ control: PluginControl) -> some View {
+        let plugins = PluginsModel.shared
+        switch control {
+        case let .switch(one):
+            SettingLine(label: one.label, on: one.on) { plugins.setSwitch(one.key, !one.on) }
+        case let .slider(one) where !one.names.isEmpty:
+            Text(verbatim: one.label)
+                .font(.system(size: 15))
+                .foregroundStyle(rowInk.opacity(0.7))
+                .padding(.leading, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+            Segments(labels: one.names, chosen: Int(pluginSliderChosen(slider: one, value: one.value))) {
+                plugins.setSlider(one, pluginSliderChoice(slider: one, index: UInt32($0)))
+            }
+            .padding(.bottom, 6)
+        case let .slider(one):
+            StepLine(slider: one) { plugins.setSlider(one, $0) }
+        case .file, .texture, .folder:
+            EmptyView()
+        }
+    }
+
+    private var panel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(verbatim: share.label)
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(titleInk)
+                .lineLimit(1)
+                .frame(height: 36)
+                .padding(.leading, 24)
+                .padding(.top, 19)
+                .padding(.bottom, 11.5)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(current.controls.enumerated()), id: \.offset) { _, control in
+                        row(control)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
+        .frame(width: panelWidth)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(RoundedRectangle(cornerRadius: 20, style: .circular).fill(panelFill))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .circular).strokeBorder(panelEdge, lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture {}
+        .padding(10)
+    }
+
+    var body: some View {
+        GeometryReader { place in
+            let screen = place.size
+            let wide = screen.width > screen.height
+            let left: CGFloat = wide ? panelWidth + 10 : 0
+            let inset: CGFloat = wide ? 41 : 24
+            let boxWidth = screen.width - left - inset * 2
+            let boxHeight = wide ? min(boxWidth, screen.height - 140) : boxWidth
+            ZStack(alignment: .topLeading) {
+                screenFill
+                    .contentShape(Rectangle())
+                    .onTapGesture { settingsOpen = false }
+                // what it makes, fitted to the box, its edge drawn
+                ZStack {
+                    if let preview {
+                        Image(uiImage: preview)
+                            .resizable()
+                            .interpolation(.none)
+                            .scaledToFit()
+                            .overlay(Rectangle().strokeBorder(panelEdge, lineWidth: 1))
+                    }
+                }
+                .frame(width: boxWidth, height: boxHeight)
+                .offset(x: left + inset, y: 110)
+                .allowsHitTesting(false)
+                if wide {
+                    VStack(spacing: 0) {
+                        Text(verbatim: title)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(titleInk)
+                            .lineLimit(1)
+                            .frame(height: 30)
+                        Text(verbatim: said ?? "")
+                            .font(.system(size: 13))
+                            .foregroundStyle(sizeInk)
+                            .lineLimit(1)
+                            .frame(height: 20)
+                    }
+                    .frame(width: max(screen.width - left - 24 - 224, 0))
+                    .offset(x: left + 24, y: 23)
+                } else {
+                    HStack(spacing: 0) {
+                        PcIconView(PcIcons.chevronLeft, size: 28, color: titleInk)
+                            .frame(width: 60)
+                        Text(verbatim: "Export\nSettings")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundStyle(titleInk)
+                    }
+                    .padding(.trailing, 12)
+                    .contentShape(Rectangle())
+                    .onTapGesture { settingsOpen.toggle() }
+                    .offset(x: 14, y: 20)
+                }
+                ExportButtons(cancel: close) {
+                    guard !exporting else { return }
+                    exporting = true
+                    model.sharePluginExport(current) { close() }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exporting = false }
+                }
+                .frame(width: screen.width, alignment: .trailing)
+                if wide || settingsOpen {
+                    panel
+                }
+            }
+        }
+        .ignoresSafeArea()
+        // what it makes as the settings stand, a moment after they stop changing
+        .task(id: asked) {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            let session = model.session
+            let wanted = current
+            let result = await Task.detached(priority: .userInitiated) { () -> (UIImage?, String?)? in
+                guard let done = CanvasModel.exportPluginShare(session, wanted) else { return nil }
+                defer { done.0.forEach { try? FileManager.default.removeItem(at: $0.deletingLastPathComponent()) } }
+                let png = done.0.first { $0.pathExtension.lowercased() == "png" }
+                return (png.flatMap { UIImage(contentsOfFile: $0.path) }, done.1)
+            }.value
+            if !Task.isCancelled, let result {
+                preview = result.0
+                said = result.1
+            }
+        }
+    }
+}
+
+/// A slider of a plugin's as a count: its name, its value as the plugin shows it, and − and + a
+/// step each, in a grey track, 52 tall.
+private struct StepLine: View {
+    let slider: PluginSlider
+    let change: (Float) -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(verbatim: slider.label)
+                .font(.system(size: 17))
+                .foregroundStyle(rowInk)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text(verbatim: pluginSliderShown(slider: slider, value: slider.value))
+                .font(.system(size: 17))
+                .foregroundStyle(rowInk)
+                .monospacedDigit()
+                .padding(.trailing, 12)
+            HStack(spacing: 0) {
+                step("−", enabled: slider.value > slider.least) { change(max(slider.value - slider.step, slider.least)) }
+                Rectangle().fill(panelEdge).frame(width: 1, height: 18)
+                step("+", enabled: slider.value < slider.most) { change(min(slider.value + slider.step, slider.most)) }
+            }
+            .frame(height: 32)
+            .background(Capsule().fill(segmentTrack))
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 16)
+        .frame(height: 52)
+    }
+
+    private func step(_ sign: String, enabled: Bool, _ action: @escaping () -> Void) -> some View {
+        Text(verbatim: sign)
+            .font(.system(size: 20, weight: .medium))
+            .foregroundStyle(enabled ? rowInk : rowInk.opacity(0.35))
+            .frame(width: 44, height: 32)
+            .contentShape(Rectangle())
+            .onTapGesture { if enabled { action() } }
     }
 }
 

@@ -34,6 +34,8 @@ pub struct LayerInfo {
     pub collapsed: bool,
     /// A text layer, its text still editable.
     pub text: bool,
+    /// A vector layer: what is drawn on it is kept as strokes and fills.
+    pub vector: bool,
     /// The kind of layer a plugin adds (`<id>.<key>`), if it is one: its strokes are kept as items
     /// too. Shown locked while its plugin is off.
     pub plugin_kind: Option<String>,
@@ -53,6 +55,12 @@ pub struct LayerInfo {
     pub can_merge: bool,
     pub can_combine: bool,
     pub can_clip: bool,
+    /// An adjustment layer: the adjustment it redraws what is below it through.
+    #[uniffi(default = None)]
+    pub adjustment: Option<crate::adjust_menu::Adjustment>,
+    /// Its styles (outline, drop shadow, glows) show.
+    #[uniffi(default = false)]
+    pub styled: bool,
     /// A filter layer's filter, by the name its plugin gives it (its id while no plugin on offers
     /// it): it has no paint, and shows what is below it through the filter (interface 17).
     #[uniffi(default = None)]
@@ -124,6 +132,12 @@ pub enum LayerOption {
     MergeDown,
     CombineDown,
     MergeMask,
+    /// An adjustment layer: its adjustment's panels opened on it.
+    AdjustmentSettings,
+    /// A layer's outline, drop shadow and glows.
+    LayerStyle,
+    /// A vector layer: its lines, lassos and fills each given a vector layer of its own.
+    SeparateObjects,
 }
 
 /// A row of a layer's options menu: what it does, its label, whether it can be chosen, and for a
@@ -278,6 +292,18 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
                 row(O::Invert, "Invert", None);
             }
         }
+        // an adjustment layer: its settings, a mask and clipping; no pixels of its own
+        LayerType::Paint if l.adjustment.is_some() => {
+            if unlocked {
+                row(O::AdjustmentSettings, "Adjustment Settings", None);
+            }
+            if !masked {
+                row(O::Mask, "Mask", None);
+            }
+            if l.can_clip {
+                row(O::ClippingMask, "Clipping Mask", Some(l.clipped));
+            }
+        }
         // a filter layer: its settings; it has no paint to select, copy, fill or invert
         LayerType::Paint if l.filter.is_some() => {
             if unlocked {
@@ -297,7 +323,10 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
             // fill, clear, lock or invert
             let drawn_from_data = l.text || l.plugin_kind.is_some();
             if !drawn_from_data && unlocked {
-                row(O::Fill, "Fill Layer", None);
+                // (a vector layer holds strokes and fills, not a colour all over)
+                if !l.vector {
+                    row(O::Fill, "Fill Layer", None);
+                }
                 row(O::Clear, "Clear", None);
                 row(O::AlphaLock, "Alpha Lock", Some(l.alpha_lock));
             }
@@ -307,6 +336,9 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
             }
             if l.can_clip {
                 row(O::ClippingMask, "Clipping Mask", Some(l.clipped));
+            }
+            if unlocked {
+                row(O::LayerStyle, "Layer Style", None);
             }
             if l.text {
                 if unlocked {
@@ -330,8 +362,14 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
                 if guided || l.assisted {
                     row(O::DrawingAssist, "Drawing Assist", Some(l.assisted));
                 }
-                if unlocked {
+                // (a vector layer's colours are its strokes'; rasterized, it is pixels like any)
+                if unlocked && !l.vector {
                     row(O::Invert, "Invert", None);
+                }
+                if unlocked && l.vector {
+                    // (dimmed, by what the layer holds, where there is one kind only)
+                    row(O::SeparateObjects, "Separate Objects", None);
+                    row(O::Rasterize, "Rasterize", None);
                 }
             }
             row(O::Reference, "Reference", Some(l.reference));
@@ -357,11 +395,29 @@ pub fn set_layer_budget(bytes: u64) {
     procraft_engine::document::set_layer_budget(bytes);
 }
 
-/// How many layers a canvas `width` × `height` holds on this device (Custom Canvas's Maximum
-/// Layers).
+/// How many layers a canvas `width` × `height` holds on this device however full they are, each
+/// counted at its full size (the least of Custom Canvas's Maximum Layers; what a PDF's pages may
+/// come to).
 #[uniffi::export]
 pub fn layers_for(width: u32, height: u32) -> u32 {
     u32::try_from(procraft_engine::document::layer_cap_for(width, height)).unwrap_or(u32::MAX)
+}
+
+/// How many layers a canvas `width` × `height` holds on this device while they are mostly empty
+/// (the most of Custom Canvas's Maximum Layers): where the layers not worked on are kept
+/// compressed, as many as fit by what they take; else [`layers_for`]'s.
+#[uniffi::export]
+pub fn empty_layers_for(width: u32, height: u32) -> u32 {
+    use procraft_engine::document::{LayerMemory, least_layer_bytes};
+    let mut doc = Document::new(width, height);
+    let (w, h) = (doc.width(), doc.height());
+    let budget = canvas_budget(w, h);
+    if budget != 0 {
+        let full = u64::from(w) * u64::from(h) * 4;
+        let resident = procraft_gpu::most_resident(budget, w, h, 4);
+        doc.set_layer_memory(Some(LayerMemory { resident, compressed: least_layer_bytes(full), layers: 1 }));
+    }
+    u32::try_from(doc.layer_cap()).unwrap_or(u32::MAX)
 }
 
 /// What the layers' textures may take on this device, bytes: past it, layers not worked on are
@@ -378,6 +434,13 @@ pub(crate) fn resident_budget() -> u64 {
     RESIDENT_BUDGET.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Sets what each canvas's kept timeline frames may take on this device, bytes: scrubbing back
+/// to a frame, or playing it again, copies it instead of compositing it. 0 keeps none.
+#[uniffi::export]
+pub fn set_frame_cache_budget(bytes: u64) {
+    procraft_gpu::set_frame_cache_budget(bytes);
+}
+
 /// What a canvas holds besides its layers, in layers' worth: its stroke (two), composite and
 /// caches (four).
 pub(crate) const CANVAS_LAYERS: u64 = 7;
@@ -386,8 +449,14 @@ pub(crate) const CANVAS_LAYERS: u64 = 7;
 /// less what the canvas holds besides them, so that the canvas as a whole keeps to the budget (a
 /// layer's worth at least; 0, no budget, keeps every layer on the GPU).
 pub(crate) fn canvas_budget(width: u32, height: u32) -> u64 {
+    canvas_budget_of(width, height, 4)
+}
+
+/// [`canvas_budget`] for a canvas whose pixels take `pixel_bytes` each (an HDR canvas's half
+/// floats take 8).
+pub(crate) fn canvas_budget_of(width: u32, height: u32, pixel_bytes: u32) -> u64 {
     let budget = resident_budget();
-    let per = u64::from(width) * u64::from(height) * 4;
+    let per = u64::from(width) * u64::from(height) * u64::from(pixel_bytes);
     if budget == 0 { 0 } else { budget.saturating_sub(CANVAS_LAYERS * per).max(per.max(1)) }
 }
 
@@ -511,7 +580,12 @@ impl CanvasSession {
             let g = &self.shared.lock().doc.guide;
             g.on || g.set_up
         };
-        layer_options(l, masked, guided)
+        let mut rows = layer_options(l, masked, guided);
+        // Separate Objects does something only with two kinds of thing on the layer
+        if let Some(row) = rows.iter_mut().find(|r| r.option == LayerOption::SeparateObjects) {
+            row.enabled = self.shared.lock().vector_kinds(LayerId(id)) > 1;
+        }
+        rows
     }
 
     /// Top layer first, as the panel lists them.
@@ -548,6 +622,7 @@ impl CanvasSession {
                 },
                 collapsed: l.collapsed,
                 text: l.text.is_some(),
+                vector: l.vector.is_some(),
                 plugin_kind: l.plugin.as_ref().map(|p| p.kind.clone()),
                 // a filter layer's shows it is one
                 plugin_badge: l
@@ -565,6 +640,8 @@ impl CanvasSession {
                 can_merge: st.doc.merge_target(l.id).is_some_and(|b| !st.doc.is_locked(b)),
                 can_combine: l.kind != LayerKind::Mask && st.doc.below(l.id).is_some_and(|b| !st.doc.is_locked(b)),
                 can_clip: st.doc.can_clip(l.id),
+                adjustment: l.adjustment.as_ref().and_then(|a| crate::adjusting::adjustment_of(&a.settings)),
+                styled: l.shown_style().is_some(),
                 filter: l.filter.as_ref().map(|f| st.filter_label(f)),
             })
             .collect()
@@ -579,8 +656,10 @@ impl CanvasSession {
     /// A new empty layer above the current one; it becomes current.
     /// A new empty layer above the current one, made current; 0 when the canvas has no room for
     /// another (see [`Document::layer_cap`]).
+    /// On a timeline, it goes in the drawing at the playhead (see `add_timeline_layer`).
     pub fn add_layer(&self) -> u64 {
-        let id = self.add_layer_quietly();
+        let on_timeline = self.shared.lock().doc.timeline.is_some();
+        let id = if on_timeline { self.add_timeline_layer() } else { self.add_layer_quietly() };
         // a layer added by hand: plugins told
         if id != 0 {
             self.tell_plugins(crate::plugin_run::Hook::LayerAdded);
@@ -630,6 +709,10 @@ impl CanvasSession {
                 d.set_current(id).then_some(())
             })
             .is_some();
+        // on a timeline, the playhead follows the layer to its drawing
+        if ok {
+            self.follow_layer();
+        }
         // the onion skins follow the current frame
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -993,6 +1076,15 @@ impl CanvasSession {
             return false;
         }
         let before = st.doc.clone();
+        // plain vector layers merge as vector layers, their strokes kept as strokes
+        if let Some(merged) = st.vector_merged(lower, &[upper]) {
+            st.keep_vector_merge("merge down", lower, merged, before, |d| {
+                d.finish_merge_down(id);
+            });
+            st.revision += 1;
+            self.shared.frame(st);
+            return true;
+        }
         // a layer changes the one below only where it is painted: only that much is kept for undo
         // (none at all for an empty one), not a copy of the whole of it; a filter layer, painted
         // nowhere, changes it wherever it is, all of it kept
@@ -1001,7 +1093,11 @@ impl CanvasSession {
         if let Some(canvas) = st.canvas.as_mut() {
             // each mask applied to its layer first, as one step; a hidden layer below gives up
             // what it holds (the merge keeps what showed)
-            let masks = [upper, lower].into_iter().filter_map(|l| st.doc.mask_of(l).map(|m| (l, m))).collect();
+            let masks = [upper, lower]
+                .into_iter()
+                .filter(|l| st.doc.layer(*l).is_some_and(|l| !l.is_adjustment()))
+                .filter_map(|l| st.doc.mask_of(l).map(|m| (l, m)))
+                .collect();
             let drop_lower = st.doc.layer(lower).is_some_and(|l| !l.visible);
             canvas.name_next_step("merge down");
             canvas.merge_down_with_masks(upper, lower, masks, drop_lower, before, within);
@@ -1409,6 +1505,15 @@ impl CanvasSession {
         };
         // undone, the layers come back chosen as they were before the pinch
         let before = chosen_before;
+        // (vector layers alone merge as vectors: none of them is a group)
+        if let Some(merged) = st.vector_merged(base, &uppers) {
+            st.keep_vector_merge("merge layers", base, merged, before, |d| {
+                d.finish_merge_chosen(base, &uppers);
+            });
+            st.revision += 1;
+            self.shared.frame(st);
+            return true;
+        }
         // a group at the bottom goes whole: flattened into one layer first (named after its bottom
         // layer), which the rest merge into, the two one step
         let lower = if st.doc.layer(base).is_some_and(|l| l.kind == LayerKind::Group) {
@@ -1458,9 +1563,11 @@ impl CanvasSession {
                 }),
             _ => None,
         };
-        // each layer's mask applied to it first, as one step
+        // each layer's mask applied to it first, as one step (an adjustment layer's mask says where
+        // its adjustment is laid into the layers below it)
         let masks = std::iter::once(lower)
             .chain(uppers.iter().copied())
+            .filter(|l| st.doc.layer(*l).is_some_and(|l| !l.is_adjustment()))
             .filter_map(|l| st.doc.mask_of(l).map(|m| (l, m)))
             .collect();
         let drop_lower = st.doc.layer(lower).is_some_and(|l| !l.visible);

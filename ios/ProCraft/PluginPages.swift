@@ -1,6 +1,9 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// The fill of a card's tag ("built in").
+private var pluginTag: Color { Look.shared.light ? Color(argb: 0x1400_0000) : Color(argb: 0x1FFF_FFFF) }
+
 /// The plugins, a page of the panel: a card each, drawn from what the list says of them, in the
 /// order they were put in. A card held by its name lifts and follows the finger or Pencil; let go
 /// over another card, it takes that one's place.
@@ -78,10 +81,21 @@ private struct PluginCard: View {
 
     private var about: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(verbatim: plugin.name)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(Pc.panelTitle)
-                .lineLimit(1)
+            HStack(spacing: 8) {
+                Text(verbatim: plugin.name)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Pc.panelTitle)
+                    .lineLimit(1)
+                if plugin.source == .builtin {
+                    Text(verbatim: "built in")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Pc.actionsRow)
+                        .lineLimit(1)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 9, style: .circular).fill(pluginTag))
+                }
+            }
             Text(verbatim: plugin.description)
                 .font(.system(size: 14))
                 .foregroundStyle(Pc.actionsRow)
@@ -395,6 +409,7 @@ extension CanvasModel {
     func applyPlugins() {
         let plugins = PluginsModel.shared.store
         session.usePlugins(plugins: plugins)
+        PluginsModel.shared.pickerSession = session
         session.setInterfaceSize(size: Float(Interface.shared.scale))
         // what they show changes with them: the layers' rows (a label a plugin gives), and the
         // library, once a plugin turned on gave it the brushes it comes with
@@ -405,6 +420,32 @@ extension CanvasModel {
         followStrokeSound()
         // how they lay the floating panels out
         followLayout()
+        // a built-in plugin turned off while what it shows is in use
+        if tool == .light, !PluginsModel.shared.has(.lightTool) {
+            chooseDrawMode(.brush)
+        }
+        session.setSelectionPixelated(on: selection.pixelated)
+        // the drawing guide neither drawn nor followed while its plugin is off, kept as saved
+        session.setGuidePaused(paused: !PluginsModel.shared.has(.drawingGuides))
+        guide.read()
+        if !PluginsModel.shared.has(.timeline) {
+            timeline.stopPlaying()
+            timeline.performArmed = false
+        }
+        if text.info != nil, !PluginsModel.shared.has(.text) {
+            text.end(keep: true)
+        }
+        if animationAssist.settings != nil, !animationAssist.shown {
+            animationAssist.stopPlaying()
+        }
+        // the colour panel on Palettes while its plugin is turned off: the disc instead
+        if colorMode == .palettes, !PluginsModel.shared.has(.palettes) {
+            colorMode = .disc
+        }
+        // Actions' Video tab gone while it was the one open: the first instead
+        if actionsTab == 3, !modelOpen, !PluginsModel.shared.has(.timeLapse) {
+            actionsTab = 0
+        }
     }
 
     /// Plays the artwork's strokes while a plugin makes their sound (and the app is in front).
@@ -512,5 +553,21 @@ extension CanvasModel {
         adjustMenuAt = nil
         readAdjust()
         refresh()
+    }
+}
+
+extension AnimationAssist {
+    /// Whether its bar shows: Animation or Page Assist on, with the Animation Assist plugin on (and
+    /// its Page Assist, for pages). Off, the artwork shows the frame it is on.
+    var shown: Bool {
+        guard let settings else { return false }
+        return PluginsModel.shared.has(settings.pages ? .pageAssist : .animationAssist)
+    }
+}
+
+extension ColorMode {
+    /// The colour panel's modes as its tabs show them: Palettes while the Palettes plugin is on.
+    static var shown: [ColorMode] {
+        allCases.filter { $0 != .palettes || PluginsModel.shared.has(.palettes) }
     }
 }

@@ -1852,7 +1852,7 @@ fn continue_filling_s_touches_never_wait_on_their_fill() {
     s.set_brush_size(0.3);
     s.stroke_begin(PointerKind::Finger, vec![sample(1024.0, -10.0, 0.0)]);
     s.stroke_end(vec![sample(1024.0, 2100.0, 30.0)]);
-    let fill = Fill { r: 0.9, g: 0.1, b: 0.1, threshold: 0.3 };
+    let fill = Fill { r: 0.9, g: 0.1, b: 0.1, threshold: 0.3, continuous: false };
     // as it was: the touch poured itself, a whole half of the layer, on the main thread
     let t = std::time::Instant::now();
     assert!(s.pour_begin(500.0, 1000.0, fill.r, fill.g, fill.b, fill.threshold));
@@ -2802,6 +2802,72 @@ fn a_preview_mixes_wet_only_where_the_brush_says_it_does() {
 fn ours(s: &CanvasSession, origin: (usize, usize)) -> (u32, u32) {
     let (set, i) = crate::brush_library::place_of(&s.shared.lock().library, origin);
     (set as u32, i as u32)
+}
+
+#[test]
+fn a_ribbon_brush_s_preview_shows_its_shape_along_the_stroke() {
+    let Some(s) = session(100, 100) else { return };
+    let (set, index) = {
+        let st = s.shared.lock();
+        let found = st.library.iter().enumerate().find_map(|(set, l)| {
+            l.brushes.iter().position(|b| !b.round_tip() && !b.mixes_wet()).map(|index| (set, index))
+        });
+        found.unwrap()
+    };
+    let change = |key: &str, value: f32| {
+        let mut st = s.shared.lock();
+        st.library.get_mut(set).and_then(|l| l.brushes.get_mut(index)).unwrap().set_setting(key, value);
+    };
+    let preview = || s.brush_preview(set as u32, index as u32, 240, 60).unwrap().rgba;
+    let stamped = preview();
+    change("ribbon", 1.0);
+    let ribbon = preview();
+    assert_ne!(stamped, ribbon);
+    assert!(ribbon.iter().skip(3).step_by(4).filter(|&&a| a > 0).count() > 100, "the ribbon shows");
+    // and its scale with it
+    change("ribbon_scale", 1.0);
+    assert_ne!(ribbon, preview());
+    // a smudge with it smudges stamp by stamp
+    let brush = s.shared.lock().library.get(set).and_then(|l| l.brushes.get(index)).cloned().unwrap();
+    let smudge = procraft_gpu::StrokeStyle::for_brush(&brush, procraft_gpu::StrokeTool::Smudge, [0.0; 3], 1.0, false);
+    assert!(smudge.ribbon.is_none());
+}
+
+#[test]
+fn the_light_tool_brightens_and_dims_with_the_paint_brush_and_keeps_the_hue() {
+    use crate::{LightKind, LightSettings};
+    let Some(s) = session(64, 64) else { return };
+    no_streamline(&s);
+    let across = |s: &CanvasSession| {
+        s.set_brush_size(1.0);
+        s.set_brush_opacity(1.0);
+        s.stroke_begin(PointerKind::Finger, vec![sample(2.0, 32.0, 0.0)]);
+        s.stroke_add((1..16).map(|i| sample(2.0 + i as f32 * 4.0, 32.0, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    };
+    s.set_color(0.5, 0.3, 0.1);
+    across(&s);
+    let before = pixel(&s, 32, 32);
+    assert_eq!(before[3], 255);
+    // with the paint tool's brush
+    s.set_tool(ToolKind::Light);
+    {
+        let st = s.shared.lock();
+        assert_eq!(st.brush_ref(ToolKind::Light), st.brush_ref(ToolKind::Paint));
+    }
+    assert_eq!(s.light(), LightSettings { kind: LightKind::Brighten, strength: 0.5 });
+    across(&s);
+    let lit = pixel(&s, 32, 32);
+    assert!(lit[0] > before[0] + 20 && lit[1] > before[1] && lit[2] > before[2], "{before:?} {lit:?}");
+    // its hue as it was: the channels in the same order and much the same proportions
+    assert!(lit[0] > lit[1] && lit[1] > lit[2]);
+    assert_eq!(s.undo().as_deref(), Some("Light stroke"));
+    assert_eq!(pixel(&s, 32, 32), before);
+    s.set_light(LightSettings { kind: LightKind::Dim, strength: 2.0 });
+    assert_eq!(s.light().strength, 1.0);
+    across(&s);
+    let dim = pixel(&s, 32, 32);
+    assert!(dim[0] + 40 < before[0] && dim[0] > dim[1], "{before:?} {dim:?}");
 }
 
 #[test]
@@ -5965,6 +6031,88 @@ fn a_crop_by_whole_pixels_copies_the_layers_as_the_cpu_would() {
 }
 
 #[test]
+fn a_crop_let_go_between_pixels_keeps_every_pixel_as_it_was() {
+    let Some(s) = session(300, 300) else { return };
+    s.set_brush_size(0.2);
+    s.stroke_begin(PointerKind::Finger, vec![sample(40.0, 60.0, 0.0)]);
+    s.stroke_add(vec![sample(120.0, 110.0, 40.0)]);
+    s.stroke_end(vec![]);
+    let id = s.layers()[0].id;
+    let _ = pixel(&s, 0, 0);
+    let before = s.copy_layer_contents(id).unwrap().rgba;
+    // as a frame dragged on a canvas of pixel art leaves it: no side on a whole pixel
+    assert!(s.crop_canvas(10.3, 20.6, 100.4, 80.2, 0.0, false, 0, 0));
+    let _ = pixel(&s, 0, 0);
+    let now = s.copy_layer_contents(id).unwrap();
+    assert_eq!((now.width, now.height), (101, 80));
+    assert!(now.rgba.as_chunks::<4>().0.iter().any(|p| p[3] != 0), "the stroke is on it");
+    // nothing blended, nothing resized: each pixel is the one 10 across and 21 down from it
+    for (y, row) in now.rgba.as_chunks::<{ 101 * 4 }>().0.iter().enumerate() {
+        let from = ((y + 21) * 300 + 10) * 4;
+        assert!(row[..] == before[from..from + 101 * 4], "row {y}");
+    }
+}
+
+#[test]
+fn a_pixelated_resize_keeps_whole_pixels_through_done_and_on_the_gpu_as_the_cpu_would() {
+    let painted = || {
+        let s = session(100, 100)?;
+        s.set_brush_size(0.3);
+        s.set_color(0.9, 0.3, 0.1);
+        s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 30.0, 0.0)]);
+        s.stroke_add(vec![sample(70.0, 80.0, 40.0)]);
+        s.stroke_end(vec![]);
+        let id = s.layers()[0].id;
+        let _ = pixel(&s, 0, 0);
+        let before = s.copy_layer_contents(id).unwrap().rgba;
+        Some((s, id, before))
+    };
+    // through Crop and Resize, twice the size: every pixel a square of four of itself
+    let Some((s, id, before)) = painted() else { return };
+    s.crop_begin();
+    assert!(!s.crop_shown().unwrap().pixelated);
+    s.crop_set_pixelated(true);
+    s.crop_set_resample(true);
+    s.crop_set_size(Some(200), Some(200));
+    assert!(s.crop_shown().unwrap().pixelated);
+    assert!(s.crop_end(true));
+    let _ = pixel(&s, 0, 0);
+    let now = s.copy_layer_contents(id).unwrap();
+    assert_eq!((now.width, now.height), (200, 200));
+    assert!(now.rgba.as_chunks::<4>().0.iter().any(|p| p[3] != 0), "the stroke is on it");
+    for (i, px) in now.rgba.as_chunks::<4>().0.iter().enumerate() {
+        let from = ((i / 200 / 2) * 100 + i % 200 / 2) * 4;
+        assert!(px[..] == before[from..from + 4], "pixel {i}");
+    }
+    // it stays on for the next crop, and undo puts the canvas back
+    s.crop_begin();
+    assert!(s.crop_shown().unwrap().pixelated);
+    assert!(!s.crop_end(false));
+    s.undo();
+    assert_eq!(s.copy_layer_contents(id).unwrap().rgba, before);
+    // resized to no whole number of times, and turned: the GPU takes the same pixels the CPU does,
+    // and none it makes is a colour the layer didn't have
+    for (rect, angle, size) in
+        [([5.0f32, 10.0, 80.0, 70.0], 0.0f32, Some((130u32, 45u32))), ([10.0, 5.0, 70.0, 80.0], 0.4, None)]
+    {
+        let Some((s, id, before)) = painted() else { return };
+        let (w, h) = size.unwrap_or((0, 0));
+        assert!(s.crop_canvas_as(rect[0], rect[1], rect[2], rect[3], angle, size.is_some(), w, h, true));
+        let c = procraft_engine::crop::crop(rect, angle, size);
+        let _ = pixel(&s, 0, 0);
+        let now = s.copy_layer_contents(id).unwrap();
+        assert_eq!((now.width, now.height), (c.width, c.height));
+        let cpu = procraft_engine::crop::resample_pixelated(&before, 100, 100, &c);
+        // (a pixel's middle that falls on the line between two may go either way)
+        let off = now.rgba.as_chunks::<4>().0.iter().zip(cpu.as_chunks::<4>().0).filter(|(a, b)| a != b).count();
+        assert!(off * 1000 <= cpu.len() / 4, "{off} pixels differ");
+        let had: std::collections::HashSet<[u8; 4]> =
+            before.as_chunks::<4>().0.iter().copied().chain([[0; 4]]).collect();
+        assert!(now.rgba.as_chunks::<4>().0.iter().all(|p| had.contains(p)), "{rect:?} {angle}");
+    }
+}
+
+#[test]
 fn a_crop_turned_or_resized_resamples_on_the_gpu_as_the_cpu_would() {
     for (rect, angle, size) in
         [([20.0f32, 30.0, 240.0, 200.0], 0.4f32, None), ([-10.0, 5.0, 260.0, 250.0], 0.0, Some((180u32, 150u32)))]
@@ -6112,6 +6260,497 @@ fn an_adjustment_within_a_selection_keeps_only_that_to_undo() {
 }
 
 #[test]
+fn lasso_fill_fills_each_shape_on_its_own_as_one_undo_step() {
+    use crate::TouchCommand;
+    use crate::selection::SelectionJoin;
+    use crate::touch::{SelectKind, SelectTouch};
+    let Some(s) = session(100, 100) else { return };
+    let tool = |kind, join, lasso_fill| {
+        Some(SelectTouch { kind, join, threshold: 0.5, lasso_fill, lasso_erase: false, lasso_tool: false })
+    };
+    // a square dragged round with the pen, a move every 2 px, lifted short of where it began: it
+    // closes and fills
+    let lasso = |s: &CanvasSession, x0: f32, y0: f32, x1: f32, y1: f32, ms: f64| {
+        let mut out = s.touch_down(1, PointerKind::Stylus, vec![sample(x0, y0, ms)]);
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0 + 4.0)];
+        let mut t = ms;
+        for pair in corners.windows(2) {
+            let [(ax, ay), (bx, by)] = [pair[0], pair[1]];
+            let steps = ((bx - ax).abs().max((by - ay).abs()) / 2.0).ceil().max(1.0) as usize;
+            for k in 1..=steps {
+                let f = k as f32 / steps as f32;
+                t += 4.0;
+                out.extend(s.touch_move(1, vec![sample(ax + (bx - ax) * f, ay + (by - ay) * f, t)]));
+            }
+        }
+        out.extend(s.touch_up(1, vec![sample(x0, y0 + 4.0, t + 4.0)]));
+        out
+    };
+    // Lasso Fill is the plugin's: without it on, a shape asked to fill is selected as ever, and a
+    // tool's own lasso isn't taken up at all
+    let dir = std::env::temp_dir().join(format!("procraft-lasso-fill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert!(!plugins.lasso_fills(), "imported, it's off");
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
+    s.set_color(1.0, 0.0, 0.0);
+    let out = lasso(&s, 10.0, 10.0, 40.0, 40.0, 0.0);
+    assert!(!out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert!(!s.freehand_path().is_empty(), "a selection's path, still open, instead");
+    assert_eq!(pixel(&s, 25, 25), [255, 255, 255, 255], "nothing filled");
+    s.set_touch_selecting(None);
+    s.set_touch_selecting(Some(SelectTouch {
+        kind: SelectKind::Freehand,
+        join: SelectionJoin::Add,
+        threshold: 0.5,
+        lasso_fill: true,
+        lasso_erase: false,
+        lasso_tool: true,
+    }));
+    s.touch_down(1, PointerKind::Stylus, vec![sample(10.0, 10.0, 500.0)]);
+    s.touch_move(1, vec![sample(30.0, 10.0, 510.0), sample(30.0, 30.0, 520.0)]);
+    assert!(s.freehand_path().is_empty(), "no lasso drawn");
+    s.touch_up(1, vec![sample(30.0, 30.0, 530.0)]);
+    assert!(!s.has_selection());
+    // (it drew a plain stroke, if anything: taken back)
+    s.undo();
+    assert_eq!(pixel(&s, 25, 25), [255, 255, 255, 255]);
+    s.set_touch_selecting(None);
+    // on, shapes fill
+    assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
+    assert!(plugins.lasso_fills());
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
+    let out = lasso(&s, 10.0, 10.0, 40.0, 40.0, 1.0);
+    assert!(out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert!(!out.contains(&TouchCommand::SelectionChanged), "{out:?}");
+    assert!(s.freehand_path().is_empty(), "the path closed as it lifted");
+    assert!(!s.has_selection(), "nothing left selected");
+    assert_eq!(pixel(&s, 25, 25), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 70, 70), [255, 255, 255, 255]);
+    // another in another colour: the first keeps its own
+    s.set_color(0.0, 0.0, 1.0);
+    lasso(&s, 60.0, 60.0, 90.0, 90.0, 1000.0);
+    assert_eq!(pixel(&s, 75, 75), [0, 0, 255, 255]);
+    assert_eq!(pixel(&s, 25, 25), [255, 0, 0, 255]);
+    // one undo takes back one shape, and only it
+    s.undo();
+    assert_eq!(pixel(&s, 75, 75), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 25, 25), [255, 0, 0, 255]);
+    s.undo();
+    assert_eq!(pixel(&s, 25, 25), [255, 255, 255, 255]);
+    // a rectangle dragged out fills the same way
+    s.set_touch_selecting(tool(SelectKind::Rectangle, SelectionJoin::Add, true));
+    s.touch_down(1, PointerKind::Stylus, vec![sample(50.0, 10.0, 2000.0)]);
+    s.touch_move(1, vec![sample(90.0, 40.0, 2020.0)]);
+    let out = s.touch_up(1, vec![sample(90.0, 40.0, 2040.0)]);
+    assert!(out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert_eq!(pixel(&s, 70, 25), [0, 0, 255, 255]);
+    assert!(!s.has_selection());
+    // a selection there before limits the fill, as it does painting, and is left as it was
+    s.select_shape(false, 0.0, 50.0, 50.0, 100.0, SelectionJoin::Add);
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
+    s.set_color(0.0, 1.0, 0.0);
+    lasso(&s, 30.0, 60.0, 70.0, 90.0, 3000.0);
+    assert_eq!(pixel(&s, 40, 75), [0, 255, 0, 255]);
+    assert_eq!(pixel(&s, 60, 75), [255, 255, 255, 255]);
+    assert!(s.has_selection());
+    s.undo();
+    assert_eq!(pixel(&s, 40, 75), [255, 255, 255, 255]);
+    assert!(s.has_selection(), "the fill's undo leaves the selection");
+    // taking away fills too: with Lasso Fill the tool only draws
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Remove, true));
+    let out = lasso(&s, 10.0, 60.0, 40.0, 90.0, 3500.0);
+    assert!(out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert_eq!(pixel(&s, 25, 75), [0, 255, 0, 255]);
+    assert!(s.has_selection(), "the selection is not taken from");
+    // without Lasso Fill, a freehand path dragged stays open when it lifts, as it always has
+    s.select_none();
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, false));
+    let out = lasso(&s, 10.0, 60.0, 30.0, 90.0, 13_000.0);
+    assert!(!out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert!(!s.freehand_path().is_empty(), "still open");
+    assert!(!s.has_selection());
+    s.close_freehand();
+    assert!(s.has_selection());
+    // at half opacity, half the colour over what is there; a fill of the selection too
+    s.select_none();
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
+    s.set_fill_opacity(0.5);
+    s.set_color(0.0, 0.0, 0.0);
+    lasso(&s, 60.0, 60.0, 90.0, 90.0, 4500.0);
+    let [r, g, b, a] = pixel(&s, 75, 75);
+    assert!(r.abs_diff(128) <= 1 && r == g && g == b && a == 255, "{:?}", [r, g, b, a]);
+    s.select_shape(false, 0.0, 0.0, 20.0, 20.0, SelectionJoin::Add);
+    s.fill_selection();
+    assert!(pixel(&s, 10, 10)[0].abs_diff(128) <= 1, "{:?}", pixel(&s, 10, 10));
+    s.set_fill_opacity(1.0);
+    s.select_none();
+    // Lasso Erase takes away what is there; the Paint or Erase tool's own lasso goes by that
+    // tool's opacity slider, not Color Fill's
+    let erasing = |tool_opacity| {
+        Some(SelectTouch {
+            kind: SelectKind::Freehand,
+            join: SelectionJoin::Add,
+            threshold: 0.5,
+            lasso_fill: true,
+            lasso_erase: true,
+            lasso_tool: tool_opacity,
+        })
+    };
+    s.set_color(1.0, 0.0, 0.0);
+    lasso(&s, 60.0, 10.0, 95.0, 45.0, 10_000.0);
+    assert_eq!(pixel(&s, 77, 27), [255, 0, 0, 255]);
+    s.set_touch_selecting(erasing(false));
+    let out = lasso(&s, 65.0, 15.0, 90.0, 40.0, 11_000.0);
+    assert!(out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert_eq!(pixel(&s, 77, 27), [255, 255, 255, 255], "erased through to the paper");
+    assert_eq!(pixel(&s, 62, 12), [255, 0, 0, 255], "only inside the shape");
+    s.undo();
+    assert_eq!(pixel(&s, 77, 27), [255, 0, 0, 255]);
+    s.set_tool(ToolKind::Erase);
+    s.set_brush_opacity(0.5);
+    s.set_touch_selecting(erasing(true));
+    lasso(&s, 65.0, 15.0, 90.0, 40.0, 12_000.0);
+    let [r, g, b, _] = pixel(&s, 77, 27);
+    assert!(r == 255 && g.abs_diff(128) <= 1 && b.abs_diff(128) <= 1, "half erased: {:?}", [r, g, b]);
+    s.set_tool(ToolKind::Paint);
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Add, true));
+    // nor does taking away without it
+    s.set_touch_selecting(tool(SelectKind::Freehand, SelectionJoin::Remove, false));
+    let out = lasso(&s, 10.0, 60.0, 30.0, 90.0, 14_000.0);
+    assert!(!out.contains(&TouchCommand::ShapeFilled), "{out:?}");
+    assert!(!s.freehand_path().is_empty(), "still open");
+    s.set_touch_selecting(None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_lasso_s_fill_shows_as_it_will_land_soft_edged_and_overlapping_alike() {
+    use crate::selection::SelectionJoin;
+    use crate::touch::{SelectKind, SelectTouch};
+    let Some(s) = session(100, 100) else { return };
+    let composite = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        canvas.read_composite(gpu).unwrap()
+    };
+    let dir = std::env::temp_dir().join(format!("procraft-lasso-soft-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
+    s.set_brush_opacity(1.0);
+    s.set_color(0.0, 0.0, 0.0);
+    s.set_lasso_preview_opacity(1.0);
+    s.set_input_settings(0.0, 0.0, 0.0, 0.0, true, Vec::new());
+    s.set_touch_selecting(Some(SelectTouch {
+        kind: SelectKind::Freehand,
+        join: SelectionJoin::Add,
+        threshold: 0.5,
+        lasso_fill: true,
+        lasso_erase: false,
+        lasso_tool: true,
+    }));
+    // slanting edges, and a loop that goes round part of itself twice (filled once, non-zero)
+    let corners = [(10.0, 15.0), (85.0, 30.0), (60.0, 90.0), (20.0, 70.0), (70.0, 40.0), (75.0, 60.0), (12.0, 22.0)];
+    s.touch_down(1, PointerKind::Stylus, vec![sample(10.0, 15.0, 0.0)]);
+    let mut t = 0.0;
+    for pair in corners.windows(2) {
+        let [(ax, ay), (bx, by)]: [(f32, f32); 2] = [pair[0], pair[1]];
+        let steps = ((bx - ax).abs().max((by - ay).abs()) / 2.0).ceil().max(1.0) as usize;
+        for k in 1..=steps {
+            let f = k as f32 / steps as f32;
+            t += 4.0;
+            s.touch_move(1, vec![sample(ax + (bx - ax) * f, ay + (by - ay) * f, t)]);
+        }
+    }
+    let shown = composite(&s);
+    s.touch_up(1, vec![sample(12.0, 22.0, t + 4.0)]);
+    let filled = composite(&s);
+    let soft = shown.as_chunks::<4>().0.iter().filter(|p| p[0] > 8 && p[0] < 247).count();
+    assert!(soft > 40, "its edges soft: {soft} pixels between");
+    let off: Vec<u8> = shown.iter().zip(&filled).map(|(a, b)| a.abs_diff(*b)).collect();
+    let most = off.iter().copied().max().unwrap_or(0);
+    let far = off.as_chunks::<4>().0.iter().filter(|d| d[0] > 40).count();
+    assert!(far <= 6 && most < 128, "shown as it fills: {far} pixels far off, at most {most}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_lasso_s_fill_shows_on_the_canvas_as_it_is_drawn() {
+    use crate::selection::{SelectionJoin, StrokeFill};
+    use crate::touch::{SelectKind, SelectTouch};
+    let Some(s) = session(100, 100) else { return };
+    // a square gone round with the pen, a move every 2 px, not lifted
+    let round = |s: &CanvasSession, ms: f64| {
+        s.touch_down(1, PointerKind::Stylus, vec![sample(20.0, 20.0, ms)]);
+        let corners = [(20.0, 20.0), (80.0, 20.0), (80.0, 80.0), (20.0, 80.0), (20.0, 26.0)];
+        let mut t = ms;
+        for pair in corners.windows(2) {
+            let [(ax, ay), (bx, by)]: [(f32, f32); 2] = [pair[0], pair[1]];
+            let steps = ((bx - ax).abs().max((by - ay).abs()) / 2.0).ceil().max(1.0) as usize;
+            for k in 1..=steps {
+                let f = k as f32 / steps as f32;
+                t += 4.0;
+                s.touch_move(1, vec![sample(ax + (bx - ax) * f, ay + (by - ay) * f, t)]);
+            }
+        }
+        t
+    };
+    let white = [255, 255, 255, 255];
+    let dir = std::env::temp_dir().join(format!("procraft-lasso-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
+    s.set_brush_size(0.3);
+    s.set_brush_opacity(1.0);
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_secondary_color(0.0, 0.0, 1.0);
+    // Outline: the fill shows under the stroke as it is drawn, as strongly as the preview says
+    s.set_stroke_fill(Some(StrokeFill { secondary: true, opacity: 1.0 }));
+    s.set_lasso_preview_opacity(1.0);
+    let t = round(&s, 0.0);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255], "the fill shown whole");
+    let [r, _, b, _] = pixel(&s, 50, 20);
+    assert!(r > 200 && b < 60, "the stroke over it: {r} {b}");
+    s.touch_up(1, vec![sample(20.0, 26.0, t + 4.0)]);
+    s.shared.lock().finish_stroke();
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255], "filled as it showed");
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), white, "nothing shown once it is taken back");
+    // at 0 nothing shows as it is drawn, and it fills all the same
+    s.set_lasso_preview_opacity(0.0);
+    let t = round(&s, 1000.0);
+    assert_eq!(pixel(&s, 50, 50), white);
+    s.touch_up(1, vec![sample(20.0, 26.0, t + 4.0)]);
+    s.shared.lock().finish_stroke();
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255]);
+    s.undo();
+    // halfway: half the fill's colour shows over what is there
+    s.set_lasso_preview_opacity(0.5);
+    round(&s, 2000.0);
+    let [r, g, b, _] = pixel(&s, 50, 50);
+    assert!(r.abs_diff(128) <= 2 && g.abs_diff(128) <= 2 && b == 255, "{:?}", [r, g, b]);
+    s.stroke_cancel();
+    assert_eq!(pixel(&s, 50, 50), white, "a stroke let go of takes its preview with it");
+    s.set_stroke_fill(None);
+    // the Pen's own lasso: its fill shows as it goes, and goes when it fills
+    s.set_lasso_preview_opacity(1.0);
+    s.set_touch_selecting(Some(SelectTouch {
+        kind: SelectKind::Freehand,
+        join: SelectionJoin::Add,
+        threshold: 0.5,
+        lasso_fill: true,
+        lasso_erase: false,
+        lasso_tool: true,
+    }));
+    let t = round(&s, 3000.0);
+    assert_eq!(pixel(&s, 50, 50), [255, 0, 0, 255], "shown as it will fill");
+    assert_eq!(pixel(&s, 5, 5), white);
+    s.touch_up(1, vec![sample(20.0, 26.0, t + 4.0)]);
+    assert_eq!(pixel(&s, 50, 50), [255, 0, 0, 255], "filled");
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), white, "and nothing left shown");
+    // the tool put away mid-lasso takes its preview with it
+    round(&s, 4000.0);
+    assert_ne!(pixel(&s, 50, 50), white);
+    s.set_touch_selecting(None);
+    assert_eq!(pixel(&s, 50, 50), white);
+    // its line is smoothed as the tool's strokes are: the app's motion filtering and stabilisation
+    // cut its corners further than without
+    let lasso = SelectTouch {
+        kind: SelectKind::Freehand,
+        join: SelectionJoin::Add,
+        threshold: 0.5,
+        lasso_fill: true,
+        lasso_erase: false,
+        lasso_tool: true,
+    };
+    let corner_cut = |s: &CanvasSession, ms: f64| {
+        s.set_touch_selecting(Some(lasso));
+        round(s, ms);
+        let path = s.freehand_path();
+        s.set_touch_selecting(None);
+        path.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[x, y]| ((x - 80.0).powi(2) + (y - 20.0).powi(2)).sqrt())
+            .fold(f32::MAX, f32::min)
+    };
+    s.set_input_settings(0.0, 0.0, 0.0, 0.0, true, Vec::new());
+    let plain = corner_cut(&s, 5000.0);
+    s.set_input_settings(1.0, 1.0, 0.0, 0.0, true, Vec::new());
+    let smoothed = corner_cut(&s, 6000.0);
+    assert!(smoothed > plain + 1.0, "smoothed {smoothed}, plain {plain}");
+    // smoothed, it still reaches the pen as a stroke's tip does: nothing trails behind
+    s.set_touch_selecting(Some(lasso));
+    round(&s, 7000.0);
+    let path = s.freehand_path();
+    let [x, y] = path.as_chunks::<2>().0.last().copied().unwrap();
+    assert!((x - 20.0).abs() < 1.0 && (y - 26.0).abs() < 1.0, "ends at the pen: {x} {y}");
+    s.set_touch_selecting(None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lasso_outline_fills_what_a_paint_stroke_goes_round_under_it_in_its_step() {
+    use crate::selection::StrokeFill;
+    let Some(s) = session(100, 100) else { return };
+    // a square gone round with the pen, a move every 2 px, lifted short of where it began
+    let round = |s: &CanvasSession, x0: f32, y0: f32, x1: f32, y1: f32, ms: f64| {
+        s.touch_down(1, PointerKind::Stylus, vec![sample(x0, y0, ms)]);
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0 + 6.0)];
+        let mut t = ms;
+        for pair in corners.windows(2) {
+            let [(ax, ay), (bx, by)] = [pair[0], pair[1]];
+            let steps = ((bx - ax).abs().max((by - ay).abs()) / 2.0).ceil().max(1.0) as usize;
+            for k in 1..=steps {
+                let f = k as f32 / steps as f32;
+                t += 4.0;
+                s.touch_move(1, vec![sample(ax + (bx - ax) * f, ay + (by - ay) * f, t)]);
+            }
+        }
+        s.touch_up(1, vec![sample(x0, y0 + 6.0, t + 4.0)]);
+        // (the stroke ended for good)
+        s.shared.lock().finish_stroke();
+    };
+    let white = [255, 255, 255, 255];
+    s.set_brush_size(0.3);
+    s.set_brush_opacity(1.0);
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_secondary_color(0.0, 0.0, 1.0);
+    s.set_stroke_fill(Some(StrokeFill { secondary: false, opacity: 1.0 }));
+    // Lasso Fill is the plugin's: without it on, a stroke only paints
+    let dir = std::env::temp_dir().join(format!("procraft-lasso-outline-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    round(&s, 20.0, 20.0, 80.0, 80.0, 0.0);
+    assert_eq!(pixel(&s, 50, 50), white, "nothing filled");
+    assert_ne!(pixel(&s, 50, 20), white, "the stroke painted");
+    s.undo();
+    assert_eq!(pixel(&s, 50, 20), white);
+    // on: the stroke's colour fills what it went round, and nothing outside
+    assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
+    round(&s, 20.0, 20.0, 80.0, 80.0, 1000.0);
+    assert_eq!(pixel(&s, 50, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 5, 5), white);
+    assert_eq!(pixel(&s, 95, 50), white);
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), white);
+    // the secondary colour: it goes under the stroke, which shows over it along the path
+    s.set_stroke_fill(Some(StrokeFill { secondary: true, opacity: 1.0 }));
+    round(&s, 20.0, 20.0, 80.0, 80.0, 2000.0);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255]);
+    let [r, _, b, _] = pixel(&s, 50, 20);
+    assert!(r > 200 && b < 60, "the stroke over its fill: {r} {b}");
+    // stroke and fill are one undo step
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), white);
+    assert_eq!(pixel(&s, 50, 20), white, "the stroke went with it");
+    s.redo();
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255]);
+    let [r, _, b, _] = pixel(&s, 50, 20);
+    assert!(r > 200 && b < 60, "redone, the stroke over its fill: {r} {b}");
+    s.undo();
+    // at half opacity, half the fill's colour over what is there
+    s.set_secondary_color(0.0, 0.0, 0.0);
+    s.set_stroke_fill(Some(StrokeFill { secondary: true, opacity: 0.5 }));
+    round(&s, 20.0, 20.0, 80.0, 80.0, 3000.0);
+    let [r, g, b, a] = pixel(&s, 50, 50);
+    assert!(r.abs_diff(128) <= 1 && r == g && g == b && a == 255, "{:?}", [r, g, b, a]);
+    s.undo();
+    // a selection there limits the fill, as it does painting
+    s.select_shape(false, 0.0, 0.0, 50.0, 100.0, crate::selection::SelectionJoin::Add);
+    s.set_stroke_fill(Some(StrokeFill { secondary: false, opacity: 1.0 }));
+    round(&s, 20.0, 20.0, 80.0, 80.0, 4000.0);
+    assert_eq!(pixel(&s, 35, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 65, 50), white);
+    s.undo();
+    s.select_none();
+    // off again: strokes only paint
+    s.set_stroke_fill(None);
+    round(&s, 20.0, 20.0, 80.0, 80.0, 5000.0);
+    assert_eq!(pixel(&s, 50, 50), white);
+    assert_ne!(pixel(&s, 50, 20), white);
+    s.undo();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lasso_outline_on_a_vector_layer_keeps_its_fill_as_a_shape_under_the_stroke() {
+    use crate::selection::StrokeFill;
+    let Some(s) = session(100, 100) else { return };
+    let round = |s: &CanvasSession, ms: f64| {
+        s.touch_down(1, PointerKind::Stylus, vec![sample(20.0, 20.0, ms)]);
+        let corners = [(20.0, 20.0), (80.0, 20.0), (80.0, 80.0), (20.0, 80.0), (20.0, 26.0)];
+        let mut t = ms;
+        for pair in corners.windows(2) {
+            let [(ax, ay), (bx, by)]: [(f32, f32); 2] = [pair[0], pair[1]];
+            let steps = ((bx - ax).abs().max((by - ay).abs()) / 2.0).ceil().max(1.0) as usize;
+            for k in 1..=steps {
+                let f = k as f32 / steps as f32;
+                t += 4.0;
+                s.touch_move(1, vec![sample(ax + (bx - ax) * f, ay + (by - ay) * f, t)]);
+            }
+        }
+        s.touch_up(1, vec![sample(20.0, 26.0, t + 4.0)]);
+        s.shared.lock().finish_stroke();
+    };
+    let white = [255, 255, 255, 255];
+    let dir = std::env::temp_dir().join(format!("procraft-lasso-outline-vector-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let plugins = crate::Plugins::with_store(dir.to_string_lossy().into_owned());
+    let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "selection-lasso-fill").unwrap();
+    assert_eq!(plugins.install(file.to_vec()), None);
+    s.use_plugins(std::sync::Arc::clone(&plugins));
+    assert!(plugins.set_on("io.github.artcraftandroid.selection-lasso-fill".to_owned(), true));
+    let layer = s.add_vector_layer();
+    s.set_brush_size(0.3);
+    s.set_brush_opacity(1.0);
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_secondary_color(0.0, 0.0, 1.0);
+    s.set_stroke_fill(Some(StrokeFill { secondary: true, opacity: 1.0 }));
+    round(&s, 0.0);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255], "filled under the stroke");
+    assert_eq!(pixel(&s, 5, 5), white);
+    let [r, _, b, _] = pixel(&s, 50, 20);
+    assert!(r > 200 && b < 60, "the stroke over its fill: {r} {b}");
+    // kept as a fill and a stroke, the fill first
+    assert_eq!(s.vector_fill_count(layer), 1);
+    assert_eq!(s.vector_stroke_count(layer), 1);
+    // drawn again from what the layer holds, it is the same
+    let before = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+    assert!(s.redraw_vector_layer(layer));
+    let after = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
+    let furthest = before.iter().zip(&after).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(furthest <= 2, "redrawn {furthest} levels off");
+    s.undo();
+    // stroke and fill are one undo step
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), white);
+    assert_eq!(pixel(&s, 50, 20), white, "the stroke went with it");
+    assert_eq!(s.vector_fill_count(layer), 0);
+    assert_eq!(s.vector_stroke_count(layer), 0);
+    s.redo();
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 255, 255]);
+    assert_eq!(s.vector_fill_count(layer), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_selection_limits_painting_and_its_tools_work() {
     use crate::selection::SelectionJoin;
     let Some(s) = session(100, 100) else { return };
@@ -6236,6 +6875,9 @@ fn the_shapes_joined_while_the_tool_is_open_show_their_paths() {
         kind: crate::touch::SelectKind::Rectangle,
         join: SelectionJoin::Add,
         threshold: 0.5,
+        lasso_fill: false,
+        lasso_erase: false,
+        lasso_tool: false,
     };
     s.set_touch_selecting(Some(how));
     let near = |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(p, q)| (p - q).abs() < 0.01);
@@ -6335,7 +6977,14 @@ fn a_colour_selection_drag_taken_back_leaves_nothing_for_the_next() {
     let bottom = ring_under_an_empty_layer(&s);
     // a threshold drag inside the ring, shown as it goes, that the platform then takes back (a
     // palm, say)
-    s.set_touch_selecting(Some(SelectTouch { kind: SelectKind::Automatic, join: SelectionJoin::Add, threshold: 0.2 }));
+    s.set_touch_selecting(Some(SelectTouch {
+        kind: SelectKind::Automatic,
+        join: SelectionJoin::Add,
+        threshold: 0.2,
+        lasso_fill: false,
+        lasso_erase: false,
+        lasso_tool: false,
+    }));
     s.touch_down(1, PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
     let out = s.touch_move(1, vec![sample(85.0, 50.0, 200.0)]);
     assert!(out.iter().any(|c| matches!(c, TouchCommand::SelectionThreshold { done: false, .. })), "{out:?}");
@@ -6880,7 +7529,7 @@ fn adjustments_change_the_layer_as_one_undo_step() {
         s.adjust_swipe(kind, 0.5);
     }
     assert!((s.adjust_motion(100.0, 0.0) - 0.1).abs() < 1e-3);
-    s.adjust_curves(vec![0.0, 0.0, 0.5, 0.8, 1.0, 1.0], vec![], vec![], vec![]);
+    s.adjust_curves(vec![0.0, 0.0, 0.5, 0.8, 1.0, 1.0], vec![], vec![], vec![], vec![], vec![]);
     s.adjust_color_balance(vec![0.5, 0.0, 0.0], vec![], vec![0.0, 0.0, -0.5]);
     s.adjust_gradient_map(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0], 1.0);
     s.adjust_noise(crate::adjust::NoiseKind::Ridges, 0.5, 0.3, 0.5, 0.7, true, false);
@@ -9083,6 +9732,7 @@ fn a_layer_s_options_follow_what_it_is() {
             O::AlphaLock,
             O::Mask,
             O::ClippingMask,
+            O::LayerStyle,
             O::DrawingAssist,
             O::Invert,
             O::Reference,
@@ -9128,6 +9778,7 @@ fn a_layer_s_options_follow_what_it_is() {
             O::Copy,
             O::Mask,
             O::ClippingMask,
+            O::LayerStyle,
             O::EditText,
             O::Rasterize,
             O::Reference,
@@ -11205,6 +11856,9 @@ fn a_held_lasso_stays_as_drawn() {
         kind: crate::touch::SelectKind::Freehand,
         join: crate::SelectionJoin::Add,
         threshold: 0.5,
+        lasso_fill: false,
+        lasso_erase: false,
+        lasso_tool: false,
     };
     s.set_touch_selecting(Some(how));
     // a rough circle, the last point near the first
@@ -13758,6 +14412,98 @@ fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
     // a locked layer takes none
     assert!(s.set_layer_locked(layer, true));
     assert!(!s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+}
+
+#[test]
+fn a_continuous_drag_fills_each_unfilled_area_it_crosses_as_one_step() {
+    use crate::TouchCommand;
+    use crate::touch::Fill;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    // a line down the middle splits the canvas in two
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, -10.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
+    let fill = |r: f32, b: f32| Fill { r, g: 0.0, b, threshold: 0.5, continuous: true };
+    s.set_touch_filling(Some(fill(1.0, 0.0)));
+    // dragged from the left half over the line to the right: both halves red, the line kept
+    s.touch_down(1, PointerKind::Finger, vec![sample(20.0, 50.0, 1000.0)]);
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    s.touch_move(1, vec![sample(50.0, 52.0, 1020.0)]);
+    s.touch_move(1, vec![sample(80.0, 50.0, 1040.0)]);
+    assert!(s.touch_up(1, vec![sample(80.0, 50.0, 1060.0)]).contains(&TouchCommand::Filled));
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    assert!(!s.pour_trailing());
+    // one undo takes the whole drag back, and the line stays
+    assert_eq!(s.undo().as_deref(), Some("ColorDrop"));
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    s.redo();
+    // dragged again in blue over what is filled, nothing changes
+    s.set_touch_filling(Some(fill(0.0, 1.0)));
+    s.touch_down(1, PointerKind::Finger, vec![sample(20.0, 50.0, 2000.0)]);
+    s.touch_move(1, vec![sample(80.0, 50.0, 2040.0)]);
+    s.touch_up(1, vec![sample(80.0, 50.0, 2060.0)]);
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    // but a tap there fills there, as Continue filling always does
+    s.touch_down(1, PointerKind::Finger, vec![sample(20.0, 50.0, 3000.0)]);
+    s.touch_up(1, vec![sample(20.0, 50.0, 3040.0)]);
+    assert_eq!(pixel(&s, 20, 50), [0, 0, 255, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    // a second finger takes back what the drag filled, and nothing before it
+    s.undo();
+    s.undo();
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    s.touch_down(1, PointerKind::Finger, vec![sample(20.0, 50.0, 4000.0)]);
+    s.touch_move(1, vec![sample(80.0, 50.0, 4040.0)]);
+    assert_eq!(pixel(&s, 80, 50), [0, 0, 255, 255]);
+    s.touch_down(2, PointerKind::Finger, vec![sample(60.0, 20.0, 4060.0)]);
+    assert!(!s.pour_trailing());
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    s.touch_up(2, vec![sample(60.0, 20.0, 4080.0)]);
+    s.touch_up(1, vec![sample(80.0, 50.0, 4080.0)]);
+    s.set_touch_filling(None);
+}
+
+#[test]
+fn all_layers_fills_up_to_lines_on_other_layers() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    // a line down the middle, on its own layer
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, -10.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
+    let lines = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    let colours = s.add_layer();
+    assert!(!s.pour_all_layers());
+    // on the empty layer alone, the line isn't seen: the whole layer fills
+    assert!(s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    s.pour_end(false, None);
+    // with All Layers it fills up to the line, on the current layer only
+    s.set_pour_all_layers(true);
+    assert!(s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    s.pour_end(true, None);
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    let painted =
+        |id: u64, x: usize, y: usize| s.copy_layer_contents(id).map(|c| c.rgba[(y * 100 + x) * 4 + 3]).unwrap();
+    assert_eq!(painted(colours, 20, 50), 255);
+    assert_eq!(painted(lines, 20, 50), 0);
+    // a hidden layer isn't seen
+    s.set_layer_visible(lines, false);
+    assert!(s.pour_begin(80.0, 50.0, 0.0, 0.0, 1.0, 0.5));
+    s.pour_end(true, None);
+    assert_eq!(pixel(&s, 80, 50), [0, 0, 255, 255]);
+    assert_eq!(painted(colours, 50, 50), 255);
 }
 
 #[test]
@@ -18035,6 +18781,9 @@ fn touches_in_every_mode_leave_nothing_open_and_undo_whole() {
                                 kind: kinds[next(4) as usize],
                                 join,
                                 threshold: next(80) as f32 / 100.0,
+                                lasso_fill: next(2) == 0,
+                                lasso_erase: next(3) == 0,
+                                lasso_tool: next(2) == 0,
                             }));
                             mode = 1;
                         }
@@ -18050,6 +18799,7 @@ fn touches_in_every_mode_leave_nothing_open_and_undo_whole() {
                                 g: 0.4,
                                 b: next(255) as f32 / 255.0,
                                 threshold: next(60) as f32 / 100.0,
+                                continuous: next(2) == 0,
                             };
                             s.set_touch_filling(Some(fill));
                             mode = 3;
@@ -21388,7 +22138,189 @@ fn brushes_brought_in_keep_their_size_range_through_a_restart() {
     assert!(shifted.is_empty());
 }
 
-/// The plugin that adds vector layers, as the app comes with it.
+#[test]
+fn pixelated_selection_takes_whole_pixels_on_the_grid() {
+    use crate::selection::SelectionJoin;
+    let Some(s) = session(100, 100) else { return };
+    let mask = |s: &CanvasSession| s.shared.lock().selection.clone().unwrap();
+    // as it is at first: a rectangle between pixels has partly selected edges
+    s.select_shape(false, 10.4, 10.4, 40.6, 30.6, SelectionJoin::Add);
+    assert!(mask(&s).data.iter().any(|&v| v != 0 && v != 255));
+    s.select_none();
+    // pixelated: its corners go onto whole pixels, and it is just the pixels between them
+    s.set_selection_pixelated(true);
+    s.select_shape(false, 10.4, 10.4, 40.6, 30.6, SelectionJoin::Add);
+    let m = mask(&s);
+    for y in 0..100usize {
+        for x in 0..100usize {
+            let inside = (10..41).contains(&x) && (10..31).contains(&y);
+            assert_eq!(m.data[y * 100 + x], if inside { 255 } else { 0 }, "{x} {y}");
+        }
+    }
+    s.select_none();
+    // an ellipse and a path drawn by hand take whole pixels only
+    s.select_shape(true, 20.3, 20.7, 61.2, 50.1, SelectionJoin::Add);
+    let m = mask(&s);
+    assert!(m.data.iter().all(|&v| v == 0 || v == 255));
+    // the ellipse between the corners as they went onto the grid: as wide and as tall as that
+    let across = (0..100).filter(|&x| (0..100).any(|y| m.data[y * 100 + x] == 255)).count();
+    let down = (0..100).filter(|&y| (0..100).any(|x| m.data[y * 100 + x] == 255)).count();
+    assert_eq!((across, down), (41, 29));
+    s.select_none();
+    s.select_polygon(vec![5.3, 5.2, 60.7, 12.4, 33.3, 70.9], SelectionJoin::Add);
+    assert!(mask(&s).data.iter().all(|&v| v == 0 || v == 255));
+    assert!(mask(&s).data.contains(&255));
+    // points far apart (a fast stroke): the path shown between them keeps to the pixels' edges,
+    // and what is selected is just the pixels it goes round
+    let shown = crate::selection::pixel_path(vec![5.3, 5.2, 60.7, 12.4, 33.3, 70.9], true);
+    use procraft_engine::geom::Vec2;
+    let corners: Vec<Vec2> = shown.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
+    assert!(corners.windows(2).all(|w| w[0].x == w[1].x || w[0].y == w[1].y), "a slant in it");
+    assert_eq!(mask(&s), procraft_engine::selection::Mask::polygon_hard(100, 100, &corners));
+    // every edge of what is selected lies on that path: a pixel in beside one out has the path
+    // between them
+    let m = mask(&s);
+    let on_path = |x: f32, y0: f32, y1: f32| {
+        corners.windows(2).any(|w| w[0].x == x && w[1].x == x && w[0].y.min(w[1].y) <= y0 && w[0].y.max(w[1].y) >= y1)
+    };
+    for y in 0..100usize {
+        for x in 1..100usize {
+            if m.data[y * 100 + x] != m.data[y * 100 + x - 1] {
+                assert!(on_path(x as f32, y as f32, y as f32 + 1.0), "{x} {y}");
+            }
+        }
+    }
+    s.select_none();
+    // Lasso Fill fills the same way: every pixel the paint colour or as it was
+    s.set_color(1.0, 0.0, 0.0);
+    s.fill_polygon(
+        vec![5.3, 5.2, 60.7, 12.4, 33.3, 70.9],
+        crate::selection::LassoFill { erase: false, tool_opacity: false },
+    );
+    let (mut red, mut white) = (0, 0);
+    for y in 0..100 {
+        for x in 0..100 {
+            match pixel(&s, x, y) {
+                [255, 0, 0, 255] => red += 1,
+                [255, 255, 255, 255] => white += 1,
+                other => panic!("{x} {y}: {other:?}"),
+            }
+        }
+    }
+    assert!(red > 500 && white > 500, "{red} {white}");
+    // off again, shapes are soft-edged as before
+    s.set_selection_pixelated(false);
+    s.select_shape(false, 10.4, 10.4, 40.6, 30.6, SelectionJoin::Add);
+    assert!(mask(&s).data.iter().any(|&v| v != 0 && v != 255));
+    s.select_none();
+    // a tool's own lasso goes by its brush, not by this: soft with a brush that isn't pixelated,
+    // even with Selection's Pixelated on, and whole pixels with one that is, even with it off
+    let tool_lasso = crate::selection::LassoFill { erase: false, tool_opacity: true };
+    let soft_pixels = |s: &CanvasSession| {
+        (0..100)
+            .flat_map(|y| (0..100).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = pixel(s, x, y);
+                p != [0, 0, 255, 255] && p != [255, 0, 0, 255] && p != [255, 255, 255, 255]
+            })
+            .count()
+    };
+    s.set_color(0.0, 0.0, 1.0);
+    s.set_brush_opacity(1.0);
+    s.set_selection_pixelated(true);
+    s.fill_polygon(vec![70.3, 60.2, 95.7, 64.4, 80.3, 95.9], tool_lasso);
+    assert!(soft_pixels(&s) > 0, "a soft brush's lasso has a soft edge");
+    s.undo();
+    s.set_selection_pixelated(false);
+    s.studio_begin();
+    s.set_studio_setting("pixelated".to_owned(), 1.0);
+    s.studio_end(true);
+    s.fill_polygon(vec![70.3, 60.2, 95.7, 64.4, 80.3, 95.9], tool_lasso);
+    assert_eq!(soft_pixels(&s), 0, "a pixelated brush's lasso takes whole pixels");
+    assert_eq!(pixel(&s, 82, 75), [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_pixelated_transform_moves_by_whole_pixels_and_blends_nothing() {
+    let Some(s) = session(100, 100) else { return };
+    // a red block with a blue one beside it on a clear layer
+    let layer = s.add_layer();
+    s.select_layer(layer);
+    s.set_selection_pixelated(true);
+    s.set_color(1.0, 0.0, 0.0);
+    s.fill_shape(false, 30.0, 30.0, 50.0, 46.0, crate::selection::LassoFill { erase: false, tool_opacity: false });
+    s.set_color(0.0, 0.0, 1.0);
+    s.fill_shape(false, 50.0, 30.0, 60.0, 46.0, crate::selection::LassoFill { erase: false, tool_opacity: false });
+    // (read without settling, which would end the transform)
+    let layer_pixels = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        st.flush();
+        let current = st.doc.current();
+        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { panic!("no canvas") };
+        canvas.read_layer(gpu, current).unwrap()
+    };
+    let (red, blue) = ([255u8, 0, 0, 255], [0u8, 0, 255, 255]);
+    let clean = |px: &[u8]| px.as_chunks::<4>().0.iter().all(|p| *p == red || *p == blue || *p == [0; 4]);
+    s.transform_set_interpolation(crate::transform::Interpolation::Bicubic);
+    s.transform_set_pixelated(true);
+    let b = s.transform_begin().unwrap();
+    assert_eq!(&b.corners[..2], &[30.0, 30.0]);
+    // dragged a little under three and a half pixels: it lands three over, whole
+    s.transform_grab(crate::transform::TransformHandle::Move, 40.0, 40.0);
+    let b = s.transform_drag(43.4, 40.0).unwrap();
+    s.transform_release();
+    assert_eq!(&b.corners[..2], &[33.0, 30.0], "{:?}", b.corners);
+    let px = layer_pixels(&s);
+    assert!(clean(&px), "blended, upright");
+    assert_eq!(&px[(30 * 100 + 33) * 4..][..4], &red);
+    assert_eq!(&px[(30 * 100 + 32) * 4..][..4], &[0; 4]);
+    // turned by an odd angle: still nothing but its own colours, though Bicubic is chosen
+    let b = s.transform_set_angle(27.0).unwrap();
+    assert!((b.angle - 27.0).abs() < 0.01, "{}", b.angle);
+    let px = layer_pixels(&s);
+    assert!(clean(&px), "blended, turned");
+    let count = |px: &[u8], c: [u8; 4]| px.as_chunks::<4>().0.iter().filter(|p| **p == c).count();
+    // about as much of each colour as there was (20 x 16 and 10 x 16)
+    assert!((count(&px, red) as i32 - 320).abs() < 40, "{}", count(&px, red));
+    assert!((count(&px, blue) as i32 - 160).abs() < 30, "{}", count(&px, blue));
+    s.transform_end(true);
+    assert!(clean(&layer_pixels(&s)));
+    // without it, Bicubic blends a turned edge
+    s.undo();
+    s.transform_set_pixelated(false);
+    s.transform_begin().unwrap();
+    s.transform_set_angle(27.0).unwrap();
+    assert!(!clean(&layer_pixels(&s)));
+    s.transform_end(false);
+}
+
+#[test]
+fn a_move_and_its_prediction_held_together_ask_for_one_frame_after_both() {
+    let Some(s) = session(200, 200) else { return };
+    s.stroke_begin(PointerKind::Stylus, vec![sample(20.0, 100.0, 0.0)]);
+    s.shared.lock().needs_frame = false;
+    // held: the move's points and where it is predicted to go ask for no frame between them
+    s.hold_frames(true);
+    s.stroke_add(vec![sample(60.0, 100.0, 8.0), sample(90.0, 100.0, 16.0)]);
+    assert!(!s.shared.lock().needs_frame, "a frame was asked for before the prediction came");
+    s.stroke_predict(vec![sample(110.0, 100.0, 24.0)]);
+    assert!(!s.shared.lock().needs_frame);
+    // let go: one frame, of both
+    s.hold_frames(false);
+    {
+        let st = s.shared.lock();
+        assert!(st.needs_frame && !st.holding_frames && !st.frame_held);
+    }
+    // let go with nothing changed meanwhile: no frame asked for
+    s.shared.lock().needs_frame = false;
+    s.hold_frames(true);
+    s.hold_frames(false);
+    assert!(!s.shared.lock().needs_frame);
+    s.stroke_end(vec![sample(110.0, 100.0, 24.0)]);
+}
+
+/// The plugin that adds vector layers, kept as a fixture (see `bundled::VECTOR_LAYERS_FIXTURE`).
 const VECTOR_ID: &str = "io.github.artcraftandroid.vector-layers";
 const VECTOR_KIND: &str = "io.github.artcraftandroid.vector-layers.vector";
 
@@ -21403,7 +22335,7 @@ fn vector_session(
     let _ = std::fs::remove_dir_all(&dir);
     let dir = dir.to_string_lossy().into_owned();
     let plugins = crate::Plugins::with_store(dir.clone());
-    let (_, file) = crate::bundled::BUNDLED.iter().find(|(folder, _)| *folder == "vector-layers").unwrap();
+    let file = crate::bundled::VECTOR_LAYERS_FIXTURE;
     assert_eq!(plugins.install(file.to_vec()), None);
     assert!(plugins.set_on(VECTOR_ID.to_owned(), true));
     s.use_plugins(std::sync::Arc::clone(&plugins));
@@ -22027,7 +22959,7 @@ fn with_its_plugin_removed_a_vector_layer_shows_its_saved_pixels_and_imported_ag
     opened.save(path.clone()).unwrap();
     assert_eq!(std::fs::read(&data).unwrap(), written);
     // imported again and on: its strokes are there to change, and it takes more
-    let (_, file) = crate::bundled::BUNDLED.iter().find(|(folder, _)| *folder == "vector-layers").unwrap();
+    let file = crate::bundled::VECTOR_LAYERS_FIXTURE;
     assert_eq!(plugins.install(file.to_vec()), None);
     assert!(plugins.set_on(VECTOR_ID.to_owned(), true));
     assert!(!opened.layers().iter().any(|l| l.id == vector && l.locked));
@@ -22886,7 +23818,16 @@ fn a_tap_of_the_selection_tool_on_a_vector_layer_takes_the_stroke_under_it_or_le
     stroke_across(&s, 40.0, 20.0, 140.0);
     stroke_across(&s, 100.0, 20.0, 140.0);
     let items = vector_items(&s, vector);
-    let tool = |kind| Some(crate::touch::SelectTouch { kind, join: crate::SelectionJoin::Add, threshold: 0.5 });
+    let tool = |kind| {
+        Some(crate::touch::SelectTouch {
+            kind,
+            join: crate::SelectionJoin::Add,
+            threshold: 0.5,
+            lasso_fill: false,
+            lasso_erase: false,
+            lasso_tool: false,
+        })
+    };
     let tap = |x: f32, y: f32, ms: f64| {
         s.touch_down(1, PointerKind::Stylus, vec![sample(x, y, ms)]);
         s.touch_up(1, vec![sample(x, y, ms + 30.0)])
@@ -22913,6 +23854,849 @@ fn a_tap_of_the_selection_tool_on_a_vector_layer_takes_the_stroke_under_it_or_le
     tap(150.0, 10.0, 2000.0);
     assert_eq!(s.freehand_path().len(), 4, "two points of a path");
     s.set_touch_selecting(None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Renders what is queued and returns the whole composite.
+fn composite(s: &CanvasSession) -> Vec<u8> {
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+    canvas.invalidate();
+    canvas.render(gpu, &mut st.doc, None);
+    let px = canvas.read_composite(gpu).unwrap();
+    assert_eq!(gpu.errors(), 0, "GPU validation errors");
+    px
+}
+
+#[test]
+fn a_canvas_put_on_a_timeline_plays_and_exports_as_before() {
+    let Some(s) = session(40, 40) else { return };
+    s.set_brush_size(0.6);
+    for (i, colour) in [[1.0, 0.0, 0.0], [0.0, 0.7, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
+        if i > 0 {
+            s.add_layer();
+        }
+        s.set_color(colour[0], colour[1], colour[2]);
+        s.stroke_begin(PointerKind::Finger, vec![sample(8.0 + 12.0 * i as f32, 20.0, 0.0)]);
+        s.stroke_end(vec![]);
+    }
+    assert!(s.set_animation_assist(true));
+    let frames = s.animation_frames();
+    s.set_frame_hold(frames[1], 2);
+    let mut a = s.animation_settings().unwrap();
+    a.background = true;
+    s.set_animation_settings(a);
+    // what Animation Assist plays, place by place
+    let sequence = s.animation_sequence();
+    assert_eq!(sequence, [0, 1, 1, 1, 2]);
+    let played: Vec<Vec<u8>> = sequence
+        .iter()
+        .map(|f| {
+            s.set_play_frame(Some(*f));
+            composite(&s)
+        })
+        .collect();
+    s.set_play_frame(None);
+
+    assert!(s.start_timeline());
+    assert!(!s.start_timeline(), "only once");
+    let info = s.timeline_info().unwrap();
+    assert_eq!((info.duration, info.fps, info.simple, info.frame), (5, 15, true, 0));
+    assert_eq!(s.timeline_tracks().len(), 2, "the background has a track of its own");
+    assert!(s.animation_settings().is_none());
+    for (place, shown) in played.iter().enumerate() {
+        s.set_timeline_playing(Some(place as u32));
+        assert_eq!(&composite(&s), shown, "playing {place}");
+    }
+    s.set_timeline_playing(None);
+    // drawing on a frame past the end stays on the last
+    s.set_timeline_frame(99);
+    assert_eq!(s.timeline_info().unwrap().frame, 4);
+    // exports take every frame of the timeline, as it plays (the background in each)
+    assert_eq!(s.animation_frame_count(), 5);
+    assert_eq!(s.animation_sequence(), [0, 1, 2, 3, 4]);
+    assert!(s.animation_frame(5, false, 0).is_none());
+    for (place, shown) in played.iter().enumerate() {
+        let frame = s.animation_frame(place as u32, false, 0).unwrap();
+        assert_eq!(&frame.rgba, shown, "exported frame {place}");
+    }
+    let dir = std::env::temp_dir().join(format!("procraft-timeline-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let gif = dir.join("t.gif");
+    s.export_gif(gif.to_string_lossy().into_owned(), 0, 15.0, false, false, false).unwrap();
+    let bytes = std::fs::read(&gif).unwrap();
+    assert_eq!(bytes.windows(3).filter(|w| w == &[0x21, 0xF9, 4]).count(), 5);
+    let _ = std::fs::remove_dir_all(&dir);
+    // and undo puts Animation Assist back
+    assert_eq!(s.undo().as_deref(), Some("Use Timeline"));
+    assert!(s.timeline_info().is_none());
+    assert_eq!(s.animation_sequence(), [0, 1, 1, 1, 2]);
+}
+
+#[test]
+fn a_timeline_is_edited_through_the_session() {
+    let Some(s) = session(40, 40) else { return };
+    s.set_brush_size(0.3);
+    for i in 0..3 {
+        if i > 0 {
+            s.add_layer();
+        }
+        s.stroke_begin(PointerKind::Finger, vec![sample(5.0 + 10.0 * i as f32, 20.0, 0.0)]);
+        s.stroke_end(vec![]);
+    }
+    assert!(s.set_animation_assist(true));
+    let frames = s.animation_frames();
+    assert!(s.start_timeline());
+    let tracks = s.timeline_tracks();
+    assert_eq!(tracks.len(), 1);
+    let clips = &tracks[0].clips;
+    assert_eq!(
+        clips.iter().map(|c| (c.root, c.start, c.duration)).collect::<Vec<_>>(),
+        [(frames[0], 0, 1), (frames[1], 1, 1), (frames[2], 2, 1)]
+    );
+    let current = |s: &CanvasSession| s.shared.lock().doc.current().0;
+    // the playhead leads the current layer, and choosing a layer moves the playhead
+    s.set_timeline_frame(1);
+    assert_eq!(current(&s), frames[1]);
+    assert!(s.select_layer(frames[2]));
+    assert_eq!(s.timeline_info().unwrap().frame, 2);
+    // a drawing added on frame 0 goes just after the one there, the rest moving along
+    s.set_timeline_frame(0);
+    let mut settings = TimelineSettingsOf::from(s.timeline_info().unwrap());
+    settings.exposure = 2;
+    s.set_timeline_settings(settings.into());
+    let added = s.add_timeline_drawing();
+    assert_ne!(added, 0);
+    let spans = |s: &CanvasSession, t: usize| {
+        s.timeline_tracks()[t].clips.iter().map(|c| (c.start, c.duration)).collect::<Vec<_>>()
+    };
+    assert_eq!(spans(&s, 0), [(0, 1), (1, 2), (3, 1), (4, 1)]);
+    assert_eq!(s.timeline_info().unwrap().frame, 1);
+    // (a new drawing is a group from the start, its one layer in it and current)
+    let new_drawing = procraft_engine::document::LayerId(s.timeline_tracks()[0].clips[1].root);
+    {
+        let st = s.shared.lock();
+        assert_eq!(st.doc.layer(new_drawing).map(|l| l.kind), Some(procraft_engine::document::LayerKind::Group));
+        assert_eq!(st.doc.members(Some(new_drawing)), [st.doc.current()]);
+    }
+    // painting where a track has nothing makes a drawing there for the stroke
+    let second = s.add_timeline_track();
+    s.set_timeline_frame(2);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let made = &s.timeline_tracks()[1];
+    assert_eq!((made.id, made.clips.len()), (second, 1));
+    assert_eq!((made.clips[0].start, made.clips[0].duration), (2, 2));
+    {
+        let st = s.shared.lock();
+        let root = procraft_engine::document::LayerId(made.clips[0].root);
+        assert_eq!(st.doc.members(Some(root)), [st.doc.current()], "the stroke's layer, in its drawing's group");
+    }
+    // hold, split, duplicate, move and delete
+    let held = s.timeline_tracks()[1].clips[0].id;
+    assert!(s.set_timeline_clip_duration(held, 4, true));
+    s.set_timeline_frame(4);
+    assert!(s.split_timeline_clip(held));
+    assert_eq!(spans(&s, 1), [(2, 2), (4, 2)]);
+    let copy = s.duplicate_timeline_clip(held);
+    assert_ne!(copy, 0);
+    assert_eq!(spans(&s, 1), [(2, 2), (4, 2), (6, 2)]);
+    let long = s.timeline_info().unwrap().duration;
+    assert!(s.move_timeline_clip(copy, second, 20));
+    assert_eq!(spans(&s, 1), [(2, 2), (6, 2), (20, 2)]);
+    assert_eq!(s.timeline_info().unwrap().duration, long, "moved past the end, it waits there");
+    let layers_before = s.layers().len();
+    assert!(s.delete_timeline_clip(copy, false));
+    // (its group and the layer in it)
+    assert_eq!(s.layers().len(), layers_before - 2);
+    assert_eq!(spans(&s, 1), [(2, 2), (6, 2)]);
+    // and every edit undoes
+    assert_eq!(s.undo().as_deref(), Some("Delete Drawing"));
+    assert_eq!(spans(&s, 1), [(2, 2), (6, 2), (20, 2)]);
+    // simple mode follows the track drawn on
+    s.set_timeline_simple(true);
+    assert!(s.timeline_info().unwrap().simple);
+    // taken off its timeline it is a still canvas, and put back on it, as it was
+    let before = (spans(&s, 0), spans(&s, 1), s.timeline_info().unwrap().duration);
+    assert!(s.stop_timeline());
+    assert!(s.timeline_info().is_none());
+    assert!(s.start_timeline());
+    assert_eq!((spans(&s, 0), spans(&s, 1), s.timeline_info().unwrap().duration), before);
+    assert_eq!(s.timeline_tracks().len(), 2);
+    // the picked frames turned off and on together, one step each
+    let both: Vec<u64> = s.timeline_tracks()[1].clips.iter().map(|c| c.id).collect();
+    assert!(s.set_timeline_clips_disabled(both.clone(), true));
+    assert!(s.timeline_tracks()[1].clips.iter().all(|c| c.disabled));
+    assert!(!s.set_timeline_clips_disabled(both.clone(), true), "already");
+    assert_eq!(s.undo().as_deref(), Some("Turn Clips Off"));
+    assert!(s.timeline_tracks()[1].clips.iter().all(|c| !c.disabled));
+}
+
+/// A timeline's settings to change, from what it has.
+struct TimelineSettingsOf {
+    fps: u32,
+    duration: u32,
+    exposure: u32,
+    playback: crate::animation::AnimationPlayback,
+    onion_frames: u32,
+    onion_opacity: f32,
+}
+
+impl From<crate::timeline::TimelineInfo> for TimelineSettingsOf {
+    fn from(i: crate::timeline::TimelineInfo) -> Self {
+        TimelineSettingsOf {
+            fps: i.fps,
+            duration: i.duration,
+            exposure: i.exposure,
+            playback: i.playback,
+            onion_frames: i.onion_frames,
+            onion_opacity: i.onion_opacity,
+        }
+    }
+}
+
+impl From<TimelineSettingsOf> for crate::timeline::TimelineSettings {
+    fn from(s: TimelineSettingsOf) -> Self {
+        crate::timeline::TimelineSettings {
+            fps: s.fps,
+            duration: s.duration,
+            exposure: s.exposure,
+            playback: s.playback,
+            onion_frames: s.onion_frames,
+            onion_opacity: s.onion_opacity,
+        }
+    }
+}
+
+#[test]
+fn a_touch_stroke_on_an_empty_track_makes_a_drawing() {
+    let Some(s) = session(100, 100) else { return };
+    assert!(s.set_animation_assist(true));
+    for _ in 0..3 {
+        s.add_layer();
+    }
+    assert!(s.start_timeline());
+    s.set_timeline_simple(false);
+    let second = s.add_timeline_track();
+    assert_eq!(s.timeline_info().unwrap().track, Some(second));
+    // a finger stroke, as the app sends it
+    let mut t = 1000.0;
+    s.touch_down(1, PointerKind::Finger, vec![sample(20.0, 20.0, t)]);
+    for k in 1..20 {
+        t += 8.0;
+        s.touch_move(1, vec![sample(20.0 + 3.0 * k as f32, 20.0 + 2.0 * k as f32, t)]);
+    }
+    s.touch_up(1, vec![sample(80.0, 60.0, t + 8.0)]);
+    let tracks = s.timeline_tracks();
+    let made = tracks.iter().find(|tr| tr.id == second).unwrap();
+    assert_eq!(made.clips.len(), 1, "{tracks:?}");
+}
+
+#[test]
+fn clips_are_keyed_through_the_session() {
+    use crate::timeline::{TimelineChannel, TimelineEasing};
+    let Some(s) = session(60, 60) else { return };
+    s.set_brush_size(0.3);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.set_animation_assist(true));
+    assert!(s.start_timeline());
+    let mut settings = TimelineSettingsOf::from(s.timeline_info().unwrap());
+    settings.duration = 10;
+    s.set_timeline_settings(settings.into());
+    let clip = s.timeline_tracks()[0].clips[0].id;
+    assert!(s.set_timeline_clip_duration(clip, 10, true));
+    // a key at frame 0, dragged live and let go: one undo step
+    s.set_timeline_frame(0);
+    assert!(s.set_timeline_key(clip, TimelineChannel::Position, vec![5.0, 0.0], TimelineEasing::Linear, false));
+    assert!(s.set_timeline_key(clip, TimelineChannel::Position, vec![10.0, 0.0], TimelineEasing::Linear, true));
+    s.set_timeline_frame(4);
+    assert!(s.set_timeline_key(clip, TimelineChannel::Position, vec![30.0, 0.0], TimelineEasing::Linear, true));
+    assert!(s.set_timeline_key(clip, TimelineChannel::Opacity, vec![0.5], TimelineEasing::Hold, true));
+    s.set_timeline_frame(2);
+    let pose = s.timeline_pose(clip).unwrap();
+    assert!((pose.x - 20.0).abs() < 1e-3 && pose.y == 0.0, "half way between the keys: {pose:?}");
+    assert!((pose.opacity - 0.5).abs() < 1e-3, "the only opacity key holds: {pose:?}");
+    let keys = s.timeline_keys(clip);
+    assert_eq!(
+        keys.iter().map(|k| (k.frame, k.channel)).collect::<Vec<_>>(),
+        [(0, TimelineChannel::Position), (4, TimelineChannel::Position), (4, TimelineChannel::Opacity)]
+    );
+    assert_eq!(keys[2].easing, TimelineEasing::Hold);
+    // it turns about the middle of what is painted, not the canvas's
+    {
+        let st = s.shared.lock();
+        let pivot = st
+            .doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .clip(procraft_engine::timeline::ClipId(clip))
+            .unwrap()
+            .keys
+            .pivot
+            .unwrap();
+        assert!((pivot[0] - 20.0).abs() < 4.0 && (pivot[1] - 30.0).abs() < 4.0, "{pivot:?}");
+    }
+    // undo takes the last key away; the live drag before it was one step
+    assert_eq!(s.undo().as_deref(), Some("Key"));
+    assert_eq!(s.timeline_keys(clip).len(), 2);
+    s.set_timeline_frame(4);
+    assert!(s.remove_timeline_keys(clip));
+    assert_eq!(s.timeline_keys(clip).len(), 1);
+    assert_eq!(s.undo().as_deref(), Some("Remove Keys"));
+    assert_eq!(s.undo().as_deref(), Some("Key"));
+    assert_eq!(s.undo().as_deref(), Some("Key"));
+    assert!(s.timeline_keys(clip).is_empty());
+}
+
+#[test]
+fn easings_and_motion_paths_through_the_session() {
+    use crate::timeline::{EasingKind, TimelineChannel, TimelineEasing, default_easing, easing_curve};
+    let Some(s) = session(60, 60) else { return };
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.start_timeline());
+    let clip = s.timeline_tracks()[0].clips[0].id;
+    assert!(s.set_timeline_clip_duration(clip, 9, true));
+    s.set_timeline_frame(0);
+    assert!(s.set_timeline_key(clip, TimelineChannel::Position, vec![0.0, 0.0], TimelineEasing::Linear, true));
+    s.set_timeline_frame(8);
+    assert!(s.set_timeline_key(clip, TimelineChannel::Position, vec![30.0, 0.0], TimelineEasing::Linear, true));
+    // a bounce, twice over and back, on the first key
+    let mut bounce = default_easing(EasingKind::Bounce);
+    bounce.repeats = 2;
+    bounce.looping = true;
+    assert!(s.set_timeline_key_easing(clip, 0, bounce.clone(), true));
+    assert_eq!(s.timeline_key_easing(clip, 0), Some(bounce.clone()));
+    assert_eq!(s.undo().as_deref(), Some("Easing"));
+    assert_eq!(s.timeline_key_easing(clip, 0).map(|e| e.kind), Some(EasingKind::Linear));
+    assert!(s.set_timeline_key_easing(clip, 0, bounce.clone(), true));
+    let curve = easing_curve(bounce, 9);
+    assert_eq!(curve.len(), 9);
+    assert!(curve[0].abs() < 1e-4 && curve[8].abs() < 1e-4, "looping comes back: {curve:?}");
+    // the path: straight, then bent down by the first key's handle
+    let path = s.timeline_motion_path(clip).unwrap();
+    assert_eq!(path.keys.len(), 2);
+    assert!(path.points.chunks(2).all(|p| (p[1] - path.keys[0].y).abs() < 1e-3), "straight across");
+    assert!(s.set_timeline_path_handles(clip, 0, Some(vec![0.0, 0.0, 0.0, 40.0]), true));
+    let bent = s.timeline_motion_path(clip).unwrap();
+    assert!(bent.points.chunks(2).any(|p| p[1] > bent.keys[0].y + 5.0), "bent down");
+    assert_eq!(bent.keys[0].handles.as_deref(), Some(&[0.0, 0.0, 0.0, 40.0][..]));
+    assert!(s.set_timeline_path_handles(clip, 0, None, true));
+    assert_eq!(s.timeline_motion_path(clip).unwrap().keys[0].handles, None);
+}
+
+/// The editor's view of an easing and the engine's easing it is go back and forth unchanged, for
+/// every kind, repeated, looping and backwards (the desktop app's editor edits the engine's).
+#[test]
+fn an_easing_spec_and_the_engine_easing_go_back_and_forth() {
+    use crate::{EasingKind, EasingSpec, default_easing};
+    use procraft_engine::timeline::Easing;
+    let kinds = [
+        EasingKind::Linear,
+        EasingKind::Hold,
+        EasingKind::Smooth,
+        EasingKind::CubicBezier,
+        EasingKind::Curve,
+        EasingKind::Bounce,
+        EasingKind::Elastic,
+        EasingKind::Steps,
+        EasingKind::ElasticSteps,
+        EasingKind::Cyclic,
+        EasingKind::Random,
+    ];
+    for kind in kinds {
+        for (repeats, looping, reversed) in [(1, false, false), (3, true, false), (2, false, true)] {
+            let spec = EasingSpec { repeats, looping, reversed, ..default_easing(kind) };
+            assert_eq!(EasingSpec::of(&spec.easing()), spec, "{kind:?}");
+        }
+    }
+    let curve = Easing::Curve(vec![[0.0, 0.0], [0.5, 1.2], [1.0, 1.0]]);
+    assert_eq!(EasingSpec::of(&curve).easing(), curve);
+    let bezier = Easing::CubicBezier([0.1, -0.2], [0.7, 1.3]);
+    assert_eq!(EasingSpec::of(&bezier).params, vec![0.1, -0.2, 0.7, 1.3]);
+    assert_eq!(EasingSpec::of(&bezier).easing(), bezier);
+}
+
+/// A canvas of four drawings on a timeline's one track (empty layers, each held a frame), shown as
+/// every track.
+fn four_drawings() -> Option<std::sync::Arc<CanvasSession>> {
+    let s = session(40, 40)?;
+    assert!(s.set_animation_assist(true));
+    for _ in 0..3 {
+        s.add_layer();
+    }
+    assert!(s.start_timeline());
+    s.set_timeline_simple(false);
+    Some(s)
+}
+
+#[test]
+fn clips_are_masked_and_grouped_through_the_session() {
+    use crate::timeline::{TimelineClipKind, TimelineMask};
+    let Some(s) = four_drawings() else { return };
+    let clips: Vec<u64> = s.timeline_tracks()[0].clips.iter().map(|c| c.id).collect();
+    assert!(s.set_timeline_clip_mask(clips[1], TimelineMask::Luminance));
+    assert!(!s.set_timeline_clip_mask(clips[1], TimelineMask::Luminance), "no change, no step");
+    assert_eq!(s.timeline_tracks()[0].clips[1].mask, TimelineMask::Luminance);
+    // the first two grouped, held six frames, cycling every two
+    let group = s.group_timeline_clips(vec![clips[0], clips[1]]);
+    assert_ne!(group, 0);
+    assert_eq!(s.group_timeline_clips(vec![]), 0);
+    let shown = s.timeline_tracks();
+    assert_eq!(
+        shown[0].clips.iter().map(|c| (c.kind, c.start)).collect::<Vec<_>>(),
+        [(TimelineClipKind::Group, 0), (TimelineClipKind::Drawing, 2), (TimelineClipKind::Drawing, 3)]
+    );
+    assert!(s.set_timeline_clip_duration(group, 6, true));
+    assert!(s.set_timeline_cycle(group, 2, true));
+    let g = s.timeline_tracks()[0].clips[0].clone();
+    assert_eq!((g.cycle, g.continue_across, g.duration), (2, true, 6));
+    // opened: its own track, its clips where they are on the timeline
+    assert!(s.open_timeline_group(Some(group)));
+    assert!(!s.open_timeline_group(Some(clips[2])), "not a group");
+    let info = s.timeline_info().unwrap();
+    assert_eq!(info.open_groups.iter().map(|g| g.id).collect::<Vec<_>>(), [group]);
+    let inner = s.timeline_tracks();
+    assert_eq!(inner.len(), 1);
+    assert_eq!(inner[0].clips.iter().map(|c| (c.id, c.start)).collect::<Vec<_>>(), [(clips[0], 0), (clips[1], 1)]);
+    assert_eq!(info.track, Some(inner[0].id), "drawn on inside it");
+    // the playhead on the second cycle draws on the drawing it shows
+    let current = |s: &CanvasSession| s.shared.lock().doc.current().0;
+    s.set_timeline_frame(3);
+    assert_eq!(current(&s), inner[0].clips[1].root);
+    // a drawing added inside it, at the playhead's frame of the first cycle
+    s.set_timeline_frame(1);
+    let added = s.add_timeline_drawing();
+    assert_ne!(added, 0);
+    assert_eq!(s.timeline_tracks()[0].clips.iter().map(|c| c.start).collect::<Vec<_>>(), [0, 1, 2]);
+    // keys on a clip inside: on its own frames, told on the timeline's
+    s.set_timeline_frame(3);
+    let opacity = crate::timeline::TimelineChannel::Opacity;
+    assert!(s.set_timeline_key(clips[0], opacity, vec![0.5], crate::timeline::TimelineEasing::Linear, true));
+    assert_eq!(s.timeline_keys(clips[0]).iter().map(|k| k.frame).collect::<Vec<_>>(), [1], "the second cycle's 1");
+    // back out, and taken apart
+    assert!(s.open_timeline_group(None));
+    assert!(s.timeline_info().unwrap().open_groups.is_empty());
+    assert!(s.ungroup_timeline_clip(group));
+    assert!(s.timeline_tracks()[0].clips.iter().all(|c| c.kind == TimelineClipKind::Drawing));
+    assert!(s.undo().is_some());
+    assert_eq!(s.timeline_tracks()[0].clips[0].kind, TimelineClipKind::Group);
+}
+
+#[test]
+fn the_camera_is_keyed_through_the_session() {
+    let Some(s) = four_drawings() else { return };
+    let still = s.timeline_camera().unwrap();
+    assert_eq!((still.x, still.y, still.zoom, still.keyed), (20.0, 20.0, 1.0, false));
+    assert_eq!(still.corners, [0.0, 0.0, 40.0, 0.0, 40.0, 40.0, 0.0, 40.0]);
+    s.set_timeline_frame(0);
+    let easing = crate::timeline::TimelineEasing::Linear;
+    assert!(s.set_timeline_camera_key(10.0, 20.0, 2.0, 350.0, easing, false));
+    assert!(s.set_timeline_camera_key(10.0, 20.0, 2.0, 350.0, easing, true));
+    s.set_timeline_frame(2);
+    assert!(s.set_timeline_camera_key(30.0, 20.0, 2.0, 10.0, easing, true));
+    assert_eq!(s.timeline_camera_keys(), [0, 2]);
+    s.set_timeline_frame(1);
+    let half = s.timeline_camera().unwrap();
+    assert!((half.x - 20.0).abs() < 1e-3 && !half.keyed, "{half:?}");
+    assert!(half.rotation.abs() < 1e-3 || (half.rotation - 360.0).abs() < 1e-3, "the short way: {half:?}");
+    // twice as close: the frame half the canvas across, about its middle
+    assert!((half.corners[0] - 10.0).abs() < 1e-3 && (half.corners[4] - 30.0).abs() < 1e-3, "{half:?}");
+    s.set_timeline_frame(2);
+    assert!(s.remove_timeline_camera_key());
+    assert!(!s.remove_timeline_camera_key());
+    assert_eq!(s.timeline_camera_keys(), [0]);
+    s.set_timeline_camera_view(true);
+    assert!(s.timeline_info().unwrap().camera_view);
+}
+
+/// Paints a red bar across the middle of a 64 square canvas, about four pixels high.
+fn red_bar(s: &CanvasSession) {
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(0.15);
+    s.stroke_begin(PointerKind::Finger, vec![sample(5.0, 32.0, 0.0)]);
+    s.stroke_add((1..12).map(|i| sample(5.0 + i as f32 * 5.0, 32.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+}
+
+#[test]
+fn an_adjustment_layer_is_added_changed_kept_undone_and_opened_again() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    red_bar(&s);
+    let base = s.layers().iter().find(|l| l.current).unwrap().id;
+    let red = pixel(&s, 32, 32);
+    assert!(red[0] > 200 && red[1] < 40, "{red:?}");
+    // added above the current layer, its panel open on it
+    assert!(s.adjustment_layer_add(Adjustment::Hsb));
+    let shown = s.adjustment_shown();
+    assert_eq!((shown.adjustment, shown.on_layer), (Some(Adjustment::Hsb), true));
+    let layers = s.layers();
+    let adjust = layers.iter().find(|l| l.current).unwrap();
+    assert_eq!(adjust.adjustment, Some(Adjustment::Hsb));
+    assert_eq!(adjust.name, "Hue, Saturation, Brightness");
+    let id = adjust.id;
+    assert_eq!(pixel(&s, 32, 32), red, "nothing changed yet");
+    s.adjustment_hsb(0.5, 0.0, 0.5);
+    let grey = pixel(&s, 32, 32);
+    assert!(grey[0].abs_diff(grey[1]) <= 2 && grey[0] < 200, "{grey:?}");
+    // never painted on: a stroke leaves it as it is
+    s.adjustment_pencil(true);
+    assert!(!s.adjustment_shown().pencil);
+    assert!(s.adjustment_end(true));
+    assert_eq!(pixel(&s, 32, 32), grey);
+    // the layer below keeps its own pixels
+    assert_eq!(s.layer_adjustment(base), None);
+    // one step: undone, it goes; redone, it is back as it was
+    assert_eq!(s.undo().as_deref(), Some("add adjustment layer"));
+    assert!(s.layers().iter().all(|l| l.adjustment.is_none()));
+    assert_eq!(pixel(&s, 32, 32), red);
+    assert!(s.redo().is_some());
+    assert_eq!(pixel(&s, 32, 32), grey);
+    // opened again on its values; changed and put back, it is as it was
+    assert_eq!(s.adjustment_layer_edit(id), Some(Adjustment::Hsb));
+    assert_eq!(s.adjustment_shown().hsb, vec![0.5, 0.0, 0.5]);
+    s.adjustment_hsb(0.5, 1.0, 0.5);
+    assert_ne!(pixel(&s, 32, 32), grey);
+    assert!(s.adjustment_end(false));
+    assert_eq!(pixel(&s, 32, 32), grey);
+    // hidden, the red shows again
+    assert!(s.set_layer_visible(id, false));
+    assert_eq!(pixel(&s, 32, 32), red);
+}
+
+#[test]
+fn an_adjustment_layer_let_go_unkept_goes_and_undo_inside_it_steps_its_values_back() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    red_bar(&s);
+    let count = s.layers().len();
+    assert!(s.adjustment_layer_add(Adjustment::Curves));
+    assert_eq!(s.layers().len(), count + 1);
+    assert!(s.adjustment_end(false));
+    assert_eq!(s.layers().len(), count, "not kept: gone");
+    // Liquify can't be one
+    assert!(!s.adjustment_layer_add(Adjustment::Liquify));
+    assert_eq!(s.layers().len(), count);
+    // undo with it open takes back its values, and it stays open
+    let column = |s: &CanvasSession| (24..40).map(|y| pixel(s, 32, y)).collect::<Vec<_>>();
+    let sharp = column(&s);
+    assert!(s.adjustment_layer_add(Adjustment::GaussianBlur));
+    s.adjustment_amount_by(0.5);
+    assert_ne!(column(&s), sharp);
+    assert!(s.undo().is_some());
+    assert_eq!(s.adjustment_shown().adjustment, Some(Adjustment::GaussianBlur));
+    assert_eq!(s.adjustment_shown().amount, 0.0);
+    assert_eq!(column(&s), sharp);
+    // Apply keeps it so far as a step and goes on
+    s.adjustment_amount_by(0.5);
+    s.adjustment_apply();
+    assert!(s.adjustment_shown().on_layer);
+    s.adjustment_amount_by(0.2);
+    assert!(s.adjustment_end(true));
+    assert_eq!(s.layers().len(), count + 1);
+}
+
+#[test]
+fn a_layer_style_shows_at_once_and_is_one_step_when_let_go() {
+    use crate::LayerEffectInfo;
+    let Some(s) = session(64, 64) else { return };
+    red_bar(&s);
+    let id = s.layers().iter().find(|l| l.current).unwrap().id;
+    let effects = s.layer_effects(id);
+    assert_eq!(effects.len(), 5);
+    assert!(effects.iter().all(|e| !e.on));
+    assert!(s.layer_options(id).iter().any(|r| r.option == crate::LayerOption::LayerStyle));
+    // a blue outline, its size dragged then let go
+    let outline = LayerEffectInfo { on: true, r: 0.0, g: 0.0, b: 1.0, size: 2.0, ..effects[0] };
+    assert!(s.set_layer_effect(id, 0, outline, false));
+    let bigger = LayerEffectInfo { size: 4.0, ..outline };
+    assert!(s.set_layer_effect(id, 0, bigger, true));
+    assert!(s.layers().iter().find(|l| l.id == id).unwrap().styled);
+    assert_eq!(s.layer_effects(id)[0], bigger);
+    // just above the bar, blue
+    let around = (20..30).map(|y| pixel(&s, 32, y)).filter(|p| p[2] > 200 && p[0] < 40).count();
+    assert!(around >= 2, "{around}");
+    assert_eq!(s.undo().as_deref(), Some("Layer Style"));
+    assert!(s.layer_effects(id).iter().all(|e| !e.on));
+    let around = (20..30).map(|y| pixel(&s, 32, y)).filter(|p| p[2] > 200 && p[0] < 40).count();
+    assert_eq!(around, 0);
+    // a Color: the bar all green, as opaque as it was, and nothing round it
+    let inside = (0..64).find(|&y| pixel(&s, 32, y)[0] > 200 && pixel(&s, 32, y)[1] < 40).unwrap();
+    let green = LayerEffectInfo { on: true, r: 0.0, g: 1.0, b: 0.0, ..effects[4] };
+    assert!(s.set_layer_effect(id, 4, green, true));
+    assert!(s.layers().iter().find(|l| l.id == id).unwrap().styled);
+    let now = pixel(&s, 32, inside);
+    assert!(now[0] <= 2 && now[1] >= 253 && now[2] <= 2 && now[3] == 255, "{now:?}");
+    assert_eq!(pixel(&s, 32, 2), pixel(&s, 2, 2), "nothing where the layer shows nothing");
+    assert_eq!(s.undo().as_deref(), Some("Layer Style"));
+    assert!(pixel(&s, 32, inside)[0] > 200);
+    // an adjustment layer takes none, and offers its settings instead
+    assert!(s.adjustment_layer_add(crate::Adjustment::Hsb));
+    assert!(s.adjustment_end(true));
+    let adjust = s.layers().iter().find(|l| l.current).unwrap().id;
+    assert!(s.layer_effects(adjust).is_empty());
+    let options = s.layer_options(adjust);
+    assert!(options.iter().any(|r| r.option == crate::LayerOption::AdjustmentSettings));
+    assert!(
+        !options.iter().any(|r| r.option == crate::LayerOption::LayerStyle || r.option == crate::LayerOption::Fill)
+    );
+}
+
+#[test]
+fn picked_layers_with_an_adjustment_layer_among_them_merge_with_it_baked_in() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    red_bar(&s);
+    let base = s.layers().iter().find(|l| l.current).unwrap().id;
+    assert!(s.adjustment_layer_add(Adjustment::Hsb));
+    s.adjustment_hsb(0.5, 0.0, 0.5);
+    assert!(s.adjustment_end(true));
+    let grey = pixel(&s, 32, 32);
+    assert!(s.pick_layer(base));
+    let count = s.layers().len();
+    assert!(s.merge_picked(), "what it does goes into the pixels");
+    assert_eq!(s.layers().len(), count - 1);
+    assert_eq!(pixel(&s, 32, 32), grey);
+}
+
+#[test]
+fn changing_an_open_adjustment_layer_keeps_the_composite_caches() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
+    red_bar(&s);
+    let red = pixel(&s, 32, 32);
+    assert!(s.adjustment_layer_add(Adjustment::Hsb));
+    // a layer above it, kept in a cache while the adjustment layer is worked on
+    let adjust = s.layers().iter().find(|l| l.current).unwrap().id;
+    s.add_layer();
+    assert!(s.select_layer(adjust));
+    let _ = pixel(&s, 32, 32);
+    assert!(s.adjustment_layer_edit(adjust).is_some());
+    let _ = pixel(&s, 32, 32);
+    let cached = |s: &CanvasSession| s.shared.lock().canvas.as_ref().unwrap().composites_cached();
+    assert!(cached(&s));
+    s.adjustment_hsb(0.5, 0.0, 0.5);
+    let grey = pixel(&s, 32, 32);
+    assert!(grey[0].abs_diff(grey[1]) <= 2 && grey != red, "{grey:?}");
+    assert!(cached(&s), "a change to it shows at once, the caches kept");
+    s.adjustment_hsb(0.5, 1.0, 0.5);
+    assert_ne!(pixel(&s, 32, 32), grey);
+    assert!(cached(&s));
+    assert!(s.adjustment_end(false));
+}
+
+/// Three dots, red, green and blue, each a frame of Animation Assist, the green held 2 more.
+fn three_frames(s: &CanvasSession) {
+    s.set_brush_size(0.6);
+    for (i, colour) in [[1.0, 0.0, 0.0], [0.0, 0.7, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
+        if i > 0 {
+            s.add_layer();
+        }
+        s.set_color(colour[0], colour[1], colour[2]);
+        s.stroke_begin(PointerKind::Finger, vec![sample(8.0 + 12.0 * i as f32, 20.0, 0.0)]);
+        s.stroke_end(vec![]);
+    }
+    assert!(s.set_animation_assist(true));
+    let frames = s.animation_frames();
+    s.set_frame_hold(frames[1], 2);
+    assert_eq!(s.animation_sequence(), [0, 1, 1, 1, 2]);
+}
+
+#[test]
+fn the_frames_export_as_a_sprite_sheet_with_its_json() {
+    use crate::harmony_tests::{EXPORTS, exports_plugin};
+    let Some(s) = session(40, 40) else { return };
+    three_frames(&s);
+    s.set_name("Dots walk".into());
+    let dir = std::env::temp_dir().join(format!("procraft-sheet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let plugins = exports_plugin(&dir);
+    let set = |key: &str, value: f32| {
+        let key = format!("{EXPORTS}.{key}");
+        if plugins.set_slider(key.clone(), value).is_none() {
+            assert!(plugins.set_switch(key, value >= 0.5));
+        }
+    };
+    // the sheet as Share lists it, its controls those of its sheet
+    let shares = plugins.shares();
+    let sheet = shares.iter().find(|p| p.label == "Sprite Sheet").unwrap();
+    assert_eq!(sheet.controls.len(), 9);
+    let out = dir.join("out").to_string_lossy().into_owned();
+    let share =
+        || s.plugin_share(plugins.clone(), format!("{EXPORTS}.sprite_sheet"), out.clone(), Default::default()).unwrap();
+    let read = |p: &str| {
+        let decoder = png::Decoder::new(std::io::Cursor::new(std::fs::read(p).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        (info.width, info.height, buf)
+    };
+    set("transparent", 0.0);
+
+    // held once: three pictures on a 2 × 2 grid, the green lasting three frames
+    let made = share();
+    assert_eq!(made.said.as_deref(), Some("5 frames on a 80 × 80 sheet"));
+    assert_eq!(s.export_progress(), 1.0);
+    assert!(made.files[0].ends_with("Dots_walk.png") && made.files[1].ends_with("Dots_walk.json"), "{:?}", made.files);
+    let (w, h, px) = read(&made.files[0]);
+    assert_eq!((w, h), (80, 80));
+    let at = |x: u32, y: u32| px[((y * w + x) * 4) as usize..][..4].to_vec();
+    // each frame its own dot over white: red in the first cell, green in the second, blue below
+    assert!(at(8, 20)[0] > 200 && at(8, 20)[1] < 60, "{:?}", at(8, 20));
+    assert!(at(40 + 20, 20)[1] > 120 && at(40 + 20, 20)[0] < 60, "{:?}", at(60, 20));
+    assert!(at(32, 40 + 20)[2] > 200 && at(32, 40 + 20)[0] < 60, "{:?}", at(32, 60));
+    assert_eq!(at(70, 70)[3], 0, "the empty fourth cell is clear");
+    assert_eq!(at(39, 1), [255, 255, 255, 255], "the background is in each frame");
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&made.files[1]).unwrap()).unwrap();
+    let frames = json["frames"].as_array().unwrap();
+    let rects: Vec<_> =
+        frames.iter().map(|f| (f["frame"]["x"].as_u64().unwrap(), f["frame"]["y"].as_u64().unwrap())).collect();
+    assert_eq!(rects, [(0, 0), (40, 0), (0, 40)]);
+    // at 15 frames a second: one frame, three, one
+    let durations: Vec<_> = frames.iter().map(|f| f["duration"].as_u64().unwrap()).collect();
+    assert_eq!(durations, [67, 200, 66]);
+    assert_eq!(frames[0]["filename"], "Dots_walk 0");
+    assert_eq!(json["meta"]["image"], "Dots_walk.png");
+    assert_eq!(json["meta"]["size"], serde_json::json!({ "w": 80, "h": 80 }));
+
+    // a strip with every frame its own, padded, no JSON: evenly cut
+    set("layout", 1.0);
+    set("padding", 2.0);
+    set("once", 0.0);
+    set("json", 0.0);
+    let made = share();
+    assert_eq!(made.files.len(), 1);
+    assert_eq!((read(&made.files[0]).0, read(&made.files[0]).1), (5 * 40 + 4 * 2, 40));
+    set("layout", 2.0);
+    set("padding", 0.0);
+    let made = share();
+    assert_eq!((read(&made.files[0]).0, read(&made.files[0]).1), (40, 200));
+
+    // trimmed and transparent: each dot alone, where it was kept in the JSON
+    set("layout", 1.0);
+    set("once", 1.0);
+    set("json", 1.0);
+    set("trim", 1.0);
+    set("transparent", 1.0);
+    let made = share();
+    let (w, h, px) = read(&made.files[0]);
+    assert!(w < 3 * 40 && h <= 40, "{w} × {h}");
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&made.files[1]).unwrap()).unwrap();
+    assert_eq!(json["frames"].as_array().unwrap().len(), 3);
+    let first = &json["frames"][0];
+    assert_eq!(first["trimmed"], true);
+    assert_eq!(first["sourceSize"], serde_json::json!({ "w": 40, "h": 40 }));
+    // the red dot sat left of the blue one
+    let x = |i: usize| json["frames"][i]["spriteSourceSize"]["x"].as_u64().unwrap();
+    assert!(x(0) < x(2), "{} {}", x(0), x(2));
+    assert!(px.chunks(4).all(|p| p[3] == 0 || p[0] > 0 || p[1] > 0 || p[2] > 0));
+
+    // on a timeline, the same
+    set("trim", 0.0);
+    set("transparent", 0.0);
+    set("layout", 0.0);
+    assert!(s.start_timeline());
+    let made = share();
+    assert_eq!(made.said.as_deref(), Some("5 frames on a 80 × 80 sheet"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_timeline_exports_as_a_harmony_scene() {
+    let Some(s) = session(40, 40) else { return };
+    three_frames(&s);
+    s.set_name("Dots".into());
+    assert!(s.start_timeline());
+    let tracks = s.timeline_tracks();
+    assert_eq!(tracks.len(), 1);
+    // a second track: a drawing on frames 2 and 3 only
+    let id = s.add_timeline_track();
+    assert!(s.rename_timeline_track(id, "Over lay".into()));
+    s.set_timeline_frame(1);
+    let clip = s.add_timeline_drawing();
+    assert!(clip != 0);
+    assert!(s.set_timeline_clip_duration(clip, 2, false));
+    s.set_color(1.0, 0.0, 1.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+
+    let dir = std::env::temp_dir().join(format!("procraft-harmony-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let plugins = crate::harmony_tests::exports_plugin(&dir);
+    let key = format!("{}.harmony", crate::harmony_tests::EXPORTS);
+    let out = dir.join("out").to_string_lossy().into_owned();
+    let made = s.plugin_share(plugins.clone(), key.clone(), out.clone(), Default::default()).unwrap();
+    assert_eq!(s.export_progress(), 1.0);
+    assert!(made.files[0].ends_with("Dots.zip"));
+    assert_eq!(made.said.as_deref(), Some("3 layers, 5 drawings"));
+    let bytes = std::fs::read(&made.files[0]).unwrap();
+    let zip = procraft_engine::zip::ZipReader::new(&bytes).unwrap();
+    let mut names: Vec<&str> = zip.names().collect();
+    names.sort_unstable();
+    let track = &tracks[0].name;
+    let plain: String = track.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let mut wanted = vec![
+        "Dots/Dots.aux".to_owned(),
+        "Dots/Dots.xstage".to_owned(),
+        "Dots/elements/Background/Background-1.png".to_owned(),
+        "Dots/elements/Over_lay/Over_lay-1.png".to_owned(),
+        format!("Dots/elements/{plain}/{plain}-1.png"),
+        format!("Dots/elements/{plain}/{plain}-2.png"),
+        format!("Dots/elements/{plain}/{plain}-3.png"),
+        "Dots/scene.elementTable".to_owned(),
+        "Dots/scene.versionTable".to_owned(),
+    ];
+    wanted.sort_unstable();
+    assert_eq!(names, wanted);
+
+    let stage = String::from_utf8(zip.read("Dots/Dots.xstage").unwrap()).unwrap();
+    let stage = procraft_engine::xml::parse(&stage).unwrap();
+    let columns = stage.find("columns").unwrap().all("column");
+    let sheet: Vec<(String, Vec<(String, String)>)> = columns
+        .iter()
+        .map(|c| {
+            let seq = c
+                .all("elementSeq")
+                .iter()
+                .map(|e| (e.attribute("val").unwrap().to_owned(), e.attribute("exposures").unwrap().to_owned()))
+                .collect();
+            (c.attribute("name").unwrap().to_owned(), seq)
+        })
+        .collect();
+    let pairs = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
+    assert_eq!(
+        sheet,
+        [
+            ("Background".to_owned(), pairs(&[("1", "1-5")])),
+            // red, green held three frames, blue
+            (plain.clone(), pairs(&[("1", "1"), ("2", "2-4"), ("3", "5")])),
+            ("Over_lay".to_owned(), pairs(&[("1", "2-3")])),
+        ]
+    );
+    assert_eq!(stage.find("scene").unwrap().attribute("nbframes"), Some("5"));
+    // each drawing is the track alone: the overlay's is clear but for its dot
+    let png = zip.read("Dots/elements/Over_lay/Over_lay-1.png").unwrap();
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+    let mut px = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut px).unwrap();
+    assert_eq!(px[..4], [0, 0, 0, 0]);
+    let dot = &px[((30 * 40 + 30) * 4)..][..4];
+    assert!(dot[0] > 200 && dot[2] > 200 && dot[1] < 60 && dot[3] == 255, "{dot:?}");
+
+    // an Animation Assist canvas is put on a timeline for it, and stays as it was
+    let Some(assist) = session(40, 40) else { return };
+    three_frames(&assist);
+    assist.set_name("Assist".into());
+    let made = assist.plugin_share(plugins, key, out, Default::default()).unwrap();
+    assert_eq!(made.said.as_deref(), Some("2 layers, 4 drawings"));
+    assert!(assist.timeline_info().is_none());
+    assert_eq!(assist.animation_sequence(), [0, 1, 1, 1, 2]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -23586,6 +25370,47 @@ fn layers_from_a_canvas_of_another_size_are_centred_and_fitted_together() {
     assert_eq!((r.x0, r.y0, r.x1, r.y1), (270, 270, 290, 290));
 }
 
+#[test]
+fn a_puppet_bends_the_layer_by_its_pins_as_one_undo_step() {
+    use crate::transform::{TransformHandle, TransformKind};
+    let Some(s) = session(200, 200) else { return };
+    no_streamline(&s);
+    s.set_brush_size(0.3);
+    // a bar across the canvas
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 100.0, 0.0)]);
+    s.stroke_add((1..14).map(|k| sample(30.0 + 10.0 * k as f32, 100.0, 10.0 * f64::from(k))).collect());
+    s.stroke_end(vec![sample(170.0, 100.0, 150.0)]);
+    assert_eq!(pixel(&s, 160, 100), [0, 0, 0, 255]);
+    s.transform_begin().unwrap();
+    // with no mesh warp, Puppet lays no mesh
+    assert!(s.transform_set_kind(TransformKind::Puppet).unwrap().puppet_edges.is_empty());
+    crate::plugin_warps::puppet_on(&s);
+    let laid = s.transform_set_kind(TransformKind::Puppet).unwrap();
+    assert!(!laid.puppet_edges.is_empty() && laid.pins.is_empty() && laid.selected_pin == -1);
+    // a tap off the mesh puts no pin; on it, a pin each
+    assert!(s.transform_puppet_tap(100.0, 20.0).unwrap().pins.is_empty());
+    s.transform_puppet_tap(40.0, 100.0);
+    let pinned = s.transform_puppet_tap(160.0, 100.0).unwrap();
+    assert_eq!(pinned.pins.len(), 6);
+    assert_eq!(pinned.selected_pin, 1);
+    // the far one dragged down
+    s.transform_grab(TransformHandle::Pin { index: 1 }, 160.0, 100.0);
+    s.transform_drag(160.0, 130.0);
+    let bent = s.transform_drag(160.0, 160.0).unwrap();
+    assert!((bent.pins[3] - 160.0).abs() < 0.5 && (bent.pins[4] - 160.0).abs() < 0.5, "{:?}", bent.pins);
+    assert!(s.transform_release().unwrap().can_undo);
+    // the chosen pin tapped again goes, and comes back undone
+    assert_eq!(s.transform_puppet_tap(160.0, 160.0).unwrap().pins.len(), 3);
+    assert_eq!(s.transform_apply(crate::transform::TransformAction::Undo).unwrap().pins.len(), 6);
+    s.transform_end(true);
+    assert_eq!(pixel(&s, 40, 100), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 160, 160), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 165, 100), [255, 255, 255, 255]);
+    s.undo();
+    assert_eq!(pixel(&s, 165, 100), [0, 0, 0, 255]);
+    assert_eq!(pixel(&s, 160, 160), [255, 255, 255, 255]);
+}
+
 /// A stand-in for the window the render loop draws into: an offscreen texture of the session's
 /// window size, giving images as `mode` says ([`READY`], [`NO_IMAGE`], [`OUTDATED`],
 /// [`SUBOPTIMAL`]), counting the configures asked for; the screen's refreshes as `refreshes` has
@@ -23611,6 +25436,7 @@ impl crate::frame_loop::Screen for TestScreen {
         _gpu: &Gpu,
         _size: (u32, u32),
         _wide: bool,
+        _hdr: bool,
     ) -> Option<(procraft_gpu::wgpu::TextureFormat, procraft_engine::profile::Profile)> {
         self.configures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some((procraft_gpu::wgpu::TextureFormat::Rgba8Unorm, procraft_engine::profile::Profile::Srgb))

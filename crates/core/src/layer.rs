@@ -64,3 +64,14 @@ pub(crate) fn create_surface(instance: &wgpu::Instance, layer: &Layer) -> Result
     // SAFETY: a live CAMetalLayer (checked as it was handed over), which the surface retains too
     unsafe { instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())
 }
+
+/// Sends what a configure just set on the layer (its colour space, and whether it shows the
+/// screen's extended range) on to the screen now. They are set from the render thread, which has
+/// no run loop: Core Animation only commits such changes "when the thread's run loop next
+/// iterates", so left alone they reach the screen late or not at all, and an HDR canvas shows no
+/// light above white until it does.
+pub(crate) fn commit() {
+    let Some(transaction) = AnyClass::get(c"CATransaction") else { return };
+    // SAFETY: `+[CATransaction flush]`, a class method without arguments, which any thread may call
+    let _: () = unsafe { msg_send![transaction, flush] };
+}

@@ -318,8 +318,11 @@ struct BrushLibrary: View {
 
     var body: some View {
         let shown = model.shownSet == CanvasModel.recentSet || model.brushSets.indices.contains(model.shownSet)
+        // drawing with a lasso or light: their settings in place of the brushes
+        if model.drawMode != .brush {
+            DrawModeSettings(model: model, arrowX: arrowX)
         // every library's card, or a library with no sets yet: a panel of their own
-        if model.showingLibraries || model.brushSets.isEmpty || !shown {
+        } else if model.showingLibraries || model.brushSets.isEmpty || !shown {
             LibrariesPanel(model: model, arrowX: arrowX, origin: origin, screen: screen, floating: floating)
         } else {
             library
@@ -344,6 +347,7 @@ struct BrushLibrary: View {
             if let floating {
                 FloatingTopStrip(frame: floating)
             }
+            DrawModeBar(model: model)
             PanelHeader(
                 title: model.libraryName, start: 20, end: 12, height: 52,
                 onTitle: { withAnimation(Motion.menuOpen) { ui.titleMenu.toggle() } },
@@ -433,6 +437,9 @@ struct BrushLibrary: View {
         .onPreferenceChange(BrushListFrame.self) { ui.brushListFrame = $0 }
         .overlay(alignment: .topLeading) { LibraryMenus(model: model, ui: ui, origin: origin, screen: screen) }
         .overlay(alignment: .topLeading) { DragGhost(model: model, ui: ui) }
+        // brushes picked are let go as the library closes, or another set shows
+        .onDisappear { model.pickedBrushes.removeAll() }
+        .onChange(of: model.shownSet) { _, _ in model.pickedBrushes.removeAll() }
         .fileImporter(isPresented: $ui.importing, allowedContentTypes: [.item]) { result in
             if case let .success(url) = result {
                 model.importBrushes(from: url)
@@ -469,6 +476,17 @@ struct BrushLibrary: View {
         }
         #endif
     }
+}
+
+/// A word in the header's place for the plus while brushes are picked.
+private func pickedButton(_ label: String, width: CGFloat, action: @escaping () -> Void) -> some View {
+    Text(verbatim: label)
+        .font(.system(size: 15))
+        .foregroundStyle(swipeInk)
+        .lineLimit(1)
+        .frame(width: width, height: 32)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
 }
 
 /// The library's search field: a magnifier, what is typed, and a button clearing it.
@@ -1055,16 +1073,6 @@ private struct SetRow: View {
                 model.showSet(index)
             }
         }
-        .modifier(HeldDrag(
-            ui: ui,
-            began: { at in
-                ui.setMenu = nil
-                let frame = ui.setFrames[index] ?? .zero
-                ui.grab = CGPoint(x: at.x - frame.minX, y: at.y - frame.minY)
-                ui.draggedSet = index
-            },
-            ended: { ui.dropSet(model) }
-        ))
     }
 }
 
@@ -1502,7 +1510,7 @@ private struct LibraryMenus: View {
             }
             if ui.titleMenu {
                 MenuDismissal { closeAll() }
-                let at = kept(libraryTitleMenuAt, CGSize(width: glassMenuWidth, height: LibraryTitleMenu.height), below: menuTop)
+                let at = kept(libraryTitleMenuAt(model), CGSize(width: glassMenuWidth, height: LibraryTitleMenu.height), below: menuTop)
                 LibraryTitleMenu(model: model) { closeAll() }
                     .offset(x: at.x, y: at.y)
                     .menuTransition(.topLeading)
@@ -1600,7 +1608,7 @@ private struct LibraryMenus: View {
         let height: CGFloat = 14 + (recent ? 40 : 80) + 23 + 40
         // the plus's lower right corner: 12 in from the header's right, its 40 under the header's
         // first 12 (the header starting under the arrow)
-        let plus = CGPoint(x: libraryWidth - 12, y: Pc.arrowHeight + 12 + 40)
+        let plus = CGPoint(x: libraryWidth - 12, y: Pc.arrowHeight + drawModesHeight(model) + 12 + 40)
         let spot = kept(CGPoint(x: plus.x - glassMenuWidth, y: plus.y), CGSize(width: glassMenuWidth, height: height))
         return GlassMenu(overPanel: true) {
             // the Recent set holds no brushes of its own to add one to
@@ -1713,12 +1721,62 @@ func libraryButton(_ tool: ToolKind) -> Int {
     switch tool {
     case .erase: 2
     case .smudge: 3
-    case .paint: 4
+    // the light tool is the Pen drawing with light: its button
+    case .paint, .light: 4
     }
 }
 
 /// The library's width.
 let brushLibraryWidth = libraryWidth
+
+/// The library's top, over its title: how the Pen or Eraser draws (Brush, Lasso, Light), as a
+/// segmented control. Not there for the Smudge, or with only Brush to choose.
+struct DrawModeBar: View {
+    let model: CanvasModel
+
+    var body: some View {
+        let modes = model.drawModes
+        if !modes.isEmpty {
+            Picker("Draw with", selection: Binding(get: { model.drawMode }, set: { model.chooseDrawMode($0) })) {
+                ForEach(modes, id: \.self) { mode in
+                    Text(verbatim: mode.name).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .environment(\.colorScheme, Look.shared.light ? .light : .dark)
+            .padding(.horizontal, 12)
+            .frame(height: drawModesHeight(model), alignment: .bottom)
+        }
+    }
+}
+
+/// How tall the library's Brush | Lasso | Light row is (none when it isn't there): what is under
+/// it moves down as far.
+func drawModesHeight(_ model: CanvasModel) -> CGFloat {
+    model.drawModes.isEmpty ? 0 : 44
+}
+
+/// The library while the Pen or Eraser draws with its lasso or with light: their settings under
+/// the Brush | Lasso | Light row.
+private struct DrawModeSettings: View {
+    let model: CanvasModel
+    let arrowX: CGFloat
+
+    var body: some View {
+        Popover(width: libraryWidth, arrowX: arrowX) {
+            DrawModeBar(model: model)
+            Group {
+                if model.drawMode == .light {
+                    LightSettingsView(model: model)
+                } else {
+                    LassoSettingsView(model: model)
+                }
+            }
+            .padding(.top, 14)
+        }
+    }
+}
 
 extension CanvasModel {
     /// What the library's sample strokes are tinted with as a plugin colours them by the colour

@@ -2,7 +2,7 @@
 //! resampled; the canvas from before is kept, history and all, and undoing past the new canvas's
 //! first step puts it back.
 
-use procraft_engine::crop::{crop, resample};
+use procraft_engine::crop::{crop, resample, resample_pixelated};
 use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu};
 
@@ -40,7 +40,8 @@ enum Across {
 }
 
 /// The canvas cropped as `c` says from `old` (`sw` × `sh`), its layers `ids` taken `across` so;
-/// `doc` is the document cropped, `budget` its textures' budget.
+/// `doc` is the document cropped, `budget` its textures' budget. With `pixelated`, for pixel art,
+/// what is resized or turned keeps its pixels' hard edges.
 #[allow(clippy::too_many_arguments)]
 fn cropped(
     gpu: &Gpu,
@@ -51,19 +52,23 @@ fn cropped(
     (sw, sh): (u32, u32),
     budget: u64,
     across: Across,
+    pixelated: bool,
 ) -> Result<Box<Canvas>, procraft_gpu::GpuError> {
     let mut canvas = Box::new(Canvas::unfilled(gpu, doc)?);
     canvas.set_resident_budget(budget);
     for &id in ids {
         let m = c.to_old;
-        let room = across == Across::Gpu && canvas.has_room();
+        // an HDR canvas's go across on the GPU whatever the room (read back they would be cut at
+        // white): those past the budget are parked, as half floats, as it renders
+        let room = across == Across::Gpu && (canvas.is_hdr() || canvas.has_room());
         let on_gpu = room
             && match c.whole_pixels() {
                 Some(offset) => canvas.copy_layer_from(gpu, old, id, offset),
-                None => canvas.resample_layer_from(gpu, old, id, [m.a, m.b, m.c, m.d, m.e, m.f]),
+                None => canvas.magnify_layer_from(gpu, old, id, [m.a, m.b, m.c, m.d, m.e, m.f], pixelated),
             };
         if !on_gpu {
-            let pixels = resample(&old.read_layer(gpu, id)?, sw, sh, c);
+            let read = old.read_layer(gpu, id)?;
+            let pixels = if pixelated { resample_pixelated(&read, sw, sh, c) } else { resample(&read, sw, sh, c) };
             // past what fits, kept compressed until needed
             if room {
                 canvas.upload_layer(gpu, id, &pixels)?;
@@ -108,6 +113,27 @@ impl CanvasSession {
         new_width: u32,
         new_height: u32,
     ) -> bool {
+        self.crop_canvas_as(x, y, width, height, angle, resample_to, new_width, new_height, false)
+    }
+}
+
+impl CanvasSession {
+    /// [`CanvasSession::crop_canvas`]; with `pixelated`, for pixel art, what is resized or turned
+    /// takes for each pixel the one old pixel its middle falls in, where it is otherwise smoothed
+    /// between the four around it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn crop_canvas_as(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        angle: f32,
+        resample_to: bool,
+        new_width: u32,
+        new_height: u32,
+        pixelated: bool,
+    ) -> bool {
         self.text_end(true);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -142,10 +168,12 @@ impl CanvasSession {
         // that fails, or the memory free can't hold them twice, each layer is worked out on the
         // CPU and kept compressed until needed
         let budget = old.resident_budget();
-        let per = u64::from(c.width) * u64::from(c.height) * 4;
-        let resident = ids.len().min(procraft_gpu::most_resident(budget, c.width, c.height)) as u64;
+        let pixel_bytes = if old.is_hdr() { procraft_engine::hdr::HDR_PIXEL as u32 } else { 4 };
+        let per = u64::from(c.width) * u64::from(c.height) * u64::from(pixel_bytes);
+        let resident = ids.len().min(procraft_gpu::most_resident(budget, c.width, c.height, pixel_bytes)) as u64;
         let short = |layers: u64| crate::device::short_of_memory((layers + CANVAS_LAYERS) * per);
-        let ways: Vec<Across> = [(Across::Gpu, !short(resident)), (Across::Compressed, !short(0))]
+        // (an HDR canvas's layers go across on the GPU only: read back they would be cut at white)
+        let ways: Vec<Across> = [(Across::Gpu, !short(resident)), (Across::Compressed, !short(0) && !old.is_hdr())]
             .into_iter()
             .filter(|w| w.1)
             .map(|w| w.0)
@@ -159,7 +187,9 @@ impl CanvasSession {
         // as it should: a texture the GPU had no memory for would otherwise come over empty
         let mut made = Err(procraft_gpu::GpuError::Failed("not tried".to_owned()));
         for way in ways {
-            made = gpu.checked(|| cropped(gpu, old, &doc, &ids, &c, (sw, sh), budget, way)).and_then(|made| made);
+            made = gpu
+                .checked(|| cropped(gpu, old, &doc, &ids, &c, (sw, sh), budget, way, pixelated))
+                .and_then(|made| made);
             match &made {
                 Ok(_) | Err(procraft_gpu::GpuError::Lost) => break,
                 Err(e) => {

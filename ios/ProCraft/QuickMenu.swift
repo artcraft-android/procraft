@@ -57,14 +57,108 @@ private let deleteHeight: CGFloat = 42
 private let deleteIn: CGFloat = 4.5
 private let deleteFill = Color(argb: 0xFFFE_4346)
 
-/// The QuickMenu: its name in the middle of where it was opened, its six actions round it; an
-/// action tapped runs and closes it, a tap anywhere else closes it, and a button held lists the
+// a touch on the ring (as measured): the button the finger is at is blue and a fifth larger, and
+// follows the finger past it with resistance, never further than its reach
+private let pullGive: CGFloat = 0.55
+private let pullReach: CGFloat = 220
+/// A touch landing no further than this from the ring is on it; one that has gone this far is no
+/// tap; a button held still this long lists what it can be set to.
+private let ringGrab: CGFloat = 30
+private let ringTapSlop: CGFloat = 10
+private let ringHold: TimeInterval = 0.4
+/// A finger setting off from the middle has chosen its way once it is this far from where it
+/// landed. The finger that opened the menu by sliding off is further than `ringSlidOpen` from
+/// there when the menu first sees it (the core's tap slop is 24); one held still is nearer.
+private let ringFlick: CGFloat = 12
+private let ringSlidOpen: CGFloat = 22
+
+/// How far `p` is from a button (or the middle) whose centre is `c`: nothing on it.
+private func ringGap(_ p: CGPoint, _ c: CGPoint) -> CGFloat {
+    hypot(max(abs(p.x - c.x) - ringWidth / 2, 0), max(abs(p.y - c.y) - ringHeight / 2, 0))
+}
+
+/// The button a finger at `p` is at, of the first `count` round `centre`: the nearest, however far
+/// past it the finger has gone; none in the middle.
+private func ringButton(at p: CGPoint, centre: CGPoint, count: Int) -> Int? {
+    var nearest: Int?
+    var gap = ringGap(p, centre)
+    for i in 0 ..< min(count, ringSlots.count) {
+        let g = ringGap(p, CGPoint(x: centre.x + ringSlots[i].x, y: centre.y + ringSlots[i].y))
+        if g < gap {
+            gap = g
+            nearest = i
+        }
+    }
+    return nearest
+}
+
+/// The button a finger gone `v` from the middle is making for: the one it is on, else the one most
+/// nearly that way.
+private func ringButton(towards v: CGSize, count: Int) -> Int? {
+    let n = min(count, ringSlots.count)
+    if let on = (0 ..< n).first(where: { ringGap(CGPoint(x: v.width, y: v.height), ringSlots[$0]) == 0 }) {
+        return on
+    }
+    let far = hypot(v.width, v.height)
+    guard far > 0 else { return nil }
+    var nearest: Int?
+    var most = -CGFloat.infinity
+    for i in 0 ..< n {
+        let slot = ringSlots[i]
+        let along = (v.width * slot.x + v.height * slot.y) / (far * hypot(slot.x, slot.y))
+        if along > most {
+            most = along
+            nearest = i
+        }
+    }
+    return nearest
+}
+
+/// A pull of (`dx`, `dy`) as a button follows it: less and less the further the finger goes.
+private func ringResist(_ dx: CGFloat, _ dy: CGFloat) -> CGSize {
+    let far = hypot(dx, dy)
+    guard far > 0 else { return .zero }
+    let k = pullReach * (1 - 1 / (far * pullGive / pullReach + 1)) / far
+    return CGSize(width: dx * k, height: dy * k)
+}
+
+/// How far a finger at `p` pulls the button whose centre is `c`: towards the finger from the line
+/// along the button's middle.
+private func ringPull(_ p: CGPoint, _ c: CGPoint) -> CGSize {
+    let half = (ringWidth - ringHeight) / 2
+    return ringResist(p.x - min(max(p.x, c.x - half), c.x + half), p.y - c.y)
+}
+
+/// A touch on the open QuickMenu.
+private struct RingTouch {
+    /// Where it landed, and where the menu first saw it (the finger that opened the menu had
+    /// landed on the canvas before).
+    let from: CGPoint
+    let seen: CGPoint
+    /// It landed off the ring (or with a list open): lifted, it closes what is open.
+    let outside: Bool
+    /// It is the finger that opened the menu, still down on the canvas.
+    let canvas: Bool
+    /// It landed in the middle (or opened the menu, which is round where it landed): it lights
+    /// the button it sets off towards, which goes the way it is pulled.
+    let flick: Bool
+    /// It has gone past a tap's slop.
+    var moved = false
+    /// Held on a button, it opened the button's picker: it does no more.
+    var spent = false
+}
+
+/// The QuickMenu: its name in the middle of where it was opened, its six actions round it. A
+/// finger slid to an action lights it, and let go there runs it and closes the menu (so does a
+/// tap on one); let go in the middle it does nothing. The finger that opened it by sliding off
+/// where it landed goes straight on: the action it set off towards is lit as the menu shows. A
+/// tap anywhere else closes it, a tap on the middle lists the menus, and a button held lists the
 /// actions it can be set to.
 struct QuickMenuView: View {
     let model: CanvasModel
     let screen: CGSize
 
-    /// Where it shows, kept while it draws back in; how far its buttons have spread.
+    /// Where it shows, kept while it draws back in; how far it has grown.
     @State private var at: CGPoint?
     @State private var shown: CGFloat = 0
     /// The button whose action is being chosen.
@@ -73,6 +167,12 @@ struct QuickMenuView: View {
     @State private var menusOpen = false
     @State private var fresh: [Int] = []
     @State private var marked: Int?
+    /// The touch on it, the button the finger is at, and how far the finger has pulled it.
+    @State private var touch: RingTouch?
+    @State private var lit: Int?
+    @State private var pull: CGSize = .zero
+    /// The wait for a button held still.
+    @State private var holding: DispatchWorkItem?
 
     private func closeMenus() {
         menusOpen = false
@@ -90,13 +190,157 @@ struct QuickMenuView: View {
         }
     }
 
+    /// The ring's middle, opened at `point`: kept on the screen.
+    private func ringCentre(_ point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: min(max(point.x, ringReachX + ringWidth / 2), screen.width - ringReachX - ringWidth / 2),
+            y: min(max(point.y, ringReachY + ringHeight), screen.height - ringReachY - ringHeight)
+        )
+    }
+
+    private var buttons: Int {
+        min(QuickMenus.shared.menu?.slots.count ?? 0, ringSlots.count)
+    }
+
+    /// No touch on it any more, and no button lit (at once, not drawn back).
+    private func dropTouch() {
+        holding?.cancel()
+        holding = nil
+        touch = nil
+        var still = Transaction()
+        still.disablesAnimations = true
+        withTransaction(still) {
+            lit = nil
+            pull = .zero
+        }
+    }
+
+    /// A touch lands at `p`.
+    private func touchLanded(_ p: CGPoint, centre: CGPoint) {
+        holding?.cancel()
+        holding = nil
+        guard choosing == nil, !menusOpen else {
+            touch = RingTouch(from: p, seen: p, outside: true, canvas: false, flick: false)
+            return
+        }
+        let gaps = ([.zero] + ringSlots.prefix(buttons)).map {
+            ringGap(p, CGPoint(x: centre.x + $0.x, y: centre.y + $0.y))
+        }
+        let outside = (gaps.min() ?? 0) > ringGrab
+        touch = RingTouch(from: p, seen: p, outside: outside, canvas: false, flick: ringGap(p, centre) == 0)
+        guard !outside, let i = ringButton(at: p, centre: centre, count: buttons) else { return }
+        // kept still on a button, it lists what the button can be set to
+        let wait = DispatchWorkItem {
+            guard let held = touch, held.from == p, !held.moved, !held.spent, lit == i else { return }
+            touch?.spent = true
+            lit = nil
+            pull = .zero
+            choosing = i
+        }
+        holding = wait
+        DispatchQueue.main.asyncAfter(deadline: .now() + ringHold, execute: wait)
+    }
+
+    /// The touch is at `p`: the button there lights and goes after the finger.
+    private func touchSlid(_ p: CGPoint, centre: CGPoint) {
+        guard var slid = touch, !slid.outside, !slid.spent else { return }
+        if !slid.moved, hypot(p.x - slid.seen.x, p.y - slid.seen.y) > ringTapSlop {
+            slid.moved = true
+            touch = slid
+            holding?.cancel()
+            holding = nil
+        }
+        // the finger that opened the menu held still lights nothing until it sets off
+        guard slid.moved || !slid.canvas else { return }
+        if slid.flick {
+            // from the middle: the button it makes for, pulled the way it goes
+            let gone = CGSize(width: p.x - slid.from.x, height: p.y - slid.from.y)
+            let i = hypot(gone.width, gone.height) < ringFlick ? nil : ringButton(towards: gone, count: buttons)
+            lit = i
+            pull = i == nil ? .zero : ringResist(gone.width, gone.height)
+        } else {
+            let i = ringButton(at: p, centre: centre, count: buttons)
+            lit = i
+            pull = i.map { ringPull(p, CGPoint(x: centre.x + ringSlots[$0].x, y: centre.y + ringSlots[$0].y)) } ?? .zero
+        }
+    }
+
+    /// The touch lifts: on a button, the button runs and the menu goes (the button still lit).
+    private func touchLifted(opened point: CGPoint, centre: CGPoint) {
+        holding?.cancel()
+        holding = nil
+        guard let lifted = touch else { return }
+        touch = nil
+        if lifted.outside {
+            tapOutside()
+        } else if lifted.spent {
+            return
+        } else if let i = lit {
+            model.quickMenuAt = nil
+            model.runQuickSlot(i, at: point)
+        } else if !lifted.moved, !lifted.canvas, ringGap(lifted.from, centre) == 0 {
+            // the middle tapped lists the menus
+            menusOpen = true
+            marked = QuickMenus.shared.active
+        }
+    }
+
+    /// The finger that opened the menu, still down on the canvas, slides to a button and lets go.
+    private func canvasFinger(_ step: FingerStep?) {
+        guard let at = model.quickMenuAt else { return }
+        let centre = ringCentre(at)
+        switch step {
+        case let .slid(p):
+            if touch == nil, choosing == nil, !menusOpen {
+                // sliding off it opened the menu, and is on its way already
+                touch = RingTouch(
+                    from: at, seen: p, outside: false, canvas: true, flick: true,
+                    moved: hypot(p.x - at.x, p.y - at.y) > ringSlidOpen
+                )
+            }
+            if touch?.canvas == true {
+                touchSlid(p, centre: centre)
+            }
+        case .lifted:
+            if touch?.canvas == true {
+                touchLifted(opened: at, centre: centre)
+            }
+        case .takenBack, nil:
+            if touch?.canvas == true {
+                dropTouch()
+            }
+        }
+    }
+
+    private func touches(_ point: CGPoint, centre: CGPoint) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+            .onChanged { drag in
+                // another finger with the one that opened it still down: they meant the canvas
+                if model.quickMenuHeld {
+                    model.loneFinger(.takenBack)
+                }
+                guard model.quickMenuAt != nil else { return }
+                // (a touch the system took back never lifted: the next one starts afresh)
+                if touch == nil || touch?.canvas == true || touch?.from != drag.startLocation {
+                    touchLanded(drag.startLocation, centre: centre)
+                }
+                touchSlid(drag.location, centre: centre)
+            }
+            .onEnded { drag in
+                guard touch?.from == drag.startLocation else { return }
+                touchSlid(drag.location, centre: centre)
+                touchLifted(opened: point, centre: centre)
+            }
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             if let at {
+                let centre = ringCentre(at)
                 Color.clear
                     .contentShape(Rectangle())
-                    .onTapGesture(perform: tapOutside)
-                ring(at)
+                    .gesture(touches(at, centre: centre))
+                ring(at, centre: centre)
                     .onAppear {
                         #if DEBUG
                             showForCapture()
@@ -111,6 +355,7 @@ struct QuickMenuView: View {
         .allowsHitTesting(model.quickMenuAt != nil)
         .onChange(of: model.quickMenuAt, initial: true) { _, target in
             if let target {
+                dropTouch()
                 if at != nil {
                     // back open while it drew in
                     withAnimation(Motion.quickMenuOpen) {
@@ -118,7 +363,12 @@ struct QuickMenuView: View {
                     }
                 }
                 at = target
+                // the finger that slid off to open it is on its way to a button already
+                canvasFinger(model.quickMenuFinger)
             } else if at != nil {
+                holding?.cancel()
+                holding = nil
+                touch = nil
                 choosing = nil
                 closeMenus()
                 withAnimation(Motion.quickMenuClose, completionCriteria: .logicallyComplete) {
@@ -126,9 +376,14 @@ struct QuickMenuView: View {
                 } completion: {
                     if model.quickMenuAt == nil {
                         at = nil
+                        lit = nil
+                        pull = .zero
                     }
                 }
             }
+        }
+        .onChange(of: model.quickMenuFinger) { _, step in
+            canvasFinger(step)
         }
     }
 
@@ -146,39 +401,33 @@ struct QuickMenuView: View {
         }
     #endif
 
-    private func ring(_ point: CGPoint) -> some View {
-        // kept on the screen
-        let centre = CGPoint(
-            x: min(max(point.x, ringReachX + ringWidth / 2), screen.width - ringReachX - ringWidth / 2),
-            y: min(max(point.y, ringReachY + ringHeight), screen.height - ringReachY - ringHeight)
-        )
+    private func ring(_ point: CGPoint, centre: CGPoint) -> some View {
         let menus = QuickMenus.shared
         let slots = menus.menu?.slots ?? []
+        let grown = Motion.quickMenuStartScale + (1 - Motion.quickMenuStartScale) * shown
         return ZStack(alignment: .topLeading) {
-            // tapped, it lists the menus
-            Text(verbatim: menus.menu?.name ?? "")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(titleInk)
-                .lineLimit(1)
-                .frame(width: ringWidth, height: ringHeight)
-                .background(Capsule().fill(titleFill))
-                .contentShape(Capsule())
-                .onTapGesture {
-                    guard choosing == nil else { return }
-                    if menusOpen {
-                        closeMenus()
-                    } else {
-                        menusOpen = true
-                        marked = menus.active
+            // the ring grows out of its middle as it fades in; the touches on it are the menu's
+            ZStack(alignment: .topLeading) {
+                Text(verbatim: menus.menu?.name ?? "")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(titleInk)
+                    .lineLimit(1)
+                    .frame(width: ringWidth, height: ringHeight)
+                    .background(Capsule().fill(titleFill))
+                    .offset(x: centre.x - ringWidth / 2, y: centre.y - ringHeight / 2)
+                ForEach(Array(slots.indices), id: \.self) { i in
+                    if ringSlots.indices.contains(i) {
+                        button(i, centre: centre)
                     }
                 }
-                .opacity(shown)
-                .offset(x: centre.x - ringWidth / 2, y: centre.y - ringHeight / 2)
-            ForEach(Array(slots.indices), id: \.self) { i in
-                if ringSlots.indices.contains(i) {
-                    button(i, at: point, centre: centre)
-                }
             }
+            .frame(width: screen.width, height: screen.height, alignment: .topLeading)
+            .scaleEffect(
+                grown,
+                anchor: UnitPoint(x: centre.x / max(screen.width, 1), y: centre.y / max(screen.height, 1))
+            )
+            .opacity(shown)
+            .allowsHitTesting(false)
             if let i = choosing, ringSlots.indices.contains(i) {
                 let top = centre.y + ringSlots[i].y - ringHeight / 2
                 ActionPicker(
@@ -227,34 +476,27 @@ struct QuickMenuView: View {
         }
     }
 
-    private func button(_ i: Int, at point: CGPoint, centre: CGPoint) -> some View {
-        Text(verbatim: model.quickSlotLabel(i))
+    /// Button `i` in its place: blue and larger with the finger at it, and pulled after the finger.
+    private func button(_ i: Int, centre: CGPoint) -> some View {
+        let on = lit == i
+        let pulled = on ? pull : .zero
+        return Text(verbatim: model.quickSlotLabel(i))
             .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(buttonInk)
+            .foregroundStyle(on ? Color.white : buttonInk)
             .lineLimit(1)
             .multilineTextAlignment(.center)
             .frame(width: ringWidth, height: ringHeight)
-            .background(Capsule().fill(buttonFill))
-            .overlay(Capsule().strokeBorder(buttonEdge, lineWidth: 1))
-            .contentShape(Capsule())
-            .onTapGesture {
-                if menusOpen {
-                    closeMenus()
-                } else {
-                    model.quickMenuAt = nil
-                    model.runQuickSlot(i, at: point)
-                }
-            }
-            .onLongPressGesture(minimumDuration: 0.4) {
-                if !menusOpen {
-                    choosing = i
-                }
-            }
-            .opacity(shown)
+            .background(Capsule().fill(on ? Pc.accent : buttonFill))
+            .overlay(Capsule().strokeBorder(on ? Color.clear : buttonEdge, lineWidth: 1))
+            .scaleEffect(on ? Motion.quickMenuLitScale : 1)
+            .offset(pulled)
+            .animation(Motion.quickMenuFollow, value: on)
+            .animation(Motion.quickMenuFollow, value: pulled)
             .offset(
-                x: centre.x + ringSlots[i].x * shown - ringWidth / 2,
-                y: centre.y + ringSlots[i].y * shown - ringHeight / 2
+                x: centre.x + ringSlots[i].x - ringWidth / 2,
+                y: centre.y + ringSlots[i].y - ringHeight / 2
             )
+            .zIndex(on ? 1 : 0)
     }
 }
 
@@ -324,10 +566,19 @@ private struct ActionPicker: View {
         }
     }
 
+    /// The actions and adjustments listed, less a built-in plugin's that is off.
+    private var listed: [QuickAction?] {
+        quickActionsListed().filter { $0.map(PluginsModel.shared.shows) ?? true }
+    }
+
+    private var adjustmentsListed: [QuickAction] {
+        quickAdjustmentsListed().filter(PluginsModel.shared.shows)
+    }
+
     private var rows: [PickerRow] {
         switch page {
         case .actions:
-            quickActionsListed().map { a in
+            listed.map { a in
                 guard let a else {
                     return PickerRow(label: "Adjustments", more: true) { page = .adjustments }
                 }
@@ -341,7 +592,7 @@ private struct ActionPicker: View {
                 return PickerRow(label: label, more: false) { onPick(a) }
             }
         case .adjustments:
-            quickAdjustmentsListed().map { a in
+            adjustmentsListed.map { a in
                 PickerRow(label: quickActionLabel(action: a), more: false) { onPick(a) }
             }
         case .brushSets:
@@ -362,9 +613,9 @@ private struct ActionPicker: View {
     private var chosen: Int {
         switch page {
         case .actions:
-            quickActionsListed().firstIndex(of: current) ?? -1
+            listed.firstIndex(of: current) ?? -1
         case .adjustments:
-            quickAdjustmentsListed().firstIndex(of: current) ?? 0
+            adjustmentsListed.firstIndex(of: current) ?? 0
         case .brushSets:
             Int(brush?.set ?? 0)
         case .brushes:

@@ -573,7 +573,7 @@ fn blur_across_cell(id: vec2<u32>) -> vec4<f32> {
     // sharpened: the difference from the blur added back
     if (st.sharpen > 0.0) {
         let was = carry_at(c.y * g + c.x);
-        out = clamp(was + st.sharpen * (was - out), vec4<f32>(0.0), vec4<f32>(1.0));
+        out = clamp(was + st.sharpen * (was - out), vec4<f32>(0.0), vec4<f32>(CEILING, CEILING, CEILING, 1.0));
         out = vec4<f32>(min(out.rgb, vec3<f32>(out.a)), out.a);
     }
     return out;
@@ -875,7 +875,9 @@ fn deposit(d: Dab, p: vec2<i32>, found: Found) -> Deposit {
     // mirrored or turned by right angles, round each pixel as the stamp does the one it lands on.
     let o = abs(p - vec2<i32>(floor(d.center)));
     let h = dither(u32(min(o.x, o.y)), u32(max(o.x, o.y)), d.dither);
-    dep.out = clamp(kept_paint(out, w) + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0));
+    // (rounded at random where the window keeps 8 bits a channel: see DITHER; an HDR canvas's
+    // colour keeps its light above white)
+    dep.out = clamp(kept_paint(out, w) + DITHER * (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(CEILING, CEILING, CEILING, 1.0));
     dep.laid = true;
     return dep;
 }
@@ -958,7 +960,7 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
             // away, or without either wherever it is less than full. The paint itself, blended
             // once more with what was under it (nothing shows where the layer was empty)
             let full = select(1.0, built, st.grain_once > 0.5 || st.dual != 0u);
-            let held = clamp(own, vec4<f32>(0.0), vec4<f32>(1.0));
+            let held = clamp(own, vec4<f32>(0.0), vec4<f32>(CEILING, CEILING, CEILING, 1.0));
             let burnt = vec4<f32>(unpremultiply(blend(was, held, st.burnt_blend)) * held.a, held.a);
             own = mix(held, burnt, clamp(st.burnt * abs(full - a), 0.0, 1.0));
         }
@@ -992,7 +994,7 @@ fn synthesized(p: vec2<i32>) -> vec4<f32> {
     out = mix(was, out, selected_at(p));
     // dithered the same each time it is put together again
     let h = dither(u32(p.x), u32(p.y), 0u);
-    return clamp(kept_paint(out, was) + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0));
+    return clamp(kept_paint(out, was) + DITHER * (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(CEILING, CEILING, CEILING, 1.0));
 }
 
 // a number in 0..1 that looks random, from three

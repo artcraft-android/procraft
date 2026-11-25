@@ -1,5 +1,6 @@
 //! Crop and Resize as it is edited, the same in every app: the rectangle kept (canvas pixels), its
-//! turn, the size it becomes (resampled, or the rectangle's), the DPI, and the rules a drag on the
+//! turn, the size it becomes (resampled, or the rectangle's), whether that is pixel art's way
+//! (Pixelated: nothing blended), the DPI, and the rules a drag on the
 //! frame follows: which part a press takes, snapping to the canvas's sides and middle, a locked
 //! aspect following the width. The app draws the frame and the settings; Done crops (crop.rs).
 
@@ -56,6 +57,8 @@ pub struct CropShown {
     pub size_height: u32,
     pub aspect_locked: bool,
     pub snapping: bool,
+    /// For pixel art: what is resized or turned keeps whole pixels, nothing blended.
+    pub pixelated: bool,
     pub dpi: f32,
     /// The frame's corners in the window (x, y each: top left, top right, bottom right, bottom
     /// left), turned with the crop.
@@ -84,6 +87,7 @@ pub(crate) struct CropEdit {
     size: (u32, u32),
     aspect_locked: bool,
     snapping: bool,
+    pixelated: bool,
     dpi: f32,
     /// A drag on the frame: what it took, the rectangle then, where it began (canvas pixels) and
     /// how far (canvas pixels) the frame snaps; and where the touch is now (window pixels).
@@ -221,8 +225,8 @@ impl CropEdit {
 #[uniffi::export]
 impl CanvasSession {
     /// Starts Crop and Resize (again): the whole canvas kept, unturned, at its size, the canvas
-    /// fitted to the window and shrunk so the frame's handles are clear. Aspect lock and snapping
-    /// stay as they were.
+    /// fitted to the window and shrunk so the frame's handles are clear. Aspect lock, snapping
+    /// and Pixelated stay as they were.
     pub fn crop_begin(&self) {
         self.fit_canvas_scaled(CROP_SCALE);
         let mut st = self.shared.lock();
@@ -264,6 +268,7 @@ impl CanvasSession {
             size_height: e.size.1,
             aspect_locked: e.aspect_locked,
             snapping: e.snapping,
+            pixelated: e.pixelated,
             dpi: e.dpi,
             corners,
             readout,
@@ -380,16 +385,24 @@ impl CanvasSession {
         self.shared.lock().crop_edit.aspect_locked = on;
     }
 
+    /// Crop and Resize's Pixelated, for pixel art, from now on: a canvas resized (Resample
+    /// canvas) or turned takes for each pixel the one pixel of the old canvas its middle falls in,
+    /// so its edges stay hard and its colours the ones it had; off, it is smoothed between them.
+    /// (A crop that only cuts or adds room keeps every pixel as it is either way.)
+    pub fn crop_set_pixelated(&self, on: bool) {
+        self.shared.lock().crop_edit.pixelated = on;
+    }
+
     /// Ends Crop and Resize: `keep` crops as set (and sets the DPI), else the canvas goes back as
     /// it was; either way it is fitted to the window again (cancelled, easing back). True if the
     /// canvas changed; false too if it couldn't be cropped ([`CanvasSession::take_failure`]).
     pub fn crop_end(&self, keep: bool) -> bool {
-        let (rect, angle, resample, size, dpi) = {
+        let (rect, angle, resample, size, dpi, pixelated) = {
             let mut st = self.shared.lock();
             let e = &mut st.crop_edit;
             let Some(rect) = e.rect.take() else { return false };
             e.drag = None;
-            (rect, e.angle, e.resample, e.size, e.dpi)
+            (rect, e.angle, e.resample, e.size, e.dpi, e.pixelated)
         };
         if !keep {
             self.ease_to_fit();
@@ -413,7 +426,7 @@ impl CanvasSession {
             && h.round() as u32 == ch
             && angle == 0.0
             && size == (cw, ch);
-        let cropped = !same && self.crop_canvas(l, t, w, h, angle, resample, size.0, size.1);
+        let cropped = !same && self.crop_canvas_as(l, t, w, h, angle, resample, size.0, size.1, pixelated);
         // the DPI too, unless a crop was wanted and couldn't be made: then nothing changes
         if (same || cropped) && (dpi - canvas_dpi).abs() > 0.01 {
             self.set_dpi(dpi);
@@ -440,6 +453,27 @@ mod tests {
         // never inside out
         let e = edit([100.0, 100.0, 500.0, 400.0], Grab::Right, (500.0, 250.0));
         assert_eq!(e.dragged(Vec2::new(50.0, 250.0), canvas), None);
+    }
+
+    #[test]
+    fn the_frame_lands_on_whole_pixels() {
+        // a canvas of pixel art fills the window: a drag is rarely a whole pixel's
+        let canvas = (64.0, 48.0);
+        let e = edit([0.0, 0.0, 64.0, 48.0], Grab::TopLeft, (0.0, 0.0));
+        assert_eq!(e.dragged(Vec2::new(10.3, 5.6), canvas), Some([10.0, 6.0, 64.0, 48.0]));
+        let e = edit([10.0, 6.0, 64.0, 48.0], Grab::Right, (64.0, 20.0));
+        assert_eq!(e.dragged(Vec2::new(50.7, 20.0), canvas), Some([10.0, 6.0, 51.0, 48.0]));
+        // moved whole, it keeps its size
+        let e = edit([10.0, 6.0, 51.0, 48.0], Grab::Move, (30.0, 30.0));
+        assert_eq!(e.dragged(Vec2::new(27.6, 31.49), canvas), Some([8.0, 7.0, 49.0, 49.0]));
+        // snapped to the middle of a canvas an odd number of pixels across, and its aspect locked
+        let mut e = edit([0.0, 0.0, 63.0, 48.0], Grab::Right, (63.0, 20.0));
+        e.snapping = true;
+        e.aspect_locked = true;
+        assert_eq!(e.dragged(Vec2::new(31.0, 20.0), (63.0, 48.0)), Some([0.0, 0.0, 32.0, 24.0]));
+        // never thinner than a pixel
+        let e = edit([10.0, 6.0, 51.0, 48.0], Grab::Left, (10.0, 20.0));
+        assert_eq!(e.dragged(Vec2::new(50.6, 20.0), canvas), None);
     }
 
     #[test]

@@ -104,6 +104,9 @@ pub(super) struct Window {
     amount: Option<wgpu::Buffer>,
     before: wgpu::Texture,
     before_view: wgpu::TextureView,
+    /// On an HDR canvas, where the amounts (8 bits a channel) are put together before they go into
+    /// their buffer: `before` holds the layer's half floats, which they can't be copied into.
+    amounts: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// Bytes the work buffer holds (each of the amount's halves as many).
     bytes: u64,
 }
@@ -174,7 +177,9 @@ impl Piece {
     }
 }
 
-/// Bytes a row of a window `width` pixels wide takes (rows start at multiples of [`PLACEMENT`]).
+/// Bytes a row of a window `width` pixels wide takes (rows start at multiples of [`PLACEMENT`]), of
+/// pixels 4 bytes each: an HDR canvas's layer, in half floats, takes [`Canvas::smudge_wide`] times
+/// that (its rows, sizes and places in the window's buffers all so many times these).
 pub(super) fn row_bytes(width: u32) -> u32 {
     (width.max(1) * 4).div_ceil(PLACEMENT) * PLACEMENT
 }
@@ -324,6 +329,12 @@ fn in_buffer(buffer: &wgpu::Buffer, offset: u64, row: u32, rows: u32) -> wgpu::T
 }
 
 impl Canvas {
+    /// How many times 4 bytes a pixel of the layers takes: 1, or 2 on an HDR canvas (half floats).
+    /// A smudge's window keeps the layer's pixels as they are (see `smudge_rgba16f.wgsl`).
+    pub(super) fn smudge_wide(&self) -> u64 {
+        u64::from(self.pixel_bytes() / 4)
+    }
+
     /// The most a smudge stroke's window may take: what a buffer may be and a binding may hold.
     pub(super) fn smudge_room_for(device: &wgpu::Device) -> u64 {
         let limits = device.limits();
@@ -335,7 +346,8 @@ impl Canvas {
     /// [`row_bytes`] apart, within what a binding holds. (Its rows take up to twice its pixels', 256
     /// bytes apart: work cut close to what a binding holds by those alone wasn't laid.)
     fn window_fits(&self, reach: IRect, most: u64) -> bool {
-        let halves = self.smudge.as_ref().map_or(1, |s| s.keeps.halves());
+        // (the biggest of its buffers: the amounts' two halves, or an HDR canvas's pixels)
+        let halves = self.smudge.as_ref().map_or(1, |s| s.keeps.halves()).max(self.smudge_wide());
         window_bytes(reach).saturating_mul(halves) <= most
             && laid_bytes(reach).saturating_mul(halves) <= self.smudge_room
     }
@@ -538,7 +550,7 @@ impl Canvas {
         // that (else as it is, its tiles' parts copied in a row at a time: only a window close to
         // the most a binding holds is that big)
         let room = self.smudge_room;
-        let halves = self.smudge.as_ref().map_or(1, |s| s.keeps.halves());
+        let halves = self.smudge.as_ref().map_or(1, |s| s.keeps.halves()).max(self.smudge_wide());
         let fits = |r: IRect| laid_bytes(r).saturating_mul(halves) <= room;
         let reach = Some(window_reach(reach)).filter(|r| fits(*r)).unwrap_or(reach);
         // past what a binding holds (a piece the stroke couldn't cut smaller): not laid
@@ -765,6 +777,9 @@ impl Canvas {
         }
         let (keeps, side) = (smudge.keeps, smudge.tile);
         let (width, height) = (reach.width(), reach.height());
+        // the layer's pixels as they are: 4 bytes each, or (half floats) `wide` times that
+        let format = layer.texture.format();
+        let wide = format.block_copy_size(None).unwrap_or(4) / 4;
         let row = row_bytes(width);
         let bytes = u64::from(row) * u64::from(height);
         let small = smudge
@@ -780,30 +795,44 @@ impl Canvas {
             let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let window = small.then(|| {
                 // grown in steps, so a stroke that reaches further doesn't make them every frame
-                let most = room / keeps.halves();
+                let most = room / keeps.halves().max(u64::from(wide));
                 let bytes = bytes.next_multiple_of(1 << 20).min(most).max(bytes);
                 let side = |n: u32, of: u32| n.next_multiple_of(256).min(of).max(n);
-                let before =
-                    texture(gpu, "smudge window", side(width, self.width), side(height, self.height), LAYER_FORMAT);
+                let before = texture(gpu, "smudge window", side(width, self.width), side(height, self.height), format);
+                let layer_bytes = bytes * u64::from(wide);
+                let amounts = (format != LAYER_FORMAT && (keeps.amount || keeps.shown)).then(|| {
+                    let t = texture(
+                        gpu,
+                        "smudge window amounts",
+                        side(width, self.width),
+                        side(height, self.height),
+                        LAYER_FORMAT,
+                    );
+                    let view = t.create_view(&wgpu::TextureViewDescriptor::default());
+                    (t, view)
+                });
                 Window {
-                    work: window_buffer(device, "smudge layer", bytes),
-                    grained: keeps.grained.then(|| window_buffer(device, "smudge grained", bytes)),
+                    work: window_buffer(device, "smudge layer", layer_bytes),
+                    grained: keeps.grained.then(|| window_buffer(device, "smudge grained", layer_bytes)),
                     amount: (keeps.amount || keeps.shown)
                         .then(|| window_buffer(device, "smudge amount", bytes * keeps.halves())),
                     before_view: before.create_view(&wgpu::TextureViewDescriptor::default()),
                     before,
+                    amounts,
                     bytes,
                 }
             });
-            let tile = |label| texture(gpu, label, side, side, LAYER_FORMAT);
+            // (the layer's pixels as they are; the amounts' bits as bytes)
+            let tile = |label| texture(gpu, label, side, side, format);
+            let amount_tile = |label| texture(gpu, label, side, side, LAYER_FORMAT);
             let made: Vec<((u32, u32), Tile)> = missing
                 .iter()
                 .map(|&at| {
                     let tile = Tile {
                         before: tile("smudge before"),
                         grained: keeps.grained.then(|| tile("smudge grained")),
-                        amount: keeps.amount.then(|| tile("smudge amount")),
-                        shown: keeps.shown.then(|| tile("smudge shown")),
+                        amount: keeps.amount.then(|| amount_tile("smudge amount")),
+                        shown: keeps.shown.then(|| amount_tile("smudge shown")),
                         more: also.iter().map(|_| tile("smudge kept")).collect(),
                     };
                     (at, tile)
@@ -851,7 +880,7 @@ impl Canvas {
         let size = extent(width, height);
         // the layer as the stroke has left it, and as it was where the stroke hasn't been
         let from_layer = copy_at(&layer.texture, reach.x0, reach.y0);
-        gpu.copy_texture_to_buffer(encoder, from_layer, in_buffer(&window.work, 0, row, height), size);
+        gpu.copy_texture_to_buffer(encoder, from_layer, in_buffer(&window.work, 0, row * wide, height), size);
         if let Some(amount) = &window.amount {
             encoder.clear_buffer(amount, 0, Some(bytes * keeps.halves()));
         }
@@ -873,7 +902,9 @@ impl Canvas {
         // parts copied straight in wrote over their neighbours' (on some phones, blocks of a
         // tile's size came out in solid colour, #357). The texture ends up holding the layer as it
         // was, as the passes read it.
-        let at_window = |r: IRect| copy_at(&window.before, r.x0 - reach.x0, r.y0 - reach.y0);
+        fn at_window(into: &wgpu::Texture, r: IRect, reach: IRect) -> wgpu::TexelCopyTextureInfo<'_> {
+            copy_at(into, r.x0 - reach.x0, r.y0 - reach.y0)
+        }
         let area = |r: IRect| u64::from(r.width()) * u64::from(r.height());
         let whole = u64::from(width) * u64::from(height);
         let kinds: [(Option<&wgpu::Buffer>, u64, KeptOf, bool); 3] = [
@@ -883,6 +914,13 @@ impl Canvas {
         ];
         for (buffer, start, kept, from_the_layer) in kinds {
             let Some(buffer) = buffer else { continue };
+            // the layer's pixels (`wide` times 4 bytes each) put together in `before`, the amounts
+            // (4 bytes each) there too, or on an HDR canvas in a texture of their own
+            let (into, into_view) = match &window.amounts {
+                Some((t, v)) if !from_the_layer => (t, v),
+                _ => (&window.before, &window.before_view),
+            };
+            let row = if from_the_layer { row * wide } else { row };
             let theirs: Vec<(&wgpu::Texture, IRect, (i32, i32))> =
                 parts.iter().filter_map(|&(tile, r, at)| Some((kept(tile)?, r, at))).collect();
             if theirs.is_empty() {
@@ -895,25 +933,25 @@ impl Canvas {
             // (under what the tiles' parts don't cover)
             if theirs.iter().map(|t| area(t.1)).sum::<u64>() < whole {
                 if from_the_layer {
-                    gpu.copy_texture_to_texture(encoder, from_layer, copy_at(&window.before, 0, 0), size);
+                    gpu.copy_texture_to_texture(encoder, from_layer, copy_at(into, 0, 0), size);
                 } else {
                     drop(super::render_pass(
                         encoder,
                         "smudge window cleared",
-                        &window.before_view,
+                        into_view,
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     ));
                 }
             }
             for (kept, r, (x, y)) in theirs {
-                gpu.copy_texture_to_texture(encoder, copy_at(kept, x, y), at_window(r), extent(r.width(), r.height()));
+                gpu.copy_texture_to_texture(
+                    encoder,
+                    copy_at(kept, x, y),
+                    at_window(into, r, reach),
+                    extent(r.width(), r.height()),
+                );
             }
-            gpu.copy_texture_to_buffer(
-                encoder,
-                copy_at(&window.before, 0, 0),
-                in_buffer(buffer, start, row, height),
-                size,
-            );
+            gpu.copy_texture_to_buffer(encoder, copy_at(into, 0, 0), in_buffer(buffer, start, row, height), size);
         }
         if before {
             if parts.iter().map(|p| area(p.1)).sum::<u64>() < whole {
@@ -923,7 +961,7 @@ impl Canvas {
                 gpu.copy_texture_to_texture(
                     encoder,
                     copy_at(&tile.before, x, y),
-                    at_window(r),
+                    at_window(&window.before, r, reach),
                     extent(r.width(), r.height()),
                 );
             }
@@ -947,13 +985,15 @@ impl Canvas {
         }
         let Some(smudge) = self.smudge.as_ref() else { return };
         let (Some(window), Some(layer)) = (smudge.window.as_ref(), self.layers.get(&smudge.into)) else { return };
+        // (the layer's pixels 4 bytes each, or `wide` times that)
+        let wide = layer.texture.format().block_copy_size(None).unwrap_or(4) / 4;
         let row = row_bytes(reach.width());
         let bytes = u64::from(row) * u64::from(reach.height());
         let offset = |r: IRect| in_window(reach, r);
         if work {
             gpu.copy_buffer_to_texture(
                 encoder,
-                in_buffer(&window.work, offset(changed), row, changed.height()),
+                in_buffer(&window.work, offset(changed) * u64::from(wide), row * wide, changed.height()),
                 copy_at(&layer.texture, changed.x0, changed.y0),
                 extent(changed.width(), changed.height()),
             );
@@ -971,15 +1011,15 @@ impl Canvas {
             }
             let (x, y, size) = (r.x0 - t.x0, r.y0 - t.y0, extent(r.width(), r.height()));
             let halves = [
-                (&tile.grained, &window.grained, 0),
-                (&tile.amount, &window.amount, 0),
-                (&tile.shown, &window.amount, bytes),
+                (&tile.grained, &window.grained, 0, wide),
+                (&tile.amount, &window.amount, 0, 1),
+                (&tile.shown, &window.amount, bytes, 1),
             ];
-            for (kept, buffer, start) in halves {
+            for (kept, buffer, start, k) in halves {
                 if let (Some(kept), Some(buffer)) = (kept, buffer) {
                     gpu.copy_buffer_to_texture(
                         encoder,
-                        in_buffer(buffer, start + offset(r), row, r.height()),
+                        in_buffer(buffer, start + offset(r) * u64::from(k), row * k, r.height()),
                         copy_at(kept, x, y),
                         size,
                     );
@@ -1101,7 +1141,8 @@ impl Canvas {
         }
         let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let tile = |label| texture(gpu, label, side, side, LAYER_FORMAT);
+        // (the layer's pixels as they are)
+        let tile = |label| texture(gpu, label, side, side, layer.texture.format());
         // (the amounts' bits as words in fragment passes, as their bytes elsewhere)
         let amounts = if in_fragments { super::fragments::AMOUNT_FORMAT } else { LAYER_FORMAT };
         let amount_tile = |label| texture(gpu, label, side, side, amounts);
@@ -1219,6 +1260,7 @@ impl super::Smudge {
         tiles
             .chain(self.window.as_ref().map(|w| &w.before))
             .chain(self.passed.as_ref().map(|p| &p.0))
+            .chain(self.keep.textures())
             .chain(fragments)
             .chain(self.rewind.iter().flat_map(super::rewind::Rewind::textures))
             .collect()

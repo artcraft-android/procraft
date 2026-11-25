@@ -43,11 +43,11 @@ enum PcIcons {
     ])
 
     static let undo = PcIcon(name: "undo", width: 50.0, height: 50.0, parts: [
-        PcIconPart(d: "M14.5 24.13L14.66 24.34L14.89 24.48L15.28 24.49L20.48 23.1L20.72 22.98L20.89 22.78L20.98 22.53L20.96 22.26L20.84 22.03L20.64 21.85L18.99 20.9L19.6 19.98L19.96 19.56L20.76 18.8L21.66 18.15L22.14 17.88L22.63 17.64L23.68 17.28L24.76 17.06L25.86 17L26.96 17.1L28.03 17.35L29.06 17.75L30.02 18.29L30.9 18.96L31.67 19.75L32.01 20.18L32.6 21.12L33.05 22.13L33.35 23.19L33.45 23.73L33.52 24.83L33.5 25.38L33.34 26.48L33.02 27.53L32.81 28.04L32.28 29.01L31.62 29.89L30.84 30.67L29.95 31.34L28.99 31.87L27.95 32.26L26.88 32.49L25.77 32.58L25.22 32.56L24.13 32.41L22.72 32.02L22.13 32.02L21.84 32.09L21.31 32.36L20.89 32.78L20.62 33.3L20.53 33.89L20.62 34.47L20.89 35L21.31 35.42L21.84 35.69L23.29 36.1L24.09 36.24L25.04 36.34L26.55 36.33L27.5 36.23L28.97 35.9L29.75 35.64L30.63 35.27L31.95 34.55L32.73 34.01L33.36 33.49L33.96 32.92L34.95 31.79L35.49 31L36.22 29.68L36.58 28.8L36.84 28.02L37.17 26.55L37.27 25.61L37.28 24.1L37.19 23.15L36.88 21.68L36.63 20.9L36.32 20.13L35.9 19.28L35.1 18L34.51 17.25L33.46 16.18L32.72 15.57L32.05 15.1L30.74 14.36L29.86 13.98L28.42 13.54L27.62 13.37L26.67 13.26L25.85 13.22L24.35 13.3L23.41 13.45L22.61 13.65L21.83 13.9L20.45 14.5L19.73 14.9L18.94 15.42L17.78 16.39L17.11 17.07L16.59 17.7L15.75 18.95L17.35 19.95L14.06 18.05L13.67 17.96L13.3 18.1L13.07 18.42L13.06 18.81Z", stroke: 0.0, fill: true, evenOdd: true),
+        PcIconPart(d: "M20.01 25.47L20.47 25.65L20.72 25.69L21.2 25.63L21.65 25.42L22.01 25.09L22.14 24.88L22.3 24.41L22.32 24.17L22.32 20.97L29.73 20.97L30.38 21L30.97 21.09L31.56 21.24L32.13 21.44L32.68 21.7L33.19 22.01L33.68 22.37L34.13 22.78L34.53 23.23L34.89 23.71L35.21 24.23L35.46 24.78L35.67 25.35L35.81 25.93L35.9 26.53L35.93 27.13L35.9 27.74L35.81 28.34L35.67 28.92L35.46 29.49L35.21 30.04L34.89 30.56L34.53 31.04L34.13 31.49L33.68 31.9L33.19 32.26L32.68 32.57L32.13 32.83L31.56 33.03L30.97 33.18L30.38 33.27L29.73 33.3L14.77 33.32L14.32 33.46L13.94 33.74L13.66 34.13L13.51 34.58L13.51 35.06L13.66 35.51L13.94 35.89L14.32 36.17L14.77 36.32L15.01 36.34L29.77 36.34L30.75 36.29L31.64 36.15L32.37 35.96L33.36 35.61L34.18 35.22L34.82 34.83L35.67 34.2L36.23 33.7L36.84 33.03L37.47 32.19L37.92 31.41L38.25 30.73L38.56 29.88L38.81 28.86L38.92 28.11L38.98 27.21L38.94 26.31L38.78 25.26L38.56 24.39L38.25 23.54L37.85 22.73L37.47 22.08L36.84 21.24L36.23 20.57L35.67 20.07L34.82 19.44L34.04 18.98L33.36 18.66L32.37 18.3L31.49 18.09L30.6 17.97L29.77 17.93L22.32 17.93L22.32 14.73L22.24 14.25L22.14 14.02L21.84 13.63L21.44 13.35L20.96 13.22L20.47 13.25L20.01 13.43L12.1 18.14L11.9 18.28L11.59 18.65L11.4 19.09L11.36 19.33L11.4 19.81L11.48 20.04L11.59 20.25L11.9 20.62Z", stroke: 0.0, fill: true, evenOdd: true),
     ])
 
     static let redo = PcIcon(name: "redo", width: 50.0, height: 50.0, parts: [
-        PcIconPart(d: "M35.76 24.13L35.59 24.34L35.36 24.48L34.97 24.49L29.78 23.1L29.55 22.98L29.37 22.78L29.29 22.53L29.3 22.27L29.42 22.03L29.62 21.86L31.27 20.9L30.66 19.99L30.3 19.57L29.5 18.81L28.61 18.16L28.13 17.89L27.63 17.66L26.59 17.29L25.51 17.08L24.41 17.02L23.31 17.11L22.24 17.36L21.21 17.76L20.25 18.3L19.38 18.97L18.61 19.76L18.27 20.19L17.68 21.12L17.23 22.13L16.93 23.19L16.84 23.73L16.76 24.83L16.79 25.38L16.95 26.47L17.26 27.53L17.47 28.04L18 29L18.67 29.88L19.44 30.66L20.33 31.32L21.29 31.85L22.32 32.24L23.4 32.48L24.5 32.57L25.05 32.55L26.14 32.4L27.55 32.01L28.14 32.01L28.43 32.08L28.95 32.34L29.37 32.76L29.64 33.29L29.73 33.87L29.64 34.45L29.37 34.98L28.95 35.4L28.43 35.67L26.98 36.08L26.18 36.22L25.23 36.32L23.72 36.31L22.78 36.21L21.31 35.88L20.53 35.62L19.65 35.26L18.34 34.53L17.55 33.99L16.92 33.47L16.32 32.91L15.34 31.77L14.8 30.99L14.07 29.67L13.71 28.8L13.45 28.02L13.12 26.55L13.02 25.6L13.01 24.1L13.1 23.15L13.41 21.68L13.66 20.9L13.96 20.14L14.38 19.29L15.18 18.01L15.77 17.27L16.83 16.19L17.56 15.59L18.23 15.11L19.54 14.38L20.41 14L21.85 13.56L22.65 13.39L23.6 13.28L24.42 13.24L25.92 13.32L26.86 13.47L27.65 13.67L28.43 13.92L29.81 14.51L30.53 14.91L31.32 15.44L31.97 15.94L33.05 16.98L33.67 17.71L34.51 18.96L32.91 19.96L36.2 18.06L36.58 17.97L36.95 18.11L37.18 18.43L37.19 18.82Z", stroke: 0.0, fill: true, evenOdd: true),
+        PcIconPart(d: "M30.25 25.47L29.79 25.65L29.55 25.68L29.06 25.63L28.61 25.42L28.26 25.09L28.13 24.88L27.97 24.41L27.95 24.17L27.95 20.98L20.54 20.98L19.9 21.01L19.31 21.1L18.72 21.24L18.15 21.45L17.61 21.71L17.09 22.02L16.6 22.38L16.16 22.78L15.75 23.23L15.39 23.71L15.08 24.23L14.82 24.78L14.62 25.34L14.47 25.93L14.39 26.53L14.36 27.13L14.39 27.73L14.47 28.33L14.62 28.92L14.82 29.48L15.08 30.03L15.39 30.55L15.75 31.03L16.16 31.48L16.6 31.88L17.09 32.24L17.61 32.55L18.15 32.81L18.72 33.02L19.31 33.16L19.9 33.25L20.54 33.28L35.48 33.3L35.93 33.45L36.32 33.73L36.59 34.11L36.74 34.56L36.74 35.04L36.59 35.49L36.32 35.88L35.93 36.15L35.48 36.3L35.24 36.32L20.51 36.32L19.53 36.27L18.64 36.13L17.91 35.94L16.92 35.59L16.11 35.2L15.46 34.81L14.62 34.19L14.06 33.68L13.45 33.02L12.83 32.17L12.37 31.4L12.05 30.71L11.74 29.87L11.48 28.85L11.37 28.1L11.32 27.2L11.35 26.3L11.51 25.26L11.74 24.39L12.05 23.54L12.44 22.73L12.83 22.09L13.45 21.24L14.06 20.58L14.62 20.07L15.46 19.45L16.24 18.99L16.92 18.67L17.91 18.32L18.79 18.1L19.68 17.98L20.51 17.94L27.95 17.94L27.95 14.75L28.03 14.27L28.13 14.04L28.42 13.65L28.83 13.37L29.3 13.24L29.79 13.27L30.25 13.44L38.15 18.15L38.51 18.46L38.66 18.66L38.84 19.1L38.88 19.34L38.84 19.82L38.77 20.05L38.51 20.45L38.34 20.62Z", stroke: 0.0, fill: true, evenOdd: true),
     ])
 
     static let transformReset = PcIcon(name: "transformreset", width: 44.0, height: 44.0, parts: [
@@ -283,7 +283,7 @@ enum PcIcons {
     ])
 
     static let pieUndo = PcIcon(name: "pieundo", width: 50.0, height: 50.0, parts: [
-        PcIconPart(d: "M11.23 23.29L11.41 23.52L11.66 23.67L12.1 23.68L17.82 22.15L18.09 22.02L18.28 21.8L18.37 21.52L18.35 21.23L18.22 20.96L18 20.77L16.18 19.72L16.86 18.71L17.25 18.25L18.13 17.41L19.12 16.7L19.65 16.4L20.2 16.14L21.35 15.73L22.54 15.49L23.76 15.43L24.97 15.53L26.15 15.81L27.28 16.25L28.34 16.85L29.31 17.59L30.16 18.46L30.54 18.94L31.18 19.96L31.68 21.08L32.01 22.24L32.12 22.84L32.2 24.06L32.17 24.67L32 25.87L31.65 27.03L31.41 27.6L30.83 28.66L30.1 29.64L29.24 30.5L28.27 31.23L27.2 31.81L26.06 32.24L24.87 32.5L23.66 32.59L23.05 32.58L21.85 32.41L20.29 31.98L19.64 31.98L19.32 32.05L18.74 32.35L18.28 32.81L17.98 33.39L17.88 34.04L17.98 34.68L18.28 35.26L18.74 35.72L19.32 36.02L20.92 36.47L21.81 36.63L22.85 36.74L24.51 36.73L25.56 36.61L27.18 36.25L28.04 35.97L29.01 35.57L30.46 34.77L31.33 34.17L32.03 33.6L32.68 32.98L33.77 31.72L34.37 30.86L35.17 29.4L35.57 28.43L35.86 27.58L36.22 25.96L36.33 24.91L36.34 23.25L36.24 22.2L35.9 20.58L35.62 19.72L35.29 18.88L34.83 17.93L33.94 16.53L33.29 15.71L32.13 14.52L31.32 13.85L30.58 13.33L29.13 12.52L28.17 12.1L26.58 11.61L25.7 11.43L24.65 11.3L23.75 11.26L22.09 11.35L21.05 11.52L20.18 11.73L19.31 12.01L17.79 12.67L17 13.11L16.13 13.69L14.85 14.75L14.12 15.5L13.54 16.2L12.61 17.57L14.37 18.68L10.75 16.58L10.32 16.48L9.91 16.64L9.66 16.99L9.65 17.43Z", stroke: 0.0, fill: true, evenOdd: true),
+        PcIconPart(d: "M17.31 24.76L17.82 24.96L18.09 25L18.62 24.94L19.12 24.71L19.51 24.34L19.65 24.11L19.83 23.59L19.85 23.32L19.85 19.8L28.03 19.8L28.73 19.84L29.39 19.93L30.04 20.1L30.66 20.32L31.27 20.61L31.84 20.95L32.37 21.35L32.87 21.79L33.31 22.29L33.71 22.82L34.05 23.39L34.34 24L34.56 24.62L34.73 25.27L34.82 25.93L34.86 26.59L34.82 27.26L34.73 27.92L34.56 28.57L34.34 29.19L34.05 29.79L33.71 30.37L33.31 30.9L32.87 31.4L32.37 31.84L31.84 32.24L31.27 32.58L30.66 32.87L30.04 33.09L29.39 33.25L28.73 33.35L28.03 33.39L11.54 33.41L11.04 33.57L10.61 33.88L10.31 34.3L10.14 34.8L10.14 35.33L10.31 35.82L10.61 36.25L11.04 36.56L11.54 36.72L11.8 36.74L28.07 36.74L29.14 36.68L30.13 36.53L30.93 36.33L32.02 35.93L32.92 35.5L33.63 35.07L34.57 34.38L35.18 33.83L35.86 33.09L36.55 32.16L37.05 31.3L37.41 30.55L37.75 29.62L38.03 28.49L38.15 27.67L38.21 26.68L38.17 25.68L38 24.53L37.75 23.57L37.41 22.64L36.97 21.74L36.55 21.03L35.86 20.1L35.18 19.36L34.57 18.81L33.63 18.11L32.78 17.61L32.02 17.25L30.93 16.86L29.96 16.63L28.98 16.49L28.07 16.45L19.85 16.45L19.85 12.93L19.76 12.39L19.65 12.14L19.33 11.71L18.88 11.41L18.36 11.26L17.82 11.29L17.31 11.49L8.59 16.68L8.38 16.84L8.03 17.24L7.82 17.73L7.78 17.99L7.82 18.52L7.91 18.77L8.03 19.01L8.38 19.41Z", stroke: 0.0, fill: true, evenOdd: true),
     ])
 
     static let pieReset = PcIcon(name: "piereset", width: 50.0, height: 50.0, parts: [
@@ -317,6 +317,138 @@ enum PcIcons {
     static let clock = PcIcon(name: "clock", width: 24.0, height: 24.0, parts: [
         PcIconPart(d: "M12 3.05a8.95 8.95 0 1 1 0 17.9a8.95 8.95 0 1 1 0-17.9z", stroke: 2.1, fill: false, evenOdd: false),
         PcIconPart(d: "M11 6.5H13V13.5H6.9V11.5H11z", stroke: 0.0, fill: true, evenOdd: false),
+    ])
+
+    // the grid timeline's own
+    static let gridLasso = PcIcon(name: "grid-lasso", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M12 4.5C7.3 4.5 3.5 7 3.5 10.2C3.5 13.4 7.3 15.9 12 15.9C16.7 15.9 20.5 13.4 20.5 10.2C20.5 7 16.7 4.5 12 4.5z", stroke: 1.9, fill: false, evenOdd: false),
+        PcIconPart(d: "M7.2 15.2C5.6 16 4.9 17.4 5.4 18.6C5.9 19.8 7.6 20 8.4 19C9.2 18 8.6 16.6 7.2 16.4", stroke: 1.9, fill: false, evenOdd: false),
+    ])
+
+    static let gridTrack = PcIcon(name: "grid-track", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M6.2 5.4H17.8A2.3 2.3 0 0 1 17.8 10H6.2A2.3 2.3 0 0 1 6.2 5.4z", stroke: 0.0, fill: true, evenOdd: false),
+        PcIconPart(d: "M6.4 13.9H17.6A2.2 2.2 0 0 1 17.6 18.3H6.4A2.2 2.2 0 0 1 6.4 13.9z", stroke: 1.8, fill: false, evenOdd: false),
+    ])
+
+    static let gridInsert = PcIcon(name: "grid-insert", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M6 5.5H18A2 2 0 0 1 20 7.5V16.5A2 2 0 0 1 18 18.5H6A2 2 0 0 1 4 16.5V7.5A2 2 0 0 1 6 5.5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M12 9V15", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M9 12H15", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridFill = PcIcon(name: "grid-fill", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M14 5.5H6A2 2 0 0 0 4 7.5V16.5A2 2 0 0 0 6 18.5H14", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M9 12H20", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M16.5 8.5L20 12L16.5 15.5", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridOptions = PcIcon(name: "grid-options", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M6 5.5H18A2 2 0 0 1 20 7.5V16.5A2 2 0 0 1 18 18.5H6A2 2 0 0 1 4 16.5V7.5A2 2 0 0 1 6 5.5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M8 10H16", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M8 14H13", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridBlend = PcIcon(name: "grid-blend", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M6 5H18A2 2 0 0 1 20 7V17A2 2 0 0 1 18 19H6A2 2 0 0 1 4 17V7A2 2 0 0 1 6 5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M12 8.6A3.4 3.4 0 0 1 12 15.4A3.4 3.4 0 0 1 12 8.6z", stroke: 0.0, fill: true, evenOdd: false),
+    ])
+
+    static let gridMask = PcIcon(name: "grid-mask", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M6 5H18A2 2 0 0 1 20 7V17A2 2 0 0 1 18 19H6A2 2 0 0 1 4 17V7A2 2 0 0 1 6 5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M12 8.6A3.4 3.4 0 0 1 12 15.4A3.4 3.4 0 0 1 12 8.6z", stroke: 1.5, fill: false, evenOdd: false),
+    ])
+
+    static let gridHighlight = PcIcon(name: "grid-highlight", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M12 4.5A7.5 7.5 0 0 1 12 19.5A7.5 7.5 0 0 1 12 4.5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M6.8 17.2L17.2 6.8", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridRename = PcIcon(name: "grid-rename", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M5 19L6 15L16.5 4.5L19.5 7.5L9 18z", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridClear = PcIcon(name: "grid-clear", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M13.5 5.5L18.5 10.5L11 18H7L4.5 15.5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M9 10L14 15", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M13 18.5H20", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridFlip = PcIcon(name: "grid-flip", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M5 9H19", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M15.5 5.5L19 9L15.5 12.5", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M19 15H5", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M8.5 11.5L5 15L8.5 18.5", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridScissors = PcIcon(name: "grid-scissors", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M7 14.5A2.5 2.5 0 0 1 7 19.5A2.5 2.5 0 0 1 7 14.5z", stroke: 1.6, fill: false, evenOdd: false),
+        PcIconPart(d: "M17 14.5A2.5 2.5 0 0 1 17 19.5A2.5 2.5 0 0 1 17 14.5z", stroke: 1.6, fill: false, evenOdd: false),
+        PcIconPart(d: "M8.5 15L16.5 4.5", stroke: 1.6, fill: false, evenOdd: false),
+        PcIconPart(d: "M15.5 15L7.5 4.5", stroke: 1.6, fill: false, evenOdd: false),
+    ])
+
+    static let gridCopy = PcIcon(name: "grid-copy", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M10 8.5H17A1.5 1.5 0 0 1 18.5 10V18A1.5 1.5 0 0 1 17 19.5H10A1.5 1.5 0 0 1 8.5 18V10A1.5 1.5 0 0 1 10 8.5z", stroke: 1.6, fill: false, evenOdd: false),
+        PcIconPart(d: "M15.5 8.5V6A1.5 1.5 0 0 0 14 4.5H7A1.5 1.5 0 0 0 5.5 6V14A1.5 1.5 0 0 0 7 15.5H8.5", stroke: 1.6, fill: false, evenOdd: false),
+    ])
+
+    static let gridPaste = PcIcon(name: "grid-paste", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M9 6H7.5A1.5 1.5 0 0 0 6 7.5V18A1.5 1.5 0 0 0 7.5 19.5H16.5A1.5 1.5 0 0 0 18 18V7.5A1.5 1.5 0 0 0 16.5 6H15", stroke: 1.6, fill: false, evenOdd: false),
+        PcIconPart(d: "M10 4.5H14A1 1 0 0 1 15 5.5V6.5A1 1 0 0 1 14 7.5H10A1 1 0 0 1 9 6.5V5.5A1 1 0 0 1 10 4.5z", stroke: 1.6, fill: false, evenOdd: false),
+    ])
+
+    static let gridKey = PcIcon(name: "grid-key", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M12 4.2L19.8 12L12 19.8L4.2 12z", stroke: 1.9, fill: false, evenOdd: false),
+        PcIconPart(d: "M12 9L15 12L12 15L9 12z", stroke: 0.0, fill: true, evenOdd: false),
+    ])
+
+    static let gridSettings = PcIcon(name: "grid-settings", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M4.5 8H9", stroke: 1.9, fill: false, evenOdd: false),
+        PcIconPart(d: "M13.6 5.4H17.4A2.6 2.6 0 0 1 17.4 10.6H13.6A2.6 2.6 0 0 1 13.6 5.4z", stroke: 0.0, fill: true, evenOdd: false),
+        PcIconPart(d: "M6.8 13.6H10.4A2.4 2.4 0 0 1 10.4 18.4H6.8A2.4 2.4 0 0 1 6.8 13.6z", stroke: 1.8, fill: false, evenOdd: false),
+        PcIconPart(d: "M15 16H19.5", stroke: 1.9, fill: false, evenOdd: false),
+    ])
+
+    static let gridProject = PcIcon(name: "grid-project", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M4.5 11H19.5V17.5A2 2 0 0 1 17.5 19.5H6.5A2 2 0 0 1 4.5 17.5z", stroke: 0.0, fill: true, evenOdd: false),
+        PcIconPart(d: "M4.2 8.3L18.4 4.5L19.1 7.1L4.9 10.9z", stroke: 0.0, fill: true, evenOdd: false),
+    ])
+
+    static let gridOnion = PcIcon(name: "grid-onion", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M9.5 8H18A1.5 1.5 0 0 1 19.5 9.5V17A1.5 1.5 0 0 1 18 18.5H9.5A1.5 1.5 0 0 1 8 17V9.5A1.5 1.5 0 0 1 9.5 8z", stroke: 0.0, fill: true, evenOdd: false),
+        PcIconPart(d: "M5.2 15.2V7A1.8 1.8 0 0 1 7 5.2H15.2", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridPrefs = PcIcon(name: "grid-prefs", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M7.4 5H16.6A2.9 2.9 0 0 1 16.6 10.8H7.4A2.9 2.9 0 0 1 7.4 5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M7.6 6.7A1.2 1.2 0 1 0 7.6 9.1A1.2 1.2 0 1 0 7.6 6.7z", stroke: 0.0, fill: true, evenOdd: false),
+        PcIconPart(d: "M7.4 13.2H16.6A2.9 2.9 0 0 1 16.6 19H7.4A2.9 2.9 0 0 1 7.4 13.2zM16.4 14.9A1.2 1.2 0 1 0 16.4 17.3A1.2 1.2 0 1 0 16.4 14.9z", stroke: 0.0, fill: true, evenOdd: true),
+    ])
+
+    static let gridPhoto = PcIcon(name: "grid-photo", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M5.5 5.5H18.5A2 2 0 0 1 20.5 7.5V16.5A2 2 0 0 1 18.5 18.5H5.5A2 2 0 0 1 3.5 16.5V7.5A2 2 0 0 1 5.5 5.5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M4 16L8.6 11.6L12 14.6L14.8 12.4L20 16.6", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M15.8 8A1.3 1.3 0 1 0 15.8 10.6A1.3 1.3 0 1 0 15.8 8z", stroke: 0.0, fill: true, evenOdd: false),
+    ])
+
+    static let gridVideo = PcIcon(name: "grid-video", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M5.5 5.5H18.5A2 2 0 0 1 20.5 7.5V16.5A2 2 0 0 1 18.5 18.5H5.5A2 2 0 0 1 3.5 16.5V7.5A2 2 0 0 1 5.5 5.5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M7 8.7H7.01M10.3 8.7H10.31M13.7 8.7H13.71M17 8.7H17.01M7 15.3H7.01M10.3 15.3H10.31M13.7 15.3H13.71M17 15.3H17.01", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridFile = PcIcon(name: "grid-file", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M3.5 7.5A2 2 0 0 1 5.5 5.5H9.3L11.3 7.8H18.5A2 2 0 0 1 20.5 9.8V16.5A2 2 0 0 1 18.5 18.5H5.5A2 2 0 0 1 3.5 16.5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M3.8 11H20.2", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridRemove = PcIcon(name: "grid-remove", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M6 5.5H18A2 2 0 0 1 20 7.5V16.5A2 2 0 0 1 18 18.5H6A2 2 0 0 1 4 16.5V7.5A2 2 0 0 1 6 5.5z", stroke: 1.7, fill: false, evenOdd: false),
+        PcIconPart(d: "M9 12H15", stroke: 1.7, fill: false, evenOdd: false),
+    ])
+
+    static let gridBroom = PcIcon(name: "grid-broom", width: 24.0, height: 24.0, parts: [
+        PcIconPart(d: "M19.5 4.5L13 11", stroke: 1.9, fill: false, evenOdd: false),
+        PcIconPart(d: "M10.4 9.6L14.4 13.6L9.4 19.4L4.6 14.6z", stroke: 0.0, fill: true, evenOdd: false),
     ])
 
     static let chevronDown = PcIcon(name: "chevron-down", width: 24.0, height: 24.0, parts: [
@@ -658,6 +790,10 @@ enum PcIcons {
         PcIconPart(d: "M35.86 15.96L35.64 15.55L35.34 15.18L34.98 14.88L34.56 14.66L34.11 14.53L33.65 14.48L16.85 14.48L16.38 14.53L15.93 14.66L15.51 14.88L15.15 15.18L14.85 15.55L14.63 15.96L14.49 16.41L14.45 16.88L14.45 31.28L14.49 31.75L14.63 32.2L14.85 32.61L15.15 32.98L15.51 33.28L15.93 33.5L16.38 33.63L16.85 33.68L33.65 33.68L34.11 33.63L34.56 33.5L34.98 33.28L35.34 32.98L35.64 32.61L35.86 32.2L36 31.75L36.05 31.28L36.05 16.88L36 16.41ZM33.4 30.85L33.33 30.97L33.17 31.04L17.33 31.04L17.16 30.97L17.09 30.8L17.09 17.36L17.16 17.19L17.33 17.12L33.17 17.12L33.33 17.19L33.41 17.36ZM31.72 21.01L31.92 20.78L32.07 20.51L32.17 20.22L32.2 19.92L32.15 19.47L32.04 19.18L31.88 18.92L31.67 18.7L31.42 18.52L30.99 18.36L30.69 18.32L30.38 18.34L30.09 18.42L29.81 18.56L18.77 27.15L18.57 27.38L18.42 27.65L18.3 28.09L18.31 28.54L18.39 28.84L18.53 29.11L18.71 29.35L18.94 29.55L19.21 29.71L19.5 29.8L19.8 29.84L20.11 29.82L20.4 29.74L20.68 29.6Z", stroke: 0.0, fill: true, evenOdd: true),
     ])
 
+    static let tabImport = PcIcon(name: "tabimport", width: 50.0, height: 50.0, parts: [
+        PcIconPart(d: "M26.39 13.67L26.37 13.44L26.3 13.22L26.12 12.92L25.96 12.75L25.76 12.62L25.43 12.51L25.08 12.49L24.85 12.54L24.64 12.62L24.36 12.83L24.21 13.01L24.1 13.22L24.03 13.44L24.01 13.67L24.01 22.3L22.46 22.31L22.32 22.37L22.21 22.47L22.14 22.69L22.16 22.84L22.24 22.97L24.91 25.86L25.04 25.95L25.2 25.98L25.36 25.95L25.49 25.86L28.16 22.97L28.26 22.77L28.25 22.61L28.19 22.47L28.08 22.37L27.94 22.31L26.39 22.3ZM18.08 30.17L18.15 30.4L18.26 30.6L18.49 30.86L18.79 31.04L19.13 31.12L31.15 31.13L31.5 31.08L31.71 30.99L31.91 30.86L32.14 30.6L32.29 30.29L32.34 30.06L32.34 22.5L32.29 22.16L32.2 21.94L31.99 21.66L31.71 21.45L31.38 21.33L31.03 21.32L30.7 21.4L30.4 21.58L30.16 21.84L30.01 22.16L29.96 22.5L29.96 28.75L20.44 28.75L20.44 22.5L20.42 22.27L20.35 22.05L20.17 21.75L20 21.58L19.7 21.4L19.37 21.32L19.13 21.32L18.9 21.36L18.69 21.45L18.49 21.58L18.26 21.84L18.15 22.05L18.06 22.38L18.06 29.94Z", stroke: 0.0, fill: true, evenOdd: true),
+    ])
+
     static let tabShare = PcIcon(name: "tabshare", width: 50.0, height: 50.0, parts: [
         PcIconPart(d: "M25.43 12.59L25.2 12.52L25.04 12.55L24.91 12.64L20.86 16.85L20.78 16.98L20.75 17.14L20.82 17.36L20.93 17.46L21.07 17.52L24 17.53L24.01 25.03L24.05 25.26L24.14 25.48L24.27 25.67L24.44 25.84L24.64 25.97L24.85 26.06L25.2 26.11L25.43 26.09L25.66 26.02L25.87 25.91L26.05 25.76L26.2 25.58L26.31 25.37L26.39 25.03L26.4 17.53L29.33 17.52L29.53 17.42L29.62 17.29L29.65 17.14L29.62 16.98L29.54 16.85ZM16.04 30.14L16.11 30.36L16.22 30.57L16.46 30.83L16.76 31.01L17.1 31.1L33.18 31.1L33.42 31.08L33.64 31.01L33.94 30.83L34.18 30.57L34.33 30.25L34.37 30.02L34.38 22.42L34.36 22.19L34.29 21.96L34.11 21.66L33.85 21.42L33.53 21.27L33.3 21.23L33.07 21.23L32.72 21.31L32.42 21.49L32.19 21.75L32.04 22.07L31.99 22.42L31.99 28.71L18.41 28.71L18.41 22.42L18.39 22.19L18.32 21.96L18.14 21.66L17.98 21.49L17.78 21.36L17.56 21.27L17.33 21.23L17.1 21.23L16.76 21.31L16.46 21.49L16.29 21.66L16.11 21.96L16.03 22.3L16.02 29.9Z", stroke: 0.0, fill: true, evenOdd: true),
     ])
@@ -947,6 +1083,18 @@ enum PcIcons {
 
     static let warp = PcIcon(name: "warp", width: 44.0, height: 44.0, parts: [
         PcIconPart(d: "M29.23 15.19L29.03 14.95L28.79 14.76L28.52 14.61L28.22 14.52L27.92 14.49L16.07 14.49L15.76 14.52L15.46 14.61L15.19 14.76L14.95 14.95L14.75 15.19L14.61 15.47L14.52 15.76L14.49 16.07L14.49 27.92L14.52 28.23L14.61 28.52L14.75 28.8L14.95 29.04L15.19 29.23L15.46 29.38L15.76 29.47L16.07 29.5L27.92 29.5L28.22 29.47L28.52 29.38L28.79 29.23L29.03 29.04L29.23 28.8L29.37 28.52L29.46 28.23L29.5 27.92L29.5 16.07L29.46 15.76L29.37 15.47ZM17.14 19.83L18.78 19.43L19.9 19.23L20.01 19.86L20.13 20.93L20.16 21.46L20.16 22.5L19.08 22.66L18.48 22.78L17.33 23.05L15.91 23.44L15.91 20.18ZM20.03 23.95L19.7 25.75L19.42 26.84L19.07 28.08L16.07 28.08L15.95 28.03L15.91 27.92L15.91 24.92L17.69 24.42L19.32 24.06ZM20.55 28.08L20.94 26.64L21.21 25.51L21.32 24.91L21.49 23.82L22.52 23.82L23.06 23.85L24.12 23.97L24.76 24.08L24.66 24.67L24.44 25.75L24.16 26.84L23.81 28.08ZM21.59 22.01L21.55 20.81L21.49 20.22L21.33 19.09L21.99 19.07L23.06 19.11L23.59 19.16L24.66 19.32L24.82 20.4L24.87 20.93L24.91 22L24.89 22.66L23.76 22.49L23.18 22.44L22.56 22.4L21.59 22.4ZM26.16 19.65L28.07 20.18L28.07 23.44L26.3 22.96L26.33 22.01L26.32 21.39L26.29 20.81ZM28.07 18.7L25.87 18.12L25.68 17.34L25.29 15.91L27.92 15.91L28.03 15.96L28.07 16.07ZM24.32 17.83L23.18 17.7L22.59 17.66L21.98 17.65L21.02 17.68L20.55 15.91L23.81 15.91L24.16 17.15ZM19.07 15.91L19.6 17.84L19.06 17.92L17.9 18.17L15.91 18.7L15.91 16.07L15.95 15.96L16.07 15.91ZM28.06 27.98L28 28.05L27.92 28.08L25.29 28.08L25.82 26.08L26.06 24.93L26.15 24.39L28.07 24.92Z", stroke: 0.0, fill: true, evenOdd: true),
+    ])
+
+    /// A figure with pins at its hand and feet: the puppet warp.
+    static let puppet = PcIcon(name: "puppet", width: 44.0, height: 44.0, parts: [
+        PcIconPart(d: "M24.2 13.6a2.2 2.2 0 1 1-4.4 0a2.2 2.2 0 1 1 4.4 0z", stroke: 1.4, fill: false, evenOdd: false),
+        PcIconPart(d: "M22 16.2V24.2M22 18.6L16.8 21.4M22 18.6L27.4 15.9M22 24.2L18.4 30M22 24.2L25.6 30", stroke: 1.4, fill: false, evenOdd: false),
+        PcIconPart(
+            d: "M29.2 15.9a1.8 1.8 0 1 1-3.6 0a1.8 1.8 0 1 1 3.6 0z"
+                + "M20.2 30a1.8 1.8 0 1 1-3.6 0a1.8 1.8 0 1 1 3.6 0z"
+                + "M27.4 30a1.8 1.8 0 1 1-3.6 0a1.8 1.8 0 1 1 3.6 0z",
+            stroke: 0, fill: true, evenOdd: false
+        ),
     ])
 
     static let snapping = PcIcon(name: "snapping", width: 44.0, height: 44.0, parts: [

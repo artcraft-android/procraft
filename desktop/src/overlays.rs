@@ -64,6 +64,9 @@ pub struct Overlays {
     /// A snapped shape is shown, and whether its handles show (it is being edited).
     pub shape: Option<QuickShapeInfo>,
     pub shape_editing: bool,
+    /// The nodes of the one stroke picked on a vector layer (window pixels, x and y in turn), while
+    /// a selection tool is up: a drag of one pulls the stroke into another shape.
+    pub vector_nodes: Vec<f32>,
     /// The brush's outline where the pen paints (points): its radius, and the brush's outline
     /// setting (none, contrasting rings, or the colour).
     cursor: Option<(Pos2, f32, i32)>,
@@ -94,6 +97,7 @@ impl Default for Overlays {
             spent: None,
             shape: None,
             shape_editing: false,
+            vector_nodes: Vec::new(),
             cursor: None,
             cursor_shape: Vec::new(),
             cursor_turn: 0.0,
@@ -357,6 +361,12 @@ impl Overlays {
                     let points: Vec<Pos2> =
                         info.handles.as_chunks::<2>().0.iter().map(|&[x, y]| pos2(x, y) / ppp).collect();
                     shape_handles(ui, &points, info);
+                }
+                // a picked stroke's nodes: white dots ringed in blue
+                let ppp = ctx.pixels_per_point();
+                for &[x, y] in self.vector_nodes.as_chunks::<2>().0 {
+                    ui.painter().circle_filled(pos2(x, y) / ppp, 6.5, argb(pc::ACCENT));
+                    ui.painter().circle_filled(pos2(x, y) / ppp, 4.5, Color32::WHITE);
                 }
             });
         if let (Some(info), true, true) = (self.shape.clone(), bar_shown, self.picking.is_none()) {

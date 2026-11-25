@@ -1,5 +1,11 @@
 // The composited canvas onto the window: a quad placed by the view (move, zoom, rotate).
 
+// The most a channel holds: 1 (white) on a standard canvas, raised in an HDR canvas's pipelines,
+// whose light above white is rolled off to what the screen shows (see `toned`).
+const CEILING: f32 = 1.0;
+// Where the roll-off begins, a share of the brightest the screen shows.
+const KNEE: f32 = 0.8;
+
 struct DisplayUniform {
     // the map from the canvas's 0..1 coordinates to clip space: (a, b, c, d) ...
     m0: vec4<f32>,
@@ -11,7 +17,8 @@ struct DisplayUniform {
     c1: vec4<f32>,
     c2: vec4<f32>,
     // how far the quad reaches past the canvas's sides (its 0..1 across and down), then 1 to
-    // smooth the edge over that; all 0 for a quad drawn exactly
+    // smooth the edge over that; all 0 for a quad drawn exactly. Then (an HDR canvas's) the
+    // brightest the target shows, sRGB-encoded (0 for white)
     edge: vec4<f32>,
     // a look the colours go through, in linear light (the display only): rows red, green and
     // blue, each three weights and what is added
@@ -79,6 +86,9 @@ fn shown(c: vec4<f32>) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
     var rgb = c.rgb / c.a;
+    if (CEILING > 1.0) {
+        rgb = toned(rgb, max(du.edge.w, 1.0));
+    }
     // through the look (perceptual greys, say: each colour as the grey of its luminance, as a
     // soft proof to a grey profile shows it), on linear light, clipped
     if (du.m1.w > 0.5) {
@@ -94,7 +104,13 @@ fn shown(c: vec4<f32>) -> vec4<f32> {
     if (du.c0.w > 0.5) {
         let lin = srgb_to_linear(rgb);
         let moved = vec3<f32>(dot(du.c0.xyz, lin), dot(du.c1.xyz, lin), dot(du.c2.xyz, lin));
-        rgb = linear_to_srgb(clamp(moved, vec3<f32>(0.0), vec3<f32>(1.0)));
+        if (CEILING > 1.0) {
+            // an extended-range target takes colours past its own primaries as they are: below 0
+            // and past 1, the curve mirrored through 0
+            rgb = sign(moved) * linear_to_srgb(min(abs(moved), vec3<f32>(CEILING)));
+        } else {
+            rgb = linear_to_srgb(clamp(moved, vec3<f32>(0.0), vec3<f32>(CEILING)));
+        }
     }
     if (du.c1.w > 0.5) {
         // between the table's first and last points' centres
@@ -106,6 +122,20 @@ fn shown(c: vec4<f32>) -> vec4<f32> {
         rgb = srgb_to_linear(rgb);
     }
     return vec4<f32>(rgb * c.a, c.a);
+}
+
+// light above white rolled off towards `peak` (sRGB-encoded): the strongest channel eased in from
+// past the knee, the others scaled with it so the hue stays
+fn toned(rgb: vec3<f32>, peak: f32) -> vec3<f32> {
+    let m = max(max(rgb.r, rgb.g), rgb.b);
+    // what the screen shows as it is (white and below) never moved
+    let knee = max(peak * KNEE, 1.0);
+    if (m <= knee) {
+        return rgb;
+    }
+    let range = max(peak - knee, 1e-4);
+    let mapped = knee + range * (1.0 - exp(-(m - knee) / range));
+    return rgb * (mapped / m);
 }
 
 // ---- a veil: part of the canvas as it was, over it but for a hole ---------------------------

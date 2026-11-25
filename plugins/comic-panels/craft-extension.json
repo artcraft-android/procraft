@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.comic-panels",
+  "name": "Comic Panels",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Make the canvas a comic page and cut it into panels by dragging lines across it, each panel a group its art is clipped to.",
+  "compat": { "procraft": { "interface": 24 } },
+  "permissions": ["layers.edit"],
+  "tools": [
+    {
+      "key": "panels", "label": "Comic panels", "fit": true,
+      "modes": [
+        { "label": "Cut", "hint": "Drag across panels to cut them" },
+        { "label": "Move", "hint": "Drag a gutter, or the page's edge, to move it" }
+      ]
+    }
+  ]
+}

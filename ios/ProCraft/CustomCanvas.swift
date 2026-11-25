@@ -20,7 +20,7 @@ private var switchIdle: Color { themed(0xFFC1_C1C1, 0xFF3B_3B3B) }
 private var capsuleFill: Color { themed(0xFF1A_1A1A, 0xFFFB_FBFB) }
 private var capsuleEdge: Color { themed(0xFF37_3737, 0xFFE0_E0E0) }
 private let capsuleInk = Color(argb: 0xFFA5_A5A5)
-private let doneBlue = Color(argb: 0xFF01_90FF)
+private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 /// Where the last row the keypad types into (DPI) ends, down from the top: the page's 120, two rows
 /// and their line, 24 between the groups, one row.
 private let typedBottom: CGFloat = 286
@@ -101,6 +101,8 @@ struct CustomCanvas: View {
     /// Which profiles the list shows.
     @State private var cmyk: Bool
     @State private var profileAsked = false
+    /// An HDR canvas: light above white kept.
+    @State private var hdr: Bool
 
     init(model: GalleryModel, onMade: @escaping () -> Void) {
         self.model = model
@@ -108,7 +110,7 @@ struct CustomCanvas: View {
         let start = model.editingPreset.map { model.presets[$0] } ?? CanvasPreset(
             name: "Untitled Canvas", unit: "px", sizeWidth: 1080, sizeHeight: 1080, dpi: 300, background: 0xFF_FFFF,
             backgroundHidden: false, timeLapseResolution: 0, timeLapseQuality: 1, timeLapseHevc: false,
-            profile: "sRGB IEC61966-2.1"
+            profile: "sRGB IEC61966-2.1", hdr: false
         )
         _name = State(initialValue: start.name)
         _width = State(initialValue: start.sizeWidth)
@@ -120,6 +122,7 @@ struct CustomCanvas: View {
         _resolution = State(initialValue: start.timeLapseResolution)
         _quality = State(initialValue: start.timeLapseQuality)
         _hevc = State(initialValue: start.timeLapseHevc)
+        _hdr = State(initialValue: start.hdr)
         _profile = State(initialValue: start.profile)
         _cmyk = State(initialValue: isCmykProfile(name: start.profile))
     }
@@ -133,7 +136,7 @@ struct CustomCanvas: View {
         return CanvasPreset(
             name: shown.isEmpty ? "Untitled Canvas" : shown, unit: unit.key, sizeWidth: width, sizeHeight: height,
             dpi: dpi, background: background, backgroundHidden: hidden, timeLapseResolution: resolution,
-            timeLapseQuality: quality, timeLapseHevc: hevc, profile: profile
+            timeLapseQuality: quality, timeLapseHevc: hevc, profile: profile, hdr: hdr && !cmyk && PluginsModel.shared.has(.hdr)
         )
     }
 
@@ -189,6 +192,15 @@ struct CustomCanvas: View {
                 typed += k
             }
         }
+    }
+
+    /// The layers a canvas of `p`'s size holds: as many as fit however full they are, to as many
+    /// as fit mostly empty (where layers not worked on are kept compressed).
+    private func maximumLayers(_ p: CanvasPreset) -> String {
+        let (w, h) = (presetWidth(preset: p), presetHeight(preset: p))
+        let full = layersFor(width: w, height: h)
+        let empty = emptyLayersFor(width: w, height: h)
+        return empty > full ? "\(full)–\(empty)" : "\(full)"
     }
 
     private func group<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -283,7 +295,8 @@ struct CustomCanvas: View {
                 .padding(.leading, 24)
                 .padding(.top, 16)
                 .padding(.bottom, 20)
-            ForEach(sections.indices, id: \.self) { i in
+            // Time-lapse settings while the Time-lapse plugin is on
+            ForEach(sections.indices.filter { $0 != 2 || PluginsModel.shared.has(.timeLapse) }, id: \.self) { i in
                 let chosen = i == section
                 let tint = chosen ? Color.white : idleInk
                 // icons centred 43 in, whatever their size; the names 69 in
@@ -357,13 +370,19 @@ struct CustomCanvas: View {
                         field = .dpi
                     }
                     line
-                    sizeRow("Maximum Layers", "\(layersFor(width: presetWidth(preset: p), height: presetHeight(preset: p)))", unit: "", editing: false) {}
+                    sizeRow("Maximum Layers", maximumLayers(p), unit: "", editing: false) {}
                 }
             }
         case 1:
             let names = cmyk ? cmykProfiles() : colorProfiles()
             VStack(spacing: 24) {
                 kindSwitch
+                // while the HDR plugin is on
+                if !cmyk, PluginsModel.shared.has(.hdr) {
+                    group {
+                        switchLine("HDR", on: hdr) { hdr.toggle() }
+                    }
+                }
                 group {
                     ForEach(names.indices, id: \.self) { i in
                         if i > 0 {

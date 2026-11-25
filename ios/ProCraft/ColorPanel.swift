@@ -283,12 +283,17 @@ struct ColorPanel: View {
         Popover(width: panelWidth, arrowX: arrowX) {
             header
             picker(c, short: short)
+            // an HDR artwork's paint can be lit above white
+            if background == nil, model.colorMode != .palettes, model.isHdr, PluginsModel.shared.has(.hdrColour) {
+                ColorLightRow(model: model)
+            }
             if model.colorMode != .palettes {
                 if short {
                     ShortBottom(model: model, c: c, ui: ui)
                 } else {
                     HistoryBlock(model: model, c: c)
-                    if model.palettes.indices.contains(model.defaultPalette) {
+                    // the default palette's swatches while the Palettes plugin is on
+                    if PluginsModel.shared.has(.palettes), model.palettes.indices.contains(model.defaultPalette) {
                         let p = model.palettes[model.defaultPalette]
                         Text(verbatim: p.name)
                             .font(.system(size: 14, weight: .semibold))
@@ -440,7 +445,7 @@ private let stepEnd: CGFloat = 18
 /// Touching anywhere on the row moves the pill there. With a plugin's steps on, a tap within
 /// `stepEnd` of either end moves it one `unit` (of 0..1) down or up instead; a drag from anywhere
 /// still goes where the finger is.
-private struct SliderRow: View {
+struct SliderRow: View {
     let value: Float
     let colours: [UInt32]
     var unit: Float = 0.01
@@ -773,6 +778,12 @@ private struct ModelClassicPicker: View {
         let side = Int(colourModelSquareSide(side: UInt32(max((across * displayScale).rounded(), 1))))
         let key = ModelHueKey(model: model, hue: coords[0])
         VStack(spacing: 0) {
+            // a plugin's: its picker, or a triangle, in the square's place
+            if PluginsModel.shared.colourTriangle || PluginsModel.shared.pickerOn {
+                PluginPicker(c: m.c, side: compact ? 248 : min(344, square))
+                    .frame(width: across, height: down)
+                    .padding(.horizontal, compact ? 6 : 16)
+            } else {
             ZStack(alignment: .topLeading) {
                 ZStack {
                     if let image = picture?.image {
@@ -795,6 +806,7 @@ private struct ModelClassicPicker: View {
             }
             .frame(width: across, height: down, alignment: .topLeading)
             .padding(.horizontal, compact ? 6 : 16)
+            }
             if compact {
                 TrackSlider(m: m, coords: coords, tracks: tracks, channel: 0)
                     .padding(.horizontal, 10)
@@ -845,6 +857,76 @@ private struct TrackSlider: View {
                 m.set(colourModelSlid(model: m.model, h: coords[0], s: coords[1], t: coords[2], channel: UInt32(channel), to: to))
             }
         }
+    }
+}
+
+/// A plugin's picker in Classic's square, `side` square: a picker plugin's picture, touches and
+/// knob, or else a triangle (saturation and brightness between the pure hue at the right, white at
+/// the top left and black at the bottom left) drawn by the core.
+private struct PluginPicker: View {
+    let c: any ColorPick
+    let side: CGFloat
+    @Environment(\.displayScale) private var scale
+
+    var body: some View {
+        let plugins = PluginsModel.shared
+        let picker = plugins.pickerOn
+        let hue = c.hue
+        let n = UInt32(max((side * scale).rounded(), 1))
+        let at = (picker ? plugins.store.pickerPoint(s: c.saturation, v: c.brightness) : nil)
+            ?? trianglePoint(s: c.saturation, v: c.brightness)
+        ZStack(alignment: .topLeading) {
+            if let image = PickerPicture.shared.image(hue: hue, side: n, picker: picker) {
+                Image(decorative: image, scale: scale)
+                    .resizable()
+                    .frame(width: side, height: side)
+            }
+            Knob(radius: 10.75, fill: canvasColor(c.rgb()))
+                .offset(x: CGFloat(at.first ?? 0) * side - 10.75, y: CGFloat(at.dropFirst().first ?? 0) * side - 10.75)
+                .allowsHitTesting(false)
+        }
+        .frame(width: side, height: side, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+            let x = Float(min(max(drag.location.x / side, 0), 1))
+            let y = Float(min(max(drag.location.y / side, 0), 1))
+            let sv = (picker ? plugins.store.pickerPick(x: x, y: y) : nil) ?? triangleSv(x: x, y: y)
+            if sv.count >= 2 {
+                c.setHsv(hue, sv[0], sv[1])
+            }
+        })
+    }
+}
+
+/// The plugin picker's picture for the last hue and size asked, kept until another is asked.
+private final class PickerPicture {
+    static let shared = PickerPicture()
+    private var key: (hue: Float, side: UInt32, picker: Bool, changes: Int)?
+    private var kept: CGImage?
+
+    func image(hue: Float, side: UInt32, picker: Bool) -> CGImage? {
+        // (a plugin's settings changed draw it again)
+        let changes = PluginsModel.shared.changes
+        if let key, key.hue == hue, key.side == side, key.picker == picker, key.changes == changes {
+            return kept
+        }
+        let count = Int(side) * Int(side) * 4
+        // a picker plugin's, blank if it couldn't draw; else the core's triangle
+        let rgba = picker
+            ? (PluginsModel.shared.pickerSession?.pickerPicture(hue: hue, side: side) ?? Data(count: count))
+            : trianglePicture(hue: hue, side: side)
+        key = (hue, side, picker, changes)
+        guard rgba.count >= count, let provider = CGDataProvider(data: rgba as CFData) else {
+            kept = nil
+            return nil
+        }
+        kept = CGImage(
+            width: Int(side), height: Int(side), bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: Int(side) * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent
+        )
+        return kept
     }
 }
 
@@ -2188,7 +2270,7 @@ private struct ModeTabs: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(ColorMode.allCases, id: \.self) { mode in
+            ForEach(ColorMode.shown, id: \.self) { mode in
                 Button { model.colorMode = mode } label: { EmptyView() }
                     .buttonStyle(ModeTabStyle(mode: mode, selected: model.colorMode == mode))
             }
@@ -2314,7 +2396,7 @@ private struct CompactTabs: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(ColorMode.allCases, id: \.self) { m in
+            ForEach(ColorMode.shown, id: \.self) { m in
                 // the tabs' 36-unit glyphs, a little smaller here
                 PcIconView(m.icon, size: 33, color: m == mode ? Pc.accent : Pc.panelTitle)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

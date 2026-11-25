@@ -74,6 +74,13 @@ pub fn adjustment_paintable(adjustment: Adjustment) -> bool {
     !matches!(adjustment, Adjustment::Liquify | Adjustment::Clone | Adjustment::Plugin)
 }
 
+/// Whether it can be an adjustment layer: everything but what moves or copies the layer's own
+/// pixels (Liquify, Clone) and plugins' filters.
+#[uniffi::export]
+pub fn adjustment_live(adjustment: Adjustment) -> bool {
+    !matches!(adjustment, Adjustment::Liquify | Adjustment::Clone | Adjustment::Plugin)
+}
+
 /// The menu's groups in order: colour, blurs, effects, painting.
 #[uniffi::export]
 pub fn adjustment_groups() -> Vec<Vec<Adjustment>> {
@@ -130,5 +137,12 @@ mod tests {
             assert_eq!(adjustment.map(adjustment_label), Some(crate::quick_menu::quick_action_label(a)));
         }
         assert_eq!(quick_action_adjustment(QuickAction::Undo), None);
+    }
+
+    #[test]
+    fn what_can_be_an_adjustment_layer() {
+        assert!(adjustment_live(Adjustment::Curves) && adjustment_live(Adjustment::Halftone));
+        assert!(!adjustment_live(Adjustment::Liquify) && !adjustment_live(Adjustment::Clone));
+        assert!(adjustment_swiped(Adjustment::Halftone));
     }
 }

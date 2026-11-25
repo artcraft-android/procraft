@@ -82,6 +82,10 @@ pub struct Imported {
     /// Its imported picture (a PNG, as stored), and the turn it is shown at (one of the system's
     /// eight image orientations; 0 is upright).
     pub reference_picture: Option<(Vec<u8>, i64)>,
+    /// The strokes and fills of its vector layers, as the app that made the package keeps them
+    /// (see [`write_with_vectors`]), by layer. None for a canvas stored turned or flipped: they
+    /// are kept as the canvas lies.
+    pub vectors: Vec<(LayerId, Vec<u8>)>,
 }
 
 /// Where a package keeps the Reference window's picture (some writers put it at the top).
@@ -185,9 +189,17 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
         .read(REFERENCE_PICTURE)
         .or_else(|| zip.read("ReferenceImage.png"))
         .map(|png| (png, root.int("referenceOrientation").unwrap_or(0)));
+    // (kept only for layers the document still has, as it was repaired)
+    let upright = canvas.turns == 0 && !canvas.flip_x && !canvas.flip_y;
+    let vectors = uuids
+        .iter()
+        .filter(|(uuid, id)| upright && !uuid.is_empty() && document.layer(*id).is_some())
+        .filter_map(|(uuid, id)| Some((*id, zip.read(&vector_entry(uuid))?)))
+        .collect();
     Ok(Imported {
         document,
         pixels,
+        vectors,
         reference: read_reference(&root),
         reference_picture,
         name: root.string("name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Untitled Artwork".to_owned()),
@@ -650,7 +662,11 @@ fn add_item(
                 text: None,
                 private: false,
                 assisted: false,
+                vector: None,
                 plugin: None,
+                adjustment: None,
+                style: None,
+                panel: None,
                 filter: None,
                 marks: Default::default(),
             });
@@ -684,7 +700,11 @@ fn add_item(
                 text,
                 private: item.bool("private").unwrap_or(false),
                 assisted: item.bool("perspectiveAssisted").unwrap_or(false),
+                vector: None,
                 plugin: None,
+                adjustment: None,
+                style: None,
+                panel: None,
                 filter: None,
                 marks: Default::default(),
             });
@@ -710,7 +730,11 @@ fn add_item(
                     text: None,
                     private: false,
                     assisted: false,
+                    vector: None,
                     plugin: None,
+                    adjustment: None,
+                    style: None,
+                    panel: None,
                     filter: None,
                     marks: Default::default(),
                 });
@@ -851,26 +875,54 @@ fn reference_fields(b: &mut Builder, w: &ReferenceWindow) -> Vec<(&'static str, 
     fields
 }
 
+/// Where a package keeps a vector layer's strokes and fills, beside its tiles: a file named by
+/// the layer's UUID, as the app that made it keeps them (see [`write_with_vectors`]). Nothing
+/// else that reads the package knows of them: to it the layer is its pixels.
+const VECTORS: &str = "ProCraft/Vectors/";
+
+fn vector_entry(uuid: &str) -> String {
+    format!("{VECTORS}{uuid}.json")
+}
+
 /// Writes a package.
 pub fn write(e: &Export<'_>) -> Vec<u8> {
+    write_with_vectors(e, &std::collections::HashMap::new())
+}
+
+/// Writes a package as [`write`] does, with the strokes and fills of its vector layers too:
+/// `vectors` holds each one's as the app keeps them (bytes this crate only carries), by layer.
+pub fn write_with_vectors(e: &Export<'_>, vectors: &std::collections::HashMap<LayerId, Vec<u8>>) -> Vec<u8> {
     let mut zip = ZipWriter::new();
-    write_into(e, &mut zip);
+    write_into(e, vectors, &mut zip);
     zip.finish()
 }
 
 /// Writes a package into `out` as it is made, a layer at a time (each layer's pixels asked for
 /// as it is written, and let go after): `out` back, or why the package couldn't be made whole.
 pub fn write_to<W: std::io::Write>(e: &Export<'_>, out: W) -> std::io::Result<W> {
+    write_to_with_vectors(e, &std::collections::HashMap::new(), out)
+}
+
+/// [`write_to`], with the strokes and fills of its vector layers too (see [`write_with_vectors`]).
+pub fn write_to_with_vectors<W: std::io::Write>(
+    e: &Export<'_>,
+    vectors: &std::collections::HashMap<LayerId, Vec<u8>>,
+    out: W,
+) -> std::io::Result<W> {
     let mut zip = ZipWriter::to(out);
-    write_into(e, &mut zip);
+    write_into(e, vectors, &mut zip);
     zip.finish_to()
 }
 
-fn write_into<W: std::io::Write>(e: &Export<'_>, zip: &mut ZipWriter<W>) {
+fn write_into<W: std::io::Write>(
+    e: &Export<'_>,
+    vectors: &std::collections::HashMap<LayerId, Vec<u8>>,
+    zip: &mut ZipWriter<W>,
+) {
     let doc = e.document;
     let (w, h) = (doc.width(), doc.height());
     let mut b = Builder::new();
-    let mut uuids = Uuids(e.seed ^ 0x9E37_79B9_7F4A_7C15);
+    let mut uuids = Uuids(e.seed ^ 0x9E37_79B9_7F4A_7C15, Vec::new());
     let doc_ref = b.reserve();
 
     // layers and groups, top first, as nested lists
@@ -977,6 +1029,11 @@ fn write_into<W: std::io::Write>(e: &Export<'_>, zip: &mut ZipWriter<W>) {
     zip.add("QuickLook/Thumbnail.png", e.thumbnail_png);
     if let Some(png) = e.reference_picture {
         zip.add(REFERENCE_PICTURE, png);
+    }
+    for (id, uuid) in &uuids.1 {
+        if let Some(bytes) = vectors.get(id) {
+            zip.add(&vector_entry(uuid), bytes);
+        }
     }
 }
 
@@ -1143,6 +1200,7 @@ fn write_item<W: std::io::Write>(
         );
     }
     let uuid = uuids.next();
+    uuids.1.push((id, uuid.clone()));
     // (one that can't be read leaves the package unfinished)
     let px = e.pixels.pixels(id).unwrap_or_else(|err| {
         zip.fail(err);
@@ -1452,8 +1510,8 @@ fn write_tiles<W: std::io::Write>(
     }
 }
 
-/// UUIDs from a seed (random enough to tell layers apart).
-struct Uuids(u64);
+/// UUIDs from a seed (random enough to tell layers apart), and which each paint layer was given.
+struct Uuids(u64, Vec<(LayerId, String)>);
 
 impl Uuids {
     fn next(&mut self) -> String {

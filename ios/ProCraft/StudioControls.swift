@@ -1501,7 +1501,7 @@ private struct AboutBrushView: View {
                 .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 22, style: .circular).fill(StudioInk.aboutCard))
                 .contentShape(Rectangle())
-                .onTapGesture { studio.newResetPoint() }
+                .onTapGesture { studio.askNewResetPoint() }
             Color.clear.frame(height: 11)
             VStack(alignment: .leading, spacing: 4) {
                 Text(verbatim: "Reset brush")
@@ -1524,7 +1524,7 @@ private struct AboutBrushView: View {
             .frame(maxWidth: .infinity, minHeight: about?.resetMade != nil ? 69 : 44, maxHeight: about?.resetMade != nil ? 69 : 44, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 22, style: .circular).fill(StudioInk.aboutCard))
             .contentShape(Rectangle())
-            .onTapGesture { studio.reset() }
+            .onTapGesture { studio.askReset() }
         }
     }
 }

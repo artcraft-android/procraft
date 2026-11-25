@@ -38,7 +38,9 @@ private let librariesSpace = "libraries"
 
 /// Where a library's title menu hangs in its panel, as measured: 8 in from the panel's left, its
 /// top 54 below the panel's (the header starting under the arrow).
-let libraryTitleMenuAt = CGPoint(x: 8, y: Pc.arrowHeight + 54)
+func libraryTitleMenuAt(_ model: CanvasModel) -> CGPoint {
+    CGPoint(x: 8, y: Pc.arrowHeight + drawModesHeight(model) + 54)
+}
 
 /// `p`, a menu `size` big's place in a panel whose top left corner is `origin` on a screen
 /// `screen` big, moved as little as keeps the menu on the screen and its top at least `top` down it.
@@ -115,6 +117,7 @@ struct LibrariesPanel: View {
             if let floating {
                 FloatingTopStrip(frame: floating)
             }
+            DrawModeBar(model: model)
             PanelHeader(
                 title: showing ? "Brush Libraries" : model.libraryName, start: 20, end: 12, height: 52,
                 onTitle: { withAnimation(Motion.menuOpen) { ui.titleMenu = true } },
@@ -462,7 +465,7 @@ private struct LibrariesMenus: View {
     @ViewBuilder
     private var titleMenu: some View {
         if model.showingLibraries {
-            let at = kept(libraryTitleMenuAt, CGSize(width: glassMenuWidth, height: 14 + 40))
+            let at = kept(libraryTitleMenuAt(model), CGSize(width: glassMenuWidth, height: 14 + 40))
             // a title's menu, as a library's is
             GlassMenu(system: true) {
                 MenuRow(icon: PcIcons.menuRestore, label: "Restore default library") {
@@ -473,7 +476,7 @@ private struct LibrariesMenus: View {
             .offset(x: at.x, y: at.y)
             .menuTransition(.topLeading)
         } else {
-            let at = kept(libraryTitleMenuAt, CGSize(width: glassMenuWidth, height: LibraryTitleMenu.height))
+            let at = kept(libraryTitleMenuAt(model), CGSize(width: glassMenuWidth, height: LibraryTitleMenu.height))
             LibraryTitleMenu(model: model) { closeAll() }
                 .offset(x: at.x, y: at.y)
                 .menuTransition(.topLeading)
@@ -487,7 +490,7 @@ private struct LibrariesMenus: View {
         let height: CGFloat = showing ? 14 + 80 : 14 + 40 + 23 + 40
         // the plus's lower right corner: 12 in from the header's right, its 40 under the header's
         // first 12 (the header starting under the arrow)
-        let plus = CGPoint(x: brushLibraryWidth - 12, y: Pc.arrowHeight + 12 + 40)
+        let plus = CGPoint(x: brushLibraryWidth - 12, y: Pc.arrowHeight + drawModesHeight(model) + 12 + 40)
         let spot = kept(CGPoint(x: plus.x - glassMenuWidth, y: plus.y), CGSize(width: glassMenuWidth, height: height))
         return GlassMenu(overPanel: true) {
             if showing {

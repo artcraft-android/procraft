@@ -10,6 +10,7 @@ mod adjustments;
 mod alert;
 mod animated_export;
 mod animation;
+mod builtins;
 mod canvas_info;
 mod chrome;
 mod collapse;
@@ -21,6 +22,7 @@ mod copy_paste;
 mod crop;
 mod curve;
 mod custom_canvas;
+mod easing_editor;
 mod edit_layout;
 mod export_card;
 mod files;
@@ -49,12 +51,15 @@ mod overlays;
 mod panel;
 mod pdf;
 mod pen;
+mod plugin_share;
+mod plugin_tool;
 mod prefs;
 mod projection;
 mod questions;
 mod quick_menu;
 mod recolor;
 mod reference;
+mod saved_curves;
 mod screen;
 mod selection;
 mod settings;
@@ -66,8 +71,11 @@ mod stroke_sound;
 mod studio;
 mod system_clipboard;
 mod text;
+mod texture_packer;
 mod textures;
 mod timelapse;
+mod timeline;
+mod timeline_settings;
 mod tool_header;
 mod touch_keyboard;
 mod transform;
@@ -1125,6 +1133,7 @@ impl App {
             }
             // the New canvas list offers the kinds of artwork the plugins on make
             gallery.kinds = interface.plugins().kinds();
+            gallery.hidden = interface.plugins().hidden_features();
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
             // layers held out of an artwork: held a moment over another, it opens; let go here,
             // they go nowhere
@@ -1410,7 +1419,10 @@ impl App {
     /// an artwork (a package, a PSD, a PDF, a picture, or a model with its files).
     fn import(&mut self, paths: Vec<std::path::PathBuf>, folder: Option<String>) {
         let (palettes, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| files::is_palette_file(p));
-        if !palettes.is_empty() {
+        // while the Palettes plugin is on
+        if !palettes.is_empty() && !self.ui.plugins().has(procraft_core::Feature::Palettes) {
+            files::say("Turn on Palettes in Plugins to bring in palettes.");
+        } else if !palettes.is_empty() {
             let store = &self.ui.colours.palettes;
             let added = palettes.iter().filter(|p| {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -1421,6 +1433,21 @@ impl App {
         let (brushes, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| files::is_brush_file(p));
         if !brushes.is_empty() {
             files::keep_pending_brushes(&brushes);
+        }
+        // a PSD, while the PSD plugin's import is on
+        let psd = |p: &std::path::PathBuf| {
+            p.extension().is_some_and(|e| matches!(e.to_string_lossy().to_lowercase().as_str(), "psd" | "psb"))
+        };
+        if paths.iter().any(psd) && !self.ui.plugins().has(procraft_core::Feature::PsdImport) {
+            files::say("Turn on PSD in Plugins to bring in PSD files.");
+            return;
+        }
+        // a model, while the 3D painting plugin is on
+        if paths.iter().any(|p| files::is_model_file(p))
+            && !self.ui.plugins().has(procraft_core::Feature::ModelPainting)
+        {
+            files::say("Turn on 3D painting in Plugins to bring in models.");
+            return;
         }
         // a model takes the files picked with it; else each is an artwork of its own, the one
         // before kept (closed) as the next comes in

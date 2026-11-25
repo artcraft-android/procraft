@@ -188,6 +188,7 @@ private struct TrackRow: View {
     let value: Float
     let track: [Color]
     let knob: Color
+    var height: CGFloat = 55
     let onChange: (Float) -> Void
 
     var body: some View {
@@ -221,7 +222,7 @@ private struct TrackRow: View {
             .frame(height: 24)
             Spacer(minLength: 0)
         }
-        .frame(height: 55)
+        .frame(height: height)
     }
 }
 
@@ -335,7 +336,8 @@ private struct BalancePanel: View {
 }
 
 /// The curves panel: the chosen channel's curve over a grid (drag its points; touch elsewhere to add
-/// one; tap a point for Delete over it), and the channels.
+/// one; tap a point for Delete over it), and the channels. An HDR canvas's has Exposure among
+/// them: its stops, and the brightness it starts above and how softly, in place of a curve.
 private struct CurvesPanel: View {
     let model: CanvasModel
     let shown: AdjustShown
@@ -347,8 +349,86 @@ private struct CurvesPanel: View {
     @State private var added = false
     @State private var moved = false
 
+    /// The channels listed: Exposure and Limit an HDR canvas's only.
+    /// The curves listed (a filter layer's have alpha too), then Exposure and Limit: an HDR canvas's
+    /// plain Curves' only.
+    private var channels: [String] {
+        let curves = Array(["Gamma", "Red", "Green", "Blue", "Alpha"].prefix(max(1, min(5, Int(shown.curveChannels)))))
+        return curves + (model.isHdr && plainCurves && PluginsModel.shared.has(.hdrCurves) ? ["Exposure", "Limit"] : [])
+    }
+
+    /// Plain Curves (four curves), not a filter layer's.
+    private var plainCurves: Bool {
+        shown.curveChannels == 4
+    }
+
     private var channel: Int {
-        Int(shown.curveChannel)
+        min(Int(shown.curveChannel), channels.count - 1)
+    }
+
+    private var exposing: Bool {
+        plainCurves && channel == 4
+    }
+
+    private var limiting: Bool {
+        plainCurves && channel == 5
+    }
+
+    /// The limit's peak (stops above white) at which, and past it, there is none.
+    private static let limitOff: Float = 6
+
+    /// Limit's sliders: its peak, white to +5 stops and Off at the end (as it starts), and its
+    /// knee, how far below the peak the easing starts.
+    private var limitRows: some View {
+        let peak = shown.limit.indices.contains(0) ? shown.limit[0] : Self.limitOff
+        let knee = shown.limit.indices.contains(1) ? shown.limit[1] : 0.8
+        let set = { (k: UInt32, v: Float) in model.adjust { $0.adjustmentLimit(k: k, value: v) } }
+        let shownPeak = peak >= Self.limitOff ? "Off" : peak <= 0 ? "White" : String(format: "+%.1f stops", peak)
+        return VStack(spacing: 0) {
+            TrackRow(
+                left: "Peak", right: shownPeak, leftInk: hsbLabel, value: peak / Self.limitOff,
+                track: [Color(white: 0.75), .white], knob: .white, height: 50
+            ) { v in
+                // tenths of a stop up to +5, the last of the track Off
+                let p = (v * Self.limitOff * 10).rounded() / 10
+                set(0, p > 5 ? Self.limitOff : p)
+            }
+            TrackRow(
+                left: "Knee", right: "\(wholeNumber(knee * 100))%", leftInk: hsbLabel, value: knee / 0.95,
+                track: [sliderTick, sliderTrack], knob: .white, height: 50
+            ) { set(1, $0 * 0.95) }
+        }
+        .padding(.horizontal, 10)
+        // as Exposure's three rows sit, the two from the top
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    /// Exposure's sliders: −5 to +5 stops, then Above and Soft (0..1), as the session keeps them.
+    private var exposureRows: some View {
+        let stops = shown.exposure.indices.contains(0) ? shown.exposure[0] : 0
+        let above = shown.exposure.indices.contains(1) ? shown.exposure[1] : 0
+        let soft = shown.exposure.indices.contains(2) ? shown.exposure[2] : 0.5
+        let set = { (k: UInt32, v: Float) in model.adjust { $0.adjustmentExposure(k: k, value: v) } }
+        let shownStops = stops == 0 ? "None" : String(format: "%+.1f stops", stops)
+        return VStack(spacing: 0) {
+            TrackRow(
+                left: "Exposure", right: shownStops, leftInk: hsbLabel, value: (stops + 5) / 10,
+                track: [.black, Color(white: 0.5), .white], knob: Color(white: Double((stops + 5) / 10)), height: 50
+            ) { v in
+                // whole tenths of a stop, and none caught near the middle
+                let s = ((v * 10 - 5) * 10).rounded() / 10
+                set(0, abs(s) < 0.15 ? 0 : s)
+            }
+            TrackRow(
+                left: "Above", right: above <= 0 ? "All" : "\(wholeNumber(above * 100))%", leftInk: hsbLabel,
+                value: above, track: [.black, .white], knob: Color(white: Double(above)), height: 50
+            ) { set(1, $0) }
+            TrackRow(
+                left: "Soft", right: "\(wholeNumber(soft * 100))%", leftInk: hsbLabel, value: soft,
+                track: [sliderTick, sliderTrack], knob: .white, height: 50
+            ) { set(2, $0) }
+        }
+        .padding(.horizontal, 10)
     }
 
     private var points: [CGPoint] {
@@ -435,6 +515,11 @@ private struct CurvesPanel: View {
 
     var body: some View {
         HStack(spacing: 16) {
+            if exposing {
+                exposureRows
+            } else if limiting {
+                limitRows
+            } else {
             GeometryReader { g in
                 ZStack(alignment: .topLeading) {
                     graph(g.size)
@@ -456,9 +541,9 @@ private struct CurvesPanel: View {
                 }
             }
             .padding(8)
+            }
             VStack(spacing: 1) {
-                // a filter layer's curves have alpha too
-                ForEach(Array(["Gamma", "Red", "Green", "Blue", "Alpha"].prefix(max(1, min(5, Int(shown.curveChannels)))).enumerated()), id: \.offset) { i, name in
+                ForEach(Array(channels.enumerated()), id: \.offset) { i, name in
                     let chosen = channel == i
                     Text(verbatim: name)
                         .font(.system(size: 16))

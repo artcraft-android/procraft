@@ -81,6 +81,8 @@ enum Shown {
     Twice,
     Metal,
     Gloss,
+    /// A ribbon's tile length against its own proportions: a quarter to four times.
+    Stretch,
 }
 
 /// One control in the studio.
@@ -108,6 +110,18 @@ enum Control {
 struct Section {
     title: Option<&'static str>,
     controls: &'static [Control],
+}
+
+impl Section {
+    /// The built-in feature the section is a way in to, if it is one's: it shows while that
+    /// feature's plugin is on (a brush whose setting is on keeps painting so with it off).
+    fn feature(&self) -> Option<procraft_core::Feature> {
+        match self.title {
+            Some("Pixel art") => Some(procraft_core::Feature::PixelArt),
+            Some("Ribbon") => Some(procraft_core::Feature::RibbonBrushes),
+            _ => None,
+        }
+    }
 }
 
 /// A plugin's row, as the spacing goes by it (its words are its own).
@@ -169,16 +183,27 @@ const PAGES: &[Page] = &[
         name: "Stroke path",
         icon: &icons::STUDIO_STROKE,
         icon_size: 33.0,
-        sections: &[Section {
-            title: Some("Stroke properties"),
-            controls: &[
-                slider("spacing", "Spacing"),
-                slider("spacing_jitter", "Spacing Jitter"),
-                slider("jitter_lateral", "Jitter Lateral"),
-                slider("jitter_linear", "Jitter Linear"),
-                slider("falloff", "Fall off"),
-            ],
-        }],
+        sections: &[
+            Section {
+                title: Some("Stroke properties"),
+                controls: &[
+                    slider("spacing", "Spacing"),
+                    slider("spacing_jitter", "Spacing Jitter"),
+                    slider("jitter_lateral", "Jitter Lateral"),
+                    slider("jitter_linear", "Jitter Linear"),
+                    slider("falloff", "Fall off"),
+                ],
+            },
+            // pixel art: stamps on whole pixels, hard-edged; pixel perfect also leaves the doubled
+            // pixels and L-corners out of a one-pixel line
+            Section {
+                title: Some("Pixel art"),
+                controls: &[
+                    toggle("pixelated", "Pixelated"),
+                    Control::Toggle("pixel_perfect", "Pixel perfect", Some(("pixelated", 1))),
+                ],
+            },
+        ],
     },
     Page {
         name: "Stabilization",
@@ -256,6 +281,15 @@ const PAGES: &[Page] = &[
                     shown("tilt_roundness", "Tilt roundness", Shown::Both),
                     slider("roundness_jitter_y", "Roundness Vertical Jitter"),
                     slider("roundness_jitter_x", "Roundness Horizontal Jitter"),
+                ],
+            },
+            // the shape stretched along the stroke as one strip (a shape image's; the round tip
+            // stamps), its tiles as long as the strip is wide at the scale's middle
+            Section {
+                title: Some("Ribbon"),
+                controls: &[
+                    toggle("ribbon", "Ribbon"),
+                    Control::Slider("ribbon_scale", "Ribbon scale", Shown::Stretch, Some(("ribbon", 1))),
                 ],
             },
             Section { title: Some("Shape filtering"), controls: &[Control::Choice("shape_filtering", FILTERING)] },
@@ -628,6 +662,11 @@ fn gap(above: Edge, below: Option<&Control>) -> f32 {
     }
 }
 
+/// A ribbon's tile length against its proportions for the slider's `v`: a quarter to four times.
+fn ribbon_stretch(v: f32) -> f32 {
+    4f32.powf(2.0 * v.clamp(0.0, 1.0) - 1.0)
+}
+
 /// A slider's value as it reads.
 fn shown_value(v: f32, shown: Shown, most: f32) -> String {
     let pc = (v * 100.0).round() as i32;
@@ -683,6 +722,8 @@ fn shown_value(v: f32, shown: Shown, most: f32) -> String {
         Shown::Charge => named("Disabled", "Max"),
         Shown::Metal => named("Non-Metallic", "Metallic"),
         Shown::Gloss => named("Glossy", "Matte"),
+        // as the engine's `Brush::ribbon_tile` takes the control
+        Shown::Stretch => format!("{}%", (ribbon_stretch(v) * 100.0).round() as i32),
         Shown::Size => {
             let size = most * v.clamp(0.0, 1.0).powf(2.2);
             // Max only at the control's end: a size of more than a unit reads as its percent
@@ -708,6 +749,9 @@ pub struct Studio {
     pub open: bool,
     /// The rows plugins add to Properties: each one's label, key and choices.
     pub plugin_rows: Vec<(String, String, Vec<String>)>,
+    /// The app's own features hidden (their built-in plugins off): Pixel art's and Ribbon's
+    /// sections go with theirs.
+    hidden: Vec<procraft_core::Feature>,
     tab: usize,
     name: String,
     /// The name as typed in its field on the About page, and whether the field has been focused.
@@ -1052,6 +1096,7 @@ impl Studio {
             return None;
         }
         self.plugin_rows = plugin_rows(&prefs.plugins);
+        self.hidden = prefs.plugins.hidden_features();
         if let Some(drawing) = &self.preview_drawing {
             match drawing.try_recv() {
                 Ok(image) => {
@@ -1246,7 +1291,9 @@ impl Studio {
                     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                     let width = ui.available_width();
                     let mut above = Edge::Top;
-                    for (k, section) in page.sections.iter().enumerate() {
+                    let hidden = self.hidden.clone();
+                    let shown = page.sections.iter().filter(|s| s.feature().is_none_or(|f| !hidden.contains(&f)));
+                    for (k, section) in shown.enumerate() {
                         // the About page is headed by the brush's name
                         let about = matches!(section.controls.first(), Some(Control::About));
                         let title = section.title.map(str::to_owned).or_else(|| about.then(|| self.name.clone()));
@@ -2391,6 +2438,7 @@ fn typed(how: Shown, most: f32) -> (i32, bool) {
         Shown::Double | Shown::Twice => (200, false),
         Shown::Both | Shown::Follow | Shown::Grade => (100, true),
         Shown::Count => (16, false),
+        Shown::Stretch => (400, false),
         Shown::Size => ((most * 100.0).round() as i32, false),
         _ => (100, false),
     }
@@ -2400,6 +2448,7 @@ fn typed_value(how: Shown, most: f32, n: i32) -> f32 {
     match how {
         Shown::Double | Shown::Twice => n as f32 / 200.0,
         Shown::Count => (n.max(1) - 1) as f32 / 15.0,
+        Shown::Stretch => ((n.clamp(25, 400) as f32 / 100.0).ln() / 4f32.ln() + 1.0) / 2.0,
         Shown::Size => ((n as f32 / 100.0) / most.max(1e-3)).clamp(0.0, 1.0).powf(1.0 / 2.2),
         _ => n as f32 / 100.0,
     }

@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.frame-exports",
+  "name": "Sprite Sheet and Harmony",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Share your animation as a sprite sheet, with the JSON a game engine reads, or as a Toon Boom Harmony scene, each track a layer with its timing.",
+  "compat": { "procraft": { "interface": 23 } },
+  "permissions": [],
+  "controls": [
+    {
+      "key": "size", "type": "slider", "label": "Longest side", "least": 0, "most": 4096, "step": 256, "starts": 0,
+      "unit": " px", "at_least": "Full size"
+    },
+    {
+      "key": "layout", "type": "slider", "label": "Layout", "least": 0, "most": 2, "step": 1, "starts": 0,
+      "names": ["Grid", "Row", "Column"]
+    },
+    { "key": "columns", "type": "slider", "label": "Columns", "least": 0, "most": 64, "step": 1, "starts": 0, "at_least": "Auto" },
+    { "key": "rows", "type": "slider", "label": "Rows", "least": 0, "most": 64, "step": 1, "starts": 0, "at_least": "Auto" },
+    {
+      "key": "padding", "type": "slider", "label": "Padding", "least": 0, "most": 64, "step": 1, "starts": 0, "unit": " px",
+      "at_least": "None"
+    },
+    { "key": "trim", "type": "switch", "label": "Trim empty space", "starts": false },
+    { "key": "once", "type": "switch", "label": "Held frames once", "starts": true },
+    { "key": "json", "type": "switch", "label": "JSON data", "starts": true },
+    { "key": "transparent", "type": "switch", "label": "Transparent background", "starts": true }
+  ],
+  "exports": [
+    {
+      "key": "sprite_sheet", "label": "Sprite Sheet", "asks": "frames",
+      "controls": ["size", "layout", "columns", "rows", "padding", "trim", "once", "json", "transparent"],
+      "size": "size", "transparent": "transparent"
+    },
+    { "key": "harmony", "label": "Harmony Scene", "asks": "tracks", "zip": true, "sounds": true }
+  ]
+}

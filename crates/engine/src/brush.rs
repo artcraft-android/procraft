@@ -918,16 +918,17 @@ impl Brush {
     }
 
     /// The brush as a dual brush's second: drawn apart as coverage alone, its grain goes on stamp
-    /// by stamp, even one fixed to the canvas; where its colour shows, it is the stroke's own,
-    /// nothing jittering or moving it.
-    pub fn as_second(mut self) -> Brush {
-        if self.grain.mode == GrainMode::Texturized {
-            self.grain.mode = GrainMode::Moving;
+    /// by stamp, even one fixed to the canvas, and it is stamped, never a ribbon; where its colour
+    /// shows, it is the stroke's own, nothing jittering or moving it.
+    pub fn as_second(self) -> Brush {
+        let mut second = self.without_ribbon();
+        if second.grain.mode == GrainMode::Texturized {
+            second.grain.mode = GrainMode::Moving;
         }
         for key in COLOUR_DYNAMICS {
-            self.extra.remove(key);
+            second.extra.remove(key);
         }
-        self
+        second
     }
 
     /// What a brush file gave the grain the brush has now.

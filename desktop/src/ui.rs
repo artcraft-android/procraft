@@ -29,7 +29,7 @@ const POPOVER_FILL: Color32 = Color32::from_rgb(0x28, 0x2a, 0x2d);
 /// A tool button held this long (seconds), as a long press, takes the current brush.
 const TOOL_HOLD_S: f64 = 0.4;
 /// The pictures and the videos Insert a file and Insert a photo take (and a drop on the canvas).
-const PICTURES: [&str; 8] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
+const PICTURES: [&str; 9] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "svg"];
 const VIDEOS: [&str; 6] = ["mp4", "m4v", "mov", "wmv", "avi", "mkv"];
 
 /// Whether `path` is named as a picture is.
@@ -188,12 +188,19 @@ pub struct Interface {
     gesture_controls: crate::gesture_controls::GestureControls,
     /// Canvas information, while it is open.
     canvas_info: Option<crate::canvas_info::CanvasInfo>,
+    /// The timeline's settings card (Actions → Canvas → Timeline Settings): the timeline's grid
+    /// opens it with its `toggle`, its `anchor` set to the button's rect.
+    pub timeline_settings: crate::timeline_settings::TimelineSettingsCard,
     /// The reference window.
     reference: crate::reference::Reference,
     /// The Reference windows opened besides the artwork's own, while a plugin lets more be open.
     more_references: Vec<crate::reference::Reference>,
     /// Crop and Resize.
     crop: crate::crop::Crop,
+    /// The Texture Packer, while it is open.
+    texture_packer: Option<crate::texture_packer::TexturePacker>,
+    /// A plugin's tool (Comic Panels), while it is open.
+    plugin_tool: crate::plugin_tool::PluginToolWindow,
     /// The drawing guide's editor.
     guide_editor: crate::guide_editor::GuideEditor,
     /// The artwork's folder in the gallery.
@@ -239,10 +246,14 @@ pub struct Interface {
     shortcut_list: crate::shortcuts::Shortcuts,
     /// Animation Assist's bar, while it is on, and sharing the layers as an animation.
     animation: crate::animation::AnimationBar,
+    /// The timeline's grid, while the artwork is on a timeline.
+    pub timeline: crate::timeline::TimelineGrid,
     animated_export: Option<crate::animated_export::AnimatedExport>,
     /// The export screen just ended, kept a frame: its preview's textures were drawn in the frame
     /// it ended in, and a texture let go of is gone before that frame is.
     ended_export: Option<crate::animated_export::AnimatedExport>,
+    /// Sharing what a plugin makes of the animation (a sprite sheet): its screen, while it is up.
+    plugin_shares: crate::plugin_share::PluginShares,
     /// The artwork was opened from the gallery's Share only to be shared as an animation: when
     /// that ends, the gallery comes back.
     exporting_from_gallery: bool,
@@ -329,9 +340,12 @@ impl Interface {
             gestures: procraft_core::GestureSettings::new(crate::files::kept_gestures()),
             gesture_controls: crate::gesture_controls::GestureControls::default(),
             canvas_info: None,
+            timeline_settings: crate::timeline_settings::TimelineSettingsCard::default(),
             reference: crate::reference::Reference::default(),
             more_references: Vec::new(),
             crop: crate::crop::Crop::default(),
+            texture_packer: None,
+            plugin_tool: crate::plugin_tool::PluginToolWindow::default(),
             guide_editor: crate::guide_editor::GuideEditor::default(),
             artwork_dir: None,
             held: None,
@@ -360,8 +374,10 @@ impl Interface {
             licences: false,
             shortcut_list: Default::default(),
             animation: crate::animation::AnimationBar::default(),
+            timeline: crate::timeline::TimelineGrid::default(),
             animated_export: None,
             ended_export: None,
+            plugin_shares: Default::default(),
             exporting_from_gallery: false,
             time_lapse: crate::timelapse::TimeLapseUi::default(),
             studio: crate::studio::Studio::default(),
@@ -444,13 +460,15 @@ impl Interface {
         }
         self.layers.forget();
         self.background_pick = None;
+        // (the packer was the artwork before's)
+        self.texture_packer = None;
         self.text.forget();
         crate::text::prepare_fonts();
         self.transform.on = false;
         self.selection.on = false;
         self.drop.end_filling();
         session.use_colour_history(self.colours.history.clone());
-        session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
+        session.set_touch_settings(self.touch_settings());
         session.use_gradients(self.gradients.clone());
         self.prefs.apply(session);
         self.time_lapse.open(self.artwork_dir.as_deref(), session.edits());
@@ -498,7 +516,12 @@ impl Interface {
     /// What an artwork dragged out of the gallery becomes (Advanced settings' Drag and Drop export).
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn drag_format(&self) -> crate::files::Format {
-        crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
+        use crate::files::Format;
+        match crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(Format::Procraft) {
+            // (our own instead while the PSD plugin's export is off)
+            Format::Psd if !self.prefs.plugins.has(procraft_core::Feature::PsdExport) => Format::Procraft,
+            format => format,
+        }
     }
 
     /// Lets go of the pictures the interface keeps only to be quicker: the brush library's sample
@@ -595,6 +618,7 @@ impl Interface {
         crate::panel::set_panels_fold(&ctx, self.floating.layout.look().fold);
         crate::panel::set_panels_solid(&ctx, self.floating.layout.look().on);
         self.ended_export = None;
+        self.plugin_shares.frame_started();
         self.canvas_pressed = std::mem::take(&mut input.canvas_pressed);
         // looked at again soon while an insert is read, or brushes made
         let brushes_coming = self.brushes_added(session);
@@ -687,7 +711,7 @@ impl Interface {
         let lit = Lit {
             actions: self.open == Some(Popover::Actions),
             transform: self.transform.on,
-            // while the selection tool is open, or while something is selected
+            // lit while the tool is open and while anything is selected (clicked then, it deselects)
             selection: self.selection.on || session.has_selection(),
             adjustments: self.open == Some(Popover::Adjustments)
                 || session.adjustment_shown().adjustment.is_some()
@@ -697,7 +721,10 @@ impl Interface {
             panel_open: matches!(self.open, Some(Popover::Layers | Popover::Colour)),
         };
         let colour = srgb(self.colours.rgb());
-        self.time_lapse.record(&ctx, session, input.idle());
+        // nothing recorded while the Time-lapse plugin is off
+        if self.prefs.plugins.has(procraft_core::Feature::TimeLapse) {
+            self.time_lapse.record(&ctx, session, input.idle());
+        }
         // the brush studio over everything (the library stays open under it)
         if let Some(new) = self.library.studio.take() {
             // a brush a plugin's brush engine draws opens in that plugin's own studio
@@ -754,6 +781,15 @@ impl Interface {
             self.popover_open = false;
             return;
         }
+        // sharing what a plugin makes of the animation (a sprite sheet): its screen over everything
+        if self.plugin_shares.is_open() {
+            self.canvas_rect = Rect::NOTHING;
+            self.animation.reset(session);
+            self.plugin_shares.show(&ctx, &mut self.look, session, &self.prefs.plugins);
+            session.set_backdrops(Vec::new());
+            self.popover_open = false;
+            return;
+        }
         // the Lighting Studio: the model among its lights, and the studio's bar
         if self.lighting.open {
             self.canvas_rect = Rect::EVERYTHING;
@@ -769,6 +805,38 @@ impl Interface {
         if self.crop.open {
             self.canvas_rect = Rect::EVERYTHING;
             self.crop.show(&ctx, &mut self.look, session);
+            session.set_backdrops(Vec::new());
+            self.popover_open = false;
+            return;
+        }
+        // the Texture Packer: the canvas, its drawings' boxes over it and the packer's bar alone
+        // (none of the canvas takes a press: the packer moves the view itself)
+        if let Some(packer) = self.texture_packer.as_mut() {
+            self.canvas_rect = Rect::NOTHING;
+            match packer.show(&ctx, session) {
+                Some(crate::texture_packer::Asked::Closed) => self.texture_packer = None,
+                Some(crate::texture_packer::Asked::Export(sprites)) => {
+                    crate::files::export_sprites(session, sprites, &mut self.export_card);
+                }
+                None => {}
+            }
+            self.export_card.show(&ctx, &mut self.look);
+            session.set_backdrops(Vec::new());
+            self.popover_open = false;
+            return;
+        }
+        // a plugin's tool (Comic Panels): the canvas, what the tool shows and its header alone
+        if self.plugin_tool.open.is_some() {
+            self.canvas_rect = Rect::EVERYTHING;
+            match self.plugin_tool.show(&ctx, &mut self.look, session) {
+                Some(crate::plugin_tool::Asked::Undo) => {
+                    self.undo(session);
+                    self.plugin_tool.again(session);
+                }
+                Some(crate::plugin_tool::Asked::Said(said, warning)) => self.overlays.notice(&said, warning),
+                None => {}
+            }
+            self.overlays.show(ui, &mut self.look, colour, false);
             session.set_backdrops(Vec::new());
             self.popover_open = false;
             return;
@@ -791,7 +859,7 @@ impl Interface {
             self.canvas_rect = Rect::EVERYTHING;
             self.hover_cursor(&ctx, session, &info, input);
             self.overlays.show(ui, &mut self.look, colour, false);
-            self.drop.show(&ctx, session, to_hex(self.colours.rgb()), 0.0);
+            self.drop.show(&ctx, session, to_hex(self.colours.rgb()), 0.0, &mut self.prefs);
             self.copy_paste_panel(&ctx, session);
             self.layer_choice(&ctx, session);
             self.quick_menu(&ctx, session);
@@ -975,6 +1043,13 @@ impl Interface {
         }
         self.hover_cursor(&ctx, session, &info, input);
         self.selection_pointer(&ctx, input);
+        // (Crisp Zoom switched from a vector layer's menu is kept as the switch in Prefs is)
+        if session.vector_crisp() != self.prefs.vector_crisp {
+            self.prefs.vector_crisp = session.vector_crisp();
+            self.prefs.keep();
+        }
+        // one stroke picked on a vector layer, with a selection tool up, shows its nodes
+        self.overlays.vector_nodes = if self.selection.on { session.vector_nodes() } else { Vec::new() };
         if let Some(kind) = self.overlays.show(ui, &mut self.look, colour, true) {
             self.overlays.shape = session.quickshape_choose(kind).or(self.overlays.shape.take());
         }
@@ -989,7 +1064,8 @@ impl Interface {
         let tool_button = match info.tool {
             ToolKind::Smudge => BarButton::Smudge,
             ToolKind::Erase => BarButton::Erase,
-            ToolKind::Paint => BarButton::Paint,
+            // the desktop has no light button yet: it sits with the brush
+            ToolKind::Paint | ToolKind::Light => BarButton::Paint,
         };
         let anchor = |p: Popover| match p {
             Popover::Actions => bar.rect(BarButton::Actions),
@@ -1131,6 +1207,38 @@ impl Interface {
             }
         }
         crate::model_picture::show(&ctx, &mut self.look, session);
+        self.selection.lasso_fill = self.prefs.lasso_fill;
+        self.selection.lasso_fills = self.prefs.plugins.lasso_fills();
+        // the app's own features, each shown while its built-in plugin is on
+        self.layers.vector_layers_hidden = !self.prefs.plugins.has(procraft_core::Feature::VectorLayers);
+        self.crop.pixel_art_hidden = !self.prefs.plugins.has(procraft_core::Feature::PixelArt);
+        let hidden = self.prefs.plugins.hidden_features();
+        // the drawing guide neither drawn nor followed while its plugin is off, kept as saved
+        session.set_guide_paused(hidden.contains(&procraft_core::Feature::DrawingGuides));
+        // a built-in plugin turned off while what it shows is in use
+        self.colours.palettes_hidden = hidden.contains(&procraft_core::Feature::Palettes);
+        if self.colours.palettes_hidden && self.colours.mode == crate::colours::Mode::Palettes {
+            self.colours.mode = crate::colours::Mode::Disc;
+        }
+        if self.text.editing() && hidden.contains(&procraft_core::Feature::Text) {
+            self.text.end(session, true);
+        }
+        // the Light tool (an artwork left on it) goes back to the brush while its plugin is off
+        if info.tool == ToolKind::Light && hidden.contains(&procraft_core::Feature::LightTool) {
+            session.set_tool(ToolKind::Paint);
+        }
+        self.quick_menu.hidden.clone_from(&hidden);
+        self.gesture_controls.hidden.clone_from(&hidden);
+        self.layers.hidden = hidden;
+        self.selection.fill_opacity = self.prefs.fill_opacity;
+        self.selection.pixelated = self.prefs.selection_pixelated;
+        // Pixelated in Selection and Transform while the Pixel art plugin is on (kept as set)
+        let pixel_art_hidden = !self.prefs.plugins.has(procraft_core::Feature::PixelArt);
+        if self.selection.pixel_art_hidden != pixel_art_hidden {
+            session.set_selection_pixelated(self.prefs.selection_pixelated && !pixel_art_hidden);
+        }
+        self.selection.pixel_art_hidden = pixel_art_hidden;
+        self.transform.pixel_art_hidden = pixel_art_hidden;
         // the bars and panels that hang from the top bar hang from where it ends as it shows
         let bar_bottom = crate::panel::bar_shown(&ctx);
         crate::panel::drawing_bottom(
@@ -1141,6 +1249,17 @@ impl Interface {
         crate::panel::drawing_bottom(&ctx, None);
         if let Some(on) = selection {
             self.prefs.selection_x_ray = on;
+            self.prefs.keep();
+        }
+        // Color Fill's Lasso Fill turned on or off, or its Opacity slid, in its popover, or
+        // Feather's Pixelated turned on or off, kept
+        if self.selection.lasso_fill != self.prefs.lasso_fill
+            || self.selection.fill_opacity != self.prefs.fill_opacity
+            || self.selection.pixelated != self.prefs.selection_pixelated
+        {
+            self.prefs.lasso_fill = self.selection.lasso_fill;
+            self.prefs.fill_opacity = self.selection.fill_opacity;
+            self.prefs.selection_pixelated = self.selection.pixelated;
             self.prefs.keep();
         }
         // Color Fill is kept between launches
@@ -1195,8 +1314,13 @@ impl Interface {
             }
             None => {}
         }
-        // a full-screen page covers the timeline, as it covers the canvas
-        if self.canvas_info.is_none() && !self.gesture_controls.open {
+        // a full-screen page covers the timeline, as it covers the canvas; it shows while the
+        // Animation Assist plugin (its Page Assist, for pages) is on
+        let assist = session.animation_settings().is_none_or(|a| {
+            use procraft_core::Feature::{AnimationAssist, PageAssist};
+            self.prefs.plugins.has(if a.pages { PageAssist } else { AnimationAssist })
+        });
+        if self.canvas_info.is_none() && !self.gesture_controls.open && assist {
             self.animation.tweens = self.prefs.plugins.tweens();
             self.animation.frame_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Frame);
             let said = self.animation.show(&ctx, &mut self.look, session, &self.colours.palettes, self.colours.harmony);
@@ -1206,10 +1330,48 @@ impl Interface {
             if let Some(crate::animation::Said::NoRoom) = said {
                 crate::files::no_room(session);
             }
+            self.timeline.perform_smoothing = self.prefs.timeline_perform_smoothing;
+            self.timeline.perform_hidden = !self.prefs.plugins.has(procraft_core::Feature::PerformedMoves);
+            self.timeline.my_curves_hidden = !self.prefs.plugins.has(procraft_core::Feature::MyCurves);
+            // the grid while the Timeline plugin is on (the iPad's timeline bar, likewise)
+            if self.prefs.plugins.has(procraft_core::Feature::Timeline) {
+                if let Some((said, warning)) = self.timeline.show(&ctx, &mut self.look, session, &self.prefs) {
+                    self.overlays.notice(said, warning);
+                }
+            } else {
+                self.timeline.reset(session);
+            }
+            // Animate: autokey on or off, the transform tool opened or ended with it; while it
+            // keys a pose, its box follows the playhead
+            if let Some(on) = self.timeline.animate_asked.take() {
+                self.set_animate(session, on);
+            }
+            if let Some(laid) = self.timeline.autokey_box(session) {
+                self.transform.moved(Some(laid));
+            }
+            // the grid's settings button: the settings' card over it, or put away
+            if std::mem::take(&mut self.timeline.settings_asked) {
+                self.timeline_settings.anchor = self.timeline.settings_button;
+                self.timeline_settings.toggle();
+            }
         } else {
             self.animation.reset(session);
+            self.timeline.reset(session);
         }
-        self.drop.show(&ctx, session, to_hex(self.colours.rgb()), bar_bottom);
+        // the Eraser band: how the eraser works, while erasing on a vector layer with nothing else
+        // in its place under the top bar
+        let erasing_vector = info.tool == ToolKind::Erase
+            && !self.transform.on
+            && !self.selection.on
+            && !self.text.editing()
+            && session.adjustment_shown().adjustment.is_none()
+            && !session.recolor_on()
+            && session.touch_layer_opacity().is_none()
+            && self.overlays.shape.is_none()
+            && !self.drop.banded()
+            && session.layers().iter().any(|l| l.current && l.vector);
+        crate::colour_drop::eraser_band(&ctx, session, erasing_vector, bar_bottom);
+        self.drop.show(&ctx, session, to_hex(self.colours.rgb()), bar_bottom, &mut self.prefs);
         self.copy_paste_panel(&ctx, session);
         self.layer_choice(&ctx, session);
         self.quick_menu(&ctx, session);
@@ -1221,7 +1383,7 @@ impl Interface {
         self.text_editor(&ctx, session);
         // a gesture setting changed: the touches follow it, and it is kept
         if self.gesture_controls.show(&ctx, &mut self.look, &self.gestures) {
-            session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
+            session.set_touch_settings(self.touch_settings());
             crate::files::keep_gestures(&self.gestures.kept());
         }
         if let Some(info) = self.canvas_info.as_mut() {
@@ -1240,6 +1402,19 @@ impl Interface {
                     self.canvas_info = None;
                 }
                 Some(_) => self.canvas_info = None,
+                None => {}
+            }
+        }
+        // the timeline's settings, over the canvas (a full-screen page covers them), while the
+        // Timeline plugin is on
+        if self.canvas_shown() && self.prefs.plugins.has(procraft_core::Feature::Timeline) {
+            use crate::timeline_settings::Said;
+            match self.timeline_settings.show(&ctx, &mut self.look, session, &mut self.prefs) {
+                Some(Said::Crop) => {
+                    self.open = None;
+                    self.crop.begin(session);
+                }
+                Some(Said::Prefs) => self.prefs.keep(),
                 None => {}
             }
         }
@@ -1544,6 +1719,7 @@ impl Interface {
                 TouchCommand::ClearLayer => self.clear_layer(session),
                 TouchCommand::ToggleBars => self.toggle_bars(session),
                 TouchCommand::Fit => session.settle_to_fit(),
+                TouchCommand::Unturn { x, y, turn } => session.unturn(x, y, turn),
                 TouchCommand::QuickShapeLast => {
                     if let Some(info) = session.quickshape_last() {
                         self.snapped(info);
@@ -1617,6 +1793,7 @@ impl Interface {
                     sliding = (!done).then_some((x, y, threshold));
                 }
                 TouchCommand::SelectionChanged => self.selection.changed(session),
+                TouchCommand::ShapeFilled => self.selection.shape_filled(),
                 // the freehand path is read as it is drawn, each frame
                 TouchCommand::FreehandChanged => {}
                 // an adjustment's amount is read as it is drawn, each frame; a touch on the canvas
@@ -1701,6 +1878,8 @@ impl Interface {
         // a finished text's step goes back to editing that text first, as a step of its own
         if !self.text.editing()
             && !self.transform.on
+            // (not while the Text plugin is off: the undo is made, the text left as it is)
+            && self.prefs.plugins.has(procraft_core::Feature::Text)
             && let Some(id) = session.text_undo_layer()
             && self.text.edit(session, id)
         {
@@ -1803,8 +1982,18 @@ impl Interface {
         }
     }
 
+    /// The gesture settings as the canvas's touches take them, less QuickShape and assisted drawing
+    /// while their built-in plugins are off.
+    fn touch_settings(&self) -> procraft_core::TouchSettings {
+        self.prefs.plugins.touch_settings_shown(self.prefs.touch_settings(&self.gestures))
+    }
+
     /// A QuickMenu button's action, the menu opened at `at` (points).
     fn run_quick(&mut self, ctx: &egui::Context, session: &CanvasSession, action: QuickAction, at: egui::Pos2) {
+        // nothing for a built-in plugin's action while it is off
+        if !crate::builtins::action(&self.prefs.plugins.hidden_features(), action) {
+            return;
+        }
         let current = session.layers().into_iter().find(|l| l.current);
         let id = current.as_ref().map(|l| l.id);
         if let Some(a) = procraft_core::quick_action_adjustment(action) {
@@ -1946,7 +2135,7 @@ impl Interface {
             QuickAction::QuickshapeOn => {
                 let on = self.gestures.is_on(GesturePurpose::Quickshape, "DRAW_HOLD".into());
                 self.gestures.set(GesturePurpose::Quickshape, "DRAW_HOLD".into(), !on);
-                session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
+                session.set_touch_settings(self.touch_settings());
                 crate::files::keep_gestures(&self.gestures.kept());
             }
             QuickAction::AddText => self.add_text(ctx, session),
@@ -2051,10 +2240,11 @@ impl Interface {
         // read one after another on a thread of their own (a video's frames take seconds), what
         // each came to told on a frame after (`inserted`); a picture alone is transformed
         let transform = paths.len() == 1;
+        let vectors = self.prefs.plugins.has(procraft_core::Feature::VectorLayers);
         let (session, (done, inserting)) = (Arc::clone(session), std::sync::mpsc::channel());
         std::thread::spawn(move || {
             for path in paths {
-                if done.send((read_insert(&session, &path, private), transform)).is_err() {
+                if done.send((read_insert(&session, &path, private, vectors), transform)).is_err() {
                     return;
                 }
             }
@@ -2084,6 +2274,7 @@ impl Interface {
                     }
                 }
                 Inserted::Picture(false) => crate::files::no_room(session),
+                Inserted::Vectors => self.overlays.notice("Vector Layer", false),
                 Inserted::Frames { added, full, assist } => {
                     if assist {
                         self.animation.reset(session);
@@ -2165,6 +2356,24 @@ impl Interface {
         }
     }
 
+    /// The timeline's Animate (autokey) on or off: on, the transform tool opens to key what is
+    /// under the playhead (a transform moving pixels kept first); off, a transform keying a pose
+    /// ends with its keys kept.
+    fn set_animate(&mut self, session: &CanvasSession, on: bool) {
+        let posing = session.timeline_autokey_posing();
+        self.timeline.set_autokey(session, on);
+        if on {
+            if self.transform.on && !posing {
+                self.transform.end(session, true);
+            }
+            if !self.transform.on {
+                self.toggle_transform(session);
+            }
+        } else if self.transform.on && posing {
+            self.transform.end(session, true);
+        }
+    }
+
     fn toggle_transform(&mut self, session: &CanvasSession) {
         if !self.transform.on && !self.takes_changes(session) {
             return;
@@ -2176,7 +2385,7 @@ impl Interface {
         self.open = None;
         session.set_pick_next(false);
         // nothing there to move: it says so and stays out of transform
-        if let Err(said) = self.transform.begin(session) {
+        if let Err(said) = self.transform.begin(session, &self.prefs.plugins) {
             self.overlays.notice(said, false);
         }
     }
@@ -2191,6 +2400,29 @@ impl Interface {
         self.open = None;
         session.set_pick_next(false);
         session.adjustment_start(a);
+    }
+
+    /// Adds an adjustment layer of `a` over the current layer and opens its adjustment on it: what
+    /// it does changes what is below it, and stays editable.
+    fn add_adjustment_layer(&mut self, session: &CanvasSession, a: procraft_core::Adjustment) {
+        // (Liquify, Clone and a plugin's filter can't be one)
+        if !procraft_core::adjustment_live(a) {
+            return;
+        }
+        self.switch_modes(session, ModeButton::Adjustment);
+        self.open = None;
+        session.set_pick_next(false);
+        if !session.adjustment_layer_add(a) {
+            crate::files::no_room(session);
+        }
+    }
+
+    /// Opens adjustment layer `id`'s adjustment on the values it keeps.
+    fn edit_adjustment_layer(&mut self, session: &CanvasSession, id: u64) {
+        self.switch_modes(session, ModeButton::Adjustment);
+        self.open = None;
+        session.set_pick_next(false);
+        session.adjustment_layer_edit(id);
     }
 
     /// Opens the plugin's filter `id` on the current layer, as [`Self::start_adjustment`] does. The
@@ -2326,8 +2558,17 @@ impl Interface {
         }
     }
 
-    /// Selection on (touches select, as its toolbar says) or off (a freehand path drawn is closed).
+    /// With anything selected (the button lit), the selection goes, as one undo step, and the tool
+    /// closes if on; else Selection on (touches select, as its toolbar says) or off (a freehand
+    /// path drawn is closed).
     fn toggle_selection(&mut self, session: &CanvasSession) {
+        if session.has_selection() {
+            // the other modes end first, keeping what they made, as with any press of it
+            self.switch_modes(session, ModeButton::Selection);
+            self.selection.close(session);
+            self.selection.clear(session);
+            return;
+        }
         // on, it ends; else the other modes end
         if !self.switch_modes(session, ModeButton::Selection) {
             return;
@@ -2710,6 +2951,7 @@ impl Interface {
             ToolKind::Paint => "Painting",
             ToolKind::Smudge => "Smudging",
             ToolKind::Erase => "Erasing",
+            ToolKind::Light => "Lighting",
         };
         self.overlays.done(format!("{doing} with the current brush"), false);
     }
@@ -3041,6 +3283,9 @@ impl Interface {
         if std::mem::take(&mut self.layers.filter_settings) {
             self.start_filter_layer_settings(session);
         }
+        if let Some(id) = self.layers.edit_adjustment.take() {
+            self.edit_adjustment_layer(session, id);
+        }
         // its background row tapped: the colour panel in its place (hanging from the Layers
         // button, from a floating one too), on the background's
         if std::mem::take(&mut self.layers.pick_background) {
@@ -3176,9 +3421,24 @@ impl Interface {
         let filters = self.prefs.plugins.filters();
         let actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Adjustments);
         let turned = self.adjustments.showing_filters && (!filters.is_empty() || !actions.is_empty());
-        let (shown, tapped) =
-            crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, &actions, turned);
+        let hidden = self.prefs.plugins.hidden_features();
+        // (on a layer of its own while the Effects plugin's Adjustment layers is on)
+        let as_layer = self.adjustments.as_layer && !hidden.contains(&procraft_core::Feature::AdjustmentLayers);
+        let (shown, tapped) = crate::adjustments::menu(
+            ctx,
+            &mut self.look,
+            button,
+            backdrops,
+            &filters,
+            &actions,
+            turned,
+            as_layer,
+            &hidden,
+        );
         match tapped {
+            Some(MenuRow::AsLayer) => self.adjustments.as_layer = !as_layer,
+            // as an adjustment layer (those that can't be one do nothing)
+            Some(MenuRow::Open(a)) if as_layer => self.add_adjustment_layer(session, a),
             Some(MenuRow::Open(a)) => self.start_adjustment(session, a),
             Some(MenuRow::Plugins) => self.adjustments.showing_filters = true,
             Some(MenuRow::Back) => self.adjustments.showing_filters = false,
@@ -3213,12 +3473,16 @@ impl Interface {
             time_lapse_recorded: self.time_lapse.recorded(),
             reference: self.reference.on,
             guide: session.guide().on,
+            timeline: session.timeline_info().is_some(),
+            plugin_tools: self.prefs.plugins.tools().into_iter().map(|t| t.label).collect(),
             side_bar: self.side_bar_shown,
             model: self.model,
             model_flat: self.model && session.model_flat(),
             paint_through: self.model && session.paint_through(),
             svg: session.exports_svg(),
+            vectors: session.exports_vectors() && self.prefs.plugins.has(procraft_core::Feature::VectorShare),
             plugin_exports: session.plugin_exports().into_iter().map(|e| e.label).collect(),
+            plugin_shares: self.prefs.plugins.shares().into_iter().map(|e| e.label).collect(),
             plugin_controls: self.prefs.plugins.controls_in(procraft_core::PluginPlace::Canvas),
             plugin_actions: self.prefs.plugins.actions_in(procraft_core::PluginPlace::Canvas),
             edit_layout: self.floating.layout.look().edit,
@@ -3237,7 +3501,7 @@ impl Interface {
             }
             Some(Act::Prefs) => {
                 self.prefs.apply(session);
-                session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
+                session.set_touch_settings(self.touch_settings());
                 self.prefs.keep();
             }
             Some(Act::SideBar) => self.side_bar_shown = !self.side_bar_shown,
@@ -3259,6 +3523,12 @@ impl Interface {
                 self.open = None;
                 self.animated_export = Some(crate::animated_export::AnimatedExport::new(format));
             }
+            Some(Act::PluginShare(i)) => {
+                self.open = None;
+                if let Some(share) = self.prefs.plugins.shares().into_iter().nth(usize::from(i)) {
+                    self.plugin_shares.open(share, session, &self.prefs.plugins, &mut self.export_card);
+                }
+            }
             Some(act @ (Act::AnimationAssist | Act::PageAssist)) => {
                 self.animation.reset(session);
                 let pages = act == Act::PageAssist;
@@ -3268,6 +3538,10 @@ impl Interface {
                 } else {
                     session.set_animation_assist(!on);
                 }
+            }
+            Some(Act::Timeline) => {
+                self.animation.reset(session);
+                self.timeline.set_on(session, !crate::timeline::TimelineGrid::on(session));
             }
             Some(Act::Licences) => self.licences = true,
             Some(Act::Shortcuts) => {
@@ -3326,6 +3600,28 @@ impl Interface {
                 self.open = None;
                 self.crop.begin(session);
             }
+            Some(Act::TexturePacker) => {
+                self.open = None;
+                self.texture_packer = crate::texture_packer::TexturePacker::open(session);
+                if self.texture_packer.is_none() {
+                    self.overlays.notice(crate::texture_packer::NOTHING_TO_PACK, true);
+                }
+            }
+            Some(Act::PluginTool(i)) => {
+                self.open = None;
+                if let Some(tool) = self.prefs.plugins.tools().into_iter().nth(usize::from(i))
+                    && let Some((said, warning)) = self.plugin_tool.begin(session, &self.prefs.plugins, tool)
+                {
+                    self.overlays.notice(&said, warning);
+                }
+            }
+            Some(Act::TimelineSettings) => {
+                self.open = None;
+                // (nothing plays on while its rate, length or playing change)
+                self.timeline.stop(session, false);
+                self.timeline_settings.anchor = self.timeline.settings_button;
+                self.timeline_settings.open();
+            }
             Some(Act::CanvasInfo) => {
                 self.open = None;
                 self.canvas_info = Some(crate::canvas_info::CanvasInfo::new(
@@ -3348,6 +3644,7 @@ impl Interface {
                 | Act::LightInterface
                 | Act::RightHanded
                 | Act::BrushCursor
+                | Act::VectorCrisp
                 | Act::ProjectCanvas
                 | Act::ResetInput,
             )
@@ -3734,6 +4031,10 @@ impl Interface {
                 || self.background_pick.is_some())
                 && self.colours.takes_keys())
             || self.animation.takes_keys()
+            || self.timeline_settings.takes_keys()
+            || self.timeline.takes_keys()
+            // (the Texture Packer's picture stays as it opened: the canvas isn't changed under it)
+            || self.texture_packer.is_some()
     }
 
     /// Nothing covers the canvas: no full-screen page or editor is open.
@@ -3741,8 +4042,10 @@ impl Interface {
         !(self.studio.open
             || self.time_lapse.replaying()
             || self.animated_export.is_some()
+            || self.plugin_shares.is_open()
             || self.lighting.open
             || self.crop.open
+            || self.plugin_tool.open.is_some()
             || self.guide_editor.open
             || self.gesture_controls.open
             || self.canvas_info.is_some()
@@ -3946,6 +4249,12 @@ pub fn escape(ctx: &egui::Context) -> bool {
     pressed
 }
 
+/// Whether Escape was pressed this frame and nothing open before took it: then it is taken, for
+/// the one thing it closes of several standing over each other (the frontmost asks first).
+pub fn escape_first(ctx: &egui::Context) -> bool {
+    escape_untaken(ctx) && escape(ctx)
+}
+
 /// Escape was pressed this frame, and nothing open took it.
 fn escape_untaken(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.key_pressed(Key::Escape))
@@ -4019,7 +4328,7 @@ fn guide_lines(painter: &egui::Painter, session: &CanvasSession) {
     }
     let ppp = painter.ctx().pixels_per_point();
     let [r, gr, b] = [0, 1, 2].map(|k| (g.color.get(k).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8);
-    let colour = Color32::from_rgba_unmultiplied(r, gr, b, (g.opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let colour = Color32::from_rgba_unmultiplied(r, gr, b, (g.line_opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
     let stroke = Stroke::new(0.25 + 1.5 * g.thickness, colour);
     for &[x0, y0, x1, y1] in g.lines.as_chunks::<4>().0 {
         painter.line_segment([egui::pos2(x0, y0) / ppp, egui::pos2(x1, y1) / ppp], stroke);
@@ -4082,6 +4391,8 @@ enum Inserted {
     /// Frames each on a layer of its own (a moving picture's or a video's): how many, whether the
     /// canvas ran out of room, and whether Animation Assist comes on with them.
     Frames { added: u32, full: bool, assist: bool },
+    /// An SVG picture, on a vector layer of its own.
+    Vectors,
     /// It couldn't be read.
     Failed(&'static str),
 }
@@ -4090,7 +4401,7 @@ enum Inserted {
 /// each fitted on a layer of their own at the animation's frame rate (or 15 a second; for each
 /// time a frame falls due, the video's frame nearest it; 999 at most), a moving picture's frames,
 /// or a picture on a layer of its own.
-fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -> Inserted {
+fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool, vectors: bool) -> Inserted {
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     if VIDEOS.contains(&extension.as_str()) {
         let settings = session.animation_settings();
@@ -4118,6 +4429,19 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
         };
     }
     let Ok(bytes) = std::fs::read(path) else { return Inserted::Failed("This picture can't be opened.") };
+    // an SVG picture comes in as a vector layer: its shapes fills, its lines strokes
+    if extension == "svg" {
+        // as a vector layer, while the Vector layers plugin is on
+        if !vectors {
+            return Inserted::Failed("Turn on Vector layers in Plugins to bring in SVG files.");
+        }
+        let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        return if session.insert_svg(bytes, name) != 0 {
+            Inserted::Vectors
+        } else {
+            Inserted::Failed("This picture can't be opened.")
+        };
+    }
     if let Some(done) = session.insert_gif_frames(bytes.clone(), private) {
         if done.added == 0 && !done.full {
             return Inserted::Failed("This picture can't be opened.");
@@ -4198,8 +4522,17 @@ mod tests {
         }
 
         /// As [`Window::open_with`], the canvas `canvas` pixels.
-        fn open_canvas(size: egui::Vec2, canvas: (u32, u32), prefs: crate::prefs::Prefs) -> Option<Window> {
+        fn open_canvas(size: egui::Vec2, canvas: (u32, u32), mut prefs: crate::prefs::Prefs) -> Option<Window> {
             let gpu = procraft_gpu::Gpu::headless().map_err(|e| eprintln!("skipped: {e}")).ok()?;
+            // the app's own features as the app has them, on (a bare store has none, so none would
+            // show), with what it comes with added off, each window a folder of its own
+            if prefs.plugins.features().is_empty() {
+                static WINDOWS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let n = WINDOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let dir = std::env::temp_dir().join(format!("procraft-desktop-window-{}-{n}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&dir);
+                prefs.plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+            }
             let session = CanvasSession::new(canvas.0, canvas.1);
             session.set_display_scale(1.0);
             session.use_gpu(gpu.clone());
@@ -4486,6 +4819,60 @@ mod tests {
             let to_window = self.ctx.layer_transform_to_global(layer).unwrap_or(egui::emath::TSTransform::IDENTITY);
             Some((to_window.mul_rect(rect), to_window))
         }
+    }
+
+    /// The Adjustments menu's Adjustment Layer, ticked, makes the adjustment tapped next an
+    /// adjustment layer over the current layer, its adjustment open on it (the bar says so, and it
+    /// can't be painted on); kept, it stays, and its options' Adjustment Settings open it again
+    /// on the values it keeps. Those that can't be one (Liquify) do nothing.
+    #[test]
+    fn the_adjustments_menu_adds_an_adjustment_layer_that_opens_again_on_its_values() {
+        let Some(mut w) = Window::open(vec2(1180.0, 1100.0), true) else { return };
+        w.stroke();
+        let before = w.session.layers().len();
+        w.ui.open = Some(Popover::Adjustments);
+        for _ in 0..30 {
+            w.frame();
+        }
+        let id = egui::Id::unique("adjustments menu");
+        let (menu, to_window) = w.area_shown(egui::Order::Foreground, id).expect("the Adjustments menu");
+        assert_eq!(to_window.scaling, 1.0);
+        // under its 52 header, 8 down: Adjustment Layer's own group, then the adjustments' first
+        let list = crate::panel::body(menu).top() + 52.0 + 8.0;
+        let x = menu.center().x;
+        w.click(pos2(x, list + 22.0));
+        assert!(w.ui.adjustments.as_layer);
+        let first = procraft_core::adjustment_groups()[0][0];
+        w.click(pos2(x, list + 54.0 + 22.0));
+        w.frame();
+        let shown = w.session.adjustment_shown();
+        assert_eq!(shown.adjustment, Some(first));
+        assert!(shown.on_layer, "an adjustment layer's");
+        let layers = w.session.layers();
+        assert_eq!(layers.len(), before + 1);
+        let added = layers.iter().find(|l| l.current).expect("the layer added is current");
+        assert_eq!(added.adjustment, Some(first));
+        let added = added.id;
+        // kept as it closes
+        w.session.adjustment_end(true);
+        w.frame();
+        assert_eq!(w.session.adjustment_shown().adjustment, None);
+        assert_eq!(w.session.layers().len(), before + 1, "kept");
+        // its options' Adjustment Settings, in the Layers panel
+        w.ui.open = Some(Popover::Layers);
+        w.frame();
+        w.ui.layers.edit_adjustment = Some(added);
+        w.frame();
+        assert_eq!(w.ui.open, None, "the panel goes as it opens");
+        let shown = w.session.adjustment_shown();
+        assert_eq!((shown.adjustment, shown.on_layer), (Some(first), true));
+        w.session.adjustment_end(false);
+        w.frame();
+        // Liquify can't be one: it does nothing (and says nothing)
+        let layers = w.session.layers().len();
+        w.ui.add_adjustment_layer(&w.session.clone(), procraft_core::Adjustment::Liquify);
+        assert_eq!(w.session.adjustment_shown().adjustment, None);
+        assert_eq!(w.session.layers().len(), layers);
     }
 
     /// The app's plugins in a folder of their own, the Interface plugin sizing each part of the
@@ -5023,8 +5410,8 @@ mod tests {
         use procraft_core::LayoutPiece;
         let (plugins, dir) = edit_layout_on("tabs");
         let prefs = crate::prefs::Prefs { plugins, ..Default::default() };
-        // (tall enough for the Adjustments menu's rows)
-        let Some(mut w) = Window::open_canvas(vec2(1300.0, 1000.0), (2600, 2000), prefs) else { return };
+        // (tall enough for the Adjustments menu's rows, Adjustment Layer's among them)
+        let Some(mut w) = Window::open_canvas(vec2(1300.0, 1200.0), (2600, 2400), prefs) else { return };
         let layout = Arc::clone(&w.ui.floating.layout);
         layout.open_at(LayoutPiece::Layers, 500.0, 150.0, 0.0);
         layout.let_go();
@@ -5091,5 +5478,322 @@ mod tests {
             assert!(left.upgrade().is_none(), "round {round}: the artwork left is still held");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Puppet, chosen on the transform toolbar, takes the mouse on the canvas: a click on what is
+    /// painted puts a pin there, Delete Pin takes the chosen one away, and a pin dragged bends what
+    /// is painted with it (the other pin holding its end). Its Mesh button opens the puppet's
+    /// settings; kept, the layer stays bent.
+    #[test]
+    fn puppet_pins_put_and_dragged_with_the_mouse_bend_the_layer() {
+        let Some(mut w) = Window::open(vec2(1180.0, 1100.0), true) else { return };
+        // Puppet's mesh is the Puppet Warp plugin's
+        let dir = std::env::temp_dir().join(format!("procraft-desktop-puppet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        assert!(plugins.set_on("io.github.artcraftandroid.puppet-warp".to_owned(), true));
+        w.ui.prefs.plugins = plugins;
+        w.session.set_brush_size(0.3);
+        w.stroke();
+        // the lowest painted row of the current layer
+        let lowest = |w: &Window| {
+            let layer = w.session.layers().into_iter().find(|l| l.current)?;
+            let p = w.session.copy_layer_contents(layer.id)?;
+            let width = p.width as usize;
+            p.rgba.as_chunks::<4>().0.iter().enumerate().filter(|(_, px)| px[3] > 0).map(|(i, _)| i / width).max()
+        };
+        let flat = lowest(&w).expect("the stroke painted");
+        let session = Arc::clone(&w.session);
+        w.ui.toggle_transform(&session);
+        w.frame();
+        w.frame();
+        // the toolbar's ways, left to right: Puppet the last
+        let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("transform toolbar"));
+        let to_window = w.ctx.layer_transform_to_global(layer).unwrap_or(egui::emath::TSTransform::IDENTITY);
+        let mut ways: Vec<Rect> = w.ctx.viewport(|v| {
+            let widgets = v.prev_pass.widgets.get_layer(layer);
+            widgets.filter(|r| (r.rect.height() - 30.0).abs() < 0.5).map(|r| to_window.mul_rect(r.rect)).collect()
+        });
+        ways.sort_by(|a, b| a.left().total_cmp(&b.left()));
+        assert_eq!(ways.len(), 5, "{ways:?}");
+        w.click(ways[4].center());
+        w.frame();
+        let shown = |w: &Window| w.ui.transform.shown().0.cloned().expect("the box");
+        assert_eq!(w.ui.transform.shown().1, procraft_core::TransformKind::Puppet);
+        let laid = shown(&w);
+        assert!(!laid.puppet_edges.is_empty() && laid.pins.is_empty(), "the mesh laid, no pins yet");
+        // the stroke ran 120 across the middle of the window
+        let middle = pos2(w.size.x / 2.0, w.size.y / 2.0);
+        // (each clear of the chosen pin's ring, which a click on takes that pin away)
+        let (left, right) = (middle - vec2(55.0, 0.0), middle + vec2(55.0, 0.0));
+        w.click(left);
+        w.click(right);
+        w.click(middle);
+        let pinned = shown(&w);
+        assert_eq!((pinned.pins.len(), pinned.selected_pin), (9, 2), "three pins, the last chosen");
+        // Delete Pin (in Rotate 45°'s place) takes the chosen one away
+        let (x, top) = crate::transform::button_tip(&w.ctx, crate::transform::BUTTON_ROOMY, 3, 7);
+        w.click(pos2(x, top + 30.0));
+        let pinned = shown(&w);
+        assert_eq!((pinned.pins.len(), pinned.selected_pin), (6, -1), "the chosen pin gone");
+        // the right one dragged down
+        let before = pinned.pins[4];
+        w.mouse_stroke(right, right + vec2(0.0, 120.0), 12);
+        w.frame();
+        let bent = shown(&w);
+        assert_eq!((bent.pins.len(), bent.selected_pin), (6, 1));
+        assert!(bent.pins[4] > before + 20.0, "the pin followed the drag: {:?}", bent.pins);
+        assert!((bent.pins[1] - pinned.pins[1]).abs() < 0.5, "the left pin stayed: {:?}", bent.pins);
+        // the Mesh button opens the puppet's settings over it
+        let (x, top) = crate::transform::button_tip(&w.ctx, crate::transform::BUTTON_ROOMY, 0, 7);
+        w.click(pos2(x, top + 30.0));
+        w.frame();
+        assert!(w.area_shown(egui::Order::Tooltip, egui::Id::unique("transform popover")).is_some());
+        // kept: the layer bent
+        w.ui.toggle_transform(&session);
+        w.frame();
+        let bent_low = lowest(&w).expect("still painted");
+        assert!(bent_low > flat + 10, "the layer bent down: {flat} to {bent_low}");
+        assert!(w.steps().0, "one step to undo");
+    }
+
+    /// Comic Panels, the plugin's tool: the canvas made a page, fitted whole under the header; a
+    /// line dragged down it cuts its panel in two (nothing painted), one step the header's Undo
+    /// takes back; with Move chosen, a press inside a panel takes nothing and the gutter dragged
+    /// moves both panels' edges; Done fits the canvas to the window again.
+    #[test]
+    fn comic_panels_cut_the_page_and_move_its_gutter() {
+        let Some(mut w) = Window::open(vec2(1000.0, 800.0), true) else { return };
+        let dir = std::env::temp_dir().join(format!("procraft-desktop-comic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        assert!(plugins.set_on("io.github.artcraftandroid.comic-panels".to_owned(), true));
+        w.ui.prefs.plugins = plugins;
+        let fitted = w.paper();
+        let tool = w.ui.prefs.plugins.tools().into_iter().find(|t| t.label == "Comic panels").unwrap();
+        let plugins = Arc::clone(&w.ui.prefs.plugins);
+        assert_eq!(w.ui.plugin_tool.begin(&w.session, &plugins, tool), None);
+        w.frame();
+        w.frame();
+        // the panels, as the tool outlines them (canvas pixels)
+        let panels = |w: &Window| -> Vec<Vec<f32>> {
+            w.ui.plugin_tool.shapes.iter().filter(|s| s.look == 0).map(|s| s.points.clone()).collect()
+        };
+        assert_eq!(panels(&w).len(), 1);
+        // the 400 x 300 page under the header, 24 in from the sides and foot
+        let paper = w.paper();
+        let top = crate::tool_header::HEIGHT + 16.0;
+        assert!((paper.top() - top).abs() < 1.0 && (paper.bottom() - 776.0).abs() < 1.0, "{paper:?}");
+        let scale = paper.width() / 400.0;
+        // the header's buttons (Cut, Move, Undo) as it lays them out, right to left from Done
+        let width = |label: &str| {
+            let font = crate::look::Weight::Regular.font(17.0);
+            w.ctx.fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font, Color32::WHITE)).size().x + 26.0
+        };
+        let (undo_w, move_w) = (width("Undo"), width("Move"));
+        let capsule_right = 1000.0 - 20.0 - 44.0 - 13.0;
+        let undo = pos2(capsule_right - undo_w / 2.0, 41.5);
+        let moving = pos2(capsule_right - undo_w - move_w / 2.0, 41.5);
+        let done = pos2(1000.0 - 20.0 - 22.0, 42.0);
+        // a line down the middle cuts the panel
+        let painted = w.painted();
+        let middle = paper.center().x;
+        w.mouse_stroke(pos2(middle, paper.top() - 8.0), pos2(middle + 4.0, paper.bottom() + 8.0), 12);
+        assert_eq!(panels(&w).len(), 2);
+        assert_eq!(w.painted(), painted, "the canvas took no stroke");
+        w.click(undo);
+        assert_eq!(panels(&w).len(), 1);
+        w.mouse_stroke(pos2(middle, paper.top() - 8.0), pos2(middle, paper.bottom() + 8.0), 12);
+        assert_eq!(panels(&w).len(), 2);
+        // the left panel's right edge, canvas pixels
+        let left_edge = |w: &Window| {
+            let right = |points: &[f32]| points.as_chunks::<2>().0.iter().map(|[x, _]| *x).fold(f32::MIN, f32::max);
+            panels(w).iter().map(|p| right(p)).fold(f32::MAX, f32::min)
+        };
+        let before = left_edge(&w);
+        w.click(moving);
+        // inside a panel nothing is taken, nor cut
+        let inside = pos2(paper.left() + 80.0 * scale, paper.center().y);
+        w.mouse_stroke(inside, inside + vec2(0.0, 120.0), 8);
+        assert_eq!(panels(&w).len(), 2);
+        assert!((left_edge(&w) - before).abs() < 0.01);
+        // the gutter dragged 20 canvas pixels to the right
+        let gutter = pos2(paper.left() + 200.0 * scale, paper.center().y);
+        w.mouse_stroke(gutter, gutter + vec2(20.0 * scale, 0.0), 8);
+        assert_eq!(panels(&w).len(), 2);
+        let moved = left_edge(&w) - before;
+        assert!((moved - 20.0).abs() < 1.0, "moved {moved}");
+        assert!(w.steps().0);
+        w.click(done);
+        assert!(w.ui.plugin_tool.open.is_none());
+        let after = w.paper();
+        assert!((after.center() - fitted.center()).length() < 1.0, "{after:?} {fitted:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The timeline's keys' tests (kept beside them), with this window.
+    mod timeline_keys {
+        use super::*;
+        include!("timeline/keys_tests.rs");
+    }
+
+    /// The timeline grid's tests (kept beside it), with this window.
+    mod timeline_grid {
+        use super::*;
+        include!("timeline/tests.rs");
+    }
+
+    /// While the Texture Packer is open, nothing reaches the canvas: a pen stroke or a mouse drag
+    /// over it moves the view and paints nothing. Escape closes it, and the canvas paints again.
+    #[test]
+    fn the_texture_packer_keeps_strokes_off_the_canvas_until_it_closes() {
+        let Some(mut w) = Window::open(vec2(1180.0, 900.0), true) else { return };
+        w.stroke();
+        w.ui.texture_packer = crate::texture_packer::TexturePacker::open(&w.session);
+        assert!(w.ui.texture_packer.is_some(), "the stroke to pack");
+        w.frame();
+        w.frame();
+        let painted = w.painted();
+        let paper = w.paper();
+        let from = pos2(paper.center().x - 100.0, paper.center().y + 60.0);
+        w.pen_stroke(from, from + vec2(150.0, 0.0), 12);
+        w.mouse_stroke(from, from + vec2(0.0, 80.0), 12);
+        assert_eq!(w.painted(), painted, "nothing painted");
+        let moved = w.paper();
+        assert!((moved.center() - paper.center() - vec2(150.0, 80.0)).length() < 8.0, "{paper:?} {moved:?}");
+        let escape = |pressed| Event::Key {
+            key: Key::Escape,
+            physical_key: Some(Key::Escape),
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        w.events.extend([escape(true), escape(false)]);
+        w.frame();
+        assert!(w.ui.texture_packer.is_none());
+        assert!(w.session.texture_packer_boxes(6, 0).is_empty(), "the core's packer let go");
+        let at = pos2(moved.center().x - 100.0, moved.center().y + 60.0);
+        w.pen_stroke(at, at + vec2(150.0, 0.0), 12);
+        assert!(w.painted() > painted, "painted again");
+    }
+
+    /// Actions → Canvas → Timeline Settings, dimmed off a timeline, opens the timeline's settings
+    /// card on one: Frames per second's named rates (the timing kept), the length typed on the
+    /// card's keys and fitted to the frames, the onion skins turned off and on again, the side
+    /// after's count and tint; a press elsewhere closes it.
+    #[test]
+    fn timeline_settings_open_from_actions_and_change_the_timeline() {
+        use crate::timeline_settings::{self as ts, Beside, Tab};
+        let Some(mut w) = Window::open(vec2(1180.0, 900.0), false) else { return };
+        w.stroke();
+        w.ui.prefs.actions_tab = 1;
+        // the Canvas tab's rows, with the Comic Panels plugin on: Crop & Resize and Comic panels
+        // (89), 20 apart from Animation Assist, Page Assist and Timeline (135), then Timeline
+        // Settings
+        assert!(w.ui.prefs.plugins.set_on("io.github.artcraftandroid.comic-panels".to_owned(), true));
+        let row = |w: &mut Window| {
+            w.ui.open = Some(Popover::Actions);
+            for _ in 0..30 {
+                w.frame();
+            }
+            let id = egui::Id::unique("actions panel");
+            let (panel, _) = w.area_shown(egui::Order::Foreground, id).expect("the Actions panel");
+            let body = crate::panel::body(panel);
+            pos2(body.center().x, body.top() + 136.0 + 89.0 + 20.0 + 135.0 + 22.0)
+        };
+        let at = row(&mut w);
+        w.click(at);
+        assert!(!w.ui.timeline_settings.is_open(), "dimmed off a timeline");
+        assert!(w.session.start_timeline());
+        w.ui.open = None;
+        w.frame();
+        let at = row(&mut w);
+        w.click(at);
+        assert!(w.ui.timeline_settings.is_open());
+        assert_eq!(w.ui.open, None, "the panel goes as it opens");
+        w.frame();
+        // where the card and what is beside it stand (their areas' rects take in more than them)
+        let window = Rect::from_min_size(Pos2::ZERO, w.size);
+        let shown = |w: &Window, _: &str| w.ui.timeline_settings.placed(window).1;
+        let (card, _, content) = w.ui.timeline_settings.placed(window);
+        let (left, top, x) = (card.left() + ts::INSET, card.top() + ts::TITLE_BAND, card.center().x);
+        let width = ts::WIDTH - 2.0 * ts::INSET;
+        let before = w.session.timeline_info().expect("a timeline");
+        // Frames per second: a faster rate by name, every frame moved to keep the timing
+        w.click(pos2(x, top + ts::ROW / 2.0));
+        assert_eq!(w.ui.timeline_settings.beside(), Some(Beside::Rates));
+        w.frame();
+        let (i, fps) = ts::FRAME_RATES
+            .iter()
+            .enumerate()
+            .find_map(|(i, (_, fps))| (*fps > before.fps).then_some((i, *fps)))
+            .expect("a faster rate");
+        let rates = shown(&w, "timeline settings beside").expect("the rates");
+        let named = rates.top() + ts::BESIDE_MARGIN + ts::CUSTOM_ROW + 1.0 + ts::RATE_ROW * (i as f32 + 0.5);
+        w.click(pos2(rates.center().x, named));
+        let info = w.session.timeline_info().expect("a timeline");
+        assert_eq!(info.fps, fps);
+        assert!(
+            (info.duration * before.fps).abs_diff(before.duration * fps) <= fps,
+            "as long in time: {} at {} from {} at {}",
+            info.duration,
+            fps,
+            before.duration,
+            before.fps
+        );
+        // Duration: 30 typed on its keys and Set; then fitted to the frames
+        let duration = pos2(x, top + ts::ROW + ts::BARE_SLIDER + ts::ROW / 2.0);
+        w.click(duration);
+        assert_eq!(w.ui.timeline_settings.beside(), Some(Beside::Length));
+        w.frame();
+        let keys = shown(&w, "timeline settings beside").expect("the keys").shrink(ts::BESIDE_MARGIN);
+        let key_width = (keys.width() - 4.0 - 2.0 * ts::KEY_GAP) / 3.0;
+        let key = |r: usize, c: usize| {
+            let y = keys.top() + ts::NUMBER_LINE + ts::KEY_GAP + (ts::KEY + ts::KEY_GAP) * r as f32 + ts::KEY / 2.0;
+            pos2(keys.left() + 2.0 + (key_width + ts::KEY_GAP) * c as f32 + key_width / 2.0, y)
+        };
+        for (r, c) in [(2, 2), (3, 0), (3, 2)] {
+            w.click(key(r, c));
+        }
+        assert_eq!(w.session.timeline_info().map(|i| i.duration), Some(30));
+        assert_eq!(w.ui.timeline_settings.beside(), None, "the keys go once it is set");
+        w.click(duration);
+        w.frame();
+        let keys = shown(&w, "timeline settings beside").expect("the keys").shrink(ts::BESIDE_MARGIN);
+        w.click(pos2(keys.center().x, keys.top() + ts::keypad_height() + 1.0 + ts::KEY / 2.0));
+        let end = w.session.timeline_content_end();
+        assert!(end > 0 && end != 30, "{end}");
+        assert_eq!(w.session.timeline_info().map(|i| i.duration), Some(end), "fitted to the frames");
+        // Onion: turned off, and back on as it was
+        let tab =
+            |t: usize| pos2(card.left() + 8.0 + (ts::WIDTH - 16.0) / 4.0 * (t as f32 + 0.5), top + content + 20.0);
+        w.click(tab(1));
+        assert_eq!(w.ui.timeline_settings.tab(), Tab::Onion);
+        let onion = w.session.timeline_onion().expect("onion skins");
+        w.click(pos2(x, top + ts::ROW / 2.0));
+        let off = w.session.timeline_onion().expect("onion skins");
+        if onion.before > 0 || onion.after > 0 {
+            assert_eq!((off.before, off.after), (0, 0));
+            w.click(pos2(x, top + ts::ROW / 2.0));
+            let again = w.session.timeline_onion().expect("onion skins");
+            assert_eq!((again.before, again.after), (onion.before, onion.after));
+        } else {
+            assert_eq!((off.before, off.after), (1, 1));
+        }
+        // Forwards: half its most skins, and tinted
+        let half = (width - 4.0) / 2.0;
+        w.click(pos2(left + half + 4.0 + half / 2.0, top + ts::ROW + ts::SECTION_GAP + ts::SIDES / 2.0));
+        let sliders = top + ts::ROW + ts::SECTION_GAP + ts::SIDES + ts::SECTION_GAP;
+        w.click(pos2(left + 16.0 + (width - 32.0) / 2.0, sliders + ts::SLIDERS_TOP + 38.5));
+        let set = w.session.timeline_onion().expect("onion skins");
+        assert_eq!(set.after, ts::MOST_SKINS / 2);
+        let tint = sliders + ts::sliders_height(2) + ts::SECTION_GAP + ts::ROW / 2.0;
+        w.click(pos2(x, tint));
+        let tinted = w.session.timeline_onion().expect("onion skins");
+        assert_eq!(tinted.after_color, if set.after_color == 0 { 0x339933 } else { 0 });
+        assert_eq!(tinted.before_color, set.before_color, "the other side as it was");
+        // a press elsewhere closes it
+        w.click(pos2(40.0, 450.0));
+        assert!(!w.ui.timeline_settings.is_open());
     }
 }

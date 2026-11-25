@@ -30,7 +30,7 @@ const READOUT_FADE: f64 = 0.3;
 /// The settings: 348 wide, 9 from the window's right edge, its arrow 174.5 in.
 const SETTINGS_WIDTH: f32 = 348.0;
 const SETTINGS_HEIGHT: f32 =
-    panel::ARROW_HEIGHT + 10.0 + 40.0 + 10.0 + 44.0 + 10.0 + 44.0 * 3.0 + 2.0 + 10.0 + 64.0 + 10.0;
+    panel::ARROW_HEIGHT + 10.0 + 40.0 + 10.0 + 44.0 + 10.0 + 44.0 * 4.0 + 3.0 + 10.0 + 64.0 + 10.0;
 
 #[derive(Default)]
 pub struct Crop {
@@ -43,6 +43,8 @@ pub struct Crop {
     /// The size readout last shown, and when the drag showing it ended (it fades from then).
     readout: Option<CropReadout>,
     readout_gone: Option<f64>,
+    /// Pixelated isn't offered: the Ribbon and pixel brushes plugin's Pixel art is off.
+    pub pixel_art_hidden: bool,
 }
 
 impl Crop {
@@ -153,7 +155,7 @@ impl Crop {
     }
 
     /// The settings popover under Settings: the size (aspect locked or not), DPI, resampling,
-    /// snapping and the turn.
+    /// Pixelated (pixel art's resampling), snapping and the turn.
     fn settings(&mut self, ctx: &egui::Context, look: &mut Look, session: &CanvasSession, shown: &CropShown) {
         let screen = ctx.content_rect();
         let rect = Rect::from_min_size(
@@ -195,15 +197,16 @@ impl Crop {
             {
                 session.crop_set_size(None, v.parse().ok());
             }
-            // DPI, resampling and snapping
+            // DPI, resampling, Pixelated and snapping
             let group =
-                Rect::from_min_size(pos2(inner.left(), row.bottom() + 10.0), vec2(inner.width(), 44.0 * 3.0 + 2.0));
+                Rect::from_min_size(pos2(inner.left(), row.bottom() + 10.0), vec2(inner.width(), 44.0 * 4.0 + 3.0));
             ui.painter().rect_filled(group, 14.0, argb(GROUP));
             let line = |k: f32| {
                 Rect::from_min_size(pos2(group.left(), group.top() + 45.0 * k - 1.0), vec2(group.width(), 1.0))
             };
             ui.painter().rect_filled(line(1.0), 0, argb(ROW_LINE));
             ui.painter().rect_filled(line(2.0), 0, argb(ROW_LINE));
+            ui.painter().rect_filled(line(3.0), 0, argb(ROW_LINE));
             let row_at =
                 |k: f32| Rect::from_min_size(pos2(group.left(), group.top() + 45.0 * k), vec2(group.width(), 44.0));
             let dpi_row = row_at(0.0);
@@ -223,9 +226,13 @@ impl Crop {
             {
                 session.crop_set_dpi(dpi);
             }
-            for (k, (label, on)) in
-                [("Resample canvas", shown.resample), ("Snapping", shown.snapping)].into_iter().enumerate()
-            {
+            let switches = [
+                (0, "Resample canvas", shown.resample),
+                (1, "Pixelated", shown.pixelated),
+                (2, "Snapping", shown.snapping),
+            ];
+            let shown_switches = switches.into_iter().filter(|(which, ..)| *which != 1 || !self.pixel_art_hidden);
+            for (k, (which, label, on)) in shown_switches.enumerate() {
                 let switch_row = row_at(1.0 + k as f32);
                 text(
                     ui.painter(),
@@ -243,10 +250,10 @@ impl Crop {
                     label,
                 );
                 if ui.interact(switch_row, ui.scope_id().with(("crop switch", k)), Sense::click()).clicked() {
-                    if k == 0 {
-                        session.crop_set_resample(!on);
-                    } else {
-                        session.crop_set_snapping(!on);
+                    match which {
+                        0 => session.crop_set_resample(!on),
+                        1 => session.crop_set_pixelated(!on),
+                        _ => session.crop_set_snapping(!on),
                     }
                 }
             }

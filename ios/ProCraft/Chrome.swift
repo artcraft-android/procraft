@@ -71,7 +71,8 @@ private struct ActionButtons: View {
         ActionButton(icon: PcIcons.adjustments, selected: model.panel == .adjustments || model.adjusting || model.recoloring, upright: upright) {
             model.toggle(.adjustments)
         }
-        ActionButton(icon: PcIcons.selection, selected: model.selecting, glyph: 33, upright: upright) {
+        // lit while the tool is open and while anything is selected (tapped then, it deselects)
+        ActionButton(icon: PcIcons.selection, selected: model.selecting || model.selection.hasSelection, glyph: 33, upright: upright) {
             model.toggleSelecting()
         }
         ActionButton(icon: PcIcons.transform, selected: model.transforming, glyph: 44, upright: upright) {
@@ -89,13 +90,16 @@ private struct ToolButtons: View {
         // the layers and colour panels take the highlight from the current tool while open
         let panelOpen = model.panel == .layers || model.panel == .color || model.transforming
             || model.selecting || model.adjusting
-        ToolButton(icon: PcIcons.brush, selected: !panelOpen && model.tool == .paint, upright: upright, onHold: { model.toolHeld(.paint) }) {
+        // the Pen: its glyph is how it draws (the brush, its lasso, or light)
+        let pen = model.tool == .paint || model.tool == .light
+        ToolButton(icon: model.penGlyph, selected: !panelOpen && pen, upright: upright, onHold: { model.toolHeld(.paint) }) {
             model.toolPressed(.paint)
         }
         ToolButton(icon: PcIcons.smudge, selected: !panelOpen && model.tool == .smudge, upright: upright, onHold: { model.toolHeld(.smudge) }) {
             model.toolPressed(.smudge)
         }
-        ToolButton(icon: PcIcons.erase, selected: !panelOpen && model.tool == .erase, upright: upright, onHold: { model.toolHeld(.erase) }) {
+        let eraseIcon = model.eraseLasso && PluginsModel.shared.lassoFills ? PcIcons.freehand : PcIcons.erase
+        ToolButton(icon: eraseIcon, selected: !panelOpen && model.tool == .erase, upright: upright, onHold: { model.toolHeld(.erase) }) {
             model.toolPressed(.erase)
         }
         ToolButton(icon: PcIcons.layers, selected: model.panel == .layers, upright: upright) { model.toggle(.layers) }

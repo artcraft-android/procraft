@@ -271,7 +271,10 @@ pub fn drawing_bottom(ctx: &egui::Context, bottom: Option<(procraft_core::Layout
 /// `rect`, where the toolbar or adjustment's controls drawn now always is: where it shows, at the
 /// place the layout has it while it floats. Where it always is is kept for the interface (its size,
 /// its grabber and its strip), with the frame it was told in.
+///
+/// On a timeline it stands over the grid's bar, not on it (as on the iPad).
 pub fn bottom_rect(ctx: &egui::Context, rect: Rect) -> Rect {
+    let rect = rect.translate(egui::vec2(0.0, -crate::timeline::lift(ctx)));
     let Some((piece, at)) = ctx
         .data(|d| d.get_temp::<Option<(procraft_core::LayoutPiece, Option<Pos2>)>>(egui::Id::unique("bottom drawn")))
         .flatten()

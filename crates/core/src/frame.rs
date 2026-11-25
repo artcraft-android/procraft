@@ -118,6 +118,18 @@ impl State {
         self.needs_frame = false;
         self.frame_due = None;
         self.frame_drawn_at = Some(Instant::now());
+        // an HDR canvas's light above white, rolled off to what the screen shows now (white, on
+        // a surface without extended range)
+        if let Some(canvas) = self.canvas.as_mut() {
+            let extended = format == wgpu::TextureFormat::Rgba16Float;
+            canvas.set_display_peak(if extended { self.display_peak } else { 1.0 });
+        }
+        self.attach_media();
+        // a vector layer's warp, its strokes bent through the mesh as it is now (one that takes
+        // long to draw waits its turn, and asks for the frame after)
+        if self.vector_warp_draw(false) {
+            self.needs_frame = true;
+        }
         // a shape moved since the last frame is drawn again where it is now, once however many
         // moves came meanwhile
         self.draw_moved_shape();
@@ -157,6 +169,14 @@ impl State {
         }
         // while a transform is open the selection shows no bands: its box shows what moves
         let banded = self.transform.is_none();
+        // vector layers drawn again as fine as the screen, once the view has rested zoomed in
+        let crisp = if self.scene_shown() || self.sphere.is_some() {
+            crate::crisp::CrispShown::No
+        } else {
+            self.crisp_frame(size, screen)
+        };
+        // (a lasso's fill shown as it is drawn shows there too)
+        self.crisp_lasso();
         // what filter layers run, before they are drawn
         self.give_layer_filters();
         // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
@@ -214,9 +234,22 @@ impl State {
                 }
                 None => {}
             }
+            // (that picture's canvas in place of the artwork's, its pixels the window's; or, the
+            // view having moved since it was made, over the artwork's, where that part of it now is)
+            use crate::crisp::CrispShown;
+            let over = match crisp {
+                CrispShown::Over(map) => Some(map),
+                _ => None,
+            };
+            let whole = crisp == CrispShown::Whole;
+            let (canvas, doc, to_screen) = match self.crisp.as_mut().filter(|_| whole) {
+                Some(sharp) => (&mut sharp.canvas, &mut sharp.doc, sharp.to_screen),
+                None => (canvas, &mut self.doc, to_screen),
+            };
+            let look = canvas_selection.filter(|_| canvas.has_selection() && banded);
             canvas.render(
                 gpu,
-                &mut self.doc,
+                doc,
                 Some(Target {
                     view,
                     format,
@@ -235,7 +268,8 @@ impl State {
             );
             // caches still being remade: another frame soon, and the artwork isn't shown yet
             let busy = canvas.busy();
-            if canvas.wants_render() {
+            // (a video's picture being read off this thread shows on the frame after it comes)
+            if canvas.wants_render() || canvas.videos_pending() {
                 self.needs_frame = true;
             } else if animating {
                 self.frame_due = Some(self.stripes_due());
@@ -249,6 +283,35 @@ impl State {
                     let _ = std::thread::Builder::new().name("open mark".into()).spawn(move || drop(mark));
                 }
             }
+            if let (Some(to_screen), Some(sharp)) = (over, self.crisp.as_mut()) {
+                let (sharp, doc) = (&mut sharp.canvas, &mut sharp.doc);
+                sharp.set_over(true);
+                sharp.render(
+                    gpu,
+                    doc,
+                    Some(Target {
+                        view,
+                        format,
+                        size,
+                        to_screen,
+                        surround,
+                        grid: None,
+                        selection: None,
+                        backdrop: None,
+                        convert,
+                        lut: None,
+                        // (it is no longer a pixel to a pixel: smoothed, never squares)
+                        crisp_from: f32::INFINITY,
+                        look: shown_look,
+                        traced: false,
+                    }),
+                );
+                sharp.set_over(false);
+            }
+        }
+        // the view resting: a frame when the sharp picture is to be made
+        if let Some(due) = self.crisp_due {
+            self.frame_due = Some(self.frame_due.map_or(due, |at| at.min(due)));
         }
         self.heed_filter_run();
         // a time-lapse frame asked for: taken once this frame has laid what it waited for (a model
@@ -278,7 +341,10 @@ const FRAME_LATENCY: u32 = 1;
 
 /// The profile a configured surface shows colours in.
 pub fn screen_profile(config: &wgpu::SurfaceConfiguration) -> Profile {
-    if config.color_space == wgpu::SurfaceColorSpace::DisplayP3 { Profile::DisplayP3 } else { Profile::Srgb }
+    match config.color_space {
+        wgpu::SurfaceColorSpace::DisplayP3 | wgpu::SurfaceColorSpace::ExtendedDisplayP3 => Profile::DisplayP3,
+        _ => Profile::Srgb,
+    }
 }
 
 /// The matrix moving a canvas's colours in `from` to `to`, if they differ.
@@ -289,14 +355,21 @@ pub(crate) fn colours_to(from: Profile, to: Profile) -> Option<[[f32; 3]; 3]> {
 /// Configures the surface for `size`: a format that doesn't re-encode sRGB, the lowest-latency
 /// present mode on offer, one frame in flight, and (if `wide`) Display P3 where the screen takes
 /// it. A surface an sRGB interface is drawn on as it is (egui's) asks for no wide colour, or the
-/// interface would show over-saturated. None if it can't be (yet).
+/// interface would show over-saturated. For an HDR canvas (`hdr`), half floats in the screen's
+/// extended range where it has one (the iPad's EDR), so light above white shows brighter than
+/// white. None if it can't be (yet).
 pub fn configure(
     gpu: &Gpu,
     surface: &wgpu::Surface<'_>,
     size: (u32, u32),
     wide: bool,
+    hdr: bool,
 ) -> Option<wgpu::SurfaceConfiguration> {
-    configure_with(gpu, surface, &surface.get_capabilities(&gpu.adapter), size, wide)
+    let caps = surface.get_capabilities(&gpu.adapter);
+    if hdr && let Some(config) = configure_extended(gpu, surface, &caps, size) {
+        return Some(config);
+    }
+    configure_with(gpu, surface, &caps, size, wide)
 }
 
 /// [`configure`] with the surface's capabilities as asked before: they don't change while the
@@ -343,7 +416,11 @@ pub(crate) fn configure_with(
     if p3 {
         config.color_space = wgpu::SurfaceColorSpace::DisplayP3;
     }
-    config.desired_maximum_frame_latency = FRAME_LATENCY;
+    // the iPad's images are shown in turn, one a refresh (there is no Mailbox there): with two, a
+    // frame can only be begun once the one before shows, and one that then takes longer than what
+    // is left of that refresh waits a whole refresh more, so a 120 Hz screen shows 60 frames a
+    // second. A third lets the next be drawn meanwhile.
+    config.desired_maximum_frame_latency = if cfg!(target_os = "ios") { 2 } else { FRAME_LATENCY };
     // a configure the GPU refuses (it couldn't come idle in time, as while an artwork opens) leaves
     // the surface unconfigured: none, so the next frame tries again (else it stayed blank)
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -352,6 +429,8 @@ pub(crate) fn configure_with(
         log::warn!("the surface couldn't be configured yet: {e}");
         return None;
     }
+    #[cfg(target_os = "ios")]
+    crate::window::commit();
     log::info!(
         "surface {}×{} {:?} {:?} {:?}",
         config.width,
@@ -360,6 +439,55 @@ pub(crate) fn configure_with(
         config.present_mode,
         config.color_space
     );
+    Some(config)
+}
+
+/// Half floats in extended sRGB among `caps`. Extended sRGB only: wgpu's extended Display P3 looks
+/// its colour space up in a way that crashes on the iPad simulator. A Display P3 canvas's colours
+/// past sRGB go out as values below 0 and past 1, which extended sRGB carries (see `display.wgsl`).
+pub(crate) fn offers_extended(caps: &wgpu::SurfaceCapabilities) -> bool {
+    caps.format_capabilities.iter().any(|f| {
+        f.format == wgpu::TextureFormat::Rgba16Float && f.color_spaces.contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB)
+    })
+}
+
+/// [`configure`] for an HDR canvas: half floats in the screen's extended range (extended sRGB, which
+/// also carries Display P3's colours), sRGB-encoded as the canvas draws, with light past white
+/// shown brighter than it. None where the surface has no extended range.
+pub(crate) fn configure_extended(
+    gpu: &Gpu,
+    surface: &wgpu::Surface<'_>,
+    caps: &wgpu::SurfaceCapabilities,
+    size: (u32, u32),
+) -> Option<wgpu::SurfaceConfiguration> {
+    let format = wgpu::TextureFormat::Rgba16Float;
+    if !offers_extended(caps) {
+        return None;
+    }
+    let color_space = wgpu::SurfaceColorSpace::ExtendedSrgb;
+    let mut config = surface.get_default_config(&gpu.adapter, size.0.max(1), size.1.max(1))?;
+    config.format = format;
+    config.color_space = color_space;
+    config.view_formats = Vec::new();
+    config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::Fifo
+    };
+    if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
+        config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
+    }
+    // (as `configure` has it)
+    config.desired_maximum_frame_latency = if cfg!(target_os = "ios") { 2 } else { FRAME_LATENCY };
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    surface.configure(&gpu.device, &config);
+    if let Some(e) = pollster::block_on(scope.pop()) {
+        log::warn!("the surface couldn't be configured for extended range: {e}");
+        return None;
+    }
+    #[cfg(target_os = "ios")]
+    crate::window::commit();
+    log::info!("surface {}×{} {:?} {:?}", config.width, config.height, config.format, config.color_space);
     Some(config)
 }
 

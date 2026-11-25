@@ -19,6 +19,9 @@ private var alertFill: Color { Look.shared.light ? Color(argb: 0xF2E3_E3E3) : Co
 private var ink: Color { Look.shared.light ? Color(argb: 0xFF22_2222) : Color(argb: 0xFFC5_C5C5) }
 private var cancelFill: Color { Look.shared.light ? Color(argb: 0xFFD9_D9D9) : Color(argb: 0xFF2D_2D2D) }
 private var cancelInk: Color { Look.shared.light ? .black : .white }
+private var nameFieldFill: Color { Look.shared.light ? Color(argb: 0xFFFF_FFFF) : Color(argb: 0x14FF_FFFF) }
+/// A name card's top: above the keyboard on an iPad on its side.
+private let nameCardTop: CGFloat = 110
 private var destroyFill: Color { Look.shared.light ? Color(argb: 0xFFFD_0100) : Color(argb: 0xFFFE_2D2E) }
 
 /// What an alert says and offers: a title (after an `icon`), a message, and `cancel` beside the
@@ -256,6 +259,100 @@ struct ProgressCard: View {
                     kept = nil
                     check = 0
                 }
+            }
+        }
+    }
+}
+
+/// What a name is asked for: under `title`, starting from `name`, taken by a button saying `action`.
+struct NameAsked: Equatable {
+    let title: String
+    var name = ""
+    let action: String
+}
+
+/// A card over everything asking for a name while `asked` is there, the keyboard up: a field under
+/// its title, then Cancel and the action, which wants something written. It comes and goes as an
+/// alert does, in the screen's upper half so the keyboard leaves it showing. A tap beside it cancels.
+struct NameCard: View {
+    let asked: NameAsked?
+    let onCancel: () -> Void
+    let onDone: (String) -> Void
+
+    /// The last one shown, kept while it goes.
+    @State private var shown: NameAsked?
+    @State private var up = false
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    private var written: String {
+        text.trimmingCharacters(in: .whitespaces)
+    }
+
+    private func done() {
+        guard asked != nil, !written.isEmpty else { return }
+        onDone(written)
+    }
+
+    private func card(_ c: NameAsked) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 24, style: .circular)
+        return VStack(spacing: 0) {
+            Text(verbatim: c.title)
+                .font(.system(size: 26, weight: .bold))
+                .foregroundStyle(ink)
+                .lineLimit(1)
+                .frame(height: 31)
+            TextField("", text: $text, prompt: Text(verbatim: "Name").foregroundColor(ink.opacity(0.35)))
+                .font(.system(size: 17))
+                .foregroundStyle(ink)
+                .tint(Pc.accent)
+                .submitLabel(.done)
+                .focused($focused)
+                .onSubmit(done)
+                .onAppear { focused = true }
+                .padding(.horizontal, 14)
+                .frame(height: 44)
+                .background(RoundedRectangle(cornerRadius: 12, style: .circular).fill(nameFieldFill))
+                .padding(.top, 18)
+            HStack(spacing: buttonGap) {
+                AlertButton(label: "Cancel", fill: cancelFill, ink: cancelInk) { if asked != nil { onCancel() } }
+                AlertButton(label: c.action, fill: Pc.accent, ink: .white, action: done)
+                    .opacity(written.isEmpty ? 0.4 : 1)
+            }
+            .padding(.top, 20)
+        }
+        .padding(.horizontal, side)
+        .padding(.top, 21)
+        .padding(.bottom, 16)
+        .frame(width: buttonWidth * 2 + buttonGap + side * 2)
+        .background(shape.fill(fill))
+        .overlay(shape.strokeBorder(Pc.glassMenuEdge, lineWidth: 1))
+        .clipShape(shape)
+        .contentShape(shape)
+        .onTapGesture {}
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            if let c = shown {
+                Color.black.opacity(up ? dim : 0)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { if asked != nil { onCancel() } }
+                card(c)
+                    .opacity(up ? 1 : 0)
+                    .scaleEffect(up ? 1 : startScale)
+                    .padding(.top, nameCardTop)
+            }
+        }
+        .onChange(of: asked, initial: true) { _, next in
+            if let next {
+                shown = next
+                text = next.name
+                withAnimation(Motion.alertIn) { up = true }
+            } else if shown != nil {
+                focused = false
+                withAnimation(Motion.alertOut) { up = false } completion: { shown = nil }
             }
         }
     }

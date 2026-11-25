@@ -42,6 +42,8 @@ final class AppSettings {
     var projectCanvas: Bool { didSet { kept.set(projectCanvas, forKey: Key.projectCanvas) } }
     /// Brush scaling relative to the screen (else to the canvas).
     var brushOnScreen: Bool { didSet { kept.set(brushOnScreen, forKey: Key.brushOnScreen) } }
+    /// Vector layers are drawn as fine as the screen when zoomed in (else as their pixels magnified).
+    var vectorCrisp: Bool { didSet { kept.set(vectorCrisp, forKey: Key.vectorCrisp) } }
     /// How strongly what isn't selected is banded, 0..1.
     var selectionVisibility: Float { didSet { kept.set(selectionVisibility, forKey: Key.selectionVisibility) } }
     /// ColorDrop keeps out of gaps up to this many canvas pixels wide in its lines (0: none).
@@ -103,6 +105,7 @@ final class AppSettings {
         colorHistoryShown = d.bool(forKey: Key.colorHistoryShown)
         projectCanvas = d.bool(forKey: Key.projectCanvas)
         brushOnScreen = d.bool(forKey: Key.brushOnScreen)
+        vectorCrisp = d.object(forKey: Key.vectorCrisp) as? Bool ?? true
         selectionVisibility = float(Key.selectionVisibility, 0.25)
         actionsTab = d.integer(forKey: Key.actionsTab)
         colorMode = d.integer(forKey: Key.colorMode)
@@ -133,6 +136,7 @@ final class AppSettings {
         static let colorHistoryShown = "colorHistoryShown"
         static let projectCanvas = "projectCanvas"
         static let brushOnScreen = "brushOnScreen"
+        static let vectorCrisp = "vectorCrisp"
         static let selectionVisibility = "selectionVisibility"
         static let actionsTab = "actionsTab"
         static let colorMode = "colorMode"
@@ -207,7 +211,9 @@ final class Gestures {
     /// The settings as the canvas's touches take them.
     func touchSettings() -> TouchSettings {
         _ = changes
-        return core.touchSettings(rapidUndoMs: Double(AppSettings.shared.rapidUndoDelay) * 1000)
+        // less QuickShape and assisted drawing while their built-in plugins are off
+        let settings = core.touchSettings(rapidUndoMs: Double(AppSettings.shared.rapidUndoDelay) * 1000)
+        return PluginsModel.shared.store.touchSettingsShown(settings: settings)
     }
 
     private func keep() {

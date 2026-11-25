@@ -52,7 +52,7 @@ enum StudioInk {
     static let calloutInk = Color(argb: 0xFF1C_1C1C)
     static let switchFixed = Color(argb: 0xFF51_5153)
     static let switchFixedKnob = Color(argb: 0xFF9B_9B9B)
-    static let done = Color(argb: 0xFF01_90FF)
+    static var done: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 }
 
 /// What the studio's rows ask to show over everything, where a scrolling column can't cut it.
@@ -652,7 +652,9 @@ private enum StudioRow {
 private func studioRows(_ tab: StudioTab, plugins: [PluginBrushControl]) -> [StudioRow] {
     var rows: [StudioRow] = []
     var above = StudioNeighbour.top
-    for (k, section) in tab.sections.enumerated() {
+    // a built-in plugin's sections while it is on
+    let sections = tab.sections.filter { $0.feature.map(PluginsModel.shared.has) ?? true }
+    for (k, section) in sections.enumerated() {
         var title = section.title.map { StudioRow.title($0) }
         if title == nil, let first = section.controls.first, case .about = first {
             title = .name
@@ -677,6 +679,11 @@ private func studioRows(_ tab: StudioTab, plugins: [PluginBrushControl]) -> [Stu
         above = .control(control)
     }
     return rows
+}
+
+/// The rows the plugins that are on add to the brush studio, kept with each brush.
+func pluginBrushControls() -> [PluginBrushControl] {
+    PluginsModel.shared.plugins.filter { $0.on && $0.problem == nil }.flatMap(\.brushControls)
 }
 
 /// The open page's settings, in sections, spaced as measured; each page opens at its top.
@@ -737,6 +744,8 @@ private struct StudioSettings: View {
             switch (ScreenCapture.studioRow, control) {
             case ("roundness", .roundness), ("tilt", .tiltAngle):
                 return true
+            case let ("ribbon", .toggle(key, _, _)):
+                return key == "ribbon"
             default:
                 return false
             }

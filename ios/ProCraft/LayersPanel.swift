@@ -3,6 +3,8 @@ import SwiftUI
 import UIKit
 
 private let layersWidth: CGFloat = 384
+/// The space the rows' bars report their places in, and one finger's holds and slides follow.
+private let layersSpace = "layers"
 private let rowHeight: CGFloat = 69
 /// A layer with a mask, and its mask: their rows sit closer.
 private let maskedRowHeight: CGFloat = 65
@@ -153,6 +155,8 @@ private final class LayersUi {
     /// The layer whose options are open, and whose blend modes.
     var options: UInt64?
     var blendFor: UInt64?
+    /// The layer whose styles are open.
+    var styleFor: UInt64?
     /// The row the blend modes open under (-1 when nothing is moving), and how far the rows under
     /// it have come back.
     var blendAt = -1
@@ -400,6 +404,13 @@ private struct LayerFrames: PreferenceKey {
     }
 }
 
+private struct LayerBars: PreferenceKey {
+    static let defaultValue: [UInt64: CGRect] = [:]
+    static func reduce(value: inout [UInt64: CGRect], nextValue: () -> [UInt64: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
 /// The layers panel: top layer first (a closed group's left out), each its thumbnail, name, blend
 /// mode's letters and visibility box, and the background colour's row under them. Tap a layer to
 /// make it current, tap the current one for its options, tap the blend letter for blend mode and
@@ -419,7 +430,9 @@ struct LayersPanel: View {
     @State private var ui = LayersUi()
 
     var body: some View {
-        let shown = model.layers.filter { !model.hidden($0) }
+        // on a timeline, only the drawing drawn on
+        let drawing = model.session.timelineDrawingShown()
+        let shown = model.layers.filter { !model.hidden($0) && model.listed($0, in: drawing) }
         let ids = shown.map(\.id)
         // floating in a window of its own: as wide as the window, no arrow, a strip over it and under it
         Popover(width: floating?.width ?? layersWidth, arrowX: arrowX, side: floating == nil ? .top : .none) {
@@ -442,6 +455,13 @@ struct LayersPanel: View {
                             model.addLayer()
                         } else {
                             withAnimation(Motion.menuOpen) { ui.addKinds = kinds }
+                        }
+                    }
+                    // held (a short while: it is a way to a kind of layer, not a menu): a vector layer
+                    .onLongPressGesture(minimumDuration: 0.25) {
+                        // while the Vector layers plugin is on
+                        if PluginsModel.shared.has(.vectorLayers) {
+                            model.addVectorLayer()
                         }
                     }
                     .padding(.top, 12)
@@ -550,6 +570,8 @@ struct LayersPanel: View {
                 ui.addKinds = model.layerKinds()
             case "rename":
                 ui.renaming = current.id
+            case "style":
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { ui.styleFor = current.id }
             default:
                 break
             }
@@ -952,6 +974,7 @@ private struct LayersMenus: View {
             ui.titleMenu = false
             ui.addKinds = nil
             ui.options = nil
+            ui.styleFor = nil
         }
     }
 
@@ -1005,6 +1028,10 @@ private struct LayersMenus: View {
             if let id = ui.options, let l = model.layers.first(where: { $0.id == id }), let row = ui.rows[id] {
                 MenuDismissal { closeAll() }
                 LayerOptionsMenu(model: model, ui: ui, layer: l, rowY: row.midY, maxHeight: maxHeight) { closeAll() }
+            }
+            if let id = ui.styleFor, let l = model.layers.first(where: { $0.id == id }), let row = ui.rows[id] {
+                MenuDismissal { closeAll() }
+                LayerStyleMenu(model: model, layer: l, rowY: row.midY, maxHeight: maxHeight)
             }
         }
     }
@@ -1104,6 +1131,8 @@ private struct LayerOptionsMenu: View {
             model.startFilterLayerSettings(l)
         case .rasterize:
             model.rasterize(l)
+        case .separateObjects:
+            model.separateObjects(l)
         case .recolour:
             model.restyleStrokes(l, colour: true)
         case .applyBrush:
@@ -1114,6 +1143,10 @@ private struct LayerOptionsMenu: View {
             model.combineDown(l)
         case .mergeMask:
             model.mergeMask(l)
+        case .adjustmentSettings:
+            model.editAdjustmentLayer(l)
+        case .layerStyle:
+            withAnimation(Motion.menuClose) { ui.styleFor = l.id }
         }
     }
 
@@ -1122,7 +1155,13 @@ private struct LayerOptionsMenu: View {
         // a plugin's actions for the layer, after the app's own
         let actions = model.panelPluginActions(.layer)
         let shape = RoundedRectangle(cornerRadius: 24, style: .circular)
-        let tall = max(CGFloat(rows.count + actions.count) * 38 + 14, 64)
+        // a vector layer's own row: whether it is drawn as fine as the screen when zoomed in (how
+        // the eraser works on it is chosen in the Eraser band, while erasing)
+        let vector = layer.vector && !layer.locked && PluginsModel.shared.has(.vectorLayers)
+        // and, with strokes or fills picked on it, what the brush as it is set can give them
+        let applying = vector && model.vectorPicked(layer)
+        let own = (vector ? 1 : 0) + (applying ? 3 : 0)
+        let tall = max(CGFloat(rows.count + actions.count + own) * 38 + 14, 64)
         // the panel hangs from the bar: its own top is the bar's height down the screen
         let top = optionsTop - Pc.barHeight
         let y = min(max(rowY - Pc.barHeight - tall / 2, top), max(maxHeight - tall, top))
@@ -1146,9 +1185,47 @@ private struct LayerOptionsMenu: View {
                 .contentShape(Rectangle())
                 .onTapGesture {
                     if r.enabled {
-                        act(r.option)
+                        // the menu closed first: a row may open another (Layer Style)
                         onDone()
+                        act(r.option)
                     }
+                }
+            }
+            if vector {
+                HStack(spacing: 0) {
+                    Text(verbatim: "Crisp Zoom")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Pc.menuInk)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if model.vectorCrisp {
+                        PcIconView(PcIcons.tick, size: 18, color: Pc.menuInk)
+                    }
+                }
+                .padding(.leading, 19)
+                .padding(.trailing, 16)
+                .frame(height: 38)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    model.toggleVectorCrisp()
+                    onDone()
+                }
+            }
+            if applying {
+                let gives: [(String, VectorApply)] = [("Apply Color", .colour), ("Apply Brush", .brush), ("Apply Size", .size)]
+                ForEach(gives, id: \.0) { row in
+                    Text(verbatim: row.0)
+                        .font(.system(size: 17))
+                        .foregroundStyle(Pc.menuInk)
+                        .lineLimit(1)
+                        .padding(.leading, 19)
+                        .padding(.trailing, 16)
+                        .frame(maxWidth: .infinity, minHeight: 38, maxHeight: 38, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            model.vectorApply(row.1)
+                            onDone()
+                        }
                 }
             }
             ForEach(actions, id: \.key) { action in
@@ -1184,6 +1261,199 @@ private struct LayerOptionsMenu: View {
         .shadow(color: .black.opacity(0.14), radius: 15, y: 6)
         .offset(x: -183, y: y)
         .menuTransition(.trailing)
+    }
+}
+
+/// A layer's styles, left of the panel by its row as its options are: each style's switch, and
+/// under the one opened (a tap on its name) its colour, given the paint colour with a tap, and its
+/// sliders. Each change shows at once and is one undo step when let go. The last, Color, makes all
+/// the layer shows one colour: it has a colour and an opacity only, and takes the paint colour as
+/// it is first switched on.
+private struct LayerStyleMenu: View {
+    let model: CanvasModel
+    let layer: LayerInfo
+    /// The row's middle on the screen.
+    let rowY: CGFloat
+    let maxHeight: CGFloat
+
+    @State private var effects: [LayerEffectInfo] = []
+    @State private var open = 0
+
+    private let names = layerEffectNames()
+    /// Where Color is among them: the style with no size or softness.
+    private static let colorStyle = 4
+    private let width: CGFloat = 300
+    private let rowTall: CGFloat = 44
+    private let sliderTall: CGFloat = 46
+
+    /// Style `i` changed by `change`, kept as a step when `done`.
+    private func set(_ i: Int, done: Bool, _ change: (inout LayerEffectInfo) -> Void) {
+        guard effects.indices.contains(i) else { return }
+        change(&effects[i])
+        model.setLayerEffect(layer, i, effects[i], done: done)
+    }
+
+    /// A slider of `value` (0..1), read as `shown`.
+    private func slider(_ label: String, _ value: Float, _ shown: String, _ onChange: @escaping (Float, Bool) -> Void) -> some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 0) {
+                Text(verbatim: label)
+                Spacer(minLength: 0)
+                Text(verbatim: shown)
+            }
+            .font(.system(size: 15))
+            .foregroundStyle(Pc.menuInk)
+            GeometryReader { g in
+                let w = g.size.width
+                let part = CGFloat(min(max(value, 0), 1))
+                let x = min(max(w * part, 13), max(w - 13, 13))
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Pc.sliderRest).frame(height: 3)
+                    Capsule().fill(Pc.accent).frame(width: w * part, height: 3)
+                    Capsule().fill(Color.white)
+                        .frame(width: 26, height: 15)
+                        .shadow(color: .black.opacity(0.2), radius: 1, y: 0.5)
+                        .offset(x: x - 13)
+                }
+                .frame(width: w, height: 16)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { drag in onChange(Float(min(max(drag.location.x / max(w, 1), 0), 1)), false) }
+                        .onEnded { drag in onChange(Float(min(max(drag.location.x / max(w, 1), 0), 1)), true) }
+                )
+            }
+            .frame(height: 16)
+        }
+        .padding(.horizontal, 19)
+        .frame(height: sliderTall)
+    }
+
+    /// Style `i`'s colour and sliders.
+    @ViewBuilder
+    private func details(_ i: Int) -> some View {
+        let e = effects[i]
+        HStack(spacing: 0) {
+            Text(verbatim: "Color")
+                .font(.system(size: 15))
+                .foregroundStyle(Pc.menuInk)
+            Spacer(minLength: 0)
+            Text(verbatim: "Tap for the paint color")
+                .font(.system(size: 12))
+                .foregroundStyle(Pc.menuInk.opacity(0.55))
+                .padding(.trailing, 8)
+            Circle()
+                .fill(Color(red: Double(e.r), green: Double(e.g), blue: Double(e.b)))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.8), lineWidth: 1.5))
+                .frame(width: 26, height: 26)
+        }
+        .padding(.horizontal, 19)
+        .frame(height: rowTall)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            let (r, g, b) = model.paintColourParts()
+            set(i, done: true) {
+                $0.r = r
+                $0.g = g
+                $0.b = b
+            }
+        }
+        if i != Self.colorStyle {
+            slider("Size", styleSizeSlider(size: e.size), "\(Int(e.size.rounded())) px") { v, done in
+                set(i, done: done) { $0.size = styleSize(slider: v) }
+            }
+        }
+        slider("Opacity", e.opacity, "\(wholeNumber(e.opacity * 100))%") { v, done in
+            set(i, done: done) { $0.opacity = v }
+        }
+        if i != Self.colorStyle {
+            slider("Softness", e.softness, "\(wholeNumber(e.softness * 100))%") { v, done in
+                set(i, done: done) { $0.softness = v }
+            }
+        }
+        // a drop shadow falls some way off, one way
+        if i == 1 {
+            slider("Distance", styleSizeSlider(size: e.distance), "\(Int(e.distance.rounded())) px") { v, done in
+                set(i, done: done) { $0.distance = styleSize(slider: v) }
+            }
+            slider("Angle", e.angle / 360, "\(Int(e.angle.rounded()))°") { v, done in
+                set(i, done: done) { $0.angle = (v * 360).rounded() }
+            }
+        }
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 24, style: .circular)
+        let opened = effects.indices.contains(open) && effects[open].on
+        let sliders: CGFloat = opened ? (open == 1 ? 5 : open == Self.colorStyle ? 1 : 3) : 0
+        let tall = rowTall * CGFloat(names.count + 1 + (opened ? 1 : 0)) + sliderTall * sliders + 14
+        let top = optionsTop - Pc.barHeight
+        let y = min(max(rowY - Pc.barHeight - tall / 2, top), max(maxHeight - tall, top))
+        VStack(alignment: .leading, spacing: 0) {
+            Text(verbatim: "Layer Style")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(Pc.menuInk)
+                .lineLimit(1)
+                .padding(.leading, 19)
+                .frame(height: rowTall)
+            ForEach(effects.indices, id: \.self) { i in
+                let chosen = i == open && effects[i].on
+                HStack(spacing: 0) {
+                    Text(verbatim: names.indices.contains(i) ? names[i] : "")
+                        .font(.system(size: 17, weight: chosen ? .semibold : .regular))
+                        .foregroundStyle(Pc.menuInk)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    PcSwitch(on: effects[i].on)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            open = i
+                            // Color, switched on as it started out (black, never given a colour):
+                            // the paint colour, which is the one wanted more often than not
+                            let fresh = i == Self.colorStyle && !effects[i].on
+                                && effects[i].r == 0 && effects[i].g == 0 && effects[i].b == 0
+                            let (r, g, b) = model.paintColourParts()
+                            set(i, done: true) {
+                                $0.on.toggle()
+                                if fresh {
+                                    $0.r = r
+                                    $0.g = g
+                                    $0.b = b
+                                }
+                            }
+                        }
+                }
+                .padding(.leading, 19)
+                .padding(.trailing, 14)
+                .frame(height: rowTall)
+                .contentShape(Rectangle())
+                .onTapGesture { withAnimation(Motion.rowMove) { open = i } }
+                if chosen {
+                    details(i)
+                }
+            }
+        }
+        .padding(.vertical, 7)
+        .frame(width: width)
+        .background {
+            ZStack {
+                shape.fill(.ultraThinMaterial)
+                shape.fill(Pc.glassMenu)
+            }
+        }
+        .clipShape(shape)
+        .shadow(color: .black.opacity(0.14), radius: 15, y: 6)
+        .offset(x: -183 - (width - 194), y: y)
+        .menuTransition(.trailing)
+        .onAppear {
+            effects = model.layerEffects(layer)
+            open = effects.firstIndex(where: { $0.on }) ?? 0
+            #if DEBUG
+            if let shows = ScreenCapture.styleOpens {
+                open = shows
+            }
+            #endif
+        }
     }
 }
 
@@ -1563,6 +1833,14 @@ private struct LayerRow: View {
             Thumb(model: model, layer: l, top: !masked, bottom: !mask, held: held)
                 .padding(.leading, 4)
                 .offset(y: mask ? 2 : masked ? -2 : 0)
+                // an adjustment layer's thumbnail opens its settings
+                .onTapGesture {
+                    if l.adjustment != nil, !l.locked {
+                        model.editAdjustmentLayer(l)
+                    } else {
+                        onTap()
+                    }
+                }
             ZStack(alignment: .leading) {
                 LockedName(layer: l, ink: ink, renaming: renaming, onRenamed: onRenamed)
                 if let tag = tag(l) {
@@ -1626,6 +1904,13 @@ private struct LayerRow: View {
         }
         if l.private {
             return "Private"
+        }
+        if let a = l.adjustment {
+            // named after its adjustment unless renamed
+            return l.name == adjustmentLabel(adjustment: a) ? "Adjustment" : adjustmentLabel(adjustment: a)
+        }
+        if l.styled {
+            return "Layer Style"
         }
         return nil
     }
@@ -1854,7 +2139,10 @@ private struct Thumb: View {
             } else {
                 Rectangle().fill(layer.kind == .mask ? Color.white : Pc.thumbBackground)
             }
-            if layer.text {
+            if layer.adjustment != nil {
+                // an adjustment layer has no pixels of its own: the Adjustments glyph
+                PcIconView(PcIcons.adjustments, size: 40, color: Pc.textLayerGlyph)
+            } else if layer.text {
                 PcIconView(PcIcons.textLayer, size: 61, color: Pc.textLayerGlyph)
             } else if let picture = model.thumbnails[layer.id] {
                 Image(uiImage: picture)
@@ -1864,6 +2152,17 @@ private struct Thumb: View {
             }
         }
         .frame(width: 93, height: 61)
+        // a vector layer is marked in its corner
+        .overlay(alignment: .bottomLeading) {
+            if layer.vector {
+                Text(verbatim: "V")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 15, height: 15)
+                    .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+                    .padding(3)
+            }
+        }
         .overlay(alignment: .bottomTrailing) {
             // a plugin's layer: its kind's badge in its corner, as its manifest draws it
             if let badge = layer.pluginBadge {

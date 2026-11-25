@@ -58,7 +58,13 @@ const STARTS: &[(&str, f32)] = &[
     ("metallic_scale", 0.1),
     ("roughness_scale", 0.1),
     ("height_scale", 0.1),
+    // a ribbon's image keeps its own proportions at the strip's width (see [`Brush::ribbon_tile`])
+    ("ribbon_scale", 0.5),
 ];
+
+/// How far the ribbon scale control stretches a ribbon's image along the strip, or squeezes it,
+/// at either end: this many times its own proportions.
+const RIBBON_STRETCH: f32 = 4.0;
 
 /// The controls drawn from the brush's own fields (the others are kept in its `extra`).
 pub const DRAWN: [&str; 37] = [
@@ -149,6 +155,26 @@ impl Brush {
     /// slider lightens each stamp instead of capping the stroke.
     pub fn blends(&self) -> bool {
         self.setting("rendering_mode") >= 3.5
+    }
+
+    /// Whether the brush draws a ribbon: its shape image stretched along the stroke as one strip
+    /// (see [`crate::ribbon`]) rather than stamped. Only a shape image: the round tip has nothing
+    /// to stretch, and draws as it always has.
+    pub fn is_ribbon(&self) -> bool {
+        self.setting("ribbon") >= 0.5 && !self.round_tip()
+    }
+
+    /// How long a tile of a ribbon's image is along the strip, in the strip's widths: 1 (its own
+    /// proportions, for a square image) at the ribbon scale control's middle, a quarter to four
+    /// times that from end to end.
+    pub fn ribbon_tile(&self) -> f32 {
+        RIBBON_STRETCH.powf(2.0 * self.setting("ribbon_scale").clamp(0.0, 1.0) - 1.0)
+    }
+
+    /// The brush without its ribbon: stamped as any other.
+    pub fn without_ribbon(mut self) -> Brush {
+        self.extra.remove("ribbon");
+        self
     }
 
     fn has_wet_mix(&self) -> bool {
@@ -345,6 +371,9 @@ impl Brush {
             "min_size" => self.min_size = self.size_from_control(unit).min(self.max_size),
             "max_opacity" => self.max_opacity = unit,
             "min_opacity" => self.min_opacity = unit,
+            "ribbon" => {
+                self.extra.insert(key.to_owned(), flag(on));
+            }
             // choices of three, kept by their place in the list
             "shape_filtering" | "grain_filtering" | "cursor_outline" | "hover_fill" | "relative_to_stroke" => {
                 self.extra.insert(key.to_owned(), value.round().clamp(0.0, 2.0));
@@ -634,6 +663,27 @@ mod tests {
         // and its size is held to it
         b.max_size = 10.0 * b.size_unit();
         assert!((b.diameter(1.0) - b.size_unit()).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_ribbon_needs_a_shape_and_scales_its_tiles_about_its_own_proportions() {
+        let mut b = Brush::round_pen();
+        assert!(!b.is_ribbon());
+        assert_eq!(b.ribbon_tile(), 1.0);
+        // the round tip has nothing to stretch
+        b.set_setting("ribbon", 1.0);
+        assert_eq!(b.setting("ribbon"), 1.0);
+        assert!(!b.is_ribbon());
+        b.shape.image = Some(0);
+        assert!(b.is_ribbon());
+        b.set_setting("ribbon_scale", 1.0);
+        assert!((b.ribbon_tile() - RIBBON_STRETCH).abs() < 1e-5);
+        b.set_setting("ribbon_scale", 0.0);
+        assert!((b.ribbon_tile() - 1.0 / RIBBON_STRETCH).abs() < 1e-5);
+        // kept as changes from the brush it started as, and taken off whole
+        let changes = b.changes_from(&Brush::round_pen());
+        assert!(changes.iter().any(|(k, v)| k == "ribbon" && *v == 1.0), "{changes:?}");
+        assert!(!b.without_ribbon().is_ribbon());
     }
 
     #[test]

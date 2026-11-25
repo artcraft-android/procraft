@@ -6,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -39,6 +40,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
@@ -71,6 +73,8 @@ import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.TransformPopup
 import io.github.artcraftandroid.procraft.canvas.boxOnScreen
+import io.github.artcraftandroid.procraft.canvas.changePuppet
+import io.github.artcraftandroid.procraft.canvas.deletePuppetPin
 import io.github.artcraftandroid.procraft.canvas.shownMeshPoints
 import io.github.artcraftandroid.procraft.canvas.toScreen
 import io.github.artcraftandroid.procraft.core.Interpolation
@@ -78,7 +82,12 @@ import io.github.artcraftandroid.procraft.core.TransformAction
 import io.github.artcraftandroid.procraft.core.TransformBox
 import io.github.artcraftandroid.procraft.core.TransformHandle
 import io.github.artcraftandroid.procraft.core.TransformKind
+import io.github.artcraftandroid.procraft.core.puppetDensityRange
+import io.github.artcraftandroid.procraft.core.puppetExpansionMax
+import io.github.artcraftandroid.procraft.core.puppetRingRadius
 import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.roundToInt
 
 internal val NodeBlue = Color(0xFF0171EA)
@@ -116,10 +125,13 @@ private val SegmentText get() = if (Pc.light) Color(0xFF3B3B3B) else Color(0xFFC
 private val ButtonText get() = if (Pc.light) Color(0xFF414141) else Color(0xFFA3A3A3)
 private val ButtonDimmed get() = if (Pc.light) Color(0xFF989898) else Color(0xFF575757)
 private val SegmentGap = 11.33.dp
-/** The transform toolbar's buttons with room for all of it (landscape), its widest icon, and its ways' pill. */
+/**
+ * The transform toolbar's buttons with room for all of it (landscape), its widest icon, and its
+ * ways' pill (481 as measured with four, and Puppet's segment and its gap beside them).
+ */
 private val TransformButtonRoomy = 89.dp
 private val TransformIcon = 50.dp
-private val TransformPill = 481.dp
+private val TransformPill = 600.dp
 internal val ButtonWidth = 83.dp
 private val ButtonHeight = 60.dp
 /** The space between a floating toolbar's buttons, however wide they are. */
@@ -141,12 +153,19 @@ internal val MenuLine get() = if (Pc.light) Color(0xFFE2E2E2) else Color(0xFF373
 internal val MenuText: Color get() = if (Pc.light) Color(0xFF393939) else Color(0xFFC5C5C5)
 internal val MenuGroupCorner = 13.dp
 
-/** The transform box over the canvas: dashed edges, its nodes, the rotate node and the box-turning node. */
+/**
+ * The transform box over the canvas: dashed edges, its nodes, the rotate node and the box-turning
+ * node (or a warp's lines and control points, or a puppet's mesh and pins).
+ */
 @Composable
 fun TransformOverlay(vm: CanvasViewModel) {
     val box = vm.transformBox ?: return
     if (vm.transformKind == TransformKind.WARP && box.mesh.size == 32) {
         WarpOverlay(vm, box)
+        return
+    }
+    if (vm.transformKind == TransformKind.PUPPET && (box.puppetEdges.isNotEmpty() || box.pins.isNotEmpty())) {
+        PuppetOverlay(vm, box)
         return
     }
     val density = LocalDensity.current.density
@@ -243,6 +262,46 @@ private fun WarpOverlay(vm: CanvasViewModel, box: TransformBox) {
     }
 }
 
+/** A puppet over the canvas: its mesh as it is bent (unless hidden), its pins, and the chosen pin's ring with a tick at the angle it holds. */
+@Composable
+private fun PuppetOverlay(vm: CanvasViewModel, box: TransformBox) {
+    val m = vm.viewMatrix
+    val held = vm.transformHeld?.first
+    val showsMesh = vm.puppet.showsMesh
+    fun holding(i: Int) = when (held) {
+        is TransformHandle.Pin -> held.index.toInt() == i
+        is TransformHandle.PinRing -> held.index.toInt() == i
+        else -> false
+    }
+    Canvas(Modifier.fillMaxSize()) {
+        if (showsMesh) {
+            val e = box.puppetEdges
+            val lines = Path()
+            for (i in 0 until e.size / 4) {
+                val a = toScreen(e[4 * i], e[4 * i + 1], m)
+                val b = toScreen(e[4 * i + 2], e[4 * i + 3], m)
+                lines.moveTo(a.x, a.y)
+                lines.lineTo(b.x, b.y)
+            }
+            drawPath(lines, MeshLine.copy(alpha = 0.7f), style = Stroke(0.5.dp.toPx()))
+        }
+        val pins = box.pins
+        for (i in 0 until pins.size / 3) {
+            val at = toScreen(pins[3 * i], pins[3 * i + 1], m)
+            if (box.selectedPin == i) {
+                // the ring a drag turns the mesh by, a tick where it points
+                val r = puppetRingRadius().dp.toPx()
+                drawCircle(DashGap, r, at, style = Stroke(3.dp.toPx()))
+                drawCircle(RotateGreen, r, at, style = Stroke(1.5.dp.toPx()))
+                val turn = Math.toRadians(pins[3 * i + 2].toDouble())
+                val tip = at + Offset(r * cos(turn).toFloat(), r * sin(turn).toFloat())
+                node(tip, RotateGreen, if (holding(i)) HELD_SCALE else 0.8f)
+            }
+            node(at, if (box.selectedPin == i) TurnOrange else NodeBlue, if (holding(i)) HELD_SCALE else 1.1f)
+        }
+    }
+}
+
 /** A node: a coloured dot on a white disc with a faint shadow, [scale] times its size (larger while held). */
 internal fun DrawScope.node(at: Offset, color: Color, scale: Float) {
     shadow(at, 5.5.dp.toPx() * scale)
@@ -265,25 +324,46 @@ internal fun Modifier.tap(onClick: () -> Unit): Modifier = composed {
     clickable(remember { MutableInteractionSource() }, indication = null, onClick = onClick)
 }
 
+/** A tap target that also does [onHold] when held instead. */
+internal fun Modifier.tapOrHold(onClick: () -> Unit, onHold: () -> Unit): Modifier = composed {
+    val tap by rememberUpdatedState(onClick)
+    val hold by rememberUpdatedState(onHold)
+    pointerInput(Unit) { detectTapGestures(onLongPress = { hold() }, onTap = { tap() }) }
+}
+
 /** The floating toolbar at the foot of the screen while transforming. */
 @Composable
 fun TransformToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = Modifier) {
+    fun choose(kind: TransformKind) {
+        // a puppet's settings go with it
+        if (kind != TransformKind.PUPPET && vm.transformPopup == TransformPopup.PUPPET_MESH) vm.transformPopup = TransformPopup.NONE
+        vm.chooseTransformKind(kind)
+    }
     FloatingToolbar(
         toolbarLayout(screenWidth, 7, TransformButtonRoomy, TransformIcon, TransformPill),
         onBackground = { vm.transformPopup = TransformPopup.NONE },
         modifier = modifier,
         segments = {
-            Segment(PcIcons.Freeform, "Freeform", vm.transformKind == TransformKind.FREEFORM, iconSize = 43.dp) { vm.chooseTransformKind(TransformKind.FREEFORM) }
-            Segment(PcIcons.Uniform, "Uniform", vm.transformKind == TransformKind.UNIFORM, iconSize = 43.dp) { vm.chooseTransformKind(TransformKind.UNIFORM) }
-            Segment(PcIcons.Distort, "Distort", vm.transformKind == TransformKind.DISTORT, iconSize = 43.dp) { vm.chooseTransformKind(TransformKind.DISTORT) }
-            Segment(PcIcons.Warp, "Warp", vm.transformKind == TransformKind.WARP, iconSize = 43.dp) { vm.chooseTransformKind(TransformKind.WARP) }
+            Segment(PcIcons.Freeform, "Freeform", vm.transformKind == TransformKind.FREEFORM, iconSize = 43.dp) { choose(TransformKind.FREEFORM) }
+            Segment(PcIcons.Uniform, "Uniform", vm.transformKind == TransformKind.UNIFORM, iconSize = 43.dp) { choose(TransformKind.UNIFORM) }
+            Segment(PcIcons.Distort, "Distort", vm.transformKind == TransformKind.DISTORT, iconSize = 43.dp) { choose(TransformKind.DISTORT) }
+            Segment(PcIcons.Warp, "Warp", vm.transformKind == TransformKind.WARP, iconSize = 43.dp) { choose(TransformKind.WARP) }
+            // while a plugin lays its mesh (Puppet Warp)
+            if (vm.transformHasPuppet) {
+                Segment(PcIcons.Puppet, "Puppet", vm.transformKind == TransformKind.PUPPET, iconSize = 43.dp) { choose(TransformKind.PUPPET) }
+            }
         },
     ) { w ->
             val popup = vm.transformPopup
             // a long name smaller only where the buttons are narrow
             val long = if (w < TransformButtonRoomy) 11.sp else 12.5.sp
+            val puppet = vm.transformKind == TransformKind.PUPPET
             if (vm.transformKind == TransformKind.WARP) {
                 ToolbarButton(PcIcons.AdvancedMesh, "Advanced Mesh", active = vm.advancedMesh, width = w, iconSize = 28.8.dp, labelSize = long) { vm.toggleAdvancedMesh() }
+            } else if (puppet) {
+                ToolbarButton(PcIcons.AdvancedMesh, "Mesh", active = popup == TransformPopup.PUPPET_MESH, width = w, iconSize = 28.8.dp) {
+                    vm.transformPopup = if (popup == TransformPopup.PUPPET_MESH) TransformPopup.NONE else TransformPopup.PUPPET_MESH
+                }
             } else {
                 ToolbarButton(PcIcons.Snapping, "Snapping", active = popup == TransformPopup.SNAPPING, width = w, iconSize = 44.dp) {
                     vm.transformPopup = if (popup == TransformPopup.SNAPPING) TransformPopup.NONE else TransformPopup.SNAPPING
@@ -291,9 +371,14 @@ fun TransformToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
             }
             ToolbarButton(PcIcons.FlipHorizontal, "Flip Horizontal", width = w, iconSize = 50.dp) { vm.transformAction(TransformAction.FLIP_HORIZONTAL) }
             ToolbarButton(PcIcons.FlipVertical, "Flip Vertical", width = w, iconSize = 50.dp) { vm.transformAction(TransformAction.FLIP_VERTICAL) }
-            ToolbarButton(PcIcons.Rotate45, "Rotate 45°", width = w, iconSize = 44.dp) { vm.transformAction(TransformAction.ROTATE45) }
+            if (puppet) {
+                // greyed until a pin is chosen
+                ToolbarButton(PcIcons.Trash, "Delete Pin", enabled = (vm.transformBox?.selectedPin ?: -1) >= 0, width = w, iconSize = 26.dp) { vm.deletePuppetPin() }
+            } else {
+                ToolbarButton(PcIcons.Rotate45, "Rotate 45°", width = w, iconSize = 44.dp) { vm.transformAction(TransformAction.ROTATE45) }
+            }
             ToolbarButton(PcIcons.FitToCanvas, "Fit to Canvas", width = w, iconSize = 35.dp) { vm.transformAction(TransformAction.FIT_TO_CANVAS) }
-            ToolbarButton(PcIcons.Interpolation, interpolationName(vm.interpolation, short = true), active = popup == TransformPopup.INTERPOLATION, width = w, iconSize = 44.dp) {
+            ToolbarButton(PcIcons.Interpolation, if (vm.transformPixelatedUsed) "Pixelated" else interpolationName(vm.interpolation, short = true), active = popup == TransformPopup.INTERPOLATION, width = w, iconSize = 44.dp) {
                 vm.transformPopup = if (popup == TransformPopup.INTERPOLATION) TransformPopup.NONE else TransformPopup.INTERPOLATION
             }
             ToolbarButton(PcIcons.TransformReset, "Reset", width = w, iconSize = 44.dp) { vm.transformAction(TransformAction.RESET) }
@@ -426,6 +511,7 @@ internal fun ToolbarButton(
     width: Dp = ButtonWidth,
     iconSize: Dp = 24.dp,
     labelSize: TextUnit = 12.5.sp,
+    onHold: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val tint = when {
@@ -435,7 +521,12 @@ internal fun ToolbarButton(
     }
     val fit = LocalToolbarFit.current
     val drawn = iconSize * fit.iconScale
-    Box(Modifier.size(width, ButtonHeight).then(if (enabled) Modifier.tap(onClick) else Modifier)) {
+    val touch = when {
+        !enabled -> Modifier
+        onHold != null -> Modifier.tapOrHold(onClick, onHold)
+        else -> Modifier.tap(onClick)
+    }
+    Box(Modifier.size(width, ButtonHeight).then(touch)) {
         // icons centred 30 below the top, labels' capitals 50 below it
         Icon(icon, contentDescription = if (fit.names) null else label, tint = tint, modifier = Modifier.align(Alignment.TopCenter).offset(y = 30.dp - drawn / 2).requiredSize(drawn))
         if (fit.names) Text(
@@ -466,12 +557,13 @@ fun TransformPopover(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
     val popup = vm.transformPopup
     if (popup == TransformPopup.NONE) return
     val layout = toolbarLayout(screenWidth, 7, TransformButtonRoomy, TransformIcon, TransformPill)
-    val buttonCentre = toolbarButtonCentre(screenWidth, layout, if (popup == TransformPopup.SNAPPING) 0 else 5, 7)
+    val buttonCentre = toolbarButtonCentre(screenWidth, layout, if (popup == TransformPopup.INTERPOLATION) 5 else 0, 7)
     val left = (buttonCentre - MenuWidth / 2).coerceIn(0.dp, screenWidth - MenuWidth)
     MenuPopover(buttonCentre - left, left, bottom = toolbarButtonsTop(screenHeight)) {
         when (popup) {
             TransformPopup.INTERPOLATION -> InterpolationMenu(vm)
             TransformPopup.SNAPPING -> SnappingMenu(vm)
+            TransformPopup.PUPPET_MESH -> PuppetMeshMenu(vm)
             TransformPopup.NONE -> Unit
         }
     }
@@ -553,9 +645,52 @@ private fun InterpolationMenu(vm: CanvasViewModel) {
                     .padding(start = 11.dp, end = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                MenuLabel(interpolationName(kind, short = false), if (selected) Color.White else MenuText, Modifier.weight(1f))
-                if (selected) Icon(PcIcons.MenuTick, contentDescription = null, tint = Color.White, modifier = Modifier.size(29.dp))
+                // Pixelated blends nothing, whichever is chosen
+                val dim = Modifier.alpha(if (vm.transformPixelatedUsed) 0.45f else 1f)
+                MenuLabel(interpolationName(kind, short = false), if (selected) Color.White else MenuText, Modifier.weight(1f).then(dim))
+                if (selected) Icon(PcIcons.MenuTick, contentDescription = null, tint = Color.White, modifier = Modifier.size(29.dp).then(dim))
             }
+        }
+    }
+    // for pixel art: whole pixels moved and sized, nothing blended, turns kept clean (while the
+    // Pixel art plugin is on)
+    if (vm.has(io.github.artcraftandroid.procraft.core.Feature.PIXEL_ART)) {
+        Spacer(Modifier.height(10.dp))
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+            SwitchRow("Pixelated", vm.transformPixelated) { vm.toggleTransformPixelated() }
+        }
+    }
+}
+
+/**
+ * A puppet's settings: its mesh shown or not, whether pins turn as it bends, and how the mesh is
+ * laid (how far past what is painted it reaches, how fine it is); an open puppet's mesh is laid
+ * again as they change.
+ */
+@Composable
+private fun PuppetMeshMenu(vm: CanvasViewModel) {
+    val p = vm.puppet.settings
+    val range = puppetDensityRange()
+    val least = (range.firstOrNull() ?: 12u).toFloat()
+    val most = (range.lastOrNull() ?: 80u).toFloat()
+    val furthest = puppetExpansionMax()
+    MenuTitle("Puppet")
+    Spacer(Modifier.height(4.dp))
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+        SwitchRow("Show Mesh", vm.puppet.showsMesh) { vm.puppet.toggleMesh() }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(MenuLine))
+        SwitchRow("Auto-rotate Pins", p.autoRotate) { vm.changePuppet(p.copy(autoRotate = !p.autoRotate)) }
+    }
+    Spacer(Modifier.height(10.dp))
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+        SliderRow("Expansion", p.expansion / furthest, "${p.expansion.roundToInt()} px") {
+            val next = (it * furthest).roundToInt().toFloat()
+            if (next != p.expansion) vm.changePuppet(p.copy(expansion = next))
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(MenuLine))
+        SliderRow("Density", (p.density.toFloat() - least) / (most - least), "${p.density}") {
+            val next = (least + it * (most - least)).roundToInt().toUInt()
+            if (next != p.density) vm.changePuppet(p.copy(density = next))
         }
     }
 }
@@ -590,7 +725,7 @@ private const val SNAP_DISTANCE_DEFAULT = 3f
 private const val SNAP_VELOCITY_MAX = 10f
 
 @Composable
-private fun SwitchRow(label: String, checked: Boolean, onToggle: () -> Unit) {
+internal fun SwitchRow(label: String, checked: Boolean, onToggle: () -> Unit) {
     Row(Modifier.fillMaxWidth().height(49.dp).tap(onToggle).padding(start = 12.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         MenuLabel(label, modifier = Modifier.weight(1f))
         Switch(checked, enabled = true)

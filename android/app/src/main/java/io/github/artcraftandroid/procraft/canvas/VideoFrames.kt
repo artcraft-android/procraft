@@ -26,6 +26,16 @@ class VideoFrames private constructor(
 ) : AutoCloseable {
     val count: Int get() = times.size
 
+    /** Degrees clockwise its frames are shown turned (0, 90, 180 or 270). */
+    val rotation: Int = if (format.containsKey(MediaFormat.KEY_ROTATION)) Math.floorMod(format.getInteger(MediaFormat.KEY_ROTATION), 360) else 0
+
+    /** The frame showing [us] microseconds in: the last to start by then (a frame starting a millisecond later counts: the time asked is a float's), the first before it starts. */
+    fun frameAt(us: Long): Int {
+        val i = times.binarySearch(us + 1_000)
+        val at = if (i >= 0) i else -i - 2
+        return at.coerceIn(0, maxOf(times.size - 1, 0))
+    }
+
     /** The frame the decoder gives next, while it goes on from the last one read; -1 when it must seek. */
     private var next = -1
     private var inputDone = false

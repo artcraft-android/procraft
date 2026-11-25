@@ -108,7 +108,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
-private val LibraryWidth = 440.dp
+internal val LibraryWidth = 440.dp
 private val SetsWidth = 168.dp
 private val BrushHeight = 80.dp
 private val BrushGap = 8.dp
@@ -275,6 +275,12 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
     // the Recent set, or one of the library's
     val recent = vm.shownSet == RECENT_SET
     val shown = sets.getOrNull(vm.shownSet)
+    // the Pen or Eraser drawing with its lasso or with light: their settings in the brushes'
+    // place, under Brush | Lasso | Light
+    if (vm.drawMode != io.github.artcraftandroid.procraft.canvas.DrawMode.BRUSH) {
+        DrawModeLibrary(vm, arrowX, modifier, floating)
+        return
+    }
     // every library's card, or a library with no sets yet: a panel of their own
     if (vm.showingLibraries || sets.isEmpty() || (shown == null && !recent)) {
         LibrariesPanel(vm, arrowX, modifier, floating)
@@ -410,6 +416,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
 
     Popover(floating?.width ?: LibraryWidth, arrowX, modifier, side = if (floating != null) ArrowSide.NONE else ArrowSide.TOP) {
         floating?.let { FloatingTop(it) }
+        // how the Pen or Eraser draws, over the title
+        DrawModeBar(vm)
         val renaming = vm.renamingLibrary == vm.libraryPlace
         Box {
             PanelHeader(

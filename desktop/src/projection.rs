@@ -44,7 +44,7 @@ impl Projection {
         };
         let size = window.inner_size();
         // only the canvas is shown there: in wide colour where the display takes it
-        let config = configure(gpu, &surface, (size.width, size.height), true);
+        let config = configure(gpu, &surface, (size.width, size.height), true, false);
         let at = monitor.position();
         log::info!(
             "Project canvas: opened on {} at {},{} ({}×{}), its window {}×{}",
@@ -61,7 +61,8 @@ impl Projection {
 
     /// The window is `width` × `height` pixels now.
     pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
-        self.config = if width > 0 && height > 0 { configure(gpu, &self.surface, (width, height), true) } else { None };
+        self.config =
+            if width > 0 && height > 0 { configure(gpu, &self.surface, (width, height), true, false) } else { None };
         self.drawn = None;
     }
 

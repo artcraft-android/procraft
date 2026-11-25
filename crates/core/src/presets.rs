@@ -25,6 +25,8 @@ pub struct CanvasPreset {
     pub time_lapse_quality: u32,
     pub time_lapse_hevc: bool,
     pub profile: String,
+    /// An HDR canvas: light above white kept (see `procraft_engine::document::DynamicRange`).
+    pub hdr: bool,
 }
 
 impl CanvasPreset {
@@ -41,6 +43,7 @@ impl CanvasPreset {
             time_lapse_quality: 1,
             time_lapse_hevc: false,
             profile: profile.to_owned(),
+            hdr: false,
         }
     }
 
@@ -62,6 +65,7 @@ impl CanvasPreset {
             "quality": self.time_lapse_quality,
             "hevc": self.time_lapse_hevc,
             "profile": self.profile,
+            "hdr": self.hdr,
         })
     }
 
@@ -82,6 +86,7 @@ impl CanvasPreset {
             time_lapse_quality: whole("quality", 1),
             time_lapse_hevc: flag("hevc"),
             profile: text("profile", SRGB),
+            hdr: flag("hdr"),
         }
     }
 }

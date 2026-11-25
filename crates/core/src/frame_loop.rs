@@ -19,9 +19,21 @@ pub(crate) trait Screen {
     /// An image of the window, drawn into and then presented.
     type Image;
 
-    /// Configures for `size` pixels (asking for wide colour if `wide`): the format drawn in and the
-    /// colours the screen shows, or none if it can't be (yet).
-    fn configure(&mut self, gpu: &Gpu, size: (u32, u32), wide: bool) -> Option<(wgpu::TextureFormat, Profile)>;
+    /// Configures for `size` pixels (asking for wide colour if `wide`, and for an HDR canvas (`hdr`)
+    /// the screen's extended range): the format drawn in and the colours the screen shows, or none if
+    /// it can't be (yet).
+    fn configure(
+        &mut self,
+        gpu: &Gpu,
+        size: (u32, u32),
+        wide: bool,
+        hdr: bool,
+    ) -> Option<(wgpu::TextureFormat, Profile)>;
+
+    /// Whether the screen offers the extended range an HDR canvas is shown in.
+    fn extended_offered(&mut self, _gpu: &Gpu) -> bool {
+        false
+    }
 
     /// The next image to draw into (waiting for one, if the window has none free).
     fn acquire(&mut self) -> Acquired<Self::Image>;
@@ -98,6 +110,11 @@ const RETRY_MOST: Duration = Duration::from_millis(250);
 /// A frame that holds the canvas longer than this is logged: touches wait on it.
 const SLOW_FRAME: Duration = Duration::from_millis(200);
 
+/// How long an HDR canvas left on an 8-bit surface waits before asking again for the extended
+/// range, and how many times it asks (some ten seconds in all).
+const EXTENDED_RETRY: Duration = Duration::from_millis(250);
+const EXTENDED_ASKS: u32 = 40;
+
 /// Draws frames into `screen` as they are asked for until the session says stop; `presented` is
 /// called after each frame is shown.
 pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presented: impl FnMut()) {
@@ -117,6 +134,10 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
     let mut suboptimal_at: Option<(u32, u32)> = None;
     // frames timed to the screen's refreshes where they are told
     let mut pacer = Pacer::default();
+    // an HDR canvas given an 8-bit surface by a refused configure: when to ask again for the
+    // extended range, and how often it has been asked
+    let mut extended_retry: Option<Instant> = None;
+    let mut extended_asked = 0u32;
     loop {
         // the frame planned to the refreshes, if they are told
         let mut planned: Option<(Timeline, Plan)> = None;
@@ -199,15 +220,34 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
             if st.stop {
                 break;
             }
-            (st.window_size, std::mem::replace(&mut st.reconfigure, false), st.wide_colour())
+            let retry = extended_retry.is_some_and(|at| Instant::now() >= at);
+            (st.window_size, std::mem::replace(&mut st.reconfigure, false) || retry, st.wide_colour())
         };
         // configured again too when the canvas comes to want wide colour or stops (its profile
         // changed, or the app's setting)
         if reconfigure || configured.is_none() || wants_wide != wide {
             let st = shared.lock();
             let Some(gpu) = st.gpu.as_ref() else { break };
-            configured = screen.configure(gpu, size, wants_wide);
+            let hdr = st.doc.range.is_high();
+            configured = screen.configure(gpu, size, wants_wide, hdr);
             wide = wants_wide;
+            // an HDR canvas left 8-bit (light above white shown as white) asks again shortly, else
+            // it stayed so until the artwork was opened again
+            let extended = configured.is_some_and(|(f, _)| f == wgpu::TextureFormat::Rgba16Float);
+            let missed = hdr && configured.is_some() && !extended && screen.extended_offered(gpu);
+            extended_retry = None;
+            if !missed {
+                if extended && extended_asked > 0 {
+                    log::info!("the surface took the extended range on asking again ({extended_asked}×)");
+                }
+                extended_asked = 0;
+            } else if extended_asked < EXTENDED_ASKS {
+                extended_asked += 1;
+                extended_retry = Some(Instant::now() + EXTENDED_RETRY);
+            } else if extended_asked == EXTENDED_ASKS {
+                extended_asked += 1;
+                log::warn!("the surface never took the extended range: the canvas shows no light above white");
+            }
         }
         let Some((format, profile)) = configured else {
             retry(shared, &mut failures);
@@ -254,6 +294,10 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
             shared.take_queued_input(st);
             st.draw_frame(&view, format, size, profile, started);
             shared.lands_on.note(st);
+            // a frame then, for the surface to be asked again for the extended range
+            if let Some(at) = extended_retry {
+                st.frame_due = Some(st.frame_due.map_or(at, |due| due.min(at)));
+            }
             let now = Instant::now();
             if let Some(prev) = last_present {
                 st.frame_interval_ms = now.duration_since(prev).as_secs_f32() * 1000.0;

@@ -25,14 +25,16 @@ pub use canvas::plugin_filter::{
     FilterCode, FilterProgram, FilterRun, read_filter, read_layer_filter, read_layer_table_filter,
 };
 pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture, read_picture_given};
+pub use canvas::video::{VideoPicture, VideoSource};
 pub use canvas::{
-    Backdrop, Canvas, DisplayLut, FillPreview, Filter, FineThumbnail, LayerStore, LayerThumbnailStep, LiquifyMode,
-    LiquifyStamp, MOST_TIPS, PendingAlphas, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, STORE_LIT,
-    SecondStroke, SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target,
-    Thumbnail, TipKind, VEIL_GRID, VeilCell, VeilCells, grey_levels, most_resident, read_texture, start_reading,
-    textures_bytes,
+    Backdrop, Canvas, CanvasPaper, DisplayLut, FillPreview, Filter, FineThumbnail, FrameCacheStats, LassoPreview, Lay,
+    LayerStore, LayerThumbnailStep, LightMode, LightTool, LiquifyMode, LiquifyStamp, MOST_TIPS, PendingAlphas,
+    PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, STORE_LIT, SecondStroke, SelectionLook,
+    SharedStroke, SmallScene, Stripes, StrokeEcho, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, TipKind,
+    VEIL_GRID, VeilCell, VeilCells, frame_cache_budget, grey_levels, most_resident, read_texture,
+    set_frame_cache_budget, start_reading, textures_bytes,
 };
-pub use canvas::{CanvasPaper, CarryFault, GREY_LOOK, ViewLook};
+pub use canvas::{CarryFault, GREY_LOOK, ViewLook};
 pub use kept::keep_pipelines_in;
 pub use lighting::Lighting;
 pub use scene::{
@@ -61,6 +63,9 @@ pub fn keep_textures_uncompressed(on: bool) {
 pub(crate) fn textures_uncompressed() -> bool {
     UNCOMPRESSED.load(Ordering::Relaxed)
 }
+
+/// The most of a canvas's pipelines made at a time (see [`Gpu::pipeline_makers`]).
+const MOST_PIPELINE_MAKERS: usize = 8;
 
 /// What a panic said (its message, when it gave one as text).
 pub fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
@@ -301,6 +306,8 @@ pub struct Gpu {
     lost: Arc<AtomicBool>,
     /// The canvases' pipelines, once the first canvas has made them.
     canvas_pipelines: Arc<OnceLock<Arc<canvas::Pipelines>>>,
+    /// HDR canvases' pipelines, once the first of them has made them.
+    hdr_pipelines: Arc<OnceLock<Arc<canvas::Pipelines>>>,
     /// The pipeline cache kept between runs (see [`kept`]), once the canvases' pipelines are made
     /// with it.
     kept: Arc<OnceLock<Option<kept::Kept>>>,
@@ -644,6 +651,7 @@ impl Gpu {
             errors,
             lost,
             canvas_pipelines: Arc::default(),
+            hdr_pipelines: Arc::default(),
             kept: Arc::default(),
             readbacks: Arc::default(),
             old,
@@ -751,17 +759,45 @@ impl Gpu {
     /// The pipelines canvases draw with, made by the first canvas on this device: from their
     /// compiled form kept by an earlier run, where there is one (see [`keep_pipelines_in`]).
     pub(crate) fn canvas_pipelines(&self) -> Arc<canvas::Pipelines> {
-        Arc::clone(self.canvas_pipelines.get_or_init(|| {
+        self.canvas_pipelines_for(canvas::layer_format(procraft_engine::document::DynamicRange::Standard))
+    }
+
+    /// The pipelines canvases whose layers are `layer_format` draw with: a standard canvas's, or
+    /// (made by the first HDR canvas) an HDR one's.
+    pub(crate) fn canvas_pipelines_for(&self, layer_format: wgpu::TextureFormat) -> Arc<canvas::Pipelines> {
+        let high = layer_format == canvas::HDR_FORMAT;
+        let made = if high { &self.hdr_pipelines } else { &self.canvas_pipelines };
+        Arc::clone(made.get_or_init(|| {
             let kept = self
                 .kept
                 .get_or_init(|| kept::folder().and_then(|dir| kept::Kept::open(&self.device, &self.adapter, &dir)));
             let abilities = canvas::Abilities::of(self);
-            let pipelines = canvas::Pipelines::new(&self.device, abilities, kept.as_ref().map(|k| k.cache.clone()));
+            let cache = kept.as_ref().map(|k| k.cache.clone());
+            let started = std::time::Instant::now();
+            let pipelines =
+                canvas::Pipelines::new(&self.device, abilities, layer_format, cache, self.pipeline_makers());
+            log::info!(
+                "{} canvases' pipelines made in {} ms",
+                if high { "HDR" } else { "standard" },
+                started.elapsed().as_millis()
+            );
             if let Some(kept) = kept {
                 kept.made();
             }
             Arc::new(pipelines)
         }))
+    }
+
+    /// How many of a canvas's pipelines are made at a time. Several on Metal, whose compiler takes
+    /// them from as many threads as ask and keeps what it compiled between runs itself; one after
+    /// another elsewhere, where drivers differ in what they stand (OpenGL has one thread's context
+    /// anyway) and the pipelines' compiled form is kept by the app where it can be.
+    fn pipeline_makers(&self) -> usize {
+        if self.adapter.get_info().backend == wgpu::Backend::Metal {
+            std::thread::available_parallelism().map_or(2, std::num::NonZero::get).clamp(1, MOST_PIPELINE_MAKERS)
+        } else {
+            1
+        }
     }
 
     /// Keeps the pipelines made so far for the next run, where they are kept (see

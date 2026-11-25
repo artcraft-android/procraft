@@ -1,17 +1,19 @@
 //! Transform, as the Android app's (ui/TransformUi.kt): the box over what moves (its dashed edges,
 //! its nodes, the rotate node above it and the box-turning node below it; a warp's lines and
-//! control points), and the floating toolbar at the foot of the window (Freeform, Uniform,
-//! Distort and Warp; Snapping or Advanced Mesh, the flips, Rotate 45°, Fit to Canvas,
-//! Interpolation, Reset) with its popovers, and a node's numbers typed in (transform_numeric.rs).
-//! The shared touches work the box.
+//! control points; a puppet's mesh, its pins and the chosen pin's ring), and the floating toolbar at
+//! the foot of the window (Freeform, Uniform, Distort, Warp and Puppet; Snapping, Advanced Mesh or
+//! the puppet's Mesh, the flips, Rotate 45° or Delete Pin, Fit to Canvas, Interpolation, Reset)
+//! with its popovers, and a node's numbers typed in (transform_numeric.rs). The shared touches work
+//! the box, and a puppet's pins: a click on its mesh puts a pin, on a pin chooses it (or, chosen,
+//! takes it away), and a drag moves a pin or, on the chosen one's ring, turns it.
 
 use std::time::Instant;
 
 use egui::epaint::PathShape;
 use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
 use procraft_core::{
-    CanvasSession, GuideSettings, Interpolation, TransformAction, TransformBox, TransformHandle, TransformKind,
-    TransformTouch,
+    CanvasSession, GuideSettings, Interpolation, PuppetSettings, TransformAction, TransformBox, TransformHandle,
+    TransformKind, TransformTouch,
 };
 
 use crate::icons::{self, Icon, Part};
@@ -81,12 +83,36 @@ const ADVANCED_MESH: Icon = Icon {
     }],
 };
 
+/// Puppet's icon: a figure, its head and its hands and feet held by pins, as the iPad app draws it.
+const PUPPET: Icon = Icon {
+    name: "puppet",
+    width: 44.0,
+    height: 44.0,
+    parts: &[
+        Part { d: "M24.2 13.6a2.2 2.2 0 1 1-4.4 0a2.2 2.2 0 1 1 4.4 0z", stroke: 1.4, fill: false, even_odd: false },
+        Part {
+            d: "M22 16.2V24.2M22 18.6L16.8 21.4M22 18.6L27.4 15.9M22 24.2L18.4 30M22 24.2L25.6 30",
+            stroke: 1.4,
+            fill: false,
+            even_odd: false,
+        },
+        Part {
+            d: "M29.2 15.9a1.8 1.8 0 1 1-3.6 0a1.8 1.8 0 1 1 3.6 0zM20.2 30a1.8 1.8 0 1 1-3.6 0a1.8 1.8 0 1 1 3.6 0zM27.4 30a1.8 1.8 0 1 1-3.6 0a1.8 1.8 0 1 1 3.6 0z",
+            stroke: 0.0,
+            fill: true,
+            even_odd: false,
+        },
+    ],
+};
+
 /// The popover open over the toolbar.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Popup {
     None,
     Snapping,
     Interpolation,
+    /// A puppet's settings: its mesh shown, its pins turning, how its mesh is laid.
+    PuppetMesh,
 }
 
 /// What a transform's toolbar asked.
@@ -95,6 +121,8 @@ enum Asked {
     Action(TransformAction),
     Popup(Popup),
     AdvancedMesh,
+    /// Takes the puppet's chosen pin away.
+    DeletePin,
     Background,
 }
 
@@ -104,8 +132,19 @@ pub struct Transform {
     shown: Option<TransformBox>,
     kind: TransformKind,
     interpolation: Interpolation,
+    /// Interpolation's Pixelated, for pixel art: the content keeps to whole pixels as it is moved
+    /// and sized, nothing is blended whatever the interpolation, and what is turned keeps its lines
+    /// clean.
+    pixelated: bool,
     guides: GuideSettings,
     advanced: bool,
+    /// How a puppet's mesh is laid and its pins turn, and whether its mesh is shown.
+    puppet: PuppetSettings,
+    puppet_mesh: bool,
+    /// A plugin lays and bends Puppet's mesh (Puppet Warp): Puppet is offered.
+    has_puppet: bool,
+    /// The Pixel art plugin is off: Interpolation has no Pixelated, and none is used.
+    pub pixel_art_hidden: bool,
     popup: Popup,
     /// The node held and where (window pixels); a rotate or box-turning node let go, where, and when.
     held: Option<(TransformHandle, Pos2)>,
@@ -121,8 +160,13 @@ impl Default for Transform {
             shown: None,
             kind: TransformKind::Freeform,
             interpolation: Interpolation::Bilinear,
+            pixelated: false,
             guides: GuideSettings::default(),
             advanced: false,
+            puppet: PuppetSettings::default(),
+            puppet_mesh: true,
+            has_puppet: false,
+            pixel_art_hidden: false,
             popup: Popup::None,
             held: None,
             let_go: None,
@@ -132,11 +176,28 @@ impl Default for Transform {
 }
 
 impl Transform {
+    /// Pixelated as it is used: as set, while the Pixel art plugin is on.
+    fn pixelated(&self) -> bool {
+        self.pixelated && !self.pixel_art_hidden
+    }
+
     /// Starts transforming the current layer (the caller has checked it takes changes). Returns
     /// what to say when there is nothing there to move.
-    pub fn begin(&mut self, session: &CanvasSession) -> Result<(), String> {
+    pub fn begin(
+        &mut self,
+        session: &CanvasSession,
+        plugins: &std::sync::Arc<procraft_core::Plugins>,
+    ) -> Result<(), String> {
         session.transform_set_interpolation(self.interpolation);
+        session.transform_set_pixelated(self.pixelated());
         session.transform_set_guides(self.guides);
+        session.transform_puppet_settings(self.puppet);
+        // Puppet's mesh is a plugin's (Puppet Warp), as on the iPad: none on, no Puppet
+        let warp = plugins.warps().into_iter().next().map(|w| w.key);
+        self.has_puppet = session.transform_mesh_warp(std::sync::Arc::clone(plugins), warp);
+        if !self.has_puppet && self.kind == TransformKind::Puppet {
+            self.kind = TransformKind::Freeform;
+        }
         let Some(shown) = session.transform_begin() else { return Err(session.transform_refusal()) };
         // a warp lays its mesh over what began
         self.shown = session.transform_set_kind(self.kind).or(Some(shown));
@@ -159,6 +220,12 @@ impl Transform {
         self.held = None;
         self.let_go = None;
         self.numeric = None;
+    }
+
+    /// The box as it is shown, and the kind chosen.
+    #[cfg(test)]
+    pub(crate) fn shown(&self) -> (Option<&TransformBox>, TransformKind) {
+        (self.shown.as_ref(), self.kind)
     }
 
     /// A touch came down on the box: its popover closes.
@@ -201,6 +268,10 @@ impl Transform {
         if let Some(asked) = self.toolbar(ctx, look) {
             match asked {
                 Asked::Kind(kind) => {
+                    // a puppet's settings go with it
+                    if kind != TransformKind::Puppet && self.popup == Popup::PuppetMesh {
+                        self.popup = Popup::None;
+                    }
                     self.kind = kind;
                     self.moved(session.transform_set_kind(kind));
                 }
@@ -213,12 +284,26 @@ impl Transform {
                     self.advanced = !self.advanced;
                     session.set_touch_transforming(Some(TransformTouch { advanced_mesh: self.advanced }));
                 }
+                Asked::DeletePin => {
+                    self.popup = Popup::None;
+                    self.moved(session.transform_puppet_delete_pin());
+                }
                 Asked::Background => self.popup = Popup::None,
             }
         }
         // Escape closes the popover, as a touch on the canvas does
         if self.popup != Popup::None && crate::ui::escape(ctx) {
             self.popup = Popup::None;
+        }
+        // Delete or Backspace takes a puppet's chosen pin away, as Delete Pin does
+        if self.kind == TransformKind::Puppet
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                    || i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+            })
+        {
+            self.moved(session.transform_puppet_delete_pin());
         }
         self.popover(ctx, look, session);
         if let (Some(numeric), Some(b)) = (self.numeric.as_mut(), self.shown.clone()) {
@@ -231,13 +316,19 @@ impl Transform {
     }
 
     /// The box: dashed edges, its nodes, the rotate node and the box-turning node (or a warp's
-    /// lines and control points).
+    /// lines and control points, or a puppet's mesh and pins).
     fn overlay(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let Some(b) = self.shown.clone() else { return };
         let ppp = ctx.pixels_per_point();
         let view = session.view_matrix();
         let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::unique("transform box")));
         let scale = |h: TransformHandle| if self.held.is_some_and(|(held, _)| held == h) { HELD_SCALE } else { 1.0 };
+        if self.kind == TransformKind::Puppet && !(b.puppet_edges.is_empty() && b.pins.is_empty()) {
+            let [a, bb, c, d, e, f] =
+                view.get(..6).and_then(|v| <[f32; 6]>::try_from(v).ok()).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            self.puppet_overlay(&painter, &b, |x, y| pos2(a * x + c * y + e, bb * x + d * y + f) / ppp);
+            return;
+        }
         if self.kind == TransformKind::Warp && b.mesh.len() == 32 {
             let point = |x: f32, y: f32| {
                 let [a, bb, c, d, e, f] =
@@ -346,55 +437,83 @@ impl Transform {
         painter.add(Shape::convex_polygon(square(8.0 * k), argb(TURN_ORANGE), Stroke::NONE));
     }
 
-    /// The floating toolbar: the four kinds in a pill over the buttons. Returns what was asked.
+    /// The floating toolbar: the kinds in a pill over the buttons (Puppet while a plugin lays its
+    /// mesh). Returns what was asked.
     fn toolbar(&mut self, ctx: &egui::Context, look: &mut Look) -> Option<Asked> {
         let kinds = [
             (&icons::FREEFORM, "Freeform", self.kind == TransformKind::Freeform),
             (&icons::UNIFORM, "Uniform", self.kind == TransformKind::Uniform),
             (&icons::DISTORT, "Distort", self.kind == TransformKind::Distort),
             (&icons::WARP, "Warp", self.kind == TransformKind::Warp),
+            (&PUPPET, "Puppet", self.kind == TransformKind::Puppet),
         ];
-        let all = [TransformKind::Freeform, TransformKind::Uniform, TransformKind::Distort, TransformKind::Warp];
+        let all = [
+            TransformKind::Freeform,
+            TransformKind::Uniform,
+            TransformKind::Distort,
+            TransformKind::Warp,
+            TransformKind::Puppet,
+        ];
         let warp = self.kind == TransformKind::Warp;
+        let puppet = self.kind == TransformKind::Puppet;
+        let chosen_pin = self.shown.as_ref().is_some_and(|b| b.selected_pin >= 0);
         let buttons: [Button; 7] = [
             if warp {
                 Button::new(&ADVANCED_MESH, "Advanced Mesh", 28.8).active(self.advanced)
+            } else if puppet {
+                Button::new(&ADVANCED_MESH, "Mesh", 28.8).active(self.popup == Popup::PuppetMesh)
             } else {
                 Button::new(&icons::SNAPPING, "Snapping", 44.0).active(self.popup == Popup::Snapping)
             },
             Button::new(&icons::FLIP_HORIZONTAL, "Flip Horizontal", 50.0),
             Button::new(&icons::FLIP_VERTICAL, "Flip Vertical", 50.0),
-            Button::new(&icons::ROTATE45, "Rotate 45\u{b0}", 44.0),
+            if puppet {
+                // greyed until a pin is chosen
+                Button::new(&icons::TRASH, "Delete Pin", 26.0).enabled(chosen_pin)
+            } else {
+                Button::new(&icons::ROTATE45, "Rotate 45\u{b0}", 44.0)
+            },
             Button::new(&icons::FIT_TO_CANVAS, "Fit to Canvas", 35.0),
-            Button::new(&icons::INTERPOLATION, interpolation_name(self.interpolation, true), 44.0)
-                .active(self.popup == Popup::Interpolation),
+            Button::new(
+                &icons::INTERPOLATION,
+                if self.pixelated() { "Pixelated" } else { interpolation_name(self.interpolation, true) },
+                44.0,
+            )
+            .active(self.popup == Popup::Interpolation),
             Button::new(&icons::TRANSFORM_RESET, "Reset", 44.0),
         ];
-        let tapped = floating_toolbar(ctx, look, "transform toolbar", BUTTON_ROOMY, &kinds, &buttons, 43.0)?;
+        let kinds = kinds.split_last().filter(|_| !self.has_puppet).map_or(&kinds[..], |(_, rest)| rest);
+        let tapped = floating_toolbar(ctx, look, "transform toolbar", BUTTON_ROOMY, kinds, &buttons, 43.0)?;
         Some(match tapped {
             Tapped::Background => Asked::Background,
             Tapped::Segment(k) => Asked::Kind(all.get(k).copied().unwrap_or(TransformKind::Freeform)),
             Tapped::Button(0) if warp => Asked::AdvancedMesh,
+            Tapped::Button(0) if puppet => Asked::Popup(Popup::PuppetMesh),
             Tapped::Button(0) => Asked::Popup(Popup::Snapping),
             Tapped::Button(1) => Asked::Action(TransformAction::FlipHorizontal),
             Tapped::Button(2) => Asked::Action(TransformAction::FlipVertical),
+            Tapped::Button(3) if puppet => Asked::DeletePin,
             Tapped::Button(3) => Asked::Action(TransformAction::Rotate45),
             Tapped::Button(4) => Asked::Action(TransformAction::FitToCanvas),
             Tapped::Button(5) => Asked::Popup(Popup::Interpolation),
             Tapped::Button(_) => Asked::Action(TransformAction::Reset),
+            Tapped::Held(_) => return None,
         })
     }
 
-    /// The popover over the toolbar, its arrow on its button: Interpolation, or Snapping's settings.
+    /// The popover over the toolbar, its arrow on its button: Interpolation, Snapping's settings, or
+    /// a puppet's.
     fn popover(&mut self, ctx: &egui::Context, look: &mut Look, session: &CanvasSession) {
         if self.popup == Popup::None {
             return;
         }
-        let index = if self.popup == Popup::Snapping { 0 } else { 5 };
+        let index = if self.popup == Popup::Interpolation { 5 } else { 0 };
         let (tip_x, tip_y) = button_tip(ctx, BUTTON_ROOMY, index, 7);
         let screen = ctx.content_rect();
         let body_height = match self.popup {
-            Popup::Interpolation => 40.0 + 10.0 + 40.0 * 3.0 + 2.0,
+            Popup::Interpolation => {
+                40.0 + 10.0 + 40.0 * 3.0 + 2.0 + if self.pixel_art_hidden { 0.0 } else { 10.0 + 49.0 }
+            }
             _ => 40.0 + 4.0 + 49.0 * 2.0 + 1.0 + 10.0 + 59.0 * 2.0 + 1.0,
         } + 20.0;
         let left = (tip_x - MENU_WIDTH / 2.0).clamp(screen.left(), screen.right() - MENU_WIDTH);
@@ -431,7 +550,9 @@ impl Transform {
                             };
                             ui.painter().rect_filled(row, corners, argb(pc::ACCENT));
                         }
-                        let ink = if on { Color32::WHITE } else { argb(MENU_TEXT) };
+                        // Pixelated blends nothing, whichever is chosen
+                        let dim = if self.pixelated() { 0.45 } else { 1.0 };
+                        let ink = if on { Color32::WHITE } else { argb(MENU_TEXT) }.gamma_multiply(dim);
                         text(
                             ui.painter(),
                             pos2(row.left() + 11.0, row.center().y),
@@ -447,7 +568,7 @@ impl Transform {
                                 &icons::MENU_TICK,
                                 pos2(row.right() - 14.0 - 14.5, row.center().y),
                                 29.0,
-                                Color32::WHITE,
+                                Color32::WHITE.gamma_multiply(dim),
                             );
                         }
                         if ui.interact(row, ui.scope_id().with(("interpolation", i)), Sense::click()).clicked() {
@@ -456,6 +577,33 @@ impl Transform {
                             self.popup = Popup::None;
                         }
                     }
+                    // for pixel art: whole pixels moved and sized, nothing blended, turns kept clean
+                    // (while the Pixel art plugin is on)
+                    if self.pixel_art_hidden {
+                        return;
+                    }
+                    let row = Rect::from_min_size(pos2(inner.left(), group.bottom() + 10.0), vec2(inner.width(), 49.0));
+                    ui.painter().rect_filled(row, 13, argb(MENU_GROUP));
+                    text(
+                        ui.painter(),
+                        pos2(row.left() + 12.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        "Pixelated",
+                        16.0,
+                        Weight::Regular,
+                        argb(MENU_TEXT),
+                    );
+                    switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), self.pixelated, "Pixelated");
+                    if ui.interact(row, ui.scope_id().with("pixelated"), Sense::click()).clicked() {
+                        self.pixelated = !self.pixelated;
+                        if let Some(shown) = session.transform_set_pixelated(self.pixelated) {
+                            self.shown = Some(shown);
+                        }
+                    }
+                }
+                Popup::PuppetMesh => {
+                    title(ui, "Puppet");
+                    self.puppet_menu(ui, inner, session);
                 }
                 _ => {
                     title(ui, "Settings");
@@ -533,6 +681,105 @@ impl Transform {
     }
 }
 
+impl Transform {
+    /// A puppet's settings under the popover's title in `inner`: its mesh shown or not, whether
+    /// pins turn as it bends, and how the mesh is laid (how far past what is painted it reaches,
+    /// how fine it is); an open puppet's mesh is laid again as they change.
+    fn puppet_menu(&mut self, ui: &Ui, inner: Rect, session: &CanvasSession) {
+        let mut p = self.puppet;
+        let group = Rect::from_min_size(pos2(inner.left(), inner.top() + 44.0), vec2(inner.width(), 99.0));
+        ui.painter().rect_filled(group, 13, argb(MENU_GROUP));
+        for (i, (label, on)) in
+            [("Show Mesh", self.puppet_mesh), ("Auto-rotate Pins", p.auto_rotate)].into_iter().enumerate()
+        {
+            let row = Rect::from_min_size(pos2(group.left(), group.top() + 50.0 * i as f32), vec2(group.width(), 49.0));
+            if i > 0 {
+                ui.painter().rect_filled(
+                    Rect::from_min_size(row.min - vec2(0.0, 1.0), vec2(row.width(), 1.0)),
+                    0,
+                    argb(MENU_LINE),
+                );
+            }
+            text(
+                ui.painter(),
+                pos2(row.left() + 12.0, row.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                16.0,
+                Weight::Regular,
+                argb(MENU_TEXT),
+            );
+            switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), on, label);
+            if ui.interact(row, ui.scope_id().with(("puppet switch", i)), Sense::click()).clicked() {
+                if i == 0 {
+                    self.puppet_mesh = !self.puppet_mesh;
+                } else {
+                    p.auto_rotate = !p.auto_rotate;
+                }
+            }
+        }
+        let sliders = Rect::from_min_size(pos2(inner.left(), group.bottom() + 10.0), vec2(inner.width(), 119.0));
+        ui.painter().rect_filled(sliders, 13, argb(MENU_GROUP));
+        let most = procraft_core::puppet_expansion_max();
+        let row = Rect::from_min_size(sliders.min, vec2(sliders.width(), 59.0));
+        let shown = format!("{} px", p.expansion.round() as i32);
+        if let Some(v) = menu_slider(ui, row, "Expansion", p.expansion / most, &shown) {
+            p.expansion = (v * most).round();
+        }
+        ui.painter().rect_filled(
+            Rect::from_min_size(pos2(sliders.left(), row.bottom()), vec2(sliders.width(), 1.0)),
+            0,
+            argb(MENU_LINE),
+        );
+        let range = procraft_core::puppet_density_range();
+        let (least, most) = (range.first().copied().unwrap_or(12) as f32, range.last().copied().unwrap_or(80) as f32);
+        let row = Rect::from_min_size(pos2(sliders.left(), row.bottom() + 1.0), vec2(sliders.width(), 59.0));
+        let at = (p.density as f32 - least) / (most - least);
+        if let Some(v) = menu_slider(ui, row, "Density", at, &p.density.to_string()) {
+            p.density = (least + v * (most - least)).round() as u32;
+        }
+        if p != self.puppet {
+            self.puppet = p;
+            self.moved(session.transform_puppet_settings(p));
+        }
+    }
+
+    /// A puppet over the canvas: its mesh as it is bent (unless hidden), its pins, and the chosen
+    /// pin's ring with a tick at the angle it holds. `point` takes canvas pixels to the window.
+    fn puppet_overlay(&self, painter: &egui::Painter, b: &TransformBox, point: impl Fn(f32, f32) -> Pos2) {
+        if self.puppet_mesh {
+            let line = Stroke::new(0.5, argb(MESH_LINE).gamma_multiply(0.7));
+            painter.extend(
+                b.puppet_edges
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&[x0, y0, x1, y1]| Shape::line_segment([point(x0, y0), point(x1, y1)], line)),
+            );
+        }
+        let holding = |i: usize| {
+            self.held.is_some_and(|(h, _)| match h {
+                TransformHandle::Pin { index } | TransformHandle::PinRing { index } => index as usize == i,
+                _ => false,
+            })
+        };
+        let chosen = usize::try_from(b.selected_pin).ok();
+        for (i, &[x, y, turn]) in b.pins.as_chunks::<3>().0.iter().enumerate() {
+            let at = point(x, y);
+            if chosen == Some(i) {
+                // the ring a drag turns the mesh by, a tick where it points
+                let r = procraft_core::puppet_ring_radius();
+                painter.circle_stroke(at, r, Stroke::new(3.0, argb(DASH_GAP)));
+                painter.circle_stroke(at, r, Stroke::new(1.5, argb(ROTATE_GREEN)));
+                let (sin, cos) = turn.to_radians().sin_cos();
+                node(painter, at + vec2(cos, sin) * r, argb(ROTATE_GREEN), if holding(i) { HELD_SCALE } else { 0.8 });
+            }
+            let colour = if chosen == Some(i) { argb(TURN_ORANGE) } else { argb(NODE_BLUE) };
+            node(painter, at, colour, if holding(i) { HELD_SCALE } else { 1.1 });
+        }
+    }
+}
+
 /// How a floating toolbar is laid out: its width, its buttons' width, how big their icons are
 /// drawn (1: as measured) and whether their names show.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -602,11 +849,12 @@ impl<'a> Button<'a> {
     }
 }
 
-/// What was tapped on a floating toolbar.
+/// What was tapped on a floating toolbar: a button right-clicked is `Held`, as a long press is on Android.
 pub(crate) enum Tapped {
     Background,
     Segment(usize),
     Button(usize),
+    Held(usize),
 }
 
 /// The floating toolbar at the foot of the window (transform, selection): a row of `segments`
@@ -662,8 +910,10 @@ pub(crate) fn floating_toolbar(
             let centre = button_centre(bar, button, i, buttons.len());
             let rect = Rect::from_min_size(pos2(centre - button / 2.0, top), vec2(button, BUTTON_HEIGHT));
             let label_size = if b.label.len() > 12 { long } else { 12.5 };
-            if toolbar_button(ui, look, rect, b, fit.names.then_some(label_size), fit.icon_scale) {
-                tapped = Some(Tapped::Button(i));
+            match toolbar_button(ui, look, rect, b, fit.names.then_some(label_size), fit.icon_scale) {
+                Some(false) => tapped = Some(Tapped::Button(i)),
+                Some(true) => tapped = Some(Tapped::Held(i)),
+                None => {}
             }
         }
     });
@@ -759,8 +1009,15 @@ fn segment(
 
 /// A toolbar button: its icon (`icon_scale` times its size) centred 30 below its top over its
 /// name (`label_size`; none in a narrow window); blue while its popover is open, grey when it
-/// can't be used. True when tapped.
-fn toolbar_button(ui: &Ui, look: &mut Look, rect: Rect, b: &Button, label_size: Option<f32>, icon_scale: f32) -> bool {
+/// can't be used. `Some(false)` when tapped, `Some(true)` when right-clicked.
+fn toolbar_button(
+    ui: &Ui,
+    look: &mut Look,
+    rect: Rect,
+    b: &Button,
+    label_size: Option<f32>,
+    icon_scale: f32,
+) -> Option<bool> {
     let tint = if !b.enabled {
         argb(BUTTON_DIMMED)
     } else if b.active {
@@ -781,7 +1038,11 @@ fn toolbar_button(ui: &Ui, look: &mut Look, rect: Rect, b: &Button, label_size: 
             ink,
         );
     }
-    b.enabled && ui.interact(rect, ui.scope_id().with(("toolbar button", b.label)), Sense::click()).clicked()
+    if !b.enabled {
+        return None;
+    }
+    let r = ui.interact(rect, ui.scope_id().with(("toolbar button", b.label)), Sense::click());
+    if r.secondary_clicked() { Some(true) } else { r.clicked().then_some(false) }
 }
 
 /// A node: a coloured dot on a white disc with a faint shadow, `scale` times its size.

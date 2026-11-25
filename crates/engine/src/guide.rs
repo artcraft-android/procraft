@@ -57,8 +57,8 @@ impl LengthUnit {
 }
 
 /// One kind of guide's look: its opacity and line thickness (0..1), its grid's size (canvas
-/// pixels) and the unit it is shown in, and its colour (0..1 along the colour bar, see
-/// [`bar_color`]).
+/// pixels) and the unit it is shown in, its colour (0..1 along the colour bar, see
+/// [`bar_color`]), and whether its grid fades with the zoom (see [`zoom_fade`]).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GuideLook {
     pub opacity: f32,
@@ -67,6 +67,20 @@ pub struct GuideLook {
     pub color: f32,
     #[serde(default, deserialize_with = "crate::document::or_default")]
     pub unit: LengthUnit,
+    /// The grid fades out as the canvas is zoomed out and in as it is zoomed in, starting to show
+    /// at zoom `fade_at` (canvas pixel to window pixels), or, where none is set, with its lines
+    /// [`FADE_FROM`] window pixels apart (see [`zoom_fade`]).
+    #[serde(default)]
+    pub fade: bool,
+    #[serde(default)]
+    pub fade_at: Option<f32>,
+}
+
+impl GuideLook {
+    /// How far apart its grid's lines are (window pixels) where it starts to fade in.
+    pub fn fade_spacing(&self) -> f32 {
+        self.fade_at.map_or(FADE_FROM, |zoom| zoom * self.size.max(SIZE_MIN))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -96,11 +110,69 @@ pub struct Guide {
 
 /// The kinds' looks as a new guide starts.
 pub const STARTS: [GuideLook; 4] = [
-    GuideLook { opacity: 0.36, thickness: 0.64, size: 71.0, color: 0.0, unit: LengthUnit::Pixels },
-    GuideLook { opacity: 0.30, thickness: 0.60, size: 82.0, color: 0.0, unit: LengthUnit::Pixels },
-    GuideLook { opacity: 1.0, thickness: 0.70, size: 71.0, color: 0.33, unit: LengthUnit::Pixels },
-    GuideLook { opacity: 0.41, thickness: 0.60, size: 71.0, color: 0.0, unit: LengthUnit::Pixels },
+    GuideLook {
+        opacity: 0.36,
+        thickness: 0.64,
+        size: 71.0,
+        color: 0.0,
+        unit: LengthUnit::Pixels,
+        fade: false,
+        fade_at: None,
+    },
+    GuideLook {
+        opacity: 0.30,
+        thickness: 0.60,
+        size: 82.0,
+        color: 0.0,
+        unit: LengthUnit::Pixels,
+        fade: false,
+        fade_at: None,
+    },
+    GuideLook {
+        opacity: 1.0,
+        thickness: 0.70,
+        size: 71.0,
+        color: 0.33,
+        unit: LengthUnit::Pixels,
+        fade: false,
+        fade_at: None,
+    },
+    GuideLook {
+        opacity: 0.41,
+        thickness: 0.60,
+        size: 71.0,
+        color: 0.0,
+        unit: LengthUnit::Pixels,
+        fade: false,
+        fade_at: None,
+    },
 ];
+
+/// The smallest size a grid can have, canvas pixels: a line round each pixel.
+pub const SIZE_MIN: f32 = 1.0;
+
+/// Window pixels between a zoom-faded grid's lines where it starts to show, where no zoom is set
+/// for it to.
+pub const FADE_FROM: f32 = 4.0;
+
+/// The zooms (canvas pixel to window pixels) a grid can be set to start to fade in at.
+pub const FADE_AT_MIN: f32 = 0.25;
+pub const FADE_AT_MAX: f32 = 32.0;
+
+/// How many times further apart than where it starts to show a zoom-faded grid's lines are where
+/// it shows whole.
+const FADE_SPAN: f32 = 4.0;
+
+/// How much (0..1) of a grid with zoom fade on shows, its lines `spacing` window pixels apart:
+/// none closer than `from`, all from [`FADE_SPAN`] times that, easing in between.
+pub fn zoom_fade(spacing: f32, from: f32) -> f32 {
+    if !spacing.is_finite() {
+        return 0.0;
+    }
+    let from = if from.is_finite() && from > 0.0 { from } else { FADE_FROM };
+    let t = ((spacing - from) / (from * (FADE_SPAN - 1.0))).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
 
 /// The guide colour bar: dark through blue, green, orange, red and pink to white, as stops.
 const BAR: [[u8; 3]; 21] = [
@@ -306,21 +378,39 @@ impl Guide {
     /// The guide's lines over a `width` × `height` canvas, as segments (canvas pixels) kept within
     /// it.
     pub fn lines(&self, width: u32, height: u32) -> Vec<(Vec2, Vec2)> {
-        let (w, h) = (width as f32, height as f32);
-        self.unclipped(width, height).into_iter().filter_map(|(a, b)| clip(a, b, w, h)).collect()
+        self.lines_seen(width, height, None)
     }
 
-    fn unclipped(&self, width: u32, height: u32) -> Vec<(Vec2, Vec2)> {
+    /// [`Guide::lines`], a grid's only where they cross `seen` (its least and greatest corners,
+    /// canvas pixels), if given: the part of the canvas the window shows.
+    pub fn lines_seen(&self, width: u32, height: u32, seen: Option<[Vec2; 2]>) -> Vec<(Vec2, Vec2)> {
+        let (w, h) = (width as f32, height as f32);
+        self.unclipped(width, height, seen).into_iter().filter_map(|(a, b)| clip(a, b, w, h)).collect()
+    }
+
+    fn unclipped(&self, width: u32, height: u32, seen: Option<[Vec2; 2]>) -> Vec<(Vec2, Vec2)> {
         let (w, h) = (width as f32, height as f32);
         let reach = w.hypot(h);
         let c = self.centre();
-        let size = self.look().size.max(4.0);
+        let size = self.look().size.max(SIZE_MIN);
+        // the lines `spacing` apart across `across` (k from the centre's) that cross what is seen
+        let crossing = |across: Vec2, spacing: f32| -> (i32, i32) {
+            let n = (reach / spacing).ceil() as i32 + 1;
+            let Some([lo, hi]) = seen else { return (-n, n) };
+            let along = [lo, Vec2::new(hi.x, lo.y), hi, Vec2::new(lo.x, hi.y)].map(|p| (p - c).dot(across) / spacing);
+            let least = along.iter().copied().fold(f32::INFINITY, f32::min).floor();
+            let most = along.iter().copied().fold(f32::NEG_INFINITY, f32::max).ceil();
+            if !(least.is_finite() && most.is_finite()) {
+                return (-n, n);
+            }
+            ((least as i32).max(-n), (most as i32).min(n))
+        };
         let family = |dir: f32| -> Vec<(Vec2, Vec2)> {
             // parallel lines `size` apart through the centre, long enough to cross the canvas
             let along = Vec2::new(dir.cos(), dir.sin());
             let across = Vec2::new(-along.y, along.x);
-            let n = (reach / size).ceil() as i32 + 1;
-            (-n..=n)
+            let (first, last) = crossing(across, size);
+            (first..=last)
                 .map(|k| {
                     let o = c + across * (k as f32 * size);
                     (o - along * reach, o + along * reach)
@@ -337,8 +427,8 @@ impl Guide {
                 for dir in [self.angle + PI / 2.0, self.angle + FRAC_PI_6, self.angle - FRAC_PI_6] {
                     let along = Vec2::new(dir.cos(), dir.sin());
                     let across = Vec2::new(-along.y, along.x);
-                    let n = (reach / iso).ceil() as i32 + 1;
-                    out.extend((-n..=n).map(|k| {
+                    let (first, last) = crossing(across, iso);
+                    out.extend((first..=last).map(|k| {
                         let o = c + across * (k as f32 * iso);
                         (o - along * reach, o + along * reach)
                     }));
@@ -498,6 +588,50 @@ mod tests {
 
     fn on(kind: GuideKind) -> Guide {
         Guide { on: true, kind, assisted: true, ..Guide::new(200, 100) }
+    }
+
+    #[test]
+    fn a_zoom_faded_grid_shows_from_its_lines_being_far_enough_apart() {
+        // as a new grid has it: from 4 pixels apart, whole from 16
+        assert_eq!(zoom_fade(1.0, FADE_FROM), 0.0);
+        assert_eq!(zoom_fade(4.0, FADE_FROM), 0.0);
+        let half = zoom_fade(10.0, FADE_FROM);
+        assert!((half - 0.5).abs() < 1e-6, "{half}");
+        assert_eq!(zoom_fade(16.0, FADE_FROM), 1.0);
+        assert_eq!(zoom_fade(500.0, FADE_FROM), 1.0);
+        assert_eq!(zoom_fade(f32::NAN, FADE_FROM), 0.0);
+        // from 8, whole from 32; what can't be a spacing is the usual
+        assert_eq!((zoom_fade(8.0, 8.0), zoom_fade(32.0, 8.0)), (0.0, 1.0));
+        assert_eq!(zoom_fade(10.0, 0.0), zoom_fade(10.0, FADE_FROM));
+        assert_eq!(zoom_fade(10.0, f32::NAN), zoom_fade(10.0, FADE_FROM));
+        // a zoom set: a pixel grid set to 800% starts with its lines 8 apart, a 71 one 568 apart
+        let mut look = STARTS[0];
+        assert_eq!(look.fade_spacing(), FADE_FROM);
+        look.fade_at = Some(8.0);
+        look.size = 1.0;
+        assert_eq!(look.fade_spacing(), 8.0);
+        look.size = 71.0;
+        assert_eq!(look.fade_spacing(), 568.0);
+        // older guides had no fade: off, and no zoom set
+        let old = r#"{"opacity":0.36,"thickness":0.64,"size":71.0,"color":0.0}"#;
+        let old = serde_json::from_str::<GuideLook>(old).unwrap();
+        assert_eq!((old.fade, old.fade_at), (false, None));
+    }
+
+    #[test]
+    fn a_grid_can_be_a_pixel_and_draws_only_the_lines_seen() {
+        let mut g = on(GuideKind::Grid);
+        g.looks[0].size = 1.0;
+        g.centre = [0.5, 0.5];
+        // a line through each pixel's middle: 200 across, 100 down
+        assert_eq!(g.lines(200, 100).len(), 200 + 100);
+        // seeing 10 × 5 pixels of it: 10 across and 5 down, and a line either side at most
+        let seen = [Vec2::new(40.0, 20.0), Vec2::new(50.0, 25.0)];
+        let lines = g.lines_seen(200, 100, Some(seen));
+        assert!((10 + 5..=12 + 7).contains(&lines.len()), "{}", lines.len());
+        // the same lines as all of them, where seen
+        let all = g.lines(200, 100);
+        assert!(lines.iter().all(|l| all.contains(l)));
     }
 
     #[test]

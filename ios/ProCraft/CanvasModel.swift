@@ -9,6 +9,21 @@ enum Panel {
     case none, layers, color, brushes, actions, adjustments
 }
 
+/// How the Pen or Eraser draws, chosen at the top of the brush library: with the brush, with a
+/// lasso (each shape drawn fills, or erases, at the tool's opacity), or, the Pen's on an HDR
+/// canvas, with light (the light tool, painting with the Pen's brush).
+enum DrawMode: CaseIterable {
+    case brush, lasso, light
+
+    var name: String {
+        switch self {
+        case .brush: "Brush"
+        case .lasso: "Lasso"
+        case .light: "Light"
+        }
+    }
+}
+
 /// Which slider's panel shows beside it: the size's or the opacity's.
 enum SliderPanel {
     case size, opacity
@@ -38,6 +53,8 @@ struct Question {
     var message = "It can't be brought back."
     var action = "Delete"
     var icon: PcIcon? = PcIcons.trash
+    /// Its action in red: it takes something away.
+    var destructive = true
     let perform: () -> Void
 }
 
@@ -70,6 +87,12 @@ final class CanvasModel {
     @ObservationIgnored var leaveWithoutSaving: () -> Void = {}
 
     private(set) var tool: ToolKind = .paint
+    /// What the light tool does to the paint under the brush, and how strongly.
+    private(set) var light = LightSettings(kind: .brighten, strength: 0.5)
+    /// How far above white (stops) the light tool brightens an HDR canvas (see `HDR.swift`).
+    var lightLimit: Float = 2
+    /// How many stops above white an HDR artwork's paint colour is lit (see `HDR.swift`).
+    var colorStops: Float = 0
     private(set) var size: Float = 0
     private(set) var opacity: Float = 1
     /// The colour panel's mode, kept from one session to the next.
@@ -244,6 +267,10 @@ final class CanvasModel {
     var sideBarMoving: SideBarShown?
     /// Share's animated export, while its screen is up.
     var animatedExport: AnimatedFormat?
+    /// Share's export of a plugin's with settings (a sprite sheet), while its screen is up.
+    var pluginShare: PluginShare?
+    /// Share's Texture Packer, while it is open.
+    var texturePacker: TexturePackerState?
     /// A CMYK canvas's inks for the Value picker: the inks a canvas colour prints with, and back.
     private(set) var inks: Inks?
     /// The single touch gestures companion shows, and what a lone finger on the canvas does with it.
@@ -251,17 +278,27 @@ final class CanvasModel {
     var companionMode: CompanionMode?
     @ObservationIgnored var colorNames = false
     @ObservationIgnored var feedbackSounds = false
+    /// The canvas is on screen and the app in front: its strokes are heard (a plugin's sound).
+    @ObservationIgnored var hearsStrokes = false {
+        didSet { followStrokeSound() }
+    }
     @ObservationIgnored var naming: Task<Void, Never>?
     @ObservationIgnored var namedAt = Date.distantPast
 
     /// The QuickMenu, open around this window point (in points); the Copy & Paste panel.
     var quickMenuAt: CGPoint?
+    /// The finger that opened the QuickMenu (sliding off, or held still) is still down on the
+    /// canvas, and what it last did under the menu.
+    @ObservationIgnored var quickMenuHeld = false
+    var quickMenuFinger: FingerStep?
     var copyPasteOpen = false
 
     /// The adjustment open, its values as the core has them, the menu a tap on the canvas opened
     /// during it (where, in points), and liquify's list (1) or adjust slider (2).
     private(set) var adjustment: Adjustment?
     private(set) var adjustShown: AdjustShown?
+    /// The Adjustments menu adds an adjustment layer rather than changing the current layer.
+    var adjustAsLayer = false
     var adjustMenuAt: CGPoint?
     var liquifyPopup = 0
     /// Layer or Pencil shows under the bar.
@@ -272,7 +309,70 @@ final class CanvasModel {
     var adjusting: Bool {
         adjustment != nil
     }
+
+    /// The Paint and Erase tools' own lassos (Lasso Fill, Lasso Erase), chosen as the library's
+    /// Lasso: the tool's strokes are shapes that close and fill (or erase) at its opacity slider.
+    private(set) var paintLasso = false
+    private(set) var eraseLasso = false
+    /// The Pen draws with light (the library's Light): its button picks the light tool, kept while
+    /// another tool is up.
+    private(set) var penLight = false
+    /// The Pen's lasso with its brush (Lasso's Outline): the brush paints the edge as it goes, and
+    /// what it goes round fills under it as it lifts, the two one undo step.
+    private(set) var lassoOutline = UserDefaults.standard.bool(forKey: "lassoOutline")
+    /// Outline's fill: with the second colour rather than the paint colour, and how strongly (its
+    /// own, the bar's opacity being the brush's).
+    private(set) var lassoFillSecondary = UserDefaults.standard.bool(forKey: "lassoFillSecondary")
+    private(set) var lassoFillOpacity = min(max(UserDefaults.standard.object(forKey: "lassoFillOpacity") as? Float ?? 1, 0), 1)
+
+    /// What the core fills under each paint stroke: Outline's fill while the Pen's lasso has it.
+    var strokeFill: StrokeFill? {
+        paintLasso && lassoOutline ? StrokeFill(secondary: lassoFillSecondary, opacity: lassoFillOpacity) : nil
+    }
+
+    /// How strongly a lasso's fill shows as it is drawn, times how strongly it will fill: none at
+    /// 0, as it will be at 1.
+    private(set) var lassoPreviewOpacity = min(max(UserDefaults.standard.object(forKey: "lassoPreviewOpacity") as? Float ?? 0.5, 0), 1)
+
+    func setLassoPreviewOpacity(_ opacity: Float) {
+        lassoPreviewOpacity = min(max(opacity, 0), 1)
+        UserDefaults.standard.set(lassoPreviewOpacity, forKey: "lassoPreviewOpacity")
+    }
+
+    /// A lasso's fill shows drawn over the screen, sharp, rather than on the canvas at its own
+    /// resolution: on a vector layer with crisp zoom, where the strokes show sharp too.
+    var lassoPreviewOnScreen: Bool {
+        AppSettings.shared.vectorCrisp && layers.first(where: { $0.current })?.vector == true
+    }
+
+    func setLassoOutline(_ on: Bool) {
+        feedback()
+        lassoOutline = on
+        UserDefaults.standard.set(on, forKey: "lassoOutline")
+    }
+
+    func setLassoFillSecondary(_ on: Bool) {
+        lassoFillSecondary = on
+        UserDefaults.standard.set(on, forKey: "lassoFillSecondary")
+    }
+
+    func setLassoFillOpacity(_ opacity: Float) {
+        lassoFillOpacity = min(max(opacity, 0), 1)
+        UserDefaults.standard.set(lassoFillOpacity, forKey: "lassoFillOpacity")
+    }
+
+    /// The current tool draws with its lasso now (nothing else open over it); the Pen's with
+    /// Outline paints strokes, filled as they lift, instead.
+    var lassoToolOn: Bool {
+        !selecting && !transforming && adjustment == nil && PluginsModel.shared.lassoFills
+            && ((tool == .paint && paintLasso && !lassoOutline) || (tool == .erase && eraseLasso))
+    }
     private(set) var recoloring = false
+    /// A plugin's tool open (Comic Panels): its touches go to its plugin.
+    var pluginTool: PluginTool?
+    /// What it shows over the canvas, and its mode chosen.
+    var toolShapes: [PluginToolShape] = []
+    var toolMode: UInt32 = 0
 
     /// The Actions panel's tab, kept from one session to the next.
     var actionsTab: Int {
@@ -295,6 +395,17 @@ final class CanvasModel {
     var guideOn: Bool {
         guide.info.on
     }
+
+    /// The artwork paints on a 3D model, not a flat canvas.
+    private(set) var modelOpen = false
+    /// The model's texture sets (one for each of its materials), and the one painted on: the
+    /// layers shown are its layers.
+    private(set) var textureSets: [String] = []
+    private(set) var textureSet = 0
+    /// The texture set painted on shows flat, as a canvas, in place of the model.
+    private(set) var modelFlat = false
+    /// Strokes on the model reach every surface under them, not only the nearest.
+    private(set) var paintThrough = false
 
     // the layers, top first, the background under them, and their thumbnails
     private(set) var layers: [LayerInfo] = []
@@ -368,6 +479,8 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var reference = ReferenceTool(model: self)
     @ObservationIgnored private(set) lazy var timeLapse = TimeLapseTool(model: self)
     @ObservationIgnored private(set) lazy var animationAssist = AnimationAssist(model: self)
+    @ObservationIgnored private(set) lazy var timeline = TimelineTool(model: self)
+    @ObservationIgnored private(set) lazy var media = TimelineMediaTool(model: self)
     @ObservationIgnored private(set) lazy var text = TextTool(model: self)
     /// The model the artwork paints on, if it is one.
     @ObservationIgnored private(set) lazy var scene = ModelScene(model: self)
@@ -414,11 +527,18 @@ final class CanvasModel {
     init(session: CanvasSession, dir: String) {
         self.session = session
         self.dir = dir
+        // video clips' pictures, read here
+        session.setVideoFrames(frames: VideoFrameReader.shared)
+        // a plugin's own artwork goes to its plugin (on); else it shows what it last drew
+        if session.pluginKind() != nil {
+            _ = session.openPluginArtwork(plugins: PluginsModel.shared.store)
+        }
         CanvasLife.made(.model)
         // the artwork open: where layers held out of another's layers panel land
         HeldLayers.shared.canvas = self
         CanvasLife.follow(self)
         _ = session.openBrushes(dir: Self.brushesDir)
+        startHdr()
         // the plugins on first: their brush engines make brushes of the files waiting too
         applyPlugins()
         PluginsModel.shared.onChange = { [weak self] in self?.applyPlugins() }
@@ -432,7 +552,13 @@ final class CanvasModel {
         refreshCanvasSpace()
         readAppSettings()
         session.setBrushScaling(onScreen: settings.brushOnScreen)
+        session.setVectorCrisp(on: settings.vectorCrisp)
         session.setLightInterface(on: settings.lightInterface)
+        session.setTimelineVectorFrames(on: UserDefaults.standard.bool(forKey: "timelineVectorFrames"))
+        session.setPourAllLayers(on: drop.allLayers)
+        // the system's Reduce Motion: a dropped colour's fill shows at once
+        session.setReduceMotion(reduce: UIAccessibility.isReduceMotionEnabled)
+        session.setSelectionPixelated(on: selection.pixelated)
         applyInput()
         session.useColourHistory(history: Self.colourHistory)
         history = Self.colourHistory.colours()
@@ -444,6 +570,12 @@ final class CanvasModel {
         brightness = brush.dropFirst(2).first ?? 1
         applyColor()
         tool = session.info().tool
+        // the light tool is an HDR canvas's: a standard one left on it opens on the brush
+        if tool == .light, !isHdr || !PluginsModel.shared.has(.lightTool) {
+            session.setTool(tool: .paint)
+            tool = .paint
+        }
+        penLight = tool == .light
         currentBrush = session.currentBrush()
         if let current = currentBrush {
             shownSet = Int(current.set)
@@ -476,7 +608,18 @@ final class CanvasModel {
     // MARK: tools and panels
 
     /// A tool button: the first tap picks the tool, the next opens its brush library.
-    func toolPressed(_ pressed: ToolKind) {
+    /// The Pen's tool: the light tool while it draws with light.
+    var penTool: ToolKind {
+        penLight && isHdr ? .light : .paint
+    }
+
+    /// A tool button's tool (the Pen's as it draws).
+    private func buttonTool(_ pressed: ToolKind) -> ToolKind {
+        pressed == .paint ? penTool : pressed
+    }
+
+    func toolPressed(_ button: ToolKind) {
+        let pressed = buttonTool(button)
         // leaving a mode for a tool keeps what it made, and only picks the tool
         guard switchModes(.tool) else {
             select(pressed)
@@ -492,9 +635,68 @@ final class CanvasModel {
         }
     }
 
+    /// The ways the current tool can draw, as the library's top offers them: none for the
+    /// Smudge, Lasso only with the Lasso Fill plugin, Light only on an HDR canvas with the HDR
+    /// plugin's Light tool on.
+    var drawModes: [DrawMode] {
+        guard tool != .smudge else { return [] }
+        var modes: [DrawMode] = [.brush]
+        if PluginsModel.shared.lassoFills {
+            modes.append(.lasso)
+        }
+        if tool != .erase, isHdr, PluginsModel.shared.has(.lightTool) {
+            modes.append(.light)
+        }
+        return modes.count > 1 ? modes : []
+    }
+
+    /// The Pen button's glyph: how the Pen draws, kept while another tool is up.
+    var penGlyph: PcIcon {
+        if penLight, isHdr {
+            return PcIcons.light
+        }
+        return paintLasso && PluginsModel.shared.lassoFills ? PcIcons.freehand : PcIcons.brush
+    }
+
+    /// How the current tool draws.
+    var drawMode: DrawMode {
+        switch tool {
+        case .light: .light
+        case .paint: paintLasso && PluginsModel.shared.lassoFills ? .lasso : .brush
+        case .erase: eraseLasso && PluginsModel.shared.lassoFills ? .lasso : .brush
+        case .smudge: .brush
+        }
+    }
+
+    /// The library's top chose how the Pen or Eraser draws.
+    func chooseDrawMode(_ mode: DrawMode) {
+        guard mode != drawMode else { return }
+        feedback()
+        if tool == .erase {
+            eraseLasso = mode == .lasso
+            return
+        }
+        paintLasso = mode == .lasso
+        penLight = mode == .light
+        let next: ToolKind = penLight ? .light : .paint
+        if next != tool {
+            session.setTool(tool: next)
+            tool = next
+            readSliders()
+            currentBrush = session.currentBrush()
+        }
+    }
+
+    /// The light tool's settings changed (from its panel).
+    func setLight(_ settings: LightSettings) {
+        session.setLight(light: settings)
+        light = session.light()
+    }
+
     /// A tool button held: that tool takes the brush the current one has (erasing with the
     /// painting brush, say), and becomes the tool.
-    func toolHeld(_ target: ToolKind) {
+    func toolHeld(_ button: ToolKind) {
+        let target = buttonTool(button)
         guard let brush = currentBrush, target != tool, switchModes(.toolHeld) else { return }
         select(target)
         if session.selectBrush(set: brush.set, index: brush.index) {
@@ -509,16 +711,44 @@ final class CanvasModel {
         case .paint: doing = "Painting"
         case .smudge: doing = "Smudging"
         case .erase: doing = "Erasing"
+        case .light: doing = "Lighting"
         }
         showDone("\(doing) with the current brush")
     }
 
     func select(_ next: ToolKind) {
         feedback()
+        if next == .light || next == .paint {
+            penLight = next == .light
+        }
         session.setTool(tool: next)
         tool = next
         readSliders()
         currentBrush = session.currentBrush()
+    }
+
+    /// The Pencil's double-tap or squeeze did what the shared touches set it to: the tool, the
+    /// eyedropper and drawing assist read again as they now are (the core switches them itself,
+    /// saying nothing).
+    func penGestureDone() {
+        let picks = session.pickNext()
+        if picks != pickNextShown {
+            pickNextShown = picks
+        }
+        let now = session.info().tool
+        if now != tool {
+            feedback()
+            endRecolor()
+            if now == .light || now == .paint {
+                penLight = now == .light
+            }
+            tool = now
+            readSliders()
+            currentBrush = session.currentBrush()
+        }
+        if session.guide() != guide.info {
+            guide.read()
+        }
     }
 
     // MARK: the brush library
@@ -650,6 +880,20 @@ final class CanvasModel {
     func duplicateBrush(_ b: BrushInfo) {
         guard session.duplicateBrush(set: b.set, index: b.index) != nil else { return }
         libraryChanged()
+    }
+
+    /// The brushes the app comes with that were deleted, back where they ship; said how many.
+    func restoreShippedBrushes() {
+        let back = session.restoreShippedBrushes()
+        if back > 0 {
+            libraryChanged()
+        }
+        let said: String = switch back {
+        case 0: "Every brush ProCraft comes with is in the library."
+        case 1: "1 brush is back."
+        default: "\(back) brushes are back."
+        }
+        showNotice(said)
     }
 
     func deleteBrush(_ b: BrushInfo) {
@@ -961,6 +1205,56 @@ final class CanvasModel {
                     Sharing.share([made])
                 } else {
                     self?.showNotice("The brush couldn't be exported.", warning: true)
+                }
+            }
+        }
+    }
+
+    /// Brush and set files from elsewhere (several brushes dragged in at once), read one after
+    /// another off the main thread under one card: together they join the library. `then` once
+    /// they are read (or at once, with none, or with another card up).
+    func importBrushes(from urls: [URL], then: (() -> Void)? = nil) {
+        guard let first = urls.first, importShown == nil, exportShown == nil else {
+            then?()
+            return
+        }
+        guard urls.count > 1 else {
+            importBrushes(from: first, then: then)
+            return
+        }
+        importCancelled = false
+        importShown = ProgressShown(progress: 0, detail: first.lastPathComponent)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var reads: [BrushesRead] = []
+            var last = first.lastPathComponent
+            for (i, url) in urls.enumerated() {
+                guard let self, !self.importCancelled else { break }
+                let name = url.lastPathComponent
+                DispatchQueue.main.async {
+                    guard !self.importCancelled else { return }
+                    self.importShown = ProgressShown(progress: Float(i) / Float(urls.count), detail: name)
+                }
+                if let read = url.readPicked().flatMap({ readBrushes(bytes: $0, fileName: name) }) {
+                    reads.append(read)
+                    last = name
+                }
+            }
+            then?()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard !self.importCancelled, !reads.isEmpty else {
+                    self.importShown = nil
+                    if !self.importCancelled {
+                        self.showNotice("These files have no brushes in them.", warning: true)
+                    }
+                    return
+                }
+                self.importShown = ProgressShown(progress: 1, done: true, detail: last)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { self.importShown = nil }
+                self.brushesRead += reads
+                self.addBrushesRead()
+                if reads.count < urls.count {
+                    self.showNotice("\(urls.count - reads.count) of the files had no brushes in them.", warning: true)
                 }
             }
         }
@@ -1426,8 +1720,17 @@ final class CanvasModel {
         refresh()
     }
 
-    /// The selection button: opens or closes the selection tool (a selection made stays).
+    /// The selection button: with anything selected (the button lit), the selection goes, as one
+    /// undo step, and the tool closes if open; else it opens or closes the selection tool.
     func toggleSelecting() {
+        if selection.hasSelection {
+            // the other modes end first, keeping what they made, as with any press of it
+            _ = switchModes(.selection)
+            closeSelecting()
+            selection.clear()
+            refreshFlags()
+            return
+        }
         // open, it closes; else the other modes end
         guard switchModes(.selection) else { return }
         panel = .none
@@ -1443,6 +1746,7 @@ final class CanvasModel {
         selection.closed()
         selecting = false
         selection.showLook()
+        readVectorNodes()
     }
 
     /// Window pixels to canvas pixels through the view, or none when it cannot be inverted.
@@ -1492,6 +1796,39 @@ final class CanvasModel {
         if a == .clone {
             readSliders()
         }
+    }
+
+    /// Adds an adjustment layer of `a` over the current layer and opens its panels on it: what it
+    /// does changes what is below it, and stays editable.
+    func addAdjustmentLayer(_ a: Adjustment) {
+        _ = switchModes(.adjustment)
+        closeForAdjustment()
+        if a == .gradientMap {
+            _ = gradientMap
+        }
+        guard session.adjustmentLayerAdd(adjustment: a) else {
+            noRoomForLayers()
+            return
+        }
+        adjustModesOpen = false
+        liquifyPopup = 0
+        readAdjust()
+        refresh()
+    }
+
+    /// Opens adjustment layer `l`'s panels on the values it keeps.
+    func editAdjustmentLayer(_ l: LayerInfo) {
+        guard l.adjustment != nil, !l.locked else { return }
+        _ = switchModes(.adjustment)
+        closeForAdjustment()
+        if l.adjustment == .gradientMap {
+            _ = gradientMap
+        }
+        guard session.adjustmentLayerEdit(layer: l.id) != nil else { return }
+        adjustModesOpen = false
+        liquifyPopup = 0
+        readAdjust()
+        refresh()
     }
 
     /// Opens the plugin's filter on the current layer. The core saves the artwork ahead of the
@@ -1816,7 +2153,18 @@ final class CanvasModel {
         reference.refresh()
         timeLapse.record()
         animationAssist.refresh()
+        timeline.refresh()
+        followAutokeyBox()
         refreshFlags()
+        // an undo changes what a plugin's tool shows (the panels Comic Panels outlines)
+        if pluginTool != nil {
+            readPluginTool()
+        }
+        // undo and redo may go back to another texture set of a model
+        if modelOpen {
+            textureSet = Int(session.textureSet())
+            modelFlat = session.modelFlat()
+        }
         // undo and redo step through a snapped shape: its handles where they now are, and past its
         // drags it gives way to the stroke as drawn and ends
         if quickShape != nil {
@@ -1825,7 +2173,12 @@ final class CanvasModel {
                 quickShapeEditing = false
             }
         }
+        readVectorNodes()
         layers = session.layers()
+        let eraser = session.vectorEraser()
+        if eraser != vectorEraser {
+            vectorEraser = eraser
+        }
         followMaskColour()
         background = session.background()
         // the strokes a selection takes on a plugin's layer may have moved, or be others now
@@ -2085,16 +2438,87 @@ final class CanvasModel {
         refresh()
     }
 
-    /// Says how many layers this canvas holds, there being no room for another.
-    /// Says the canvas holds no more layers, and how many it holds.
+    /// The Layers panel's + held: a new vector layer, which keeps what is drawn on it as strokes
+    /// and fills.
+    func addVectorLayer() {
+        feedback()
+        if session.addVectorLayer() == 0 {
+            noRoomForLayers()
+        } else {
+            showNotice("Vector Layer")
+        }
+        refresh()
+    }
+
+    /// How the eraser works on vector layers: taking what its brush covers, whole strokes, or a
+    /// stroke up to where it crosses others. Chosen in the Eraser band.
+    private(set) var vectorEraser: VectorEraser = .subtract
+
+    func chooseVectorEraser(_ mode: VectorEraser) {
+        guard mode != vectorEraser else { return }
+        feedback()
+        session.setVectorEraser(mode: mode)
+        vectorEraser = mode
+    }
+
+    /// The Eraser band shows under the top bar: the Erase tool is up on a vector layer, drawing
+    /// strokes (its lasso only subtracts), with no mode or other band in its place.
+    var eraserBandShown: Bool {
+        tool == .erase && !eraseLasso && !barsHidden && !selecting && !transforming && !adjusting
+            && !recoloring && quickShape == nil && opacityLayer == nil && drop.band == .none
+            && layers.first(where: { $0.current })?.vector == true
+    }
+
+    /// The nodes of the one stroke picked on a vector layer (window pixels, x and y in turn), shown
+    /// while a selection tool is up: a drag of one pulls the stroke into another shape.
+    private(set) var vectorNodes: [Float] = []
+
+    /// Reads those nodes again: the selection, the view or the stroke changed.
+    func readVectorNodes() {
+        let nodes = selecting ? session.vectorNodes() : []
+        if nodes != vectorNodes {
+            vectorNodes = nodes
+        }
+    }
+
+    /// Whether strokes or fills are picked on vector layer `l`, to be given the brush's colour,
+    /// brush or size.
+    func vectorPicked(_ l: LayerInfo) -> Bool {
+        l.current && l.vector && session.vectorPickedCount() > 0
+    }
+
+    /// Gives what is picked on the vector layer the paint brush's colour, brush or size as they
+    /// are set now.
+    func vectorApply(_ what: VectorApply) {
+        feedback()
+        if session.vectorApply(what: what) {
+            refresh()
+        }
+    }
+
+    /// Whether vector layers are drawn as fine as the screen when zoomed in.
+    var vectorCrisp: Bool { AppSettings.shared.vectorCrisp }
+
+    /// Crisp zoom on or off, kept for every artwork from now on.
+    func changeVectorCrisp(_ on: Bool) {
+        AppSettings.shared.vectorCrisp = on
+        session.setVectorCrisp(on: on)
+    }
+
+    func toggleVectorCrisp() {
+        changeVectorCrisp(!vectorCrisp)
+        showNotice(vectorCrisp ? "Crisp Zoom On" : "Crisp Zoom Off")
+    }
+
+    /// Says the canvas holds no more layers, and how many it has: how many it holds goes by what
+    /// they take, so no fixed number says it.
     func noRoomSaid() -> String {
-        let info = session.info()
-        return "This canvas holds at most \(layersFor(width: max(info.width, 1), height: max(info.height, 1))) layers."
+        let used = session.layerStats().used
+        return "No room for another layer: this canvas's \(used) \(used == 1 ? "layer takes" : "layers take") all the memory it has for layers."
     }
 
     func noRoomForLayers() {
-        let info = session.info()
-        showNotice("This canvas holds at most \(layersFor(width: max(info.width, 1), height: max(info.height, 1))) layers.", warning: true)
+        showNotice(noRoomSaid(), warning: true)
     }
 
     func selectLayer(_ id: UInt64) {
@@ -2168,6 +2592,7 @@ final class CanvasModel {
         let info = session.info()
         canUndo = info.canUndo
         canRedo = info.canRedo
+        selection.readHas()
     }
 
     // MARK: the colour
@@ -2312,6 +2737,10 @@ final class CanvasModel {
         session.setTouchFilling(fill: drop.touchFill())
         // the selection tool's touch selects as the tool is set
         session.setTouchSelecting(how: selection.touch())
+        // the Pen's lasso with Outline: each paint stroke fills what it goes round as it lifts
+        session.setStrokeFill(fill: strokeFill)
+        // a lasso's fill shows on the canvas as it is drawn (or here, over it, on a sharp vector layer)
+        session.setLassoPreviewOpacity(opacity: lassoPreviewOnScreen ? 0 : lassoPreviewOpacity)
         if selecting {
             selection.setPopup(.none)
         }
@@ -2334,6 +2763,7 @@ final class CanvasModel {
         if quickShape != nil {
             quickShape = session.quickshapeInfo() ?? quickShape
         }
+        readVectorNodes()
         // a stroke on a locked or hidden layer, or a group, drew nothing: say why (text layers ask
         // to rasterize)
         if !adjusting, layers.first(where: { $0.current })?.text != true {
@@ -2342,6 +2772,12 @@ final class CanvasModel {
         refreshFlags()
         reference.refresh()
         timeLapse.record()
+        // on a timeline, the panel: a first stroke on an empty frame made a drawing there, and
+        // the drawing painted on has a new picture (the read gives nothing when nothing it shows
+        // changed)
+        if timeline.on {
+            timeline.refresh()
+        }
         // the stroke's colour went into the history
         history = Self.colourHistory.colours()
         if layersShown {
@@ -2352,6 +2788,13 @@ final class CanvasModel {
     /// Fits the canvas to the window again; what is over it follows the view as it settles.
     func settleToFit() {
         session.settleToFit()
+        followView()
+    }
+
+    /// Turns the canvas back by `turn` (radians) about (`x`, `y`), easing there: two fingers'
+    /// accidental turn.
+    func settleTurn(x: Float, y: Float, turn: Float) {
+        session.unturn(x: x, y: y, turn: turn)
         followView()
     }
 
@@ -2389,6 +2832,8 @@ final class CanvasModel {
         if quickShape != nil {
             quickShape = session.quickshapeInfo()
         }
+        // so do a picked stroke's nodes
+        readVectorNodes()
     }
 
     /// The interface hidden or shown again (not while transforming).
@@ -2458,6 +2903,10 @@ final class CanvasModel {
             switch b.why {
             case .locked:
                 toggleLocked(b.layer)
+            case .alphaLocked:
+                if b.layer.alphaLock {
+                    toggleAlphaLock(b.layer)
+                }
             case .hidden, .groupHidden:
                 // its own box ticked (what else hides it stays)
                 if let said = session.showLayer(id: b.layer.id) {
@@ -2537,7 +2986,9 @@ final class CanvasModel {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let now = self.picking {
-                    self.picking = PickState(x: x, y: y, image: image ?? now.image, rgb: seen?.rgb ?? now.rgb, lift: now.lift)
+                    self.picking = PickState(x: x, y: y, image: image ?? now.image, rgb: seen?.rgb ?? now.rgb, stops: seen?.stops ?? now.stops,
+            lift: now.lift
+        )
                 }
                 self.readPick()
             }
@@ -2570,6 +3021,10 @@ final class CanvasModel {
         pendingPick = nil
         if let rgb = picking?.rgb {
             setRgb(rgb)
+            // and as bright as it was there, light above white and all
+            if isHdr {
+                setColorStops(picking?.stops ?? 0)
+            }
         }
         picking = nil
     }
@@ -2589,6 +3044,7 @@ final class CanvasModel {
         case .line: shape = "a line"
         case .polyline: shape = "a polyline"
         case .arc: shape = "an arc"
+        case .curve: shape = "a curve"
         case .ellipse: shape = "an ellipse"
         case .circle: shape = "a circle"
         case .triangle: shape = "a triangle"

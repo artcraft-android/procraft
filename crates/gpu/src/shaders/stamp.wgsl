@@ -1,5 +1,6 @@
 // Brush stamps into the stroke texture: one instanced quad per stamp, turned and squashed as the
-// stamp says, with the round tip or a shape image, and a moving grain if the brush has one.
+// stamp says, with the round tip or a shape image, and a moving grain if the brush has one. A
+// ribbon brush's pieces (vs_ribbon) go the same way, the shape image stretched along each.
 // Written premultiplied; the pipeline blends them "over" or keeps the maximum (see stamp_rule.wgsl
 // for strokes that take their rule pixel by pixel).
 
@@ -36,6 +37,10 @@ struct StampUniform {
     // in their own colours; 2 lightness maps, their grey the colour's lightness; 3 gradient maps,
     // their grey a colour between the brush's and the secondary. All but masks RGBA, premultiplied.
     tip_kind: u32,
+    // 1: pixel art, each stamp laid on whole pixels and hard-edged
+    pixelated: u32,
+    // 1: a ribbon's pieces, the shape read along the strip (see vs_ribbon)
+    ribbon: u32,
 }
 
 @group(0) @binding(0) var<uniform> su: StampUniform;
@@ -112,23 +117,75 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
     );
     // a shape's quad keeps its reach however small the stamp; the round tip thins out by its area
-    let r = max(inst.radius, select(0.25, 0.01, su.shape >= 0));
+    var r = max(inst.radius, select(0.25, 0.01, su.shape >= 0));
+    var center = inst.center;
+    if (su.pixelated == 1u) {
+        // a whole number of pixels across, centred where it covers whole pixels: an odd width
+        // mid-pixel, an even one on a corner (as the stroke already laid it, unless mirrored off
+        // the grid)
+        let across = max(round(r * 2.0), 1.0);
+        r = across * 0.5;
+        center = select(floor(center) + 0.5, round(center), across % 2.0 == 0.0);
+    }
     let half = vec2<f32>(r, max(r * inst.roundness, 1e-3));
     // one pixel to spare for anti-aliasing
     let q = corners[vi % 6u] * (half + 1.0) / half;
     let local = q * half;
     let c = cos(inst.angle);
     let s = sin(inst.angle);
-    let p = inst.center + vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
+    let p = center + vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
     var o: StampOut;
     o.pos = vec4<f32>(p.x / su.canvas_size.x * 2.0 - 1.0, 1.0 - p.y / su.canvas_size.y * 2.0, 0.0, 1.0);
     o.q = q;
     o.radius = r;
     o.alpha = inst.alpha;
-    o.grain_at = grain_read(inst.grain_offset, p - inst.center, inst.grain_turn, inst.look.y);
+    o.grain_at = grain_read(inst.grain_offset, p - center, inst.grain_turn, inst.look.y);
     o.fill = inst.flip * half / (half + QUAD_REACH);
     o.color = mix(tinted(su.color.rgb, inst.tint, inst.brightness_add), su.secondary.rgb, inst.look.z);
     o.look = inst.look;
+    o.grain_press = inst.more.x;
+    o.grain_bleed = inst.more.y;
+    o.transfer = inst.more.z;
+    o.layer = su.shape + i32(inst.tip.x);
+    o.finish = inst.tip.yzw;
+    return o;
+}
+
+// A ribbon's piece (see procraft_engine::ribbon): its two rungs, each its middle and the way to its
+// left edge (as long as half the strip's width), and their alphas and places along the image (in
+// tiles). The stamp it is laid for, beside it, gives its look.
+struct RibbonIn {
+    @location(13) start: vec4<f32>,
+    @location(14) end: vec4<f32>,
+    @location(15) ends: vec4<f32>,
+}
+
+// A ribbon's piece as two triangles from rung to rung, a pixel wider each side than the strip so
+// the shape's own edge is what shows. Its frame for the fragments: q.x how far along the image (in
+// tiles, read by its fraction), q.y across it from -1 at the left edge (the image's top) to 1.
+@vertex
+fn vs_ribbon(@builtin(vertex_index) vi: u32, inst: StampIn, piece: RibbonIn) -> StampOut {
+    // (which rung, which side)
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    );
+    let corner = corners[vi % 6u];
+    let to = corner.x > 0.5;
+    let rung = select(piece.start, piece.end, to);
+    let half = max(length(rung.zw), 1e-3);
+    let side = corner.y * (half + 1.0) / half;
+    let p = rung.xy - rung.zw * side;
+    var o: StampOut;
+    o.pos = vec4<f32>(p.x / su.canvas_size.x * 2.0 - 1.0, 1.0 - p.y / su.canvas_size.y * 2.0, 0.0, 1.0);
+    o.q = vec2<f32>(select(piece.ends.z, piece.ends.w, to), side);
+    o.radius = max(inst.radius, 0.01);
+    o.alpha = select(piece.ends.x, piece.ends.y, to);
+    o.grain_at = grain_read(inst.grain_offset, p - inst.center, inst.grain_turn, inst.look.y);
+    o.fill = vec2<f32>(1.0);
+    o.color = mix(tinted(su.color.rgb, inst.tint, inst.brightness_add), su.secondary.rgb, inst.look.z);
+    // a leaning pen's shading across a stamp has no leading edge on a strip
+    o.look = vec4<f32>(inst.look.xyz, 0.0);
     o.grain_press = inst.more.x;
     o.grain_bleed = inst.more.y;
     o.transfer = inst.more.z;
@@ -239,13 +296,24 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     var colour = i.color;
     if (su.shape < 0) {
         let d = length(i.q) * r;
-        // a one-pixel anti-aliased rim, and the brush's own falloff from hardness·r outwards
-        let rim = clamp(r - d + 0.5, 0.0, 1.0);
-        let soft = 1.0 - smoothstep(min(su.hardness, 0.999) * r, r + 0.5, d);
-        a = min(rim, soft);
+        if (su.pixelated == 1u) {
+            // each pixel whose middle is inside, whole; a tenth of a pixel in from the edge rounds
+            // the corners of a disc off as pixel art draws them (three across a plus, five across
+            // a square less its corners)
+            a = select(0.0, 1.0, d <= r - 0.1);
+        } else {
+            // a one-pixel anti-aliased rim, and the brush's own falloff from hardness·r outwards
+            let rim = clamp(r - d + 0.5, 0.0, 1.0);
+            let soft = 1.0 - smoothstep(min(su.hardness, 0.999) * r, r + 0.5, d);
+            a = min(rim, soft);
+        }
     } else {
-        // the shape fills the quad it is drawn on, which shows on a stamp a few pixels across
-        let uv = i.q * i.fill * 0.5 + 0.5;
+        // the shape fills the quad it is drawn on, which shows on a stamp a few pixels across; a
+        // ribbon's tiles along the strip, from its left edge to its right across it
+        var uv = i.q * i.fill * 0.5 + 0.5;
+        if (su.ribbon == 1u) {
+            uv = vec2<f32>(fract(i.q.x), i.q.y * 0.5 + 0.5);
+        }
         // the mip level that matches the quad's size on the canvas
         // (a brush file's own image is bigger than the brush images, by as many levels)
         let side = f32(textureDimensions(shapes).x);
@@ -260,6 +328,10 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
             // a picture-like tip: as far as it is opaque, in the colour it gives
             s = t.a;
             colour = tip_colour(colour, t, i.finish.x);
+        }
+        if (su.pixelated == 1u) {
+            // pixel art paints a pixel or doesn't
+            s = step(0.5, s);
         }
         a = select(0.0, s, inside);
     }
@@ -321,7 +393,7 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     }
     // the round tip's rim takes a pixel as covered to its middle: a tip under a pixel across
     // covers only its area of one (a shape's quad reaches past it, which thins it as far)
-    if (su.shape < 0) {
+    if (su.shape < 0 && su.pixelated == 0u) {
         let small = min(r * 2.0, 1.0);
         a = a * small * small;
     }

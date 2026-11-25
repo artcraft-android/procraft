@@ -49,6 +49,7 @@ import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.GuideType
 import io.github.artcraftandroid.procraft.core.GuideUnit
 import io.github.artcraftandroid.procraft.core.SymmetryType
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -111,7 +112,7 @@ fun GuideOverlay(vm: CanvasViewModel) {
     val g = vm.guide ?: return
     if (!g.on && !vm.guideEditing) return
     val density = androidx.compose.ui.platform.LocalDensity.current.density
-    val color = Color(g.color.getOrElse(0) { 0f }, g.color.getOrElse(1) { 0f }, g.color.getOrElse(2) { 0f }, g.opacity)
+    val color = Color(g.color.getOrElse(0) { 0f }, g.color.getOrElse(1) { 0f }, g.color.getOrElse(2) { 0f }, g.lineOpacity)
     Canvas(Modifier.fillMaxSize()) {
         val width = (0.25f + 1.5f * g.thickness) * density
         val l = g.lines
@@ -175,6 +176,7 @@ fun GuideEditor(vm: CanvasViewModel) {
         }
         GuideToolbar(vm, Modifier.align(Alignment.BottomCenter)) { keypad = SizeKeypad(g.sizeText, g.unit) }
         SymmetryOptions(vm, maxWidth, maxHeight)
+        ZoomFadeOptions(vm, maxWidth, maxHeight)
         GuideNodeMenu(vm)
         open?.let { k ->
             // each key changes the size at once; a unit chosen clears what was typed
@@ -333,8 +335,9 @@ private fun GuideType.icon() = when (this) {
 private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier, onChip: () -> Unit) {
     val g = vm.guide ?: return
     val screen = androidx.compose.ui.platform.LocalConfiguration.current
+    val grid = g.kind == GuideType.GRID || g.kind == GuideType.ISOMETRIC
     if (screen.screenWidthDp > screen.screenHeightDp) {
-        val slider = guideSlider(screen.screenWidthDp.dp)
+        val slider = guideSlider(screen.screenWidthDp.dp, grid)
         OptionsPanel(screen.screenWidthDp.dp - 16.dp, 137.dp, modifier, 16.dp) {
             KindsSwitch(546.dp, GUIDE_KINDS.map { (k, label, w) -> Kind(k.icon(), label, w) }, GUIDE_KINDS.indexOfFirst { it.first == g.kind }) {
                 vm.chooseGuideKind(GUIDE_KINDS[it].first)
@@ -344,8 +347,10 @@ private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier, onChip: () -> 
                 OptionSlider("Opacity", g.opacity, shown(g.opacity, max = true), slider) { vm.setGuideLook(opacity = it) }
                 OptionSlider("Thickness", g.thickness, shown(g.thickness, max = true), slider) { vm.setGuideLook(thickness = it) }
                 when (g.kind) {
-                    GuideType.GRID, GuideType.ISOMETRIC ->
+                    GuideType.GRID, GuideType.ISOMETRIC -> {
                         OptionSlider("Grid size", sizeToSlider(g.size), g.sizeLabel, slider, chip = true, onChip = onChip) { vm.setGuideLook(size = sliderToSize(it)) }
+                        FadeSwitch(vm, g.fade, 140.dp)
+                    }
                     GuideType.SYMMETRY -> Box(
                         Modifier.size(slider, 40.dp).clip(RoundedCornerShape(20.dp)).background(Color(0xFF303030)).tap { vm.symmetryOptionsOpen = !vm.symmetryOptionsOpen },
                         contentAlignment = Alignment.Center,
@@ -374,8 +379,9 @@ private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier, onChip: () -> 
         Row(Modifier.width(620.dp).height(54.dp), horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
             when (g.kind) {
                 GuideType.GRID, GuideType.ISOMETRIC -> {
-                    OptionSlider("Grid size", sizeToSlider(g.size), g.sizeLabel, 300.dp, chip = true, onChip = onChip) { vm.setGuideLook(size = sliderToSize(it)) }
-                    AssistedSwitch(vm, g.assisted)
+                    OptionSlider("Grid size", sizeToSlider(g.size), g.sizeLabel, 240.dp, chip = true, onChip = onChip) { vm.setGuideLook(size = sliderToSize(it)) }
+                    FadeSwitch(vm, g.fade, 140.dp)
+                    AssistedSwitch(vm, g.assisted, 200.dp)
                 }
                 GuideType.PERSPECTIVE -> AssistedSwitch(vm, g.assisted)
                 GuideType.SYMMETRY -> Box(
@@ -389,14 +395,71 @@ private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier, onChip: () -> 
     }
 }
 
-/** A slider's width in the wide guide toolbar: 257, less what a narrower screen would take from its switch. */
-private fun guideSlider(screenWidth: androidx.compose.ui.unit.Dp) = minOf(257.dp, (screenWidth - 328.dp) / 3)
+/**
+ * A slider's width in the wide guide toolbar: 257, less what a narrower screen would take from its
+ * switch (and from Zoom Fade's beside a grid's).
+ */
+private fun guideSlider(screenWidth: androidx.compose.ui.unit.Dp, grid: Boolean = false) =
+    minOf(257.dp, (screenWidth - if (grid) 499.dp else 328.dp) / 3)
 
 @Composable
-private fun AssistedSwitch(vm: CanvasViewModel, on: Boolean) {
-    Row(Modifier.width(300.dp).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun AssistedSwitch(vm: CanvasViewModel, on: Boolean, width: Dp = 300.dp) {
+    Row(Modifier.width(width).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("Assisted Drawing", color = GuideLabel, fontSize = 15.sp, maxLines = 1, modifier = Modifier.weight(1f))
         Box(Modifier.tap { vm.setGuideAssisted(!on) }) { Switch(on, enabled = true) }
+    }
+}
+
+/** A grid's lines fade out as the canvas is zoomed out and in as it is zoomed in; held, where they start to. */
+@Composable
+private fun FadeSwitch(vm: CanvasViewModel, on: Boolean, width: Dp) {
+    Row(Modifier.width(width).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Zoom Fade", color = GuideLabel, fontSize = 15.sp, maxLines = 1, modifier = Modifier.weight(1f))
+        Box(Modifier.tapOrHold(onClick = { vm.setGuideFade(!on) }, onHold = { vm.zoomFadeOpen = !vm.zoomFadeOpen })) { Switch(on, enabled = true) }
+    }
+}
+
+/** The zooms Zoom Fade's slider stops at, evenly along it: Auto (none), then 25% to 3200%. */
+private val FadeStops: List<Float?> = listOf(null, 0.25f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f, 8f, 12f, 16f, 24f, 32f)
+
+/** Zoom Fade's slider's position for a zoom (or Auto), at its nearest stop, and back. */
+private fun fadeAtToSlider(at: Float?): Float {
+    val i = at?.let { z -> (1 until FadeStops.size).minByOrNull { abs(FadeStops[it]!! - z) } } ?: 0
+    return i.toFloat() / (FadeStops.size - 1)
+}
+
+private fun sliderToFadeAt(v: Float): Float? = FadeStops[(v.coerceIn(0f, 1f) * (FadeStops.size - 1)).roundToInt().coerceIn(0, FadeStops.size - 1)]
+
+/** A zoom as a percentage: whole, or to a tenth under 10%. */
+private fun zoomPercent(zoom: Float): String {
+    val percent = zoom * 100
+    return if (percent >= 10) "${percent.roundToInt()}%" else String.format(java.util.Locale.ROOT, "%.1f%%", percent)
+}
+
+/**
+ * Zoom Fade's options, over its switch: on or off, and the zoom its grid starts to fade in at
+ * (whole at four times that): Auto (as its lines come a few pixels apart, the zoom that is for its
+ * size shown), or one of the slider's stops.
+ */
+@Composable
+private fun ZoomFadeOptions(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
+    val g = vm.guide ?: return
+    if (!vm.zoomFadeOpen || (g.kind != GuideType.GRID && g.kind != GuideType.ISOMETRIC)) return
+    // over the switch, its arrow at the switch's column's middle
+    val wide = screenWidth > screenHeight
+    val slider = guideSlider(screenWidth, grid = true)
+    val middle = if (wide) 8.dp + 16.dp + (slider + 19.dp) * 3 + 70.dp else (screenWidth - 620.dp) / 2 + 240.dp + 20.dp + 70.dp
+    val left = (middle - 150.dp).coerceIn(0.dp, screenWidth - 300.dp)
+    MenuPopover(middle - left, left, if (wide) screenHeight - 89.dp else screenHeight - 98.dp) {
+        MenuTitle("Zoom Fade")
+        Spacer(Modifier.height(4.dp))
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(MenuGroup)) {
+            SwitchRow("Zoom Fade", g.fade) { vm.setGuideFade(!g.fade) }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(MenuLine))
+            SliderRow("Fade In At", fadeAtToSlider(g.fadeAt), g.fadeAt?.let(::zoomPercent) ?: "Auto (${zoomPercent(g.fadeAutoAt)})") {
+                vm.setGuideFadeAt(sliderToFadeAt(it))
+            }
+        }
     }
 }
 

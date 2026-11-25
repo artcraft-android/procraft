@@ -48,11 +48,6 @@ extension PcIcons {
         ),
     ])
 
-    /// The import card's glyph.
-    static let tabImport = PcIcon(name: "tabimport", width: 50, height: 50, parts: [
-        PcIconPart(d: "M26.39 13.67L26.37 13.44L26.3 13.22L26.12 12.92L25.96 12.75L25.76 12.62L25.43 12.51L25.08 12.49L24.85 12.54L24.64 12.62L24.36 12.83L24.21 13.01L24.1 13.22L24.03 13.44L24.01 13.67L24.01 22.3L22.46 22.31L22.32 22.37L22.21 22.47L22.14 22.69L22.16 22.84L22.24 22.97L24.91 25.86L25.04 25.95L25.2 25.98L25.36 25.95L25.49 25.86L28.16 22.97L28.26 22.77L28.25 22.61L28.19 22.47L28.08 22.37L27.94 22.31L26.39 22.3ZM18.08 30.17L18.15 30.4L18.26 30.6L18.49 30.86L18.79 31.04L19.13 31.12L31.15 31.13L31.5 31.08L31.71 30.99L31.91 30.86L32.14 30.6L32.29 30.29L32.34 30.06L32.34 22.5L32.29 22.16L32.2 21.94L31.99 21.66L31.71 21.45L31.38 21.33L31.03 21.32L30.7 21.4L30.4 21.58L30.16 21.84L30.01 22.16L29.96 22.5L29.96 28.75L20.44 28.75L20.44 22.5L20.42 22.27L20.35 22.05L20.17 21.75L20 21.58L19.7 21.4L19.37 21.32L19.13 21.32L18.9 21.36L18.69 21.45L18.49 21.58L18.26 21.84L18.15 22.05L18.06 22.38L18.06 29.94Z", stroke: 0, fill: true, evenOdd: true),
-    ])
-
     /// The advanced mesh icon's cells: four across, three down, with thin gaps.
     static var advancedMesh: PcIcon {
         var cells = ""
@@ -71,7 +66,7 @@ extension PcIcons {
 
 /// A popover over the transform toolbar.
 enum TransformPopup {
-    case none, snapping, interpolation
+    case none, snapping, interpolation, puppetMesh
 }
 
 /// Numeric entry open beside the node at window point `at`: for the box's angle (the rotation
@@ -87,22 +82,36 @@ struct TransformNumericAsk: Equatable {
 final class TransformTool {
     private static let kindKey = "transformKind"
     private static let interpolationKey = "interpolation"
+    private static let pixelatedKey = "transformPixelated"
     private static let meshKey = "advancedMesh"
     private static let magneticsKey = "magnetics"
     private static let snappingKey = "snapping"
     private static let distanceKey = "snapDistance"
     private static let velocityKey = "snapVelocity"
+    private static let puppetExpansionKey = "puppetExpansion"
+    private static let puppetDensityKey = "puppetDensity"
+    private static let puppetAutoRotateKey = "puppetAutoRotate"
+    private static let puppetMeshKey = "puppetShowMesh"
 
     @ObservationIgnored private unowned let model: CanvasModel
 
     private(set) var box: TransformBox?
     private(set) var kind: TransformKind
     private(set) var interpolation: Interpolation
+    /// Interpolation's Pixelated, for pixel art: the content keeps to whole pixels as it is moved
+    /// and sized, nothing is blended whatever the interpolation, and what is turned keeps its lines
+    /// clean. Only while the Ribbon and pixel brushes plugin's Pixel art is on; off, what was set
+    /// waits for it.
+    var pixelated: Bool { pixelatedSet && PluginsModel.shared.has(.pixelArt) }
+    private var pixelatedSet: Bool
     var popup = TransformPopup.none
     /// Magnetics, snapping, and snapping's distance (1..50 points) and velocity (0..10).
     private(set) var guides: GuideSettings
     /// A warp shows and takes all 16 of its control points, not only its corners.
     private(set) var advancedMesh: Bool
+    /// How a puppet's mesh is laid and its pins turn, and whether its mesh is shown.
+    private(set) var puppet: PuppetSettings
+    private(set) var puppetShowsMesh: Bool
     /// The node held and where (window points); the one let go, springing back from where and since
     /// when.
     private(set) var held: (handle: TransformHandle, at: CGPoint)?
@@ -112,9 +121,18 @@ final class TransformTool {
     init(model: CanvasModel) {
         self.model = model
         let d = UserDefaults.standard
-        kind = Self.kinds[d.string(forKey: Self.kindKey) ?? ""] ?? .freeform
+        let kept = Self.kinds[d.string(forKey: Self.kindKey) ?? ""] ?? .freeform
+        // Puppet while a plugin lays and bends its mesh (Puppet Warp)
+        kind = kept == .puppet && PluginsModel.shared.warps.isEmpty ? .freeform : kept
         interpolation = Self.interpolations[d.string(forKey: Self.interpolationKey) ?? ""] ?? .bilinear
+        pixelatedSet = d.bool(forKey: Self.pixelatedKey)
         advancedMesh = d.bool(forKey: Self.meshKey)
+        puppet = PuppetSettings(
+            expansion: d.object(forKey: Self.puppetExpansionKey) as? Float ?? 4,
+            density: UInt32(d.object(forKey: Self.puppetDensityKey) as? Int ?? 40),
+            autoRotate: d.object(forKey: Self.puppetAutoRotateKey) as? Bool ?? true
+        )
+        puppetShowsMesh = d.object(forKey: Self.puppetMeshKey) as? Bool ?? true
         guides = GuideSettings(
             magnetics: d.bool(forKey: Self.magneticsKey),
             snapping: d.bool(forKey: Self.snappingKey),
@@ -124,7 +142,7 @@ final class TransformTool {
     }
 
     private static let kinds: [String: TransformKind] = [
-        "freeform": .freeform, "uniform": .uniform, "distort": .distort, "warp": .warp,
+        "freeform": .freeform, "uniform": .uniform, "distort": .distort, "warp": .warp, "puppet": .puppet,
     ]
     private static let interpolations: [String: Interpolation] = [
         "nearest": .nearest, "bilinear": .bilinear, "bicubic": .bicubic,
@@ -134,7 +152,14 @@ final class TransformTool {
     func begin() -> Bool {
         let s = model.session
         s.transformSetInterpolation(interpolation: interpolation)
+        _ = s.transformSetPixelated(on: pixelated)
         s.transformSetGuides(guides: guides)
+        _ = s.transformPuppetSettings(settings: puppet)
+        // Puppet's mesh is the plugin's
+        let plugins = PluginsModel.shared
+        if !s.transformMeshWarp(plugins: plugins.store, key: plugins.warps.first?.key), kind == .puppet {
+            kind = .freeform
+        }
         guard let first = s.transformBegin() else {
             model.showNotice(s.transformRefusal())
             return false
@@ -165,10 +190,41 @@ final class TransformTool {
         UserDefaults.standard.set(Self.interpolations.first { $0.value == next }?.key, forKey: Self.interpolationKey)
     }
 
+    /// Pixelated on or off: the content goes onto whole pixels at once.
+    func togglePixelated() {
+        pixelatedSet.toggle()
+        box = model.session.transformSetPixelated(on: pixelated) ?? box
+        UserDefaults.standard.set(pixelatedSet, forKey: Self.pixelatedKey)
+    }
+
     func toggleAdvancedMesh() {
         advancedMesh.toggle()
         UserDefaults.standard.set(advancedMesh, forKey: Self.meshKey)
         model.showDone("Advanced mesh " + (advancedMesh ? "on" : "off"))
+    }
+
+    /// How a puppet's mesh is laid and its pins turn from now on (an open one's laid again).
+    func changePuppet(_ next: PuppetSettings) {
+        if next.autoRotate != puppet.autoRotate {
+            model.showNotice("Auto-rotate pins " + (next.autoRotate ? "on" : "off"))
+        }
+        puppet = next
+        box = model.session.transformPuppetSettings(settings: next) ?? box
+        let d = UserDefaults.standard
+        d.set(next.expansion, forKey: Self.puppetExpansionKey)
+        d.set(Int(next.density), forKey: Self.puppetDensityKey)
+        d.set(next.autoRotate, forKey: Self.puppetAutoRotateKey)
+    }
+
+    func togglePuppetMesh() {
+        puppetShowsMesh.toggle()
+        UserDefaults.standard.set(puppetShowsMesh, forKey: Self.puppetMeshKey)
+    }
+
+    /// Takes the puppet's chosen pin away.
+    func deletePin() {
+        popup = .none
+        box = model.session.transformPuppetDeletePin() ?? box
     }
 
     func changeGuides(_ g: GuideSettings) {
@@ -189,6 +245,7 @@ final class TransformTool {
     func apply(_ action: TransformAction) {
         popup = .none
         box = model.session.transformApply(action: action) ?? box
+        model.autokeyFollow()
     }
 
     /// The box after a drag step on the canvas.
@@ -196,6 +253,7 @@ final class TransformTool {
         if let next {
             box = next
         }
+        model.autokeyFollow()
     }
 
     func setSize(width: Float, height: Float) {
@@ -279,6 +337,8 @@ struct TransformOverlay: View {
             Group {
                 if tool.kind == .warp, box.mesh.count == 32 {
                     WarpOverlay(model: model, box: box)
+                } else if tool.kind == .puppet, !box.puppetEdges.isEmpty || !box.pins.isEmpty {
+                    PuppetOverlay(model: model, box: box)
                 } else if let shown = BoxOnScreen(box, view: model.viewMatrix, pixels: model.pixels) {
                     BoxOverlay(model: model, box: box, shown: shown)
                 }
@@ -442,12 +502,68 @@ private struct WarpOverlay: View {
     }
 }
 
+/// A puppet over the canvas: its mesh as it is bent (unless hidden), its pins, and the chosen
+/// pin's ring with a tick at the angle it holds.
+private struct PuppetOverlay: View {
+    let model: CanvasModel
+    let box: TransformBox
+
+    private func spot(_ x: Float, _ y: Float) -> CGPoint {
+        model.canvasToWindow(CGPoint(x: CGFloat(x), y: CGFloat(y)))
+    }
+
+    private func holding(_ i: Int) -> Bool {
+        switch model.transform.held?.handle {
+        case let .pin(index), let .pinRing(index): Int(index) == i
+        default: false
+        }
+    }
+
+    var body: some View {
+        let showsMesh = model.transform.puppetShowsMesh
+        Canvas { context, _ in
+            if showsMesh {
+                let e = box.puppetEdges
+                var lines = Path()
+                for i in 0 ..< e.count / 4 {
+                    lines.move(to: spot(e[4 * i], e[4 * i + 1]))
+                    lines.addLine(to: spot(e[4 * i + 2], e[4 * i + 3]))
+                }
+                context.stroke(lines, with: .color(meshLine.opacity(0.7)), lineWidth: 0.5)
+            }
+            let pins = box.pins
+            for i in 0 ..< pins.count / 3 {
+                let at = spot(pins[3 * i], pins[3 * i + 1])
+                if Int(box.selectedPin) == i {
+                    // the ring a drag turns the mesh by, a tick where it points
+                    let r = CGFloat(puppetRingRadius())
+                    let ring = Path(ellipseIn: CGRect(x: at.x - r, y: at.y - r, width: 2 * r, height: 2 * r))
+                    context.stroke(ring, with: .color(overlayDashGap), lineWidth: 3)
+                    context.stroke(ring, with: .color(rotateGreen), lineWidth: 1.5)
+                    let turn = Double(pins[3 * i + 2]) * .pi / 180
+                    let tip = CGPoint(x: at.x + r * cos(turn), y: at.y + r * sin(turn))
+                    node(context, at: tip, color: rotateGreen, scale: holding(i) ? heldScale : 0.8)
+                }
+                node(
+                    context, at: at, color: Int(box.selectedPin) == i ? turnOrange : nodeBlue,
+                    scale: holding(i) ? heldScale : 1.1
+                )
+            }
+        }
+    }
+}
+
 private func interpolationName(_ i: Interpolation, short: Bool) -> String {
     switch i {
     case .nearest: short ? "Nearest" : "Nearest Neighbor"
     case .bilinear: "Bilinear"
     case .bicubic: "Bicubic"
     }
+}
+
+/// How many kinds of transform the toolbar shows: Puppet while a plugin lays and bends its mesh.
+private var transformKindsShown: Int {
+    PluginsModel.shared.warps.isEmpty ? 4 : 5
 }
 
 /// The floating toolbar at the foot of the screen while transforming.
@@ -459,17 +575,24 @@ struct TransformToolbar: View {
         let tool = model.transform
         let popup = tool.popup
         FloatingToolbar(
-            layout: ToolbarLayout(screenWidth: screenWidth, count: 7, roomy: buttonRoomy, narrow: buttonNarrow),
+            layout: ToolbarLayout(screenWidth: screenWidth, count: transformKindsShown + 2, roomy: buttonRoomy, narrow: buttonNarrow),
             onBackground: { tool.popup = .none }
         ) {
             ToolbarSegment(icon: PcIcons.freeform, label: "Freeform", selected: tool.kind == .freeform, iconSize: 43) { tool.choose(.freeform) }
             ToolbarSegment(icon: PcIcons.uniform, label: "Uniform", selected: tool.kind == .uniform, iconSize: 43) { tool.choose(.uniform) }
             ToolbarSegment(icon: PcIcons.distort, label: "Distort", selected: tool.kind == .distort, iconSize: 43) { tool.choose(.distort) }
             ToolbarSegment(icon: PcIcons.warp, label: "Warp", selected: tool.kind == .warp, iconSize: 43) { tool.choose(.warp) }
+            if let warp = PluginsModel.shared.warps.first {
+                ToolbarSegment(icon: PcIcons.puppet, label: warp.label, selected: tool.kind == .puppet, iconSize: 43) { tool.choose(.puppet) }
+            }
         } buttons: { w in
             if tool.kind == .warp {
                 ToolbarButton(icon: PcIcons.advancedMesh, label: "Advanced Mesh", active: tool.advancedMesh, width: w, iconSize: 28.8) {
                     tool.toggleAdvancedMesh()
+                }
+            } else if tool.kind == .puppet {
+                ToolbarButton(icon: PcIcons.advancedMesh, label: "Mesh", active: popup == .puppetMesh, width: w, iconSize: 28.8) {
+                    tool.popup = popup == .puppetMesh ? .none : .puppetMesh
                 }
             } else {
                 ToolbarButton(icon: PcIcons.snapping, label: "Snapping", active: popup == .snapping, width: w, iconSize: 44) {
@@ -478,9 +601,17 @@ struct TransformToolbar: View {
             }
             ToolbarButton(icon: PcIcons.flipHorizontal, label: "Flip Horizontal", width: w, iconSize: 50) { tool.apply(.flipHorizontal) }
             ToolbarButton(icon: PcIcons.flipVertical, label: "Flip Vertical", width: w, iconSize: 50) { tool.apply(.flipVertical) }
-            ToolbarButton(icon: PcIcons.rotate45, label: "Rotate 45°", width: w, iconSize: 44) { tool.apply(.rotate45) }
+            if tool.kind == .puppet {
+                ToolbarButton(icon: PcIcons.trash, label: "Delete Pin", width: w, iconSize: 26) { tool.deletePin() }
+                    .opacity((tool.box?.selectedPin ?? -1) >= 0 ? 1 : 0.45)
+            } else {
+                ToolbarButton(icon: PcIcons.rotate45, label: "Rotate 45°", width: w, iconSize: 44) { tool.apply(.rotate45) }
+            }
             ToolbarButton(icon: PcIcons.fitToCanvas, label: "Fit to Canvas", width: w, iconSize: 35) { tool.apply(.fitToCanvas) }
-            ToolbarButton(icon: PcIcons.interpolation, label: interpolationName(tool.interpolation, short: true), active: popup == .interpolation, width: w, iconSize: 44) {
+            ToolbarButton(
+                icon: PcIcons.interpolation, label: tool.pixelated ? "Pixelated" : interpolationName(tool.interpolation, short: true),
+                active: popup == .interpolation, width: w, iconSize: 44
+            ) {
                 tool.popup = popup == .interpolation ? .none : .interpolation
             }
             ToolbarButton(icon: PcIcons.transformReset, label: "Reset", width: w, iconSize: 44) { tool.apply(.reset) }
@@ -496,8 +627,8 @@ struct TransformPopover: View {
     var body: some View {
         let tool = model.transform
         if tool.popup != .none {
-            let layout = ToolbarLayout(screenWidth: screen.width, count: 7, roomy: buttonRoomy, narrow: buttonNarrow)
-            let centre = layout.buttonCentre(tool.popup == .snapping ? 0 : 5, screenWidth: screen.width)
+            let layout = ToolbarLayout(screenWidth: screen.width, count: transformKindsShown + 2, roomy: buttonRoomy, narrow: buttonNarrow)
+            let centre = layout.buttonCentre(tool.popup == .interpolation ? transformKindsShown : 0, screenWidth: screen.width)
             let left = min(max(centre - toolbarMenuWidth / 2, 0), screen.width - toolbarMenuWidth)
             ToolbarPopover(
                 arrowX: centre - left, left: left, bottom: ToolbarLayout.buttonsTop(screenHeight: screen.height),
@@ -505,6 +636,8 @@ struct TransformPopover: View {
             ) {
                 if tool.popup == .interpolation {
                     InterpolationMenu(tool: tool)
+                } else if tool.popup == .puppetMesh {
+                    PuppetMeshMenu(tool: tool)
                 } else {
                     SnappingMenu(tool: tool)
                 }
@@ -543,7 +676,63 @@ private struct InterpolationMenu: View {
                     tool.choose(kind)
                     tool.popup = .none
                 }
+                // Pixelated blends nothing, whichever is chosen
+                .opacity(tool.pixelated ? 0.45 : 1)
             }
+        }
+        .padding(.bottom, 10)
+        // for pixel art: whole pixels moved and sized, nothing blended, turns kept clean
+        ToolbarMenuGroup {
+            if PluginsModel.shared.has(.pixelArt) {
+                ToolbarSwitchRow(label: "Pixelated", on: tool.pixelated) { tool.togglePixelated() }
+            }
+        }
+    }
+}
+
+/// A puppet's settings: its mesh shown or not, whether pins turn as it bends, and how the mesh is
+/// laid (how far past what is painted it reaches, how fine it is).
+private struct PuppetMeshMenu: View {
+    let tool: TransformTool
+
+    var body: some View {
+        let p = tool.puppet
+        let range = puppetDensityRange()
+        let (least, most) = (Float(range.first ?? 12), Float(range.last ?? 80))
+        ToolbarMenuTitle(text: "Puppet")
+            .padding(.bottom, 4)
+        ToolbarMenuGroup {
+            ToolbarSwitchRow(label: "Show Mesh", on: tool.puppetShowsMesh) { tool.togglePuppetMesh() }
+            ToolbarMenuLine()
+            ToolbarSwitchRow(label: "Auto-rotate Pins", on: p.autoRotate) {
+                tool.changePuppet(PuppetSettings(expansion: p.expansion, density: p.density, autoRotate: !p.autoRotate))
+            }
+        }
+        .padding(.bottom, 10)
+        ToolbarMenuGroup {
+            PanelSlider(
+                label: "Expansion",
+                value: p.expansion / puppetExpansionMax(),
+                shown: "\(wholeNumber(p.expansion)) px",
+                onChange: {
+                    let next = Float(wholeNumber($0 * puppetExpansionMax()))
+                    if next != p.expansion {
+                        tool.changePuppet(PuppetSettings(expansion: next, density: p.density, autoRotate: p.autoRotate))
+                    }
+                }
+            )
+            ToolbarMenuLine()
+            PanelSlider(
+                label: "Density",
+                value: (Float(p.density) - least) / (most - least),
+                shown: "\(p.density)",
+                onChange: {
+                    let next = UInt32(wholeNumber(least + $0 * (most - least)))
+                    if next != p.density {
+                        tool.changePuppet(PuppetSettings(expansion: p.expansion, density: next, autoRotate: p.autoRotate))
+                    }
+                }
+            )
         }
     }
 }

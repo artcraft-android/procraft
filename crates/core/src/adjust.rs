@@ -2,6 +2,7 @@
 //! one undo step or put back; only what is selected changes.
 
 use procraft_engine::document::LayerId;
+use procraft_engine::filter::LIMIT_OFF;
 use procraft_engine::geom::Vec2;
 use procraft_engine::selection::feather_radius;
 use procraft_engine::tone;
@@ -263,6 +264,9 @@ impl State {
 
     /// Ends an open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
     pub(crate) fn end_adjustment(&mut self, commit: bool) {
+        if self.end_adjustment_layer(commit) {
+            return;
+        }
         let within = if commit && self.adjusting { self.changed_since_begin() } else { None };
         if self.heed_filter_run() {
             return;
@@ -290,7 +294,7 @@ impl State {
             let name = match self.last_filter {
                 _ if liquifying => Some(crate::liquify_steps::LIQUIFY_STEP),
                 Some(Filter::Hsb { .. }) => Some("adjust HSB"),
-                Some(Filter::Curves) => Some("adjust Curves"),
+                Some(Filter::Curves { .. }) => Some("adjust Curves"),
                 Some(Filter::ColorBalance { .. }) => Some("change Color Balance"),
                 Some(Filter::GradientMap { .. }) => Some("change Gradient Map"),
                 Some(Filter::Zoom { .. }) => None,
@@ -318,12 +322,87 @@ impl State {
     }
 
     fn adjust(&mut self, filter: Filter) {
+        if self.adjust_layer.is_some() {
+            self.adjust_live(filter, None);
+            return;
+        }
         if self.adjusting
             && let Some(canvas) = self.canvas.as_mut()
         {
             self.last_filter = Some(filter);
             canvas.set_filter(filter);
         }
+    }
+}
+
+impl State {
+    /// An adjustment with a table (curves, gradient map): the table given to the canvas, or kept by
+    /// the adjustment layer open.
+    fn adjust_with_table(&mut self, filter: Filter, entries: Vec<u8>) {
+        if self.adjust_layer.is_some() {
+            self.adjust_live(filter, Some(entries));
+            return;
+        }
+        if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+            canvas.set_table(gpu, &entries);
+        }
+        self.adjust(filter);
+    }
+
+    /// The adjustment layer open takes `filter` (and `table`, or none unless it still reads its
+    /// own) and the panel's settings as they are now; the canvas shows it.
+    fn adjust_live(&mut self, filter: Filter, table: Option<Vec<u8>>) {
+        let Some(edit) = self.adjust_layer.as_ref() else { return };
+        let (id, previewing) = (edit.layer, edit.preview);
+        self.last_filter = Some(filter);
+        if previewing {
+            return;
+        }
+        let Some(mut adjustment) = self.doc.layer(id).and_then(|l| l.adjustment.clone()) else { return };
+        adjustment.filter = filter;
+        match table {
+            Some(t) => adjustment.table = t,
+            None if !matches!(filter, Filter::Curves { .. } | Filter::GradientMap { .. }) => adjustment.table.clear(),
+            None => {}
+        }
+        adjustment.settings = self.adjust.layer_settings();
+        // (it is the current layer, composited live: the caches stay)
+        if self.doc.set_adjustment(id, adjustment)
+            && let Some(canvas) = self.canvas.as_mut()
+        {
+            canvas.recomposite();
+        }
+    }
+
+    /// Ends the adjustment layer open, if one is: `commit` keeps what changed as one undo step,
+    /// otherwise the document goes back as it was (a layer just added, gone). Returns whether one
+    /// was open.
+    fn end_adjustment_layer(&mut self, commit: bool) -> bool {
+        let Some(edit) = self.adjust_layer.take() else { return false };
+        self.adjusting = false;
+        self.pencil = false;
+        // previewed as it was: shown as it is again
+        if edit.preview
+            && let Some(mut adjustment) = self.doc.layer(edit.layer).and_then(|l| l.adjustment.clone())
+            && let Some(filter) = self.last_filter
+        {
+            adjustment.filter = filter;
+            self.doc.set_adjustment(edit.layer, adjustment);
+        }
+        if commit {
+            if self.doc != edit.before
+                && let Some(canvas) = self.canvas.as_mut()
+            {
+                canvas.name_next_step(if edit.added { "add adjustment layer" } else { "change adjustment layer" });
+                canvas.record_document(edit.before);
+            }
+        } else {
+            self.doc = edit.before;
+        }
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.invalidate();
+        }
+        true
     }
 }
 
@@ -334,7 +413,7 @@ impl Shared {
             return;
         }
         // with Drawing Assist on the layer, the symmetry's copies too, as a stroke's
-        let guide = st.doc.stroke_guide();
+        let guide = crate::guide::stroke_guide(&st.doc, st.guide_paused);
         if let Some(canvas) = st.canvas.as_mut() {
             for step in &steps {
                 canvas.liquify_stamps(&crate::guide::mirrored_liquify(&guide, step));
@@ -424,17 +503,33 @@ impl CanvasSession {
     }
 
     /// Curves: the points (x, y pairs in 0..1) of the curve for all three channels and of the red,
-    /// green and blue curves; each runs through its points as a smooth spline.
-    pub fn adjust_curves(&self, all: Vec<f32>, red: Vec<f32>, green: Vec<f32>, blue: Vec<f32>) {
+    /// green and blue curves; each runs through its points as a smooth spline. `exposure` is the
+    /// exposure before them: its stops (−5..5), and the brightness it starts above and how softly
+    /// (0..1); `limit` the limit after them: its peak (stops above white, 0..5, none from 6) and
+    /// knee (0..0.95). Each none when left out.
+    pub fn adjust_curves(
+        &self,
+        all: Vec<f32>,
+        red: Vec<f32>,
+        green: Vec<f32>,
+        blue: Vec<f32>,
+        exposure: Vec<f32>,
+        limit: Vec<f32>,
+    ) {
         let points = |v: &[f32]| v.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect::<Vec<_>>();
         let [a, r, g, b] = [&all, &red, &green, &blue].map(|v| tone::curve_table(&points(v)));
         let entries: Vec<u8> = r.iter().zip(&g).zip(&b).zip(&a).flat_map(|(((&r, &g), &b), &a)| [r, g, b, a]).collect();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
-            canvas.set_table(gpu, &entries);
-        }
-        st.adjust(Filter::Curves);
+        let at = |i: usize, or: f32| exposure.get(i).copied().filter(|v| v.is_finite()).unwrap_or(or);
+        let filter = Filter::Curves {
+            exposure: at(0, 0.0).clamp(-5.0, 5.0),
+            above: at(1, 0.0).clamp(0.0, 1.0),
+            soft: at(2, 0.5).clamp(0.0, 1.0),
+            peak: limit.first().copied().filter(|v| v.is_finite()).unwrap_or(LIMIT_OFF).clamp(0.0, LIMIT_OFF),
+            knee: limit.get(1).copied().filter(|v| v.is_finite()).unwrap_or(0.8).clamp(0.0, 0.95),
+        };
+        st.adjust_with_table(filter, entries);
         self.shared.frame(st);
     }
 
@@ -543,10 +638,7 @@ impl CanvasSession {
         let a = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 1.0 };
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
-            canvas.set_table(gpu, &entries);
-        }
-        st.adjust(Filter::GradientMap { amount: a });
+        st.adjust_with_table(Filter::GradientMap { amount: a }, entries);
         self.shared.frame(st);
     }
 
@@ -717,7 +809,8 @@ impl CanvasSession {
     pub fn adjust_pencil(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if !st.adjusting || st.pencil {
+        // an adjustment layer shows through its mask instead
+        if !st.adjusting || st.pencil || st.adjust_layer.is_some() {
             return;
         }
         st.pencil = true;
@@ -767,6 +860,28 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if !st.adjusting {
+            return;
+        }
+        // an adjustment layer: shown doing nothing, or as set
+        if let Some(edit) = st.adjust_layer.as_mut() {
+            edit.preview = false;
+            let id = edit.layer;
+            let shown = if original {
+                Filter::Sharpen { amount: 0.0 }
+            } else {
+                st.last_filter.unwrap_or(Filter::Sharpen { amount: 0.0 })
+            };
+            if let Some(mut adjustment) = st.doc.layer(id).and_then(|l| l.adjustment.clone()) {
+                adjustment.filter = shown;
+                st.doc.set_adjustment(id, adjustment);
+            }
+            if let Some(edit) = st.adjust_layer.as_mut() {
+                edit.preview = original;
+            }
+            if let Some(canvas) = st.canvas.as_mut() {
+                canvas.recomposite();
+            }
+            self.shared.frame(st);
             return;
         }
         // back from it, a plugin's filter draws as it does on any change

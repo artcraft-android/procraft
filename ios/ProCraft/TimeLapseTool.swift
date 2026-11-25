@@ -30,11 +30,12 @@ enum VideoWriter {
     }
 
     /// `count` frames, `width` x `height` (even), as an MP4 at `url`. `draw` paints frame n in a
-    /// context the frame's size and says whether it did. False if the video wasn't made; nothing is
-    /// left at `url` then.
+    /// context the frame's size and says whether it did; with `together` over one, that many frames
+    /// are painted at once on as many threads (`draw` must then be safe to call so), and written in
+    /// order. False if the video wasn't made; nothing is left at `url` then.
     static func write(
         to url: URL, width: Int, height: Int, count: Int, hevc: Bool, bitsPerPixel: Int,
-        fps: Float = Float(framesASecond), draw: (Int, CGContext) -> Bool
+        fps: Float = Float(framesASecond), together: Int = 1, draw: (Int, CGContext) -> Bool
     ) -> Bool {
         // each frame's time exact, for a rate in thousandths
         let rate = frameRate(fps: fps)
@@ -60,29 +61,49 @@ enum VideoWriter {
         let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         let layout = CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         var whole = true
-        for n in 0 ..< count {
-            while !input.isReadyForMoreMediaData, writer.status == .writing {
-                Thread.sleep(forTimeInterval: 0.002)
+        var n = 0
+        while whole, n < count {
+            let batch = min(max(together, 1), count - n)
+            // each batch's pictures (the ones read, their decoded pixels, the frames painted) let go
+            // before the next: off the main thread nothing drains them otherwise, and thousands of
+            // frames run the device out of memory
+            whole = autoreleasepool { () -> Bool in
+                var buffers: [CVPixelBuffer] = []
+                for _ in 0 ..< batch {
+                    var made: CVPixelBuffer?
+                    guard writer.status == .writing, let pool = adaptor.pixelBufferPool,
+                          CVPixelBufferPoolCreatePixelBuffer(nil, pool, &made) == kCVReturnSuccess, let buffer = made
+                    else { return false }
+                    buffers.append(buffer)
+                }
+                // painted side by side (reading a frame's picture and fitting it is most of the
+                // work), then written one after another
+                var drawn = [Bool](repeating: false, count: batch)
+                let first = n
+                drawn.withUnsafeMutableBufferPointer { results in
+                    DispatchQueue.concurrentPerform(iterations: batch) { k in
+                        autoreleasepool {
+                            let buffer = buffers[k]
+                            CVPixelBufferLockBaseAddress(buffer, [])
+                            let context = CGContext(
+                                data: CVPixelBufferGetBaseAddress(buffer), width: width, height: height, bitsPerComponent: 8,
+                                bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: space, bitmapInfo: layout
+                            )
+                            results[k] = context.map { draw(first + k, $0) } ?? false
+                            CVPixelBufferUnlockBaseAddress(buffer, [])
+                        }
+                    }
+                }
+                for k in 0 ..< batch {
+                    while !input.isReadyForMoreMediaData, writer.status == .writing {
+                        Thread.sleep(forTimeInterval: 0.002)
+                    }
+                    let at = CMTime(value: Int64(first + k) * Int64(rate.seconds), timescale: CMTimeScale(max(rate.frames, 1)))
+                    guard drawn[k], writer.status == .writing, adaptor.append(buffers[k], withPresentationTime: at) else { return false }
+                }
+                return true
             }
-            var made: CVPixelBuffer?
-            guard writer.status == .writing, let pool = adaptor.pixelBufferPool,
-                  CVPixelBufferPoolCreatePixelBuffer(nil, pool, &made) == kCVReturnSuccess, let buffer = made
-            else {
-                whole = false
-                break
-            }
-            CVPixelBufferLockBaseAddress(buffer, [])
-            let context = CGContext(
-                data: CVPixelBufferGetBaseAddress(buffer), width: width, height: height, bitsPerComponent: 8,
-                bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: space, bitmapInfo: layout
-            )
-            let drawn = context.map { draw(n, $0) } ?? false
-            CVPixelBufferUnlockBaseAddress(buffer, [])
-            let at = CMTime(value: Int64(n) * Int64(rate.seconds), timescale: CMTimeScale(max(rate.frames, 1)))
-            guard drawn, adaptor.append(buffer, withPresentationTime: at) else {
-                whole = false
-                break
-            }
+            n += batch
         }
         input.markAsFinished()
         guard whole else {
@@ -311,16 +332,26 @@ final class ArtworkTimeLapse {
             fitted = VideoWriter.fit(width: picture.width, height: picture.height, maxSide: Int(timeLapseSide(s: video)))
         }
         guard let (width, height) = fitted else { return nil }
+        // several frames read and fitted at once: as many as there are cores, within what their
+        // pixels may take together
+        let together = max(1, min(ProcessInfo.processInfo.activeProcessorCount, 8, (192 << 20) / max(width * height * 4, 1)))
+        // `going` hears of one frame at a time, whichever thread paints it
+        let asking = NSLock()
+        // frames that couldn't be read (left white), counted as they come, from any thread
         var missed = 0
         let made = VideoWriter.write(
             to: url, width: width, height: height, count: picks.count, hevc: hevc,
-            bitsPerPixel: Int(timeLapseBitsPerPixel(s: video))
+            bitsPerPixel: Int(timeLapseBitsPerPixel(s: video)), together: together
         ) { n, context in
-            guard going(Float(n) / Float(picks.count)) else { return false }
-            if let source = frame(picks[n])?.cgImage {
-                shown = source
-            } else {
+            asking.lock()
+            let on = going(Float(n) / Float(picks.count))
+            asking.unlock()
+            guard on else { return false }
+            let shown = frame(picks[n])?.cgImage
+            if shown == nil {
+                asking.lock()
                 missed += 1
+                asking.unlock()
             }
             // fitted on white
             context.setFillColor(UIColor.white.cgColor)
@@ -329,7 +360,8 @@ final class ArtworkTimeLapse {
             let scale = min(CGFloat(width) / CGFloat(source.width), CGFloat(height) / CGFloat(source.height))
             let shownWidth = CGFloat(source.width) * scale
             let shownHeight = CGFloat(source.height) * scale
-            context.interpolationQuality = .high
+            // a frame the video's own size is copied as it is
+            context.interpolationQuality = source.width == width && source.height == height ? .none : .high
             context.draw(source, in: CGRect(
                 x: (CGFloat(width) - shownWidth) / 2, y: (CGFloat(height) - shownHeight) / 2,
                 width: shownWidth, height: shownHeight
@@ -344,12 +376,30 @@ final class ArtworkTimeLapse {
     /// made before kept, so a share makes only what is new; the pictures they hold then gone, as the
     /// artwork file keeps a time-lapse: only as video). Leaving the artwork does this too.
     func forPackage() -> PackageTimeLapse {
+        forPackage { _ in true } ?? core.forPackage()
+    }
+
+    /// [`forPackage`], `going` hearing how far the frames not in a video yet have come (0..1) before
+    /// each; none if it stopped it (the videos made before kept, the one under way not).
+    func forPackage(going: (Float) -> Bool) -> PackageTimeLapse? {
         var plan = core.segmentPlan()
+        let total = max(plan?.frames.count ?? 0, 1)
+        var done = 0
         while let making = plan {
             let size = making.width > 0 && making.height > 0 ? (Int(making.width), Int(making.height)) : nil
-            let made = encode(
-                to: URL(fileURLWithPath: making.path), picks: making.frames.map { Int($0) }, size: size, hevc: making.hevc
-            )
+            let url = URL(fileURLWithPath: making.path)
+            let todo = making.frames.count
+            var stopped = false
+            let made = encode(to: url, picks: making.frames.map { Int($0) }, size: size, hevc: making.hevc) { share in
+                let on = going(min(1, (Float(done) + share * Float(todo)) / Float(total)))
+                stopped = !on
+                return on
+            }
+            if stopped {
+                try? FileManager.default.removeItem(at: url)
+                return nil
+            }
+            done += todo
             plan = core.segmentMade(plan: making, width: UInt32(made?.0 ?? 0), height: UInt32(made?.1 ?? 0), made: made != nil)
         }
         dropClipFrames()
@@ -469,7 +519,8 @@ final class TimeLapseTool {
 
     /// Records the canvas as a frame, one at a time while changes come.
     func record() {
-        guard recording else { return }
+        // (nothing recorded while the Time-lapse plugin is off)
+        guard recording, PluginsModel.shared.has(.timeLapse) else { return }
         if taking {
             stale = true
             return
@@ -594,7 +645,7 @@ struct TimeLapseReplay: View {
                     withAnimation(Motion.replayFade) { model.timeLapse.replaying = false }
                 }
                 // how far it has played
-                Color(argb: 0xFF00_76FD)
+                Pc.tinted(Color(argb: 0xFF00_76FD))
                     .frame(width: place.size.width * min(max(share, 0), 1), height: 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 85)

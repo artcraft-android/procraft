@@ -63,6 +63,8 @@ private enum Imported {
     case picture(CanvasSession)
     /// Something that isn't an artwork, or the reason it can't be read.
     case said(String)
+    /// Something that asks about itself (a plugin): nothing more to say here.
+    case offered
 }
 
 /// The gallery: what it shows, and what its buttons do with the store. An artwork's work goes on a
@@ -76,14 +78,20 @@ final class GalleryModel {
     /// export, and closes back to the gallery after.
     static let animatedFormats: [AnimatedFormat] = [.gif, .png, .mp4, .hevc]
 
-    /// What Share offers, in order.
-    static let shareFormats = ["ProCraft", "Procreate", "PSD", "PDF", "JPEG", "PNG", "TIFF"] + animatedFormats.map(\.title)
+    /// What Share offers, in order: PSD while the PSD plugin's export is on.
+    static var shareFormats: [String] {
+        ["ProCraft", "Procreate", "PSD", "PDF", "JPEG", "PNG", "TIFF"].filter { $0 != "PSD" || PluginsModel.shared.has(.psdExport) }
+            + animatedFormats.map(\.title)
+    }
 
     /// Several artworks shared as one PDF are named this, unless they are a stack's.
     static let groupName = "Artworks"
 
     private static let presetsKey = "canvasPresets"
 
+    /// The workspace showing, and every one there is.
+    private(set) var workspace = Gallery.workspaces.selected()
+    private(set) var workspaces = Gallery.workspaces.list()
     /// What the gallery, or the stack open, shows, as the store orders it.
     private(set) var entries: [GalleryEntry] = []
     /// The stack open: its folder and name.
@@ -187,12 +195,81 @@ final class GalleryModel {
         }
     }
 
-    /// Runs `change` on the store off the main thread, the gallery read again after it.
-    private func changing(_ change: @escaping () -> Void) {
+    /// Runs `change` on the store off the main thread, the gallery read again after it. The store
+    /// is the one showing now, whichever shows by the time it runs.
+    private func changing(_ change: @escaping (ArtworkStore) -> Void) {
+        let store = Gallery.store
         work.async { [weak self] in
-            change()
+            change(store)
             DispatchQueue.main.async { self?.reload() }
         }
+    }
+
+    // MARK: workspaces
+
+    /// The workspaces read again, and the one picked shown if it isn't the one showing: another
+    /// was picked, or this one has a new name, or is gone. No stack stays open.
+    private func readWorkspaces() {
+        workspaces = Gallery.workspaces.list()
+        let picked = Gallery.workspaces.selected()
+        guard picked != workspace else { return }
+        Gallery.show(picked)
+        workspace = picked
+        openStack = nil
+        stackPlaces = [:]
+        flyOutOf = nil
+        flyingBack = nil
+        reload()
+    }
+
+    /// With the Workspaces plugin off, the gallery is the first workspace's, where the app has
+    /// always kept its artworks; the others wait, as they were, for it to be on again.
+    func followWorkspacesPlugin() {
+        guard !PluginsModel.shared.has(.workspaces), !workspace.isDefault,
+              let first = Gallery.workspaces.list().first
+        else { return }
+        showWorkspace(first)
+    }
+
+    func showWorkspace(_ next: Workspace) {
+        Gallery.workspaces.select(workspace: next)
+        readWorkspaces()
+    }
+
+    /// A new, empty workspace named `name`, shown at once.
+    func newWorkspace(_ name: String) {
+        guard let made = Gallery.workspaces.create(name: name) else {
+            message = "This workspace can't be made."
+            return
+        }
+        showWorkspace(made)
+    }
+
+    /// Runs `change` on the workspaces off the main thread, once nothing is being written in
+    /// them: the save of an artwork just left, and the store's own work.
+    private func changingWorkspaces(_ change: @escaping () -> Void) {
+        Task { @MainActor in
+            while Gallery.closingSaves > 0 {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            work.async { [weak self] in
+                change()
+                DispatchQueue.main.async { self?.readWorkspaces() }
+            }
+        }
+    }
+
+    func renameWorkspace(_ renamed: Workspace, _ name: String) {
+        changingWorkspaces { [weak self] in
+            if Gallery.workspaces.rename(workspace: renamed, name: name) == nil {
+                DispatchQueue.main.async { self?.message = "This workspace can't be renamed." }
+            }
+        }
+    }
+
+    /// `gone` deleted with every artwork in it; if it was showing, the first one shows.
+    func deleteWorkspace(_ gone: Workspace) {
+        changingWorkspaces { Gallery.workspaces.delete(workspace: gone) }
     }
 
     func showStack(_ dir: String?, name: String = "") {
@@ -218,21 +295,21 @@ final class GalleryModel {
         shown.insert(entry, at: min(max(to, 0), shown.count))
         entries = shown
         let into = folder ?? Gallery.store.root()
-        changing { Gallery.store.moveEntry(dir: entry.dir, to: Int64(to), into: into) }
+        changing { $0.moveEntry(dir: entry.dir, to: Int64(to), into: into) }
     }
 
     /// `entry` taken out of the stack open to the gallery's front (let go on the way back).
     func takeOutOfStack(_ entry: GalleryEntry) {
         guard openStack != nil else { return }
         let root = Gallery.store.root()
-        changing { Gallery.store.moveEntry(dir: entry.dir, to: 0, into: root) }
+        changing { $0.moveEntry(dir: entry.dir, to: 0, into: root) }
     }
 
     /// An artwork dropped onto `onto` in the gallery: with an artwork it makes a stack, this one
     /// first; a stack takes it in first.
     func put(_ a: GalleryArtwork, onto: GalleryEntry) {
         guard openStack == nil, a.dir != onto.dir else { return }
-        changing { Gallery.store.putOnto(dir: a.dir, onto: onto.dir) }
+        changing { $0.putOnto(dir: a.dir, onto: onto.dir) }
     }
 
     /// Puts artworks the gallery can't show in a stack of their own, after the save of any artwork
@@ -242,9 +319,10 @@ final class GalleryModel {
         while Gallery.closingSaves > 0 {
             try? await Task.sleep(for: .milliseconds(100))
         }
+        let store = Gallery.store
         await withCheckedContinuation { done in
             work.async {
-                _ = Gallery.store.recoverLostArtworks()
+                _ = store.recoverLostArtworks()
                 done.resume()
             }
         }
@@ -253,7 +331,7 @@ final class GalleryModel {
 
     func stack(_ list: [GalleryArtwork]) {
         guard list.count >= 2, openStack == nil else { return }
-        changing { _ = Gallery.store.stack(dirs: list.map(\.dir)) }
+        changing { _ = $0.stack(dirs: list.map(\.dir)) }
     }
 
     /// What Select's actions act on of the entries `picked` (by folder): a stack picked whole.
@@ -265,18 +343,18 @@ final class GalleryModel {
     /// stack picked takes in the rest, keeping its name; with none picked, a new stack.
     func stackPicked(_ dirs: [String]) {
         guard dirs.count >= 2, openStack == nil else { return }
-        changing { _ = Gallery.store.stackPicked(dirs: dirs) }
+        changing { _ = $0.stackPicked(dirs: dirs) }
     }
 
     /// The entries in `dirs` deleted, a stack with every artwork in it.
     func delete(dirs: [String]) {
-        changing { dirs.forEach { Gallery.store.delete(dir: $0) } }
+        changing { store in dirs.forEach { store.delete(dir: $0) } }
     }
 
     /// Each of the entries in `dirs` duplicated right after itself, a stack with a copy of each of
     /// its artworks.
     func duplicate(dirs: [String]) {
-        changing { dirs.forEach { _ = Gallery.store.duplicate(dir: $0) } }
+        changing { store in dirs.forEach { _ = store.duplicate(dir: $0) } }
     }
 
     func renameStack(_ dir: String, _ name: String) {
@@ -284,20 +362,20 @@ final class GalleryModel {
         if openStack?.dir == dir {
             openStack = (dir, trimmed.isEmpty ? "Stack" : trimmed)
         }
-        changing { Gallery.store.renameStack(dir: dir, name: name) }
+        changing { $0.renameStack(dir: dir, name: name) }
     }
 
     func delete(_ a: GalleryArtwork) {
-        changing { Gallery.store.delete(dir: a.dir) }
+        changing { $0.delete(dir: a.dir) }
     }
 
     func duplicate(_ a: GalleryArtwork) {
-        changing { _ = Gallery.store.duplicate(dir: a.dir) }
+        changing { _ = $0.duplicate(dir: a.dir) }
     }
 
     func rename(_ a: GalleryArtwork, _ name: String) {
         guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        changing { Gallery.store.rename(dir: a.dir, name: name) }
+        changing { $0.rename(dir: a.dir, name: name) }
     }
 
     /// Opens artwork `a`; for `animated`, into that animated export alone, closing back to the
@@ -393,6 +471,7 @@ final class GalleryModel {
         )
         session.madeWithScreenTurned(turns: Self.screenTurns())
         _ = session.setNewProfile(name: p.profile)
+        session.setNewHdr(hdr: p.hdr)
         let dir = Gallery.store.newFolder(folder: folder)
         ArtworkTimeLapse(dir: dir).settings = TimeLapseSettings(
             resolution: p.timeLapseResolution, quality: p.timeLapseQuality, hevc: p.timeLapseHevc
@@ -614,10 +693,13 @@ final class GalleryModel {
     private func finishImport(_ outcome: Imported, name: String, folder: String?, open: Bool) {
         var toOpen: OpenArtwork?
         var said: String?
+        var quiet = false
         switch outcome {
         case let .said(text):
             // an import cancelled says nothing
             said = cancelled ? nil : text
+        case .offered:
+            quiet = true
         case let .made(dir):
             if cancelled {
                 Gallery.store.delete(dir: dir)
@@ -642,11 +724,13 @@ final class GalleryModel {
             if let said {
                 self.message = said
                 self.importShown = nil
+            } else if quiet {
+                self.importShown = nil
             } else if !wasCancelled {
                 self.importShown = ProgressShown(progress: 1, done: true, detail: name)
             }
         }
-        if said == nil, !wasCancelled {
+        if said == nil, !quiet, !wasCancelled {
             Thread.sleep(forTimeInterval: doneShown)
         }
         DispatchQueue.main.async { [weak self] in
@@ -668,6 +752,27 @@ final class GalleryModel {
         let title = (name as NSString).deletingPathExtension.trimmingCharacters(in: .whitespaces)
         let lower = name.lowercased()
         let tag = String(decoding: head, as: UTF8.self)
+        // what isn't an artwork's, a brush's or a palette's, by its name: a plugin (offered, as its
+        // own page's Import offers it), a font, a colour profile
+        if lower.hasSuffix(".procraft-plugin") || lower.hasSuffix(".procraftplugin") {
+            // read a moment later: a copy this one's going doesn't take with it
+            let kept = FileManager.default.temporaryDirectory.appendingPathComponent("plugin-\(UUID().uuidString)-\(name)")
+            guard (try? FileManager.default.copyItem(at: copy, to: kept)) != nil else {
+                return .said("This file can't be opened.")
+            }
+            DispatchQueue.main.async { [weak self] in
+                PluginsModel.shared.offer(kept) { self?.message = $0 }
+            }
+            return .offered
+        }
+        if [".ttf", ".otf", ".ttc"].contains(where: { lower.hasSuffix($0) }) {
+            let added = (try? Data(contentsOf: copy)).flatMap { importTextFont(bytes: $0, fileName: name) }
+            return .said(added != nil ? "Font added." : "This font can't be read.")
+        }
+        if lower.hasSuffix(".icc") || lower.hasSuffix(".icm") {
+            let added = (try? Data(contentsOf: copy)).flatMap { importProfile(bytes: $0) }
+            return .said(added.map { "\($0) added to the color profiles." } ?? "This color profile can't be read.")
+        }
         // another program's palette
         let foreign = tag == "ASEF" || lower.hasSuffix(".aco")
         let zip = head.starts(with: [0x50, 0x4B])
@@ -676,6 +781,8 @@ final class GalleryModel {
             return addBrushes(copy, name: name, ours: kind == .brushes)
         }
         if foreign || kind == .swatches {
+            // while the Palettes plugin is on
+            guard PluginsModel.shared.has(.palettes) else { return .said("Turn on Palettes in Plugins to bring in palettes.") }
             guard let bytes = try? Data(contentsOf: copy),
                   CanvasModel.paletteStore.importFile(bytes: bytes, fileName: name) else {
                 return .said("This palette can't be read.")
@@ -700,6 +807,8 @@ final class GalleryModel {
             return bringModel(copy, name: lower.hasSuffix(".zip") ? name : name + ".zip", title: named)
         }
         if tag == "8BPS" {
+            // while the PSD plugin's import is on
+            guard PluginsModel.shared.has(.psdImport) else { return .said("Turn on PSD in Plugins to bring in PSD files.") }
             return bringPsd(copy, title: title, folder: folder)
         }
         if tag == "%PDF" {
@@ -725,6 +834,10 @@ final class GalleryModel {
     /// holding one with its files), with the `files` picked along with it; named `title`, else
     /// after the file. The images it brings go into its texture sets.
     private func bringModel(_ copy: URL, name: String, files: [ModelFile] = [], title: String? = nil) -> Imported {
+        // while the 3D painting plugin is on
+        guard PluginsModel.shared.has(.modelPainting) else {
+            return .said("Turn on 3D painting in Plugins to bring in models.")
+        }
         guard let bytes = try? Data(contentsOf: copy) else { return .said("This model can't be opened.") }
         let artwork = (title ?? (name as NSString).deletingPathExtension).trimmingCharacters(in: .whitespaces)
         do {
@@ -902,7 +1015,14 @@ final class GalleryModel {
             case "TIFF": try session.exportTiff(path: url.path)
             case "PNG": try session.exportPng(path: url.path)
             case "JPEG": try session.exportJpeg(path: url.path)
-            default: try session.exportPackage(path: url.path, seed: UInt64.random(in: 0 ... UInt64.max), timeLapse: ArtworkTimeLapse(dir: a.dir).forPackage())
+            case "Procreate":
+                try session.exportPackage(path: url.path, seed: UInt64.random(in: 0 ... UInt64.max), timeLapse: ArtworkTimeLapse(dir: a.dir).forPackage())
+            // ours: on a timeline, the folder as saved (a package can't hold the timeline)
+            default:
+                try session.exportArtwork(
+                    dir: a.dir, saveFirst: false, path: url.path, seed: UInt64.random(in: 0 ... UInt64.max),
+                    timeLapse: ArtworkTimeLapse(dir: a.dir).forPackage()
+                )
             }
             return true
         } catch {

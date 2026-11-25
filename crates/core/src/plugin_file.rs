@@ -24,7 +24,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 22;
+const INTERFACE: u32 = 24;
 /// The first interface with features (several plugins' worth in one, each a switch of its own).
 const FEATURES_FROM: u32 = 16;
 /// The interface filter layers came in.
@@ -44,6 +44,10 @@ const MOST_FEATURED_HOOKS: usize = 32;
 const MOST_FEATURED_ACTIONS: usize = 32;
 /// The most values a picker's picture is given (its controls' all).
 const MOST_PICTURE_VALUES: usize = 16;
+/// The interface exports of the animation came in.
+pub(crate) const EXPORTS_FROM: u32 = 23;
+/// The interface mesh warps and tools came in.
+pub(crate) const WARPS_FROM: u32 = 24;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
 /// The file, its entries, one entry, all of them unpacked, and the manifest, in bytes.
@@ -220,6 +224,12 @@ pub(crate) struct Shape {
     /// The plugin it takes the place of whose set of brushes its own is (interface 19): one given
     /// before as that one's isn't given again.
     pub brushes_from: Option<String>,
+    /// The files it makes of the animation for Share (interface 23).
+    pub exporters: Vec<Exporter>,
+    /// The meshes it lays and bends for Transform (interface 24).
+    pub warps: Vec<Warp>,
+    /// Its tools, whose touches it takes (interface 24).
+    pub tools: Vec<Tool>,
 }
 
 /// One of the features of a plugin made of several (interface 16): a switch at the top of its list,
@@ -260,6 +270,8 @@ pub(crate) struct MenuChoice {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ListedFilter {
     pub id: String,
+    /// Its key among the plugin's filters.
+    pub key: String,
     pub label: String,
     pub code: String,
     pub controls: Vec<usize>,
@@ -469,6 +481,12 @@ struct RawManifest {
     #[serde(default)]
     brush_engines: Vec<RawEngine>,
     #[serde(default)]
+    exports: Vec<RawExporter>,
+    #[serde(default)]
+    warps: Vec<RawWarp>,
+    #[serde(default)]
+    tools: Vec<RawTool>,
+    #[serde(default)]
     filters: Vec<RawFilter>,
     #[serde(default)]
     replaces: Vec<RawReplaced>,
@@ -553,6 +571,140 @@ fn menu_of(
         });
     }
     Ok(Some(Menu { place, choices, under }))
+}
+
+/// A file a plugin makes of the animation for Share (interface 23): its key and name, what it
+/// asks to be drawn, whether its files go in one zip, the controls its sheet shows, the slider
+/// that sizes what is drawn and the switch that leaves the background out, and whether it takes
+/// the animation's sounds.
+#[derive(Deserialize)]
+struct RawExporter {
+    key: String,
+    label: String,
+    asks: String,
+    #[serde(default)]
+    zip: bool,
+    #[serde(default)]
+    controls: Vec<String>,
+    #[serde(default)]
+    size: Option<String>,
+    #[serde(default)]
+    transparent: Option<String>,
+    #[serde(default)]
+    sounds: bool,
+}
+
+/// What an exporter asks the app to draw for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExportAsks {
+    /// Each of the animation's frames, whole.
+    Frames,
+    /// Each drawing track alone, frame by frame (through its mattes), and the background.
+    Tracks,
+}
+
+/// A file a plugin makes of the animation for Share (interface 23), as read: `key` is its own,
+/// `controls` the places of the controls its sheet shows, `size` a slider's (the longest side
+/// drawn, 0 full size) and `transparent` a switch's (the background left out).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Exporter {
+    pub key: String,
+    pub label: String,
+    pub asks: ExportAsks,
+    pub zip: bool,
+    pub controls: Vec<usize>,
+    pub size: Option<usize>,
+    pub transparent: Option<usize>,
+    pub sounds: bool,
+}
+
+/// A mesh a plugin lays over what is transformed and bends by pins (interface 24): its key, and
+/// its name on Transform's bar.
+#[derive(Deserialize)]
+struct RawWarp {
+    key: String,
+    label: String,
+}
+
+/// A mesh warp, as read: `key` is its own.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Warp {
+    pub key: String,
+    pub label: String,
+}
+
+/// A tool a plugin has (interface 24): its key, its name, its modes (each a name and the words
+/// under the tool's header while it is chosen), and whether the whole canvas is shown under the
+/// header while it is open.
+#[derive(Deserialize)]
+struct RawTool {
+    key: String,
+    label: String,
+    #[serde(default)]
+    modes: Vec<RawToolMode>,
+    #[serde(default)]
+    fit: bool,
+}
+
+#[derive(Deserialize)]
+struct RawToolMode {
+    label: String,
+    #[serde(default)]
+    hint: String,
+}
+
+/// A tool, as read: `key` is its own; `modes` each its name and hint.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Tool {
+    pub key: String,
+    pub label: String,
+    pub modes: Vec<(String, String)>,
+    pub fit: bool,
+}
+
+/// The most mesh warps and tools a plugin has, and modes a tool has.
+const MOST_WARPS: usize = 4;
+const MOST_TOOLS: usize = 4;
+const MOST_TOOL_MODES: usize = 4;
+
+/// `raw` as warps: plain keys and names, none twice.
+fn warps_of(raw: &[RawWarp]) -> Result<Vec<Warp>, Refusal> {
+    let mut keys = HashSet::new();
+    let fits = raw.len() <= MOST_WARPS
+        && raw.iter().all(|w| {
+            valid_key(&w.key)
+                && !w.label.trim().is_empty()
+                && shows_plainly(&w.label, 20)
+                && keys.insert(w.key.as_str())
+        });
+    if !fits {
+        return Err(Refusal::Described);
+    }
+    Ok(raw.iter().map(|w| Warp { key: w.key.clone(), label: w.label.clone() }).collect())
+}
+
+/// `raw` as tools: plain keys, names and modes, none twice.
+fn tools_of(raw: &[RawTool]) -> Result<Vec<Tool>, Refusal> {
+    let mut keys = HashSet::new();
+    let plain = |text: &str, most: usize| !text.trim().is_empty() && shows_plainly(text, most);
+    let fits = raw.len() <= MOST_TOOLS
+        && raw.iter().all(|t| {
+            valid_key(&t.key)
+                && plain(&t.label, 40)
+                && keys.insert(t.key.as_str())
+                && t.modes.len() <= MOST_TOOL_MODES
+                && t.modes.iter().all(|m| plain(&m.label, 20) && shows_plainly(&m.hint, 80))
+        });
+    if !fits {
+        return Err(Refusal::Described);
+    }
+    let tools = raw.iter().map(|t| Tool {
+        key: t.key.clone(),
+        label: t.label.clone(),
+        modes: t.modes.iter().map(|m| (m.label.clone(), m.hint.clone())).collect(),
+        fit: t.fit,
+    });
+    Ok(tools.collect())
 }
 
 /// A filter of several in one plugin (interface 5): its key, its name under Adjustments, the keys
@@ -1225,6 +1377,9 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     )?;
     // made of features (interface 16): each holds what a plugin held
     let featured = !shape.features.is_empty();
+    let exporters = exporters_of(&raw.exports, &raw.controls)?;
+    let warps = warps_of(&raw.warps)?;
+    let tools = tools_of(&raw.tools)?;
     let mut files = Vec::with_capacity(raw.files.len().min(MOST_ENTRIES));
     let mut seen = HashSet::new();
     for file in raw.files {
@@ -1308,13 +1463,16 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
             }
             hooks.push(hook);
         }
-        // code steps in somewhere, does something when tapped, or makes artworks or layers of its
-        // own
+        // code steps in somewhere, does something when tapped, makes artworks or layers of its
+        // own, or files of the animation
         if hooks.is_empty()
             && raw.actions.is_empty()
             && raw.kinds.is_empty()
             && raw.layer_kinds.is_empty()
             && raw.brush_engines.is_empty()
+            && raw.exports.is_empty()
+            && raw.warps.is_empty()
+            && raw.tools.is_empty()
         {
             return Err(Refusal::Described);
         }
@@ -1458,6 +1616,31 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     if !brush_engines.is_empty() {
         hooks.push(Hook::Brushes);
     }
+    // files of the animation for Share, for code written to interface 23 or later: on the
+    // exports hook while it has any
+    let exporting = has(PluginPart::Hooks) && compat.interface.is_some_and(|interface| interface >= EXPORTS_FROM);
+    if !raw.exports.is_empty() && !exporting {
+        return Err(Refusal::Described);
+    }
+    shape.exporters = exporters;
+    if !shape.exporters.is_empty() {
+        hooks.push(Hook::Exports);
+    }
+    // mesh warps and tools, for code written to interface 24 or later; a tool's edits to the
+    // layers need the permission to make them
+    let warping = has(PluginPart::Hooks) && compat.interface.is_some_and(|interface| interface >= WARPS_FROM);
+    let edits = permissions.contains(&crate::plugin_commands::PluginPermission::LayersEdit);
+    if (!warping && (!warps.is_empty() || !tools.is_empty())) || (!tools.is_empty() && !edits) {
+        return Err(Refusal::Described);
+    }
+    shape.warps = warps;
+    if !shape.warps.is_empty() {
+        hooks.push(Hook::Warps);
+    }
+    shape.tools = tools;
+    if !shape.tools.is_empty() {
+        hooks.push(Hook::Tools);
+    }
     // a place this app doesn't have is for a newer one
     let mut actions = Vec::new();
     for a in raw.actions {
@@ -1487,6 +1670,49 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         shape,
         files,
     })
+}
+
+/// The most files of the animation a plugin makes for Share.
+const MOST_EXPORTERS: usize = 4;
+
+/// `raw` as exporters, their controls found among `controls` by key: none twice, a size a slider
+/// and a background a switch.
+fn exporters_of(raw: &[RawExporter], controls: &[RawControl]) -> Result<Vec<Exporter>, Refusal> {
+    if raw.len() > MOST_EXPORTERS {
+        return Err(Refusal::Described);
+    }
+    let at = |key: &str, kind: Option<&str>| {
+        let at = controls.iter().position(|c| c.key == key && kind.is_none_or(|k| c.kind == k));
+        at.ok_or(Refusal::Described)
+    };
+    let mut keys = HashSet::new();
+    let mut out = Vec::new();
+    for e in raw {
+        let plain = !e.label.trim().is_empty() && shows_plainly(&e.label, 40);
+        if !valid_key(&e.key) || !plain || !keys.insert(e.key.as_str()) {
+            return Err(Refusal::Described);
+        }
+        let asks = match e.asks.as_str() {
+            "frames" => ExportAsks::Frames,
+            "tracks" => ExportAsks::Tracks,
+            _ => return Err(Refusal::Newer),
+        };
+        let shown = e.controls.iter().map(|key| at(key, None)).collect::<Result<Vec<_>, _>>()?;
+        if shown.iter().collect::<HashSet<_>>().len() != shown.len() {
+            return Err(Refusal::Described);
+        }
+        out.push(Exporter {
+            key: e.key.clone(),
+            label: e.label.clone(),
+            asks,
+            zip: e.zip,
+            controls: shown,
+            size: e.size.as_deref().map(|key| at(key, Some("slider"))).transpose()?,
+            transparent: e.transparent.as_deref().map(|key| at(key, Some("switch"))).transpose()?,
+            sounds: e.sounds,
+        });
+    }
+    Ok(out)
 }
 
 /// What the manifest of plugin `id` says beyond its card's list (its controls, actions, filters,
@@ -1634,6 +1860,7 @@ fn shape_of(
         }
         filters.push(ListedFilter {
             id: format!("{}.{}", id, f.key),
+            key: f.key.clone(),
             label: f.label.clone(),
             code: format!("{FILTERS_FOLDER}/{}.wgsl", f.key),
             controls,
@@ -1724,6 +1951,9 @@ fn shape_of(
         features: Vec::new(),
         brushes_under,
         brushes_from,
+        exporters: Vec::new(),
+        warps: Vec::new(),
+        tools: Vec::new(),
     };
     shape.features = features_of(controls, &shape, actions.len())?;
     Ok((shape, menu_under))
@@ -3218,7 +3448,7 @@ pub(crate) mod tests {
             );
         }
         // a hook this app has, written to a later interface than it reads: for a newer app
-        assert_eq!(folders(23, folder, hooks).err(), Some(Refusal::Newer));
+        assert_eq!(folders(INTERFACE + 1, folder, hooks).err(), Some(Refusal::Newer));
     }
 
     #[test]
@@ -3520,7 +3750,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_plugin_written_to_interface_3_lists_the_kinds_of_layer_it_adds() {
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-layers").unwrap();
+        let file = crate::bundled::VECTOR_LAYERS_FIXTURE;
         let package = read_package(file).unwrap();
         let id = "io.github.artcraftandroid.vector-layers";
         // its badge a curve between two nodes

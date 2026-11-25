@@ -388,11 +388,29 @@ impl Hooks {
             && self.through(Hook::OpacityTogether, false, |running, said| Ok(said | running.opacity_together()?))
     }
 
+    /// The stroke preview hook: how strongly a stroke of `tool` (0 paint, 1 erase, 2 smudge,
+    /// 3 light) shows while it is drawn, as a share of how it will be kept. Each plugin on it has
+    /// a say, one after another: their answers multiply. 1 with none on it.
+    pub(crate) fn stroke_preview_opacity(&self, tool: i32) -> f32 {
+        if !self.has(Hook::StrokePreviewOpacity) {
+            return 1.0;
+        }
+        self.through(Hook::StrokePreviewOpacity, 1.0, |running, said| Ok(said * running.stroke_preview_opacity(tool)?))
+    }
+
     /// The pin hook: whether a touch on the canvas with a panel open paints at once and leaves the
     /// panel up, rather than closing it (a tap) or fading it (a drag).
     pub(crate) fn pin_panels(&self) -> bool {
         self.has(Hook::PinPanels)
             && self.through(Hook::PinPanels, false, |running, said| Ok(said | running.pin_panels()?))
+    }
+
+    /// The lasso hook: whether Color Fill's Lasso Fill and the Paint and Erase tools' lassos are
+    /// offered, the shapes they draw filled (or erased) rather than selected. Without it the apps
+    /// show neither, and the core takes a lasso asked for as a plain selection.
+    pub(crate) fn lasso_fill(&self) -> bool {
+        self.has(Hook::LassoFill)
+            && self.through(Hook::LassoFill, false, |running, said| Ok(said | running.lasso_fill()?))
     }
 
     /// The clear hook: whether the interface keeps clear of the status bar and the screen's cutouts
@@ -1523,8 +1541,14 @@ pub(crate) mod tests {
 
     #[test]
     fn the_plugins_that_come_with_the_app_and_only_answer_answer_from_their_own_code() {
-        const ANSWERING: [&str; 5] =
-            ["colour-tools", "edit-layout", "interface-look", "layer-toolbox", "radial-segments"];
+        const ANSWERING: [&str; 6] = [
+            "colour-tools",
+            "edit-layout",
+            "interface-look",
+            "layer-toolbox",
+            "radial-segments",
+            "selection-lasso-fill",
+        ];
         let dir = store("answering");
         let plugins = Plugins::with_store(dir.clone());
         let hooks = plugins.hooks();
@@ -1542,25 +1566,26 @@ pub(crate) mod tests {
                 hooks.hide_undo_notice(),
                 hooks.opacity_together(),
                 hooks.pin_panels(),
+                hooks.lasso_fill(),
             ];
             (yes, hooks.radial_segments())
         };
-        assert_eq!(said(&hooks), ([false; 5], None), "imported, they say nothing");
+        assert_eq!(said(&hooks), ([false; 6], None), "imported, they say nothing");
         for name in ANSWERING {
             assert!(plugins.set_on(id(name), true), "{name}");
         }
-        // each waits for its feature and its switch, and radial symmetry makes eight until its
-        // slider moves
-        assert_eq!(said(&hooks), ([false; 5], Some(8)));
+        // each waits for its feature and its switch (Lasso Fill has none: on, it is offered), and
+        // radial symmetry makes eight until its slider moves
+        assert_eq!(said(&hooks), ([false, false, false, false, false, true], Some(8)));
         for (name, feature) in
             [("colour-tools", "colordrop"), ("interface-look", "interface"), ("layer-toolbox", "layer_tools")]
         {
             assert!(plugins.set_switch(format!("{}.{feature}", id(name)), true), "{feature}");
         }
-        assert_eq!(said(&hooks), ([false; 5], Some(8)));
+        assert_eq!(said(&hooks), ([false, false, false, false, false, true], Some(8)));
         // (the eyedropper's kept under the setting the app had before it was a plugin)
         assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
-        assert_eq!(said(&hooks), ([true, false, false, false, false], Some(8)));
+        assert_eq!(said(&hooks), ([true, false, false, false, false, true], Some(8)));
         for (name, switch) in [
             ("colour-tools", "all_layers"),
             ("interface-look", "hide_undo"),
@@ -1570,11 +1595,11 @@ pub(crate) mod tests {
             assert!(plugins.set_switch(format!("{}.{switch}", id(name)), true), "{switch}");
         }
         assert!(plugins.set_slider(format!("{}.parts", id("radial-segments")), 12.0).is_some());
-        assert_eq!(said(&hooks), ([true; 5], Some(12)));
+        assert_eq!(said(&hooks), ([true; 6], Some(12)));
         for name in ANSWERING {
             assert!(plugins.set_on(id(name), false), "{name}");
         }
-        assert_eq!(said(&hooks), ([false; 5], None));
+        assert_eq!(said(&hooks), ([false; 6], None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3359,6 +3384,106 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_stroke_shows_fainter_while_it_is_drawn_as_the_plugin_that_comes_with_the_app_says() {
+        const ID: &str = "io.github.artcraftandroid.stroke-preview-opacity";
+        let Some(s) = session() else { return };
+        let dir = store("stroke-preview");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, bytes) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "stroke-preview-opacity").unwrap();
+        assert_eq!(plugins.install(bytes.to_vec()), None);
+        s.use_plugins(Arc::clone(&plugins));
+        let hooks = plugins.hooks();
+        assert_eq!(hooks.stroke_preview_opacity(0), 1.0, "imported, it says nothing");
+        // how dark the canvas shows at the stroke's middle
+        let dark = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            let px = canvas.read_composite(gpu).unwrap();
+            255 - i32::from(px[(50 * 200 + 60) * 4])
+        };
+        let begin = |s: &CanvasSession| {
+            s.stroke_begin(PointerKind::Stylus, vec![sample(30.0, 50.0, 0.0)]);
+            s.stroke_add((1..10).map(|i| sample(30.0 + i as f32 * 6.0, 50.0, f64::from(i) * 8.0)).collect());
+        };
+        let on = |s: &CanvasSession| {
+            s.stroke_add((10..20).map(|i| sample(30.0 + i as f32 * 6.0, 50.0, f64::from(i) * 8.0)).collect());
+        };
+        let end = |s: &CanvasSession| s.stroke_end(vec![sample(150.0, 50.0, 170.0)]);
+        s.set_color(0.0, 0.0, 0.0);
+        // (a stroke laid in place, wet paint say, changes its layer as it goes and shows as it is
+        // laid: only strokes drawn apart from their layer show fainter)
+        let brushes: [Option<(u32, u32)>; 1] = [None];
+        for brush in brushes {
+            if let Some((set, index)) = brush {
+                assert!(s.select_brush(set, index));
+            }
+            assert!(plugins.set_on(ID.to_owned(), false) || brush.is_none());
+            assert!(plugins.set_slider(format!("{ID}.opacity"), 0.5).is_some());
+            // as it shows without: drawn, and kept
+            begin(&s);
+            let whole = dark(&s);
+            assert!(whole > 80, "{brush:?}: {whole}");
+            end(&s);
+            let kept = dark(&s);
+            s.undo();
+            assert_eq!(dark(&s), 0);
+            // on: half as strong while it is drawn
+            assert!(plugins.set_on(ID.to_owned(), true));
+            assert_eq!(hooks.stroke_preview_opacity(0), 0.5);
+            begin(&s);
+            let half = dark(&s);
+            assert!((half * 2 - whole).abs() <= whole / 8 + 4, "{brush:?}: {half} of {whole}");
+            // the slider moved while it is being drawn: the stroke follows
+            assert!(plugins.set_slider(format!("{ID}.opacity"), 0.25).is_some());
+            on(&s);
+            let quarter = dark(&s);
+            assert!(quarter < half - whole / 8, "{brush:?}: {quarter} after {half}");
+            // lifted, it is kept as it would have been
+            end(&s);
+            assert!((dark(&s) - kept).abs() <= 3, "{brush:?}: kept {} for {kept}", dark(&s));
+            s.undo();
+        }
+        // the light tool with paint; the eraser and the smudge once its switch is on
+        assert_eq!(hooks.stroke_preview_opacity(3), 0.25);
+        assert_eq!((hooks.stroke_preview_opacity(1), hooks.stroke_preview_opacity(2)), (1.0, 1.0));
+        assert!(plugins.set_switch(format!("{ID}.erasing"), true));
+        assert_eq!((hooks.stroke_preview_opacity(1), hooks.stroke_preview_opacity(2)), (0.25, 0.25));
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert_eq!(hooks.stroke_preview_opacity(0), 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn several_plugins_on_the_stroke_preview_hook_multiply_and_a_wild_answer_stops_one() {
+        let says = |share: &str| {
+            wat::parse_str(format!(
+                r#"(module (func (export "procraft_stroke_preview_opacity") (param i32) (result f32) (f32.const {share})))"#
+            ))
+            .unwrap()
+        };
+        let hooks = Hooks::default();
+        hooks.put_on("a".to_owned(), Running::start(&says("0.5"), &[]).unwrap(), &[Hook::StrokePreviewOpacity]);
+        assert_eq!(hooks.stroke_preview_opacity(0), 0.5);
+        hooks.put_on("b".to_owned(), Running::start(&says("0.5"), &[]).unwrap(), &[Hook::StrokePreviewOpacity]);
+        assert_eq!(hooks.stroke_preview_opacity(0), 0.25);
+        // past 1, below 0 or no number: stopped, and the stroke shows as the others say
+        for wild in ["1.5", "-0.1", "nan"] {
+            let dir = store(&format!("stroke-preview-{wild}"));
+            let plugins = Plugins::with_store(dir.clone());
+            let module = says(wild);
+            let mut manifest = coded(ID, &module);
+            manifest["hooks"] = json!(["stroke_preview_opacity"]);
+            assert_eq!(plugins.install(file(&manifest, &module)), None, "{wild}");
+            assert!(plugins.set_on(ID.to_owned(), true));
+            assert_eq!(plugins.hooks().stroke_preview_opacity(0), 1.0, "{wild}");
+            assert!(card(&plugins).problem.is_some(), "{wild}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
     fn radial_symmetry_goes_by_a_plugin_s_count_while_it_is_on() {
         let dir = store("radial");
         let module =
@@ -3663,6 +3788,39 @@ pub(crate) mod tests {
         plugins.set_on(ID.to_owned(), false);
         pour_at(&s, 30.0, 30.0);
         assert!(red_at(&s, 30, 30) && red_at(&s, 199, 199));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_continuous_drag_goes_on_past_where_the_plugin_cut_a_fill() {
+        use crate::PointerKind;
+        use crate::touch::Fill;
+        let Some(s) = session() else { return };
+        let dir = store("fill-trail");
+        filling(&s, &dir, &fill_module(FILL_AT, "(i32.const 1)", RIGHT_OF_128));
+        let sample = |x: f32, time_ms: f64| crate::PenSample {
+            x,
+            y: 30.0,
+            pressure: 1.0,
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms,
+            roll: 0.0,
+        };
+        s.set_touch_filling(Some(Fill { r: 1.0, g: 0.0, b: 0.0, threshold: 0.3, continuous: true }));
+        // the first fill stops where the plugin cuts it; dragged on past there, the rest fills too
+        s.touch_down(1, PointerKind::Finger, vec![sample(30.0, 1000.0)]);
+        assert!(red_at(&s, 30, 30) && !red_at(&s, 190, 30));
+        for (i, x) in [60.0, 100.0, 140.0, 190.0].into_iter().enumerate() {
+            s.touch_move(1, vec![sample(x, 1000.0 + 20.0 * (i as f64 + 1.0))]);
+        }
+        s.touch_up(1, vec![sample(190.0, 1100.0)]);
+        assert!(red_at(&s, 30, 30) && red_at(&s, 190, 30) && red_at(&s, 199, 199));
+        assert!(!s.pour_finishing());
+        // the drag is one undo step
+        s.undo();
+        assert!(!red_at(&s, 30, 30) && !red_at(&s, 190, 30));
+        s.set_touch_filling(None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

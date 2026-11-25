@@ -226,8 +226,21 @@ impl Canvas {
                 _ => Vec::new(),
             }
         };
-        // those queued before it are laid first (and kept for the newest mark as they are)
-        let queued: Vec<PacedStamp> = ops.iter().take(from).flat_map(&paced).collect();
+        // those queued before it are laid first (and kept for the newest mark as they are); a tip of
+        // its own laid ahead among them (between its save and its taking off) isn't its
+        let mut in_tip = self.in_second_tip;
+        let queued: Vec<PacedStamp> = ops
+            .iter()
+            .take(from)
+            .flat_map(|op| {
+                match op {
+                    Op::SaveTip { second: true, .. } => in_tip = true,
+                    Op::Untip { second: true, .. } => in_tip = false,
+                    _ => {}
+                }
+                if in_tip { Vec::new() } else { paced(op) }
+            })
+            .collect();
         let Some(op) = ops.get(from).filter(|op| matches!(op, Op::Stamps { carry: false, .. })) else { return ops };
         let stamps = paced(op);
         let unchanged = stamps.iter().zip(marks.given.iter().chain(&queued)).take_while(|(a, b)| same(a, b)).count();
@@ -237,7 +250,9 @@ impl Canvas {
         let mut out = Vec::with_capacity(ops.len() + 1);
         for (k, op) in ops.into_iter().enumerate() {
             match op {
-                Op::Stamps { second, instances, wet, picks, times, style, layer, pencil, carry, .. } if k == from => {
+                Op::Stamps { second, instances, wet, picks, times, ribbon, style, layer, pencil, carry, .. }
+                    if k == from =>
+                {
                     out.push(Op::RewindSecond(at));
                     out.push(Op::Stamps {
                         second,
@@ -245,6 +260,7 @@ impl Canvas {
                         wet: wet.into_iter().skip(at).collect(),
                         picks: picks.into_iter().skip(at).collect(),
                         times: times.into_iter().skip(at).collect(),
+                        ribbon: ribbon.into_iter().skip(at).collect(),
                         style,
                         clear: false,
                         again: true,

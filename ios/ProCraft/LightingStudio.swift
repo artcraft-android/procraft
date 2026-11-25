@@ -199,7 +199,7 @@ struct LightingStudio: View {
         let above = at.y - reach - Pc.arrowHeight - settingsHeight > barHeight + 8
         let left = min(max(at.x - settingsWidth / 2, 12), max(screen.width - settingsWidth - 12, 12))
         let top = above ? at.y - reach - Pc.arrowHeight - settingsHeight : at.y + reach
-        return LightSettings(scene: scene, index: index, light: scene.lights[index]) { lightOpen = nil }
+        return StudioLightSettings(scene: scene, index: index, light: scene.lights[index]) { lightOpen = nil }
             .modifier(SettingsPopover(arrowX: min(max(at.x - left, 28), settingsWidth - 28), above: above))
             .offset(x: left, y: top)
     }
@@ -220,7 +220,7 @@ private struct SettingsPopover: ViewModifier {
 }
 
 /// A light's hue, how much of that colour it has, how strong it is; Delete and Duplicate.
-private struct LightSettings: View {
+private struct StudioLightSettings: View {
     let scene: ModelScene
     let index: Int
     let light: ModelLight

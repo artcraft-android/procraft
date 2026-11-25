@@ -255,9 +255,15 @@ impl Canvas {
         let mut uniforms = UniformData::default();
         let (w, h) = (self.width as f32, self.height as f32);
         let probe = PROBE_SIZE as f32;
-        let uniform = FilterUniform { a: [0.0; 4], b: [0.0; 4], size: [w, h, 0.0, 0.0], c: [probe, probe, -1.0, 0.0] };
+        let uniform = FilterUniform {
+            a: [0.0; 4],
+            b: [0.0; 4],
+            size: [w, h, 0.0, 0.0],
+            c: [probe, probe, -1.0, 0.0],
+            ..bytemuck::Zeroable::zeroed()
+        };
         let offset = uniforms.push(&uniform);
-        let bind = self.filter_source(device, &self.composite_view);
+        let bind = self.filter_layer_source(device, &self.composite_view);
         let before = self.filter_before(device, None);
         let target = program.probe_target().create_view(&wgpu::TextureViewDescriptor::default());
         {
@@ -347,7 +353,7 @@ impl Canvas {
     }
 
     /// What a filter's draw reads: `source` as what is below.
-    fn filter_source(&self, device: &wgpu::Device, source: &wgpu::TextureView) -> wgpu::BindGroup {
+    fn filter_layer_source(&self, device: &wgpu::Device, source: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("filter layer source"),
             layout: &self.pipelines.transform_layout,
@@ -409,9 +415,15 @@ impl Canvas {
         let (w, h) = (self.width as f32, self.height as f32);
         let reach = program.reach_of(filter).map_or(-1.0, |r| r as f32);
         let probe = PROBE_SIZE as f32;
-        let uniform = FilterUniform { a, b, size: [w, h, 0.0, 0.0], c: [probe, probe, reach, 0.0] };
+        let uniform = FilterUniform {
+            a,
+            b,
+            size: [w, h, 0.0, 0.0],
+            c: [probe, probe, reach, 0.0],
+            ..bytemuck::Zeroable::zeroed()
+        };
         let offset = uniforms.push(&uniform);
-        let source = self.filter_source(device, below);
+        let source = self.filter_layer_source(device, below);
         let before = self.filter_before(device, Some(layer.id));
         let rows = rows_at_once(rect.width(), program.program.worst()).max(1);
         {
@@ -493,8 +505,14 @@ impl Canvas {
         let (w, h) = (self.width as f32, self.height as f32);
         let reach = program.reach_of(filter).map_or(-1.0, |r| r as f32);
         let probe = PROBE_SIZE as f32;
-        let offset = uniforms.push(&FilterUniform { a, b, size: [w, h, 0.0, 0.0], c: [probe, probe, reach, 0.0] });
-        let source = self.filter_source(device, &low.view);
+        let offset = uniforms.push(&FilterUniform {
+            a,
+            b,
+            size: [w, h, 0.0, 0.0],
+            c: [probe, probe, reach, 0.0],
+            ..bytemuck::Zeroable::zeroed()
+        });
+        let source = self.filter_layer_source(device, &low.view);
         let before = self.filter_before(device, Some(upper.id));
         let rows = rows_at_once(self.width, program.program.worst()).max(1);
         {

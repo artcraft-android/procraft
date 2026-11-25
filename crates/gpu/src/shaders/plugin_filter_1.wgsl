@@ -11,7 +11,7 @@ struct HostUniform {
     b: vec4<f32>,
     // (the canvas's width, height, 1 with a selection, 1 with the alpha locked)
     size: vec4<f32>,
-    // (the probe's width and height, unused, unused)
+    // (the probe's width and height, 1 on an HDR canvas, unused)
     c: vec4<f32>,
 }
 
@@ -38,11 +38,17 @@ fn host_straight(c: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(c.rgb / c.a, c.a);
 }
 
+// A pixel as a filter is given it, colour straight: cut at white, as the pixels it is written for
+// are (an HDR canvas's can be brighter than their alpha; a standard one's never are).
+fn host_given(c: vec4<f32>) -> vec4<f32> {
+    return host_straight(min(c, vec4<f32>(c.a)));
+}
+
 // The layer as it was at `at`, in canvas pixels, colour straight: past an edge, the edge's.
 fn layer_at(at: vec2<f32>) -> vec4<f32> {
     let most = vec2<i32>(host_u.size.xy) - vec2<i32>(1);
     let i = clamp(vec2<i32>(floor(at)), vec2<i32>(0), most);
-    return host_straight(textureLoad(host_copy, i, 0));
+    return host_given(textureLoad(host_copy, i, 0));
 }
 
 fn canvas_size() -> vec2<f32> {
@@ -51,12 +57,16 @@ fn canvas_size() -> vec2<f32> {
 
 // What pixel i becomes, premultiplied. A pixel that ran out of its budget, or came back with what
 // isn't a colour, stays as it was; the alpha stays where it is locked, and the selection takes
-// only what it holds.
+// only what it holds. On an HDR canvas, one given back as it was given keeps its light above white.
 fn host_filtered(i: vec2<i32>) -> vec4<f32> {
     v = HostValues(/*READ*/);
     let was = textureLoad(host_copy, i, 0);
-    let made = pixel(host_straight(was), vec2<f32>(i) + vec2<f32>(0.5));
+    let given = host_given(was);
+    let made = pixel(given, vec2<f32>(i) + vec2<f32>(0.5));
     if (host_budget < 0 || !all(abs(made) < vec4<f32>(3.0e38))) {
+        return was;
+    }
+    if (host_u.c.z > 0.5 && all(abs(made - given) < vec4<f32>(1.0 / 1024.0))) {
         return was;
     }
     let colour = clamp(made, vec4<f32>(0.0), vec4<f32>(1.0));

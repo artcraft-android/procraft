@@ -12,11 +12,17 @@ struct ProCraftApp: App {
     init() {
         // the log kept in a file too, for Help's Share log
         AppLog.start()
-        // the layers' textures may take a quarter of what the app may use (an iPad app is ended
-        // well short of the device's memory); none said (the simulator), all of them
+        // the layers may take half of what the app may use (an iPad app is ended well short of the
+        // device's memory, so not half the device's as on Android), their textures a quarter: past
+        // that, those not worked on are kept compressed off the GPU until needed. None said (the
+        // simulator): the core's own 2 GiB, and all the textures kept
         let available = os_proc_available_memory()
         if available > 0 {
+            setLayerBudget(bytes: UInt64(available / 2))
             setResidentBudget(bytes: UInt64(available / 4))
+            // and timeline frames kept for scrubbing and playing an eighth (the core's own
+            // default where none is said)
+            setFrameCacheBudget(bytes: UInt64(available / 8))
         }
         // the layers' pixels may take half the device's memory: it sets how many layers a canvas
         // holds (set before Custom Canvas asks), more on a bigger iPad
@@ -279,7 +285,15 @@ struct RootView: View {
                 open.onClose()
             }
         #if DEBUG
-        .task { ScreenCapture.start { OpenCanvas.shared.show($0) } }
+        .task {
+            ScreenCapture.start { model in
+                if let model {
+                    OpenCanvas.shared.show(model)
+                } else {
+                    OpenCanvas.shared.close()
+                }
+            }
+        }
         #endif
     }
 }
@@ -308,7 +322,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-"]
+    private static let canvasScreens = ["liquify", "adjust-", "layers-adjustment", "layers-style", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-", "timeline", "ribbon", "light", "hdr", "texture-packer", "layers-vector", "puppet", "comic-panels"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// Animation Assist's settings open on the onion skins' colours.
@@ -320,6 +334,11 @@ enum ScreenCapture {
     static var compactMode: ColorMode?
     /// What opens over the QuickMenu.
     static var quickShows: String?
+    /// The Adjustments menu opens with Adjustment Layer on; a layer's styles open on this one.
+    static var adjustAsLayer = false
+    static var styleOpens: Int?
+    /// The timeline's settings open on the onion skins' page.
+    static var onionOpens = false
 
     /// The studio's pages, by capture.
     private static let pages: [String: Int] = [
@@ -444,6 +463,29 @@ enum ScreenCapture {
     }
 
     /// Frames of the canvas in four colours recorded, off the main thread; then `then`.
+    /// A line on a timeline keyed to fall and turn a quarter over eight frames, seen half way;
+    /// returns its clip.
+    @discardableResult
+    static func timelineKeyed(_ model: CanvasModel) -> UInt64? {
+        model.timeline.setOn(true)
+        let s = model.session
+        let at = { (k: Int) in PenSample(x: 700 + Float(k) * 20, y: 1100, pressure: 0.6, tilt: 0, orientation: 0, timeMs: Double(k) * 8, roll: 0) }
+        s.strokeBegin(pointer: .stylus, samples: [at(0)])
+        s.strokeAdd(samples: (1 ... 30).map(at))
+        s.strokeEnd(samples: [])
+        guard let clip = s.timelineTracks().first?.clips.first?.id else { return nil }
+        _ = s.setTimelineClipDuration(id: clip, duration: 8, push: true)
+        s.setTimelineFrame(frame: 0)
+        _ = s.setTimelineKey(id: clip, channel: .position, values: [0, 0], easing: .smooth, done: true)
+        _ = s.setTimelineKey(id: clip, channel: .rotation, values: [0], easing: .smooth, done: true)
+        s.setTimelineFrame(frame: 7)
+        _ = s.setTimelineKey(id: clip, channel: .position, values: [0, 500], easing: .smooth, done: true)
+        _ = s.setTimelineKey(id: clip, channel: .rotation, values: [90], easing: .smooth, done: true)
+        s.setTimelineFrame(frame: 3)
+        model.refresh()
+        return clip
+    }
+
     private static func recordFrames(_ model: CanvasModel, then: @escaping () -> Void) {
         let session = model.session
         let lapse = model.timeLapse.lapse
@@ -518,6 +560,69 @@ enum ScreenCapture {
         library(model, shows: shows)
     }
 
+    /// Colourful strokes across the canvas (window points), for the effects to change.
+    private static func paintStrokes(_ model: CanvasModel) {
+        let s = model.session
+        s.setBrushSize(slider: 0.5)
+        for (k, hue) in [Float(0.0), 0.58, 0.14].enumerated() {
+            model.setColor(hue: hue, saturation: 0.8, brightness: 0.9)
+            let y = 420 + Float(k) * 260
+            let at = { (i: Int) in
+                PenSample(x: 500 + Float(i) * 40, y: y + 80 * sin(Float(i) / 3), pressure: 0.8, tilt: 0, orientation: 0, timeMs: Double(i) * 8, roll: 0)
+            }
+            s.strokeBegin(pointer: .stylus, samples: [at(0)])
+            s.strokeAdd(samples: (1 ... 40).map(at))
+            s.strokeEnd(samples: [])
+        }
+        model.refresh()
+    }
+
+    /// The effects' screens: an adjustment open on the strokes (or as an adjustment layer), or the
+    /// layers panel over an adjustment layer, or a layer's styles.
+    private static func effects(_ name: String, _ model: CanvasModel) {
+        paintStrokes(model)
+        switch name {
+        case "effect-layer":
+            model.addAdjustmentLayer(.hsb)
+            model.adjust { $0.adjustmentHsb(hue: 0.75, saturation: 0.5, brightness: 0.5) }
+        case "layers-adjustment":
+            model.addAdjustmentLayer(.gradientMap)
+            model.endAdjustment(commit: true)
+            model.toggle(.layers)
+        case "layers-style":
+            if let l = model.layers.first(where: { $0.current }) {
+                var effects = model.layerEffects(l)
+                if effects.count >= 4 {
+                    effects[0].on = true
+                    effects[0].size = 6
+                    effects[1].on = true
+                    effects[2].on = true
+                    for i in 0 ..< 3 {
+                        model.setLayerEffect(l, i, effects[i], done: true)
+                    }
+                }
+            }
+            layersShows = "style"
+            styleOpens = 1
+            model.toggle(.layers)
+        case "layers-style-color":
+            // the strokes all one colour, as opaque as they were, and its page open
+            if let l = model.layers.first(where: { $0.current }) {
+                var effects = model.layerEffects(l)
+                if effects.count > 4 {
+                    effects[4].on = true
+                    (effects[4].r, effects[4].g, effects[4].b) = (0.1, 0.55, 0.35)
+                    model.setLayerEffect(l, 4, effects[4], done: true)
+                }
+            }
+            layersShows = "style"
+            styleOpens = 4
+            model.toggle(.layers)
+        default:
+            break
+        }
+    }
+
     /// The vector layers plugin on, and a layer of its kind over the current one.
     private static func vectorLayer(_ model: CanvasModel) {
         _ = apply("Vector layers")
@@ -526,8 +631,124 @@ enum ScreenCapture {
         }
     }
 
+    /// `steps` run one after another a fifth of a second apart: strokes given all at once, with no
+    /// frame between them, aren't all taken.
+    private static func paced(_ steps: [() -> Void]) {
+        for (i, step) in steps.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2 * Double(i), execute: step)
+        }
+    }
+
+    /// A stroke through `points` (window pixels) at `pressure` for each.
+    private static func stroke(_ s: CanvasSession, _ points: [(Float, Float, Float)]) {
+        let samples = points.enumerated().map { k, p in
+            PenSample(x: p.0, y: p.1, pressure: p.2, tilt: 0, orientation: 0, timeMs: Double(k) * 8, roll: 0)
+        }
+        guard let first = samples.first, let last = samples.last else { return }
+        s.strokeBegin(pointer: .stylus, samples: [first])
+        s.strokeAdd(samples: Array(samples.dropFirst().dropLast()))
+        s.strokeEnd(samples: [last])
+    }
+
+    /// A wave across the canvas at `y`, the pressure swelling from light to full and back.
+    private static func wave(_ s: CanvasSession, y: Float) {
+        stroke(s, (0 ... 60).map { k in
+            let t = Float(k) / 60
+            return (300 + Float(k) * 28, y + 70 * sin(t * 2 * .pi), 0.25 + 0.75 * sin(t * .pi))
+        })
+    }
+
+    /// A straight line from `from` to `to` at full pressure.
+    private static func line(_ s: CanvasSession, _ from: (Float, Float), _ to: (Float, Float)) {
+        stroke(s, (0 ... 40).map { k in
+            let t = Float(k) / 40
+            return (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t, 1)
+        })
+    }
+
+    /// Ribbon brushes drawn on the canvas: a heart stamped, then as a ribbon, a star stretched
+    /// along and a leaf, each with the brush the paint tool has, changed only while drawn (the
+    /// studio's edit put back after).
+    private static func ribbons(_ model: CanvasModel) {
+        let s = model.session
+        s.setBrushSize(slider: 0.7)
+        s.setBrushOpacity(slider: 1)
+        // (shape, ribbon, its scale, colour)
+        let rows: [(UInt32, Float, Float, [Float])] = [
+            (37, 0, 0.5, [0.8, 0.2, 0.3]), (37, 1, 0.5, [0.8, 0.2, 0.3]),
+            (18, 1, 0.75, [0.95, 0.65, 0.1]), (8, 1, 0.5, [0.2, 0.6, 0.3]),
+        ]
+        paced(rows.enumerated().map { i, row in
+            {
+                _ = s.studioBegin()
+                _ = s.setStudioShippedSource(kind: .shape, index: row.0)
+                s.setStudioSetting(key: "ribbon", value: row.1)
+                s.setStudioSetting(key: "ribbon_scale", value: row.2)
+                s.setColor(r: row.3[0], g: row.3[1], b: row.3[2])
+                wave(s, y: 760 + Float(i) * 330)
+                s.studioEnd(keep: false)
+                model.refresh()
+            }
+        })
+    }
+
+    /// The light tool over bands of colour: brightened down one stripe, dimmed down another, its
+    /// panel open.
+    private static func lit(_ model: CanvasModel) {
+        let s = model.session
+        s.setBrushSize(slider: 0.9)
+        s.setBrushOpacity(slider: 1)
+        let bands: [[Float]] = [[0.8, 0.3, 0.2], [0.2, 0.45, 0.8], [0.3, 0.65, 0.3], [0.85, 0.7, 0.2]]
+        var steps: [() -> Void] = []
+        for (i, c) in bands.enumerated() {
+            for k in 0 ..< 3 {
+                let y = 720 + Float(i) * 340 + Float(k) * 80
+                steps.append {
+                    s.setColor(r: c[0], g: c[1], b: c[2])
+                    line(s, (250, y), (2100, y))
+                }
+            }
+        }
+        steps.append {
+            model.select(.light)
+            s.setBrushSize(slider: 0.9)
+            s.setBrushOpacity(slider: 1)
+            model.setLight(LightSettings(kind: .brighten, strength: 0.6))
+            line(s, (800, 640), (800, 2080))
+        }
+        steps.append {
+            model.setLight(LightSettings(kind: .dim, strength: 0.6))
+            line(s, (1500, 640), (1500, 2080))
+        }
+        steps.append {
+            model.refresh()
+            model.toggle(.brushes)
+        }
+        paced(steps)
+    }
+
     /// Opens what capture `name` shows, if it is one of these.
     private static func open(_ name: String, in model: CanvasModel) {
+        if ExportDebug.scenes.contains(name) {
+            ExportDebug.open(name, in: model)
+            return
+        }
+        if MediaDebug.scenes.contains(name) {
+            MediaDebug.open(name, in: model)
+            return
+        }
+        if TimelineLanesDebug.scenes.contains(name) {
+            TimelineLanesDebug.open(name, in: model)
+            return
+        }
+        if TimelineBigDebug.scenes.contains(name) {
+            TimelineBigDebug.open(name, in: model)
+            return
+        }
+        if TimelineGridDebug.scenes.contains(name) {
+            TimelineGridDebug.open(name, in: model)
+            return
+        }
         if let page = pages[name] {
             studio(model, page: page)
             return
@@ -617,6 +838,297 @@ enum ScreenCapture {
             model.animationAssist.frameOptionsOpen = name == "animation-frame"
             if name == "animation-colors" {
                 animationColors = true
+            }
+        case "studio-ribbon":
+            // the Shape page at its Ribbon section, the ribbon on (its preview drawn as one)
+            studioRow = "ribbon"
+            studio(model, page: 3) { studio, _ in
+                // a heart's shape to stretch: the round tip has none
+                studio.keepSource(.shape, pixels: Data(), shipped: 37)
+                studio.set("ribbon", 1)
+            }
+        case "ribbon":
+            ribbons(model)
+        case "light":
+            lit(model)
+        case "texture-packer":
+            // three drawings apart and a dot by one, packed, two of them chosen and one renamed
+            let s = model.session
+            s.setBrushSize(slider: 0.6)
+            s.setBrushOpacity(slider: 1)
+            var steps: [() -> Void] = []
+            let shapes: [((Float, Float), (Float, Float), [Float])] = [
+                ((400, 700), (900, 900), [0.85, 0.3, 0.2]),
+                ((1300, 650), (1300, 1200), [0.2, 0.45, 0.8]),
+                ((500, 1500), (1100, 1400), [0.3, 0.65, 0.3]),
+                ((1300, 560), (1302, 560), [0.2, 0.45, 0.8]),
+            ]
+            for (from, to, c) in shapes {
+                steps.append {
+                    s.setColor(r: c[0], g: c[1], b: c[2])
+                    line(s, from, to)
+                }
+            }
+            steps.append {
+                model.openTexturePacker()
+                guard let packer = model.texturePacker else { return }
+                packer.chosen = [0, 2]
+                packer.names[TexturePackerState.key(packer.boxes[0])] = "flag"
+                model.packerFocus(packer, 0)
+            }
+            paced(steps)
+        case "puppet", "puppet-bent":
+            // the Puppet Warp plugin on, a bar painted, Transform's Puppet over it; bent: two pins
+            // put at its ends and the far one taken down
+            let s = model.session
+            let plugins = PluginsModel.shared
+            if let puppet = plugins.plugins.first(where: { $0.id == "io.github.artcraftandroid.puppet-warp" }), !puppet.on {
+                plugins.setOn(puppet, true)
+            }
+            s.setBrushSize(slider: 0.9)
+            s.setBrushOpacity(slider: 1)
+            s.setColor(r: 0.2, g: 0.35, b: 0.8)
+            paced([
+                {
+                    line(s, (500, 900), (1700, 900))
+                    model.refresh()
+                },
+                {
+                    model.toggleTransform()
+                    model.transform.choose(.puppet)
+                },
+                {
+                    guard name == "puppet-bent" else { return }
+                    _ = s.transformPuppetTap(x: 560, y: 900)
+                    _ = s.transformPuppetTap(x: 1640, y: 900)
+                    s.transformGrab(handle: .pin(index: 1), x: 1640, y: 900)
+                    for k in 1 ... 10 {
+                        _ = s.transformDrag(x: 1640 - Float(k) * 20, y: 900 + Float(k) * 40)
+                    }
+                    if let box = s.transformRelease() {
+                        model.transform.moved(box)
+                    }
+                    model.refreshView()
+                },
+            ])
+        case "comic-panels", "comic-panels-cutting":
+            // the Comic Panels plugin on, its tool opened (the canvas made a page), cut down the
+            // middle and its left half across; cutting: a line being drawn across the right half
+            let plugins = PluginsModel.shared
+            if let comic = plugins.plugins.first(where: { $0.id == "io.github.artcraftandroid.comic-panels" }), !comic.on {
+                plugins.setOn(comic, true)
+            }
+            paced([
+                {
+                    guard let tool = PluginsModel.shared.tools.first else { return }
+                    model.openPluginTool(tool)
+                },
+                {
+                    // window points: the page fitted under the header, in the middle across
+                    let screen = UIScreen.main.bounds
+                    let mid = max(screen.width, screen.height) / 2
+                    let drag = { (a: CGPoint, b: CGPoint, up: Bool) in
+                        model.touchPluginTool(.down, at: a)
+                        model.touchPluginTool(.moved, at: b)
+                        if up {
+                            model.touchPluginTool(.up, at: b)
+                        }
+                    }
+                    drag(CGPoint(x: mid, y: 100), CGPoint(x: mid + 2, y: 1100), true)
+                    drag(CGPoint(x: 40, y: 500), CGPoint(x: mid - 20, y: 520), true)
+                    if name == "comic-panels-cutting" {
+                        drag(CGPoint(x: mid + 40, y: 700), CGPoint(x: mid + 600, y: 760), false)
+                    }
+                },
+            ])
+        case "hdr":
+            // brightened past white: the bands' middles glow on a screen with extended range
+            model.setLightLimit(3)
+            lit(model)
+        case "hdr-exposure":
+            // the bands lit, then Curves open on its exposure, a stop and a half up
+            lit(model)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                model.toggle(.brushes)
+                model.startAdjustment(.curves)
+                model.adjust {
+                    $0.adjustmentCurveChannel(channel: 4)
+                    $0.adjustmentExposure(k: 0, value: 1.5)
+                }
+            }
+        case "hdr-limit":
+            // the bands lifted two stops past white, then Curves open on its limit, held to white
+            lit(model)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                model.toggle(.brushes)
+                model.startAdjustment(.curves)
+                model.adjust {
+                    $0.adjustmentExposure(k: 0, value: 2)
+                    $0.adjustmentCurveChannel(channel: 5)
+                    $0.adjustmentLimit(k: 0, value: 0)
+                }
+            }
+        case "hdr-export-check":
+            // what only a run can show: the HDR HEIC, the OpenEXR and the HLG video made, as
+            // hdr-check.* in the exports folder, for a look from outside
+            lit(model)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                let session = model.session
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let dir = Sharing.exportsDir
+                    var said: [String] = []
+                    let heic = dir.appendingPathComponent("hdr-check.heic")
+                    do {
+                        let picture = try session.hdrPicture()
+                        if let data = HDRImage.heic(picture), (try? data.write(to: heic)) != nil {
+                            said.append("HEIC: \(data.count) bytes, brightest \(picture.brightest)")
+                        } else {
+                            said.append("HEIC: not encoded")
+                        }
+                    } catch {
+                        said.append("HEIC: \(error)")
+                    }
+                    let exr = dir.appendingPathComponent("hdr-check.exr")
+                    do {
+                        try session.exportExr(path: exr.path)
+                        said.append("EXR: made")
+                    } catch {
+                        said.append("EXR: \(error)")
+                    }
+                    // then as an animation: the picture, and an empty frame after it
+                    DispatchQueue.main.sync {
+                        model.animationAssist.setAssist(true, pages: false)
+                        model.addLayer()
+                    }
+                    let video = CanvasModel.exportAnimation(session, .hevc, AnimatedChoices(fps: 12))
+                    let moved = video.flatMap { url -> URL? in
+                        let to = dir.appendingPathComponent("hdr-check.mp4")
+                        try? FileManager.default.removeItem(at: to)
+                        return (try? FileManager.default.moveItem(at: url, to: to)) != nil ? to : nil
+                    }
+                    said.append(moved == nil ? "HLG: failed" : "HLG: made")
+                    let text = said.joined(separator: "\n")
+                    NSLog("HDR export check: %@", text)
+                    DispatchQueue.main.async { model.saying = ("HDR export check", text) }
+                }
+            }
+        case "hdr-colors":
+            // the colour panel's light above white: the paint lit two stops
+            lit(model)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                model.toggle(.brushes)
+                model.setColorStops(2)
+                colors(model, .value)
+            }
+        case "timeline-keys", "timeline-path":
+            guard let clip = timelineKeyed(model) else { break }
+            // its track's rows of keys out
+            if let track = model.timeline.clip(clip)?.0.id {
+                model.timeline.gridKeyTracks.insert(track)
+            }
+            if name == "timeline-path" {
+                // the last key bent: its handles show
+                model.timeline.bendPath(clip, at: 7)
+            }
+        case "timeline-matte":
+            // a broad black stroke below, a red layer above it masked by it (an alpha matte)
+            model.addLayer()
+            model.timeline.setOn(true)
+            let s = model.session
+            let tracks = s.timelineTracks()
+            guard tracks.count == 2, let below = tracks[0].clips.first, let above = tracks[1].clips.first else { break }
+            model.selectLayer(below.root)
+            s.setBrushSize(slider: 1)
+            s.setColor(r: 0, g: 0, b: 0)
+            let at = { (k: Int) in PenSample(x: 500 + Float(k) * 30, y: 900 + Float(k % 6) * 60, pressure: 1, tilt: 0, orientation: 0, timeMs: Double(k) * 8, roll: 0) }
+            s.strokeBegin(pointer: .stylus, samples: [at(0)])
+            s.strokeAdd(samples: (1 ... 30).map(at))
+            s.strokeEnd(samples: [])
+            s.setColor(r: 0.86, g: 0.16, b: 0.16)
+            _ = s.fillLayer(id: above.root)
+            _ = s.setTimelineClipMask(id: above.id, mask: .alpha)
+            model.refresh()
+            model.timeline.picked = above.id
+        case "timeline-group", "timeline-group-open":
+            // four drawings, the first two grouped and cycling
+            model.animationAssist.setAssist(true, pages: false)
+            for _ in 0 ..< 3 {
+                model.addLayer()
+            }
+            model.timeline.setOn(true)
+            let s = model.session
+            guard let track = s.timelineTracks().first(where: { $0.clips.count >= 2 }) else { break }
+            let group = s.groupTimelineClips(ids: [track.clips[0].id, track.clips[1].id])
+            _ = s.setTimelineClipDuration(id: group, duration: 6, push: true)
+            _ = s.setTimelineCycle(id: group, length: 2, continueAcross: false)
+            model.refresh()
+            // (open: its own tracks' rows out under it; else put away)
+            _ = s.setTimelineGroupFolded(id: group, folded: name != "timeline-group-open")
+            model.refresh()
+        case "timeline", "timeline-tracks":
+            model.animationAssist.setAssist(true, pages: false)
+            for _ in 0 ..< 3 {
+                model.addLayer()
+            }
+            model.timeline.setOn(true)
+            if name == "timeline-tracks" {
+                model.timeline.addTrack()
+            }
+        case "export-sheet", "export-frames":
+            // a ball bouncing across in four drawings, the low one held, and a second track's
+            // drawing over frames 2 and 3; then the sprite sheet screen, or both exports made
+            let s = model.session
+            model.animationAssist.setAssist(true, pages: false)
+            let line = { (x: Float, y: Float, r: Float) in
+                let at = { (k: Int) -> PenSample in
+                    let t = Float(k) / 24 * 2 * .pi
+                    return PenSample(x: x + r * cos(t), y: y + r * sin(t), pressure: 0.8, tilt: 0, orientation: 0, timeMs: Double(k) * 8, roll: 0)
+                }
+                s.strokeBegin(pointer: .stylus, samples: [at(0)])
+                s.strokeAdd(samples: (1 ... 24).map(at))
+                s.strokeEnd(samples: [])
+            }
+            s.setColor(r: 0.9, g: 0.2, b: 0.1)
+            for (i, y) in [Float(500), 900, 1300, 900].enumerated() {
+                if i > 0 {
+                    model.addLayer()
+                }
+                line(500 + Float(i) * 300, y, 120)
+            }
+            if let low = s.animationFrames().dropFirst(2).first {
+                s.setFrameHold(id: low, frames: 2)
+            }
+            model.timeline.setOn(true)
+            let track = s.addTimelineTrack()
+            _ = s.renameTimelineTrack(id: track, name: "Shadow")
+            s.setTimelineFrame(frame: 1)
+            let clip = s.addTimelineDrawing()
+            _ = s.setTimelineClipDuration(id: clip, duration: 2, push: false)
+            s.setColor(r: 0.2, g: 0.2, b: 0.3)
+            line(1100, 1500, 60)
+            s.setTimelineFrame(frame: 0)
+            _ = s.setName(name: "Bounce")
+            model.refresh()
+            // the Sprite Sheet and Harmony plugin on: its sprite sheet's screen, or each made
+            let plugins = PluginsModel.shared
+            if let exports = plugins.plugins.first(where: { $0.id == "io.github.artcraftandroid.frame-exports" }), !exports.on {
+                plugins.setOn(exports, true)
+            }
+            let shares = plugins.store.shares()
+            if name == "export-sheet" {
+                model.pluginShare = shares.first { $0.label == "Sprite Sheet" }
+            } else {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    var said: [String] = []
+                    for share in shares {
+                        if let done = CanvasModel.exportPluginShare(s, share) {
+                            said.append("\(share.label): \(done.1 ?? ""), \(done.0.map(\.lastPathComponent))")
+                        } else {
+                            said.append("\(share.label): failed")
+                        }
+                    }
+                    DispatchQueue.main.async { model.saying = ("Export check", said.joined(separator: "\n")) }
+                }
             }
         case "export-gif", "export-mp4":
             model.animationAssist.setAssist(true, pages: false)
@@ -761,6 +1273,16 @@ enum ScreenCapture {
             model.startAdjustment(.chromaticAberration)
         case "effect-perspective":
             model.startAdjustment(.perspectiveBlur)
+        case "effect-layer", "layers-adjustment", "layers-style",
+             "layers-style-color":
+            effects(name, model)
+        case "layers-vector-merge":
+            VectorMergeScene.show(model)
+        case _ where EffectsFixesScene.names.contains(name):
+            EffectsFixesScene.show(name, model)
+        case "adjustments-layer":
+            adjustAsLayer = true
+            model.toggle(.adjustments)
         case "transform":
             transform(model)
         case "transform-snapping":
@@ -889,8 +1411,38 @@ enum ScreenCapture {
         }
     }
 
-    static func start(open: @escaping (CanvasModel) -> Void) {
+    /// Shows a canvas in place of the one shown (for scenes that go from one canvas to another).
+    static var opener: ((CanvasModel?) -> Void)?
+
+    /// `-import PATH -then NAME`: what the artwork the file opens as shows once it is up: its
+    /// `layers`, the actions' `actions-share` or `actions-3d` tab, or (a model) its texture `flat`.
+    static func imported(_ model: CanvasModel) {
         let arguments = ProcessInfo.processInfo.arguments
+        guard let at = arguments.firstIndex(of: "-then"), at + 1 < arguments.count else { return }
+        let name = arguments[at + 1]
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            switch name {
+            case "layers":
+                model.toggle(.layers)
+            case "actions-share", "actions-3d":
+                model.actionsTab = name == "actions-share" ? 2 : 3
+                model.toggle(.actions)
+            case "flat":
+                model.scene.setFlat(true)
+            default:
+                break
+            }
+        }
+    }
+
+    static func start(open: @escaping (CanvasModel?) -> Void) {
+        opener = open
+        let arguments = ProcessInfo.processInfo.arguments
+        // `-import PATH`: the file brought in as one opened with the app is
+        if let at = arguments.firstIndex(of: "-import"), at + 1 < arguments.count {
+            let url = URL(fileURLWithPath: arguments[at + 1])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { GalleryModel.shared.importOpened(url) }
+        }
         guard let at = arguments.firstIndex(of: "-screen"), at + 1 < arguments.count else { return }
         let name = arguments[at + 1]
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
@@ -908,7 +1460,13 @@ enum ScreenCapture {
             let scale = scene.screen.scale
             let width = UInt32(max(bounds.width, bounds.height) * scale)
             let height = UInt32(min(bounds.width, bounds.height) * scale)
-            let model = CanvasModel(session: CanvasSession(width: width, height: height), dir: Gallery.store.newFolder(folder: nil))
+            let session = CanvasSession(width: width, height: height)
+            // an HDR canvas, its light above white shown in the screen's extended range
+            // (the light tool's scene too: the tool is an HDR canvas's only)
+            if name.hasPrefix("hdr") || name == "light" {
+                session.setNewHdr(hdr: true)
+            }
+            let model = CanvasModel(session: session, dir: Gallery.store.newFolder(folder: nil))
             open(model)
             switch name {
             case "brushes": model.toolPressed(.paint)

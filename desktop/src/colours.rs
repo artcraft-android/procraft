@@ -257,6 +257,8 @@ pub struct Colours {
     kept: Arc<KeptColours>,
     /// The palettes, kept by the shared core (the default one shows here).
     pub palettes: Arc<Palettes>,
+    /// Palettes isn't one of the modes: the Palettes plugin is off.
+    pub palettes_hidden: bool,
     pickers: Pickers,
     /// The mode shown.
     pub mode: Mode,
@@ -344,6 +346,7 @@ impl Default for Colours {
                 ColourHistory::open(crate::files::app_dir().join("colour-history.json").to_string_lossy().into_owned())
             },
             palettes: Palettes::open(crate::files::app_dir().join("palettes.json").to_string_lossy().into_owned()),
+            palettes_hidden: false,
             pickers: Pickers::default(),
             steps: false,
             before_shown: false,
@@ -690,7 +693,9 @@ impl Colours {
         // palette (34 and its rows) and the pickers tighter
         let short = screen.height() < SHORT_SCREEN;
         let shape = Shape::of(short, screen.height());
-        let has_palette = (self.palettes.default_palette() as usize) < self.palettes.list().len();
+        // the default palette's swatches while the Palettes plugin is on
+        let has_palette =
+            !self.palettes_hidden && (self.palettes.default_palette() as usize) < self.palettes.list().len();
         let history = *history_shown || !has_palette;
         let header = match self.mode {
             Mode::Harmony => HEADER_HEIGHT + 14.0,
@@ -903,7 +908,7 @@ impl Colours {
             }
             ui.set_clip_rect(clip);
             let tabs = Rect::from_min_max(pos2(body.left(), body.bottom() - 70.0), body.max);
-            if let Some(mode) = mode_tabs(ui, look, tabs, self.mode) {
+            if let Some(mode) = mode_tabs(ui, look, tabs, self.mode, self.palettes_hidden) {
                 self.mode = mode;
                 self.hex = None;
                 self.scrolled = 0.0;
@@ -2224,10 +2229,12 @@ pub(crate) const MODE_TABS: [(&icons::Icon, &str, Mode); 5] = [
 ];
 
 /// The mode tabs: Disc, Classic, Harmony, Value and Palettes.
-fn mode_tabs(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode) -> Option<Mode> {
-    let w = rect.width() / MODE_TABS.len() as f32;
+/// `palettes_hidden`: the Palettes plugin is off, and Palettes isn't one.
+fn mode_tabs(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode, palettes_hidden: bool) -> Option<Mode> {
+    let tabs: Vec<_> = MODE_TABS.into_iter().filter(|t| !palettes_hidden || t.2 != Mode::Palettes).collect();
+    let w = rect.width() / tabs.len() as f32;
     let mut chosen = None;
-    for (i, (icon, label, m)) in MODE_TABS.into_iter().enumerate() {
+    for (i, (icon, label, m)) in tabs.into_iter().enumerate() {
         let selected = m == mode;
         let tab = Rect::from_min_size(pos2(rect.left() + w * i as f32, rect.top()), vec2(w, rect.height()));
         if ui.interact(tab, ui.scope_id().with(("mode tab", i)), Sense::click()).clicked() {

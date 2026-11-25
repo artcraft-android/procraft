@@ -37,8 +37,10 @@ pub enum Format {
     ModelTiff,
     ModelTextures,
     ModelArtwork,
-    /// A plugin's artwork, its shapes kept.
+    /// A plugin's artwork, its shapes kept; or the artwork's vector layers, as shapes.
     Svg,
+    /// The artwork's vector layers as a page of shapes.
+    VectorPdf,
 }
 
 impl Format {
@@ -56,6 +58,7 @@ impl Format {
             Format::ModelObj => "OBJ",
             Format::ModelUsdz => "USDZ",
             Format::Svg => "SVG",
+            Format::VectorPdf => "PDF",
         }
     }
 
@@ -69,7 +72,7 @@ impl Format {
             Format::Procraft | Format::ModelArtwork => "procraft",
             Format::Package => "procreate",
             Format::Psd => "psd",
-            Format::Pdf | Format::LayersPdf => "pdf",
+            Format::Pdf | Format::LayersPdf | Format::VectorPdf => "pdf",
             Format::Png | Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelRender | Format::ModelTextures => {
                 "png"
             }
@@ -760,9 +763,15 @@ pub fn save(session: &Arc<CanvasSession>, ui: &mut Interface, ask: bool) {
     };
     let edits = session.edits();
     let time_lapse = ui.artwork_dir.as_deref().map(crate::timelapse::for_package);
+    let dir = ui.artwork_dir.clone();
     let (session, (done, saved)) = (Arc::clone(session), std::sync::mpsc::channel());
     write_meanwhile(true, move || {
-        let written = session.export_package(path.to_string_lossy().into_owned(), seed(), time_lapse);
+        let at = path.to_string_lossy().into_owned();
+        // a timeline goes too: the artwork's folder, whole
+        let written = match dir {
+            Some(dir) => session.export_artwork(dir, true, at, seed(), time_lapse),
+            None => session.export_package(at, seed(), time_lapse),
+        };
         let _ = done.send(written.map(|()| (path, edits)).map_err(|e| e.to_string()));
     });
     ui.saving = Some(saved);
@@ -867,7 +876,12 @@ pub fn export(
         let at = part.to_string_lossy().into_owned();
         match format {
             Format::ModelArtwork => session.export_model_artwork(artwork.unwrap_or_default(), at),
-            Format::Procraft | Format::Package => session.export_package(at, seed(), time_lapse),
+            // ours keeps a timeline too (the artwork's folder, whole); the other app's is the package
+            Format::Procraft => match artwork {
+                Some(dir) => session.export_artwork(dir, true, at, seed(), time_lapse),
+                None => session.export_package(at, seed(), time_lapse),
+            },
+            Format::Package => session.export_package(at, seed(), time_lapse),
             Format::Psd => session.export_psd(at),
             Format::Pdf => session.export_pdf(at, false, pdf_quality),
             Format::LayersPdf => session.export_pdf(at, true, pdf_quality),
@@ -880,9 +894,27 @@ pub fn export(
             Format::ModelRender => session.export_model_render(at, false),
             Format::ModelTiff => session.export_model_tiff(at),
             Format::Svg => session.export_svg(at),
+            Format::VectorPdf => session.export_vector_pdf(at),
             Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures => Ok(()),
         }?;
         Ok(vec![part])
+    });
+}
+
+/// The Texture Packer's `sprites`, each a PNG of its own, written into a folder the user picks, as
+/// [`export`] writes the layers' PNG files.
+pub fn export_sprites(
+    session: &Arc<CanvasSession>,
+    sprites: Vec<procraft_core::PackerSprite>,
+    card: &mut crate::export_card::ExportCard,
+) {
+    if card.busy() || sprites.is_empty() {
+        return;
+    }
+    let Some(dir) = dialog().set_title("Export sprites as PNG files").pick_folder() else { return };
+    let dir = dir.to_string_lossy().into_owned();
+    writing(session, card, "Can't export", move |session| {
+        Ok(session.texture_packer_export(dir, sprites)?.into_iter().map(PathBuf::from).collect())
     });
 }
 
@@ -1118,9 +1150,11 @@ pub fn write_artwork(
         return Err("There's no GPU device to draw it with.".to_owned());
     }
     match format {
-        Format::Procraft | Format::Package => {
-            s.export_package(path, seed(), Some(crate::timelapse::for_package(&a.dir)))
+        // ours keeps a timeline too (the folder as saved); the other app's is the package
+        Format::Procraft => {
+            s.export_artwork(a.dir.clone(), false, path, seed(), Some(crate::timelapse::for_package(&a.dir)))
         }
+        Format::Package => s.export_package(path, seed(), Some(crate::timelapse::for_package(&a.dir))),
         Format::Psd => s.export_psd(path),
         Format::Pdf | Format::LayersPdf => s.export_pdf(path, false, pdf_quality),
         Format::Tiff => s.export_tiff(path),

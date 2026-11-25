@@ -7,15 +7,20 @@
 
 use std::sync::Arc;
 
+use procraft_engine::filter::LIMIT_OFF;
 use procraft_engine::geom::Vec2;
 use procraft_engine::view::View;
 
 use crate::CanvasSession;
+use procraft_engine::document::{Document, LayerAdjustment, LayerId};
+
 use crate::adjust::{
     ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, MOTION_DRAG_PT, NoiseKind, PerspectiveKind,
     SwipeAdjustment,
 };
-use crate::adjust_menu::{Adjustment, adjustment_paintable, adjustment_pencil_amount};
+use crate::adjust_menu::{
+    Adjustment, adjustment_groups, adjustment_live, adjustment_paintable, adjustment_pencil_amount,
+};
 use crate::gradients::Gradients;
 
 /// Painted on, bloom starts smaller and burns more.
@@ -23,6 +28,25 @@ const PENCIL_BLOOM_SIZE: f32 = 0.335;
 const PENCIL_BLOOM_BURN: f32 = 0.57;
 /// How close (0..1) a curve's point may come to its neighbours.
 const CURVE_GAP: f32 = 0.01;
+
+/// Curves' channels: all, red, green, blue, its exposure and its limit.
+const CURVE_CHANNELS: usize = 6;
+
+/// Curves' exposure untouched: no stops, from the darkest, half soft.
+const NO_EXPOSURE: [f32; 3] = [0.0, 0.0, 0.5];
+
+/// Curves' limit untouched: none, its knee at 80%.
+const NO_LIMIT: [f32; 2] = [LIMIT_OFF, 0.8];
+
+/// Curves' limit kept to its ranges.
+fn limit_kept([peak, knee]: [f32; 2]) -> [f32; 2] {
+    [peak.clamp(0.0, LIMIT_OFF), knee.clamp(0.0, 0.95)]
+}
+
+/// Curves' exposure kept to its ranges.
+fn exposure_kept([stops, above, soft]: [f32; 3]) -> [f32; 3] {
+    [stops.clamp(-5.0, 5.0), above.clamp(0.0, 1.0), soft.clamp(0.0, 1.0)]
+}
 /// The clone source's ring (points from its centre), and how far off it a touch still takes it.
 pub const CLONE_PUCK_RADIUS: f32 = 30.0;
 pub(crate) const CLONE_PUCK_SLOP: f32 = 8.0;
@@ -66,10 +90,15 @@ pub struct AdjustShown {
     /// red, green and blue for each tone (0..1, 0.5 none).
     pub balance_tone: u32,
     pub balance: Vec<f32>,
-    /// Curves: the channel shown (0 all, 1 red, 2 green, 3 blue) and each channel's points as
-    /// x, y pairs (0..1).
+    /// Curves: the channel shown (0 all, 1 red, 2 green, 3 blue, 4 exposure) and each channel's
+    /// points as x, y pairs (0..1).
     pub curve_channel: u32,
     pub curves: Vec<Vec<f32>>,
+    /// Curves' exposure: its stops (−5..5), and the brightness it starts above and how softly
+    /// (0..1).
+    pub exposure: Vec<f32>,
+    /// Curves' limit: its peak (stops above white, 0..5; none from 6) and its knee (0..0.95).
+    pub limit: Vec<f32>,
     /// How many of the curves its panel offers: 4 (all, red, green, blue), or 5 with alpha last,
     /// for a filter layer's curves (interface 18).
     #[uniffi(default = 4)]
@@ -106,6 +135,75 @@ pub struct AdjustShown {
     pub changed: bool,
     /// A plugin's filter: its name, and its controls for one panel to draw.
     pub plugin: Option<crate::plugin_filter::PluginFilterShown>,
+    /// It is an adjustment layer's: it changes what is below that layer, and is never painted on.
+    pub on_layer: bool,
+}
+
+/// An adjustment layer open in the adjustment's panels: the layer, the document from before this
+/// time it was opened (to keep as one undo step, or go back to), and from when its values last
+/// started (undo and reset go back there); whether it was added just now, and whether it is shown
+/// doing nothing for a moment (Preview).
+pub(crate) struct LayerEdit {
+    pub(crate) layer: LayerId,
+    pub(crate) before: Document,
+    pub(crate) start: Document,
+    pub(crate) added: bool,
+    pub(crate) preview: bool,
+}
+
+/// An adjustment layer's settings as its file keeps them: the values its panels show.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct LayerSettings {
+    adjustment: String,
+    amount: f32,
+    hsb: Vec<f32>,
+    balance_tone: u32,
+    balance: Vec<f32>,
+    curve_channel: u32,
+    curves: Vec<Vec<f32>>,
+    exposure: Vec<f32>,
+    limit: Vec<f32>,
+    gradient: u32,
+    noise_kind: u32,
+    noise: Vec<f32>,
+    noise_multi: bool,
+    noise_added: bool,
+    bloom: Vec<f32>,
+    halftone_kind: u32,
+    chroma_kind: u32,
+    chroma: Vec<Vec<f32>>,
+    chroma_offset: [f32; 2],
+    glitch_kind: u32,
+    glitch: Vec<Vec<f32>>,
+    perspective_kind: u32,
+    perspective_origin: Option<[f32; 2]>,
+    perspective_arrow: f32,
+}
+
+/// The `i`th of `all`, or `or`.
+fn nth<T: Copy>(all: &[T], i: u32, or: T) -> T {
+    all.get(i as usize).copied().unwrap_or(or)
+}
+
+/// `values` into `into`, as many as both have, each finite one within `lo`..1.
+fn fill<const N: usize>(into: &mut [f32; N], values: &[f32], lo: f32) {
+    for (v, &x) in into.iter_mut().zip(values) {
+        if x.is_finite() {
+            *v = x.clamp(lo, 1.0);
+        }
+    }
+}
+
+/// The adjustment an adjustment layer's `settings` are for.
+pub(crate) fn adjustment_of(settings: &serde_json::Value) -> Option<Adjustment> {
+    let name = settings.get("adjustment")?.as_str()?;
+    adjustment_named(name)
+}
+
+/// The adjustment named `name` (as `{:?}` writes it).
+fn adjustment_named(name: &str) -> Option<Adjustment> {
+    adjustment_groups().into_iter().flatten().find(|a| format!("{a:?}") == name)
 }
 
 pub(crate) struct Adjusting {
@@ -119,6 +217,8 @@ pub(crate) struct Adjusting {
     curve_channel: usize,
     curves: [Vec<(f32, f32)>; CURVES],
     curve_channels: usize,
+    exposure: [f32; 3],
+    limit: [f32; 2],
     gradient: usize,
     gradients: Option<Arc<Gradients>>,
     noise_kind: NoiseKind,
@@ -154,6 +254,9 @@ pub(crate) struct Adjusting {
     perspective: Perspective,
     perspective_before: Vec<Perspective>,
     perspective_after: Vec<Perspective>,
+    /// The adjustment layer the adjustment open works on (kept through its undo and reset, which
+    /// open it again); none, the current layer.
+    layer: Option<LayerId>,
 }
 
 /// Perspective blur's puck: where it is (canvas pixels; none for the canvas's middle), and the way
@@ -183,6 +286,8 @@ impl Default for Adjusting {
             curve_channel: 0,
             curves: std::array::from_fn(|_| straight()),
             curve_channels: 4,
+            exposure: NO_EXPOSURE,
+            limit: NO_LIMIT,
             gradient: 0,
             gradients: None,
             noise_kind: NoiseKind::Clouds,
@@ -211,6 +316,7 @@ impl Default for Adjusting {
             perspective: Perspective::default(),
             perspective_before: Vec::new(),
             perspective_after: Vec::new(),
+            layer: None,
         }
     }
 }
@@ -345,7 +451,9 @@ impl Adjusting {
         match self.open {
             Some(Adjustment::Hsb) => self.hsb.iter().any(|&v| v != 0.5),
             Some(Adjustment::ColorBalance) => self.balance.iter().any(|&v| v != 0.5),
-            Some(Adjustment::Curves) => self.curves.iter().any(|c| *c != straight()),
+            Some(Adjustment::Curves) => {
+                self.curves.iter().any(|c| *c != straight()) || self.exposure[0] != 0.0 || self.limit[0] < LIMIT_OFF
+            }
             Some(Adjustment::GradientMap | Adjustment::Plugin) => true,
             Some(Adjustment::PerspectiveBlur) => self.amount > 0.0 || !self.perspective_before.is_empty(),
             _ => self.amount > 0.0,
@@ -363,6 +471,8 @@ impl Adjusting {
             balance: self.balance.to_vec(),
             curve_channel: self.curve_channel as u32,
             curves: self.curves.iter().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()).collect(),
+            exposure: self.exposure.to_vec(),
+            limit: self.limit.to_vec(),
             curve_channels: self.curve_channels as u32,
             gradient: self.gradient as u32,
             noise_kind: self.noise_kind,
@@ -387,7 +497,99 @@ impl Adjusting {
             perspective_puck: self.perspective_puck(view, middle),
             changed: self.changed(),
             plugin: None,
+            on_layer: false,
         }
+    }
+
+    /// Its values as an adjustment layer keeps them.
+    pub(crate) fn layer_settings(&self) -> serde_json::Value {
+        let settings = LayerSettings {
+            adjustment: self.open.map(|a| format!("{a:?}")).unwrap_or_default(),
+            amount: self.amount,
+            hsb: self.hsb.to_vec(),
+            balance_tone: self.balance_tone as u32,
+            balance: self.balance.to_vec(),
+            curve_channel: self.curve_channel as u32,
+            curves: self.curves.iter().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()).collect(),
+            exposure: self.exposure.to_vec(),
+            limit: self.limit.to_vec(),
+            gradient: self.gradient as u32,
+            noise_kind: self.noise_kind as u32,
+            noise: self.noise.to_vec(),
+            noise_multi: self.noise_multi,
+            noise_added: self.noise_added,
+            bloom: self.bloom.to_vec(),
+            halftone_kind: self.halftone_kind as u32,
+            chroma_kind: self.chroma_kind as u32,
+            chroma: self.chroma.iter().map(|c| c.to_vec()).collect(),
+            chroma_offset: [self.chroma_offset.0, self.chroma_offset.1],
+            glitch_kind: self.glitch_kind as u32,
+            glitch: self.glitch.to_vec(),
+            perspective_kind: self.perspective_kind as u32,
+            perspective_origin: self.perspective.origin.map(|o| [o.x, o.y]),
+            perspective_arrow: self.perspective.arrow,
+        };
+        serde_json::to_value(settings).unwrap_or_default()
+    }
+
+    /// Its values set from an adjustment layer's `settings`: the adjustment they are for, if any.
+    /// What they leave out stays as it is.
+    fn load_layer_settings(&mut self, settings: &serde_json::Value) -> Option<Adjustment> {
+        let s: LayerSettings = serde_json::from_value(settings.clone()).ok()?;
+        let adjustment = adjustment_named(&s.adjustment).filter(|a| adjustment_live(*a))?;
+        self.amount = if s.amount.is_finite() { s.amount.clamp(0.0, 1.0) } else { 0.0 };
+        fill(&mut self.hsb, &s.hsb, 0.0);
+        self.balance_tone = (s.balance_tone as usize).min(2);
+        fill(&mut self.balance, &s.balance, 0.0);
+        self.curve_channel = (s.curve_channel as usize).min(CURVE_CHANNELS - 1);
+        for (curve, points) in self.curves.iter_mut().zip(&s.curves) {
+            let pts: Vec<(f32, f32)> = points.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect();
+            if pts.len() >= 2 && pts.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+                *curve = pts;
+            }
+        }
+        // (a layer from before Curves had its exposure: none)
+        self.exposure = NO_EXPOSURE;
+        for (v, &x) in self.exposure.iter_mut().zip(&s.exposure) {
+            if x.is_finite() {
+                *v = x;
+            }
+        }
+        self.exposure = exposure_kept(self.exposure);
+        self.limit = NO_LIMIT;
+        for (v, &x) in self.limit.iter_mut().zip(&s.limit) {
+            if x.is_finite() {
+                *v = x;
+            }
+        }
+        self.limit = limit_kept(self.limit);
+        self.gradient = s.gradient as usize;
+        use {ChromaticKind as C, GlitchKind as G, HalftoneKind as H, NoiseKind as N};
+        self.noise_kind = nth(&[N::Clouds, N::Billows, N::Ridges], s.noise_kind, N::Clouds);
+        fill(&mut self.noise, &s.noise, 0.0);
+        self.noise_multi = s.noise_multi;
+        self.noise_added = s.noise_added;
+        fill(&mut self.bloom, &s.bloom, 0.0);
+        self.halftone_kind = nth(&[H::FullColor, H::ScreenPrint, H::Newspaper], s.halftone_kind, H::FullColor);
+        self.chroma_kind = nth(&[C::Perspective, C::Displace], s.chroma_kind, C::Perspective);
+        for (c, v) in self.chroma.iter_mut().zip(&s.chroma) {
+            fill(c, v, 0.0);
+        }
+        let [dx, dy] = s.chroma_offset;
+        self.chroma_offset = if dx.is_finite() && dy.is_finite() { (dx, dy) } else { (0.0, 0.0) };
+        self.glitch_kind = nth(&[G::Artifact, G::Wave, G::Signal, G::Diverge], s.glitch_kind, G::Artifact);
+        for (g, v) in self.glitch.iter_mut().zip(&s.glitch) {
+            if v.len() == g.len() && v.iter().all(|x| x.is_finite()) {
+                g.clone_from(v);
+            }
+        }
+        let p = [PerspectiveKind::Positional, PerspectiveKind::Directional];
+        self.perspective_kind = nth(&p, s.perspective_kind, PerspectiveKind::Positional);
+        self.perspective = Perspective {
+            origin: s.perspective_origin.filter(|o| o.iter().all(|v| v.is_finite())).map(|[x, y]| Vec2::new(x, y)),
+            arrow: if s.perspective_arrow.is_finite() { s.perspective_arrow } else { ARROW_UP },
+        };
+        Some(adjustment)
     }
 
     /// Perspective blur on the layer (not painted on): its puck and a point along its arrow in the
@@ -408,7 +610,7 @@ enum Redraw {
     Swipe(SwipeAdjustment, f32),
     Hsb([f32; 3]),
     Balance([f32; 9]),
-    Curves([Vec<f32>; CURVES]),
+    Curves([Vec<f32>; CURVES], [f32; 3], [f32; 2]),
     Gradient(Vec<f32>, f32),
     Noise(NoiseKind, f32, [f32; 3], bool, bool),
     Bloom(f32, [f32; 3]),
@@ -433,9 +635,11 @@ impl Adjusting {
             ),
             Some(Adjustment::Hsb) => Redraw::Hsb(self.hsb),
             Some(Adjustment::ColorBalance) => Redraw::Balance(self.balance),
-            Some(Adjustment::Curves) => {
-                Redraw::Curves(self.curves.clone().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()))
-            }
+            Some(Adjustment::Curves) => Redraw::Curves(
+                self.curves.clone().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()),
+                self.exposure,
+                self.limit,
+            ),
             Some(Adjustment::GradientMap) => {
                 let list = self.gradients.as_ref().map(|g| g.list()).unwrap_or_default();
                 match list.get(self.gradient) {
@@ -478,6 +682,19 @@ impl CanvasSession {
         if self.shared.lock().pencil {
             return None;
         }
+        // an adjustment layer: undo takes back what changed since its values last started; with
+        // nothing changed it is closed and the step made as any
+        if self.shared.lock().adjust_layer.is_some() {
+            if self.layer_changed() {
+                if !undo {
+                    return Some(None);
+                }
+                self.layer_back();
+                return Some(Some(crate::adjust_menu::adjustment_label(open)));
+            }
+            self.adjustment_end(true);
+            return None;
+        }
         // perspective blur's puck steps back (or on) a drag at a time
         if self.perspective_step(undo) {
             return Some(Some(crate::adjust_menu::adjustment_label(open)));
@@ -490,9 +707,9 @@ impl CanvasSession {
             return Some(Some(crate::adjust_menu::adjustment_label(open)));
         }
         let kept = self.adjusting(|a, _| (a.perspective_kind, a.perspective));
-        self.adjustment_end(false);
+        self.adjustment_close(false);
         let name = step(self);
-        self.adjustment_start(open);
+        self.adjustment_open(open);
         self.adjusting(|a, _| (a.perspective_kind, a.perspective) = kept);
         Some(name)
     }
@@ -507,9 +724,18 @@ impl CanvasSession {
     /// Opens the adjustment open again from nothing, or (`commit`) keeping what it did as one undo
     /// step. Perspective blur keeps its way, and committed, its puck and arrow.
     fn adjustment_again(&self, open: Adjustment, commit: bool) {
+        // an adjustment layer goes on open, kept as it is or back to where its values started
+        if self.shared.lock().adjust_layer.is_some() {
+            if commit {
+                self.layer_keep();
+            } else {
+                self.layer_back();
+            }
+            return;
+        }
         let (kind, puck) = self.adjusting(|a, _| (a.perspective_kind, a.perspective));
-        self.adjustment_end(commit);
-        self.adjustment_start(open);
+        self.adjustment_close(commit);
+        self.adjustment_open(open);
         self.adjusting(|a, _| {
             a.perspective_kind = kind;
             if commit {
@@ -527,7 +753,7 @@ impl CanvasSession {
     fn redraw_adjustment(&self, redraw: Redraw) {
         // a filter layer's editor sets the layer, not pixels
         let set = match &redraw {
-            Redraw::Curves(curves) => self.set_layer_curves(curves),
+            Redraw::Curves(curves, ..) => self.set_layer_curves(curves),
             Redraw::Gradient(stops, _) => self.set_layer_gradient(stops),
             _ => false,
         };
@@ -543,7 +769,9 @@ impl CanvasSession {
                 let tone = |k: usize| v.get(k * 3..k * 3 + 3).map(<[f32]>::to_vec).unwrap_or_default();
                 self.adjust_color_balance(tone(0), tone(1), tone(2));
             }
-            Redraw::Curves([all, red, green, blue, _]) => self.adjust_curves(all, red, green, blue),
+            Redraw::Curves([all, red, green, blue, _], exposure, limit) => {
+                self.adjust_curves(all, red, green, blue, exposure.to_vec(), limit.to_vec())
+            }
             Redraw::Gradient(stops, amount) => self.adjust_gradient_map(stops, amount),
             Redraw::Noise(kind, amount, [scale, octaves, turbulence], multi, added) => {
                 self.adjust_noise(kind, amount, scale, octaves, turbulence, multi, added);
@@ -584,12 +812,194 @@ impl CanvasSession {
     /// can't be adjusted. The amount starts at none (a gradient map's at all of it), HSB, colour
     /// balance and curves as they were; the other adjustments keep their settings.
     pub fn adjustment_start(&self, adjustment: Adjustment) -> bool {
+        // from the menu: on the current layer, not an adjustment layer open
+        if self.adjusting(|a, _| a.layer.is_some()) {
+            self.adjustment_end(true);
+        }
+        self.adjustment_open(adjustment)
+    }
+
+    /// Adds an adjustment layer of `adjustment` above the current layer and opens it, as the
+    /// adjustment opens on a layer; false when it can't be one (Liquify, Clone, a plugin's
+    /// filter), or the canvas has no room for another layer. Ended without keeping it, the layer
+    /// goes again.
+    pub fn adjustment_layer_add(&self, adjustment: Adjustment) -> bool {
+        if !adjustment_live(adjustment) || !self.shared.lock().doc.has_room(1) {
+            return false;
+        }
+        self.adjustment_end(true);
+        let id = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            st.finish_stroke();
+            st.settle();
+            let before = st.doc.clone();
+            let name = crate::adjust_menu::adjustment_label(adjustment);
+            // nothing changed until its values are set (sharpening by none)
+            let blank = LayerAdjustment {
+                filter: procraft_gpu::Filter::Sharpen { amount: 0.0 },
+                table: Vec::new(),
+                settings: serde_json::Value::Null,
+            };
+            let id = st.doc.add_adjustment_layer(name, blank);
+            st.adjust_layer = Some(LayerEdit { layer: id, start: st.doc.clone(), before, added: true, preview: false });
+            st.revision += 1;
+            id
+        };
+        // its values start as a new adjustment's do
+        let up = self.shared.lock().canvas_angle(ARROW_UP);
+        self.adjusting(|a, _| {
+            a.layer = Some(id);
+            a.hsb = [0.5; 3];
+            a.balance = [0.5; 9];
+            a.curves = std::array::from_fn(|_| straight());
+            a.exposure = NO_EXPOSURE;
+            a.limit = NO_LIMIT;
+            a.chroma_offset = (0.0, 0.0);
+            a.perspective_kind = PerspectiveKind::Positional;
+            a.perspective = Perspective { origin: None, arrow: up };
+            a.perspective_before.clear();
+            a.perspective_after.clear();
+        });
+        self.adjustment_open(adjustment)
+    }
+
+    /// Opens adjustment layer `layer`'s adjustment with its values as it keeps them, to change
+    /// them; the adjustment opened, or none when it isn't an adjustment layer (or is locked).
+    pub fn adjustment_layer_edit(&self, layer: u64) -> Option<Adjustment> {
+        let id = LayerId(layer);
+        let settings = {
+            let st = self.shared.lock();
+            let l = st.doc.layer(id).filter(|_| !st.doc.is_locked(id))?;
+            l.adjustment.as_ref()?.settings.clone()
+        };
+        self.adjustment_end(true);
+        let adjustment = self.adjusting(|a, _| {
+            let mut loaded = Adjusting { gradients: a.gradients.clone(), ..Adjusting::default() };
+            let adjustment = loaded.load_layer_settings(&settings)?;
+            *a = loaded;
+            Some(adjustment)
+        })?;
+        {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            st.finish_stroke();
+            st.settle();
+            st.doc.set_current(id);
+            let before = st.doc.clone();
+            st.adjust_layer =
+                Some(LayerEdit { layer: id, start: before.clone(), before, added: false, preview: false });
+            st.adjusting = true;
+            st.last_filter = st.doc.layer(id).and_then(|l| l.adjustment.as_ref()).map(|a| a.filter);
+            st.revision += 1;
+            self.shared.frame(st);
+        }
+        self.adjusting(|a, _| {
+            a.open = Some(adjustment);
+            a.layer = Some(id);
+        });
+        Some(adjustment)
+    }
+
+    /// Which adjustment layer `layer` is (none for any other layer).
+    pub fn layer_adjustment(&self, layer: u64) -> Option<Adjustment> {
+        let st = self.shared.lock();
+        adjustment_of(&st.doc.layer(LayerId(layer))?.adjustment.as_ref()?.settings)
+    }
+}
+
+impl CanvasSession {
+    /// Whether the adjustment layer open has changed since its values last started.
+    fn layer_changed(&self) -> bool {
+        let st = self.shared.lock();
+        st.adjust_layer.as_ref().is_some_and(|e| st.doc != e.start)
+    }
+
+    /// The adjustment layer open back to where its values last started, and its panel with it.
+    fn layer_back(&self) {
+        let settings = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let Some(edit) = st.adjust_layer.as_mut() else { return };
+            edit.preview = false;
+            let (start, id) = (edit.start.clone(), edit.layer);
+            st.doc = start;
+            if let Some(canvas) = st.canvas.as_mut() {
+                canvas.invalidate();
+            }
+            st.last_filter = st.doc.layer(id).and_then(|l| l.adjustment.as_ref()).map(|a| a.filter);
+            self.shared.frame(st);
+            st.doc.layer(id).and_then(|l| l.adjustment.as_ref()).map(|a| a.settings.clone())
+        };
+        self.adjusting(|a, _| {
+            let open = a.open;
+            if let Some(s) = &settings
+                && !s.is_null()
+            {
+                a.load_layer_settings(s);
+            } else {
+                // just added: as it opened
+                *a = Adjusting { gradients: a.gradients.clone(), layer: a.layer, open, ..Adjusting::default() };
+            }
+            a.touched = false;
+        });
+    }
+
+    /// The adjustment layer open kept as it is, as one undo step, and goes on open from there.
+    fn layer_keep(&self) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let Some(edit) = st.adjust_layer.as_mut() else { return };
+        if st.doc == edit.before {
+            return;
+        }
+        let before = std::mem::replace(&mut edit.before, st.doc.clone());
+        edit.start = st.doc.clone();
+        let added = std::mem::replace(&mut edit.added, false);
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.name_next_step(if added { "add adjustment layer" } else { "change adjustment layer" });
+            canvas.record_document(before);
+        }
+        st.revision += 1;
+        drop(guard);
+        self.adjusting(|a, _| a.touched = false);
+    }
+
+    /// Opens `adjustment` on what it works on: the adjustment layer open (as it was set), or the
+    /// current layer.
+    fn adjustment_open(&self, adjustment: Adjustment) -> bool {
+        if self.adjusting(|a, _| a.layer.is_some()) {
+            let open = self.shared.lock().adjust_layer.is_some();
+            if !open {
+                return false;
+            }
+            {
+                let mut st = self.shared.lock();
+                st.adjusting = true;
+            }
+            let redraw = self.adjusting(|a, _| {
+                a.open = Some(adjustment);
+                a.amount = if adjustment == Adjustment::GradientMap { 1.0 } else { 0.0 };
+                a.pencil = false;
+                a.preview = false;
+                a.touched = false;
+                a.redraw()
+            });
+            self.redraw_adjustment(redraw);
+            // its values as they start are where undo goes back to
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            if let Some(edit) = st.adjust_layer.as_mut() {
+                edit.start = st.doc.clone();
+            }
+            return true;
+        }
         // Liquify leaves an alpha locked layer alone; the others take one layer
         use crate::layers::Blocked;
         if matches!(self.why_not_adjusted(adjustment), Some(Blocked::AlphaLocked | Blocked::Group | Blocked::Several)) {
             return false;
         }
-        self.adjustment_end(true);
+        self.adjustment_close(true);
         // a filter layer's editor, again as it began (Reset, Undo, Apply)
         if matches!(adjustment, Adjustment::Curves | Adjustment::GradientMap) && self.filter_layer_editor_again() {
             return true;
@@ -619,6 +1029,8 @@ impl CanvasSession {
             a.balance = [0.5; 9];
             a.curves = std::array::from_fn(|_| straight());
             a.curve_channels = 4;
+            a.exposure = NO_EXPOSURE;
+            a.limit = NO_LIMIT;
             a.chroma_offset = (0.0, 0.0);
             a.liquified = false;
             a.touched = false;
@@ -642,10 +1054,12 @@ impl CanvasSession {
         }
         true
     }
+}
 
-    /// Ends the open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
-    /// Returns whether one was open.
-    pub fn adjustment_end(&self, commit: bool) -> bool {
+impl CanvasSession {
+    /// Ends the open adjustment as [`Self::adjustment_end`] does, keeping what it works on (an
+    /// adjustment layer) for it to open again.
+    fn adjustment_close(&self, commit: bool) -> bool {
         let open = self.adjusting(|a, _| {
             a.preview = false;
             a.pencil = false;
@@ -660,12 +1074,23 @@ impl CanvasSession {
         }
         open
     }
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// Ends the open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
+    /// Returns whether one was open.
+    pub fn adjustment_end(&self, commit: bool) -> bool {
+        let open = self.adjustment_close(commit);
+        self.adjusting(|a, _| a.layer = None);
+        open
+    }
 
     /// What the open adjustment shows.
     pub fn adjustment_shown(&self) -> AdjustShown {
         let st = self.shared.lock();
         let shown = st.adjust.shown(st.view, Vec2::new(st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0));
-        AdjustShown { plugin: st.filters.shown(), ..shown }
+        AdjustShown { plugin: st.filters.shown(), on_layer: st.adjust_layer.is_some(), ..shown }
     }
 
     /// The amount moved by `step` (a swipe's), within 0..1.
@@ -701,16 +1126,46 @@ impl CanvasSession {
         });
     }
 
-    /// Curves' channel shown: 0 all, 1 red, 2 green, 3 blue (4 alpha, on a filter layer).
+    /// Curves' channel shown: 0 all, 1 red, 2 green, 3 blue (4 alpha, on a filter layer); on an HDR
+    /// canvas's plain Curves 4 exposure and 5 limit (their sliders in place of a curve).
     pub fn adjustment_curve_channel(&self, channel: u32) {
-        self.adjusting(|a, _| a.curve_channel = (channel as usize).min(a.curve_channels.max(1) - 1));
+        self.adjusting(|a, _| a.curve_channel = (channel as usize).min(CURVE_CHANNELS - 1));
+    }
+
+    /// Curves' exposure slider `k` (0 its stops, −5..5; 1 the brightness it starts above, 2 how
+    /// softly, 0..1) moved to `value`.
+    pub fn adjustment_exposure(&self, k: u32, value: f32) {
+        self.change_adjustment(|a, _| {
+            if let Some(v) = a.exposure.get_mut(k as usize)
+                && value.is_finite()
+            {
+                *v = value;
+            }
+            a.exposure = exposure_kept(a.exposure);
+        });
+    }
+
+    /// Curves' limit slider `k` (0 its peak, stops above white, 0..5 and none from 6; 1 its knee,
+    /// 0..0.95) moved to `value`.
+    pub fn adjustment_limit(&self, k: u32, value: f32) {
+        self.change_adjustment(|a, _| {
+            if let Some(v) = a.limit.get_mut(k as usize)
+                && value.is_finite()
+            {
+                *v = value;
+            }
+            a.limit = limit_kept(a.limit);
+        });
     }
 
     /// Adds a point to the channel shown; returns its index.
     pub fn adjustment_curve_add(&self, x: f32, y: f32) -> u32 {
         let mut at = 0;
         self.change_adjustment(|a, _| {
-            let Some(points) = a.curves.get_mut(a.curve_channel) else { return };
+            // (Exposure and Limit, shown in place of a curve, have no points)
+            let Some(points) = a.curves.get_mut(a.curve_channel).filter(|_| a.curve_channel < a.curve_channels) else {
+                return;
+            };
             let p = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
             at = points.partition_point(|q| q.0 <= p.0);
             points.insert(at, p);
@@ -721,7 +1176,10 @@ impl CanvasSession {
     /// Moves point `index` of the channel shown to (`x`, `y`), kept between its neighbours.
     pub fn adjustment_curve_move(&self, index: u32, x: f32, y: f32) {
         self.change_adjustment(|a, _| {
-            let Some(points) = a.curves.get_mut(a.curve_channel) else { return };
+            // (Exposure and Limit, shown in place of a curve, have no points)
+            let Some(points) = a.curves.get_mut(a.curve_channel).filter(|_| a.curve_channel < a.curve_channels) else {
+                return;
+            };
             let i = index as usize;
             if i >= points.len() {
                 return;
@@ -737,7 +1195,8 @@ impl CanvasSession {
     /// Takes point `index` off the channel shown (a curve keeps two).
     pub fn adjustment_curve_delete(&self, index: u32) {
         self.change_adjustment(|a, _| {
-            if let Some(points) = a.curves.get_mut(a.curve_channel)
+            if a.curve_channel < a.curve_channels
+                && let Some(points) = a.curves.get_mut(a.curve_channel)
                 && points.len() > 2
                 && (index as usize) < points.len()
             {
@@ -844,10 +1303,18 @@ impl CanvasSession {
 
     /// Every value back to where the adjustment started.
     pub fn adjustment_reset(&self) {
-        if let Some(open) = self.adjusting(|a, _| a.open) {
-            self.adjustment_end(false);
-            self.adjustment_start(open);
+        let Some(open) = self.adjusting(|a, _| a.open) else { return };
+        // an adjustment layer: its values as a new one's
+        if self.shared.lock().adjust_layer.is_some() {
+            self.adjusting(|a, _| {
+                *a = Adjusting { gradients: a.gradients.clone(), layer: a.layer, ..Adjusting::default() };
+            });
+            self.adjustment_open(open);
+            self.adjusting(|a, _| a.touched = true);
+            return;
         }
+        self.adjustment_close(false);
+        self.adjustment_open(open);
     }
 
     /// Keeps what the adjustment did as one undo step and starts it again from there.
@@ -855,7 +1322,7 @@ impl CanvasSession {
         match self.adjusting(|a, _| a.open) {
             // it draws as it opens: opened again, it would go over what it did
             Some(Adjustment::Plugin) => {
-                self.adjustment_end(true);
+                self.adjustment_close(true);
             }
             Some(open) => self.adjustment_again(open, true),
             None => {}
@@ -872,14 +1339,25 @@ impl CanvasSession {
         if self.perspective_step(true) {
             return;
         }
+        // an adjustment layer: back to where its values started, or with nothing changed, closed and
+        // the last step undone
+        if self.shared.lock().adjust_layer.is_some() {
+            if self.layer_changed() {
+                self.layer_back();
+            } else {
+                self.adjustment_end(true);
+                self.undo();
+            }
+            return;
+        }
         if changed {
             self.adjustment_again(open, false);
             return;
         }
         let kept = self.adjusting(|a, _| (a.perspective_kind, a.perspective));
-        self.adjustment_end(false);
+        self.adjustment_close(false);
         self.undo();
-        self.adjustment_start(open);
+        self.adjustment_open(open);
         self.adjusting(|a, _| (a.perspective_kind, a.perspective) = kept);
     }
 
@@ -887,7 +1365,8 @@ impl CanvasSession {
     /// brush goes shows it; back to the layer starts it again.
     pub fn adjustment_pencil(&self, pencil: bool) {
         let Some((open, was)) = self.adjusting(|a, _| a.open.map(|o| (o, a.pencil))) else { return };
-        if pencil == was || !adjustment_paintable(open) {
+        // an adjustment layer shows through its mask instead
+        if pencil == was || !adjustment_paintable(open) || self.shared.lock().adjust_layer.is_some() {
             return;
         }
         if !pencil {
