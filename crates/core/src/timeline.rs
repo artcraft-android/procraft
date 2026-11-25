@@ -1188,6 +1188,18 @@ fn spec_of(e: &Easing) -> EasingSpec {
     }
 }
 
+impl EasingSpec {
+    /// The engine's easing this is.
+    pub fn easing(&self) -> Easing {
+        easing_of(self)
+    }
+
+    /// Easing `e` as the easing editor shows it.
+    pub fn of(e: &Easing) -> EasingSpec {
+        spec_of(e)
+    }
+}
+
 /// An easing of `kind` with its usual numbers, as the editor starts one.
 #[uniffi::export]
 pub fn default_easing(kind: EasingKind) -> EasingSpec {
