@@ -18,7 +18,7 @@ use procraft_core::{CanvasSession, TimelineClipKind, TimelineMask, TimelineTrack
 use super::grid::{BAR_GAP_ABOVE, Place, label_colour};
 use super::{TimelineGrid, grid_icons};
 use crate::icons::{self, Icon};
-use crate::look::{Look, Themed, Weight, argb, pc, text, text_width};
+use crate::look::{Look, Themed, Weight, argb, pc, text};
 
 /// A card's usual width, an empty frame's menu's, a block's, the cycle card's.
 pub(super) const CARD_WIDTH: f32 = 228.0;
@@ -51,7 +51,8 @@ const INK_BRIGHT: Themed = Themed(0xFFF2F2F2, 0xFF1C1C1C);
 const INK_DIM: Themed = Themed(0xFF757575, 0xFF8C8C8C);
 const RULE: Themed = Themed(0xB3474747, 0xB3C0C0C0);
 const KEY_FILL: Themed = Themed(0x1AF2F2F2, 0x1A1C1C1C);
-const DANGER: u32 = 0xFFFF453A;
+/// A row that takes something away.
+const DANGER: Color32 = Color32::from_rgb(0xFF, 0x45, 0x3A);
 
 /// The colours a track's name (or a block) is highlighted in (0xRRGGBB).
 pub(super) const HIGHLIGHTS: [(&str, u32); 8] = [
@@ -322,13 +323,10 @@ impl TimelineGrid {
             return;
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) && menu.renaming.is_none() {
-            let menu = self.menu.as_mut().expect("open");
-            if menu.sub.is_some() {
-                menu.sub = None;
-            } else if menu.beside.is_some() {
-                menu.set_beside(None);
-            } else {
-                self.close_menu();
+            match self.menu.as_mut() {
+                Some(m) if m.sub.is_some() => m.sub = None,
+                Some(m) if m.beside.is_some() => m.set_beside(None),
+                _ => self.close_menu(),
             }
             return;
         }
@@ -357,7 +355,7 @@ impl TimelineGrid {
             at += c.width + CARD_GAP;
         }
         let mut hits = Vec::new();
-        let menu = self.menu.as_mut().expect("open");
+        let Some(menu) = self.menu.as_mut() else { return };
         menu.scroll.resize(cards.len(), 0.0);
         for (i, (card, rect)) in cards.iter().zip(&rects).enumerate() {
             egui::Area::new(Id::unique(("timeline menu card", i))).fixed_pos(rect.min).order(Order::Foreground).show(
@@ -371,10 +369,9 @@ impl TimelineGrid {
         // the keyboard's digits on the keys beside it
         if let Some(Item::Keypad { key, most, .. }) =
             cards.iter().flat_map(|c| &c.items).find(|i| matches!(i, Item::Keypad { .. }))
+            && let Some(n) = hardware_keys(ctx, menu, *most)
         {
-            if let Some(n) = hardware_keys(ctx, menu, *most) {
-                hits.push(Hit::Keyed { key, n });
-            }
+            hits.push(Hit::Keyed { key, n });
         }
         self.cards = rects;
         for hit in hits {
@@ -1131,11 +1128,10 @@ fn draw_item(
             } else if *lit {
                 argb(pc::ACCENT)
             } else if *danger {
-                Color32::from_rgb(0xFF, 0x45, 0x3A)
+                DANGER
             } else {
                 argb(INK_BRIGHT)
             };
-            let _ = DANGER;
             let mut x = r.left() + 16.0;
             if let Some(icon) = icon {
                 look.icon_on(ui, painter, icon, pos2(x + 11.0, r.center().y), 20.0, ink);
@@ -1365,5 +1361,4 @@ fn keypad(
             }
         }
     }
-    let _ = text_width;
 }

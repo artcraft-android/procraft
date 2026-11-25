@@ -574,7 +574,7 @@ impl TimelineGrid {
             self.dragging(ui, session, place, at, now, dt);
         }
         if released || !down {
-            self.lifted(ui, session, place, at, now);
+            self.lifted(ui, session, place, now);
             self.motion.touch = Touch::None;
             self.motion.held_clip = None;
         }
@@ -614,7 +614,8 @@ impl TimelineGrid {
                 ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(hold - held_for));
             }
         };
-        match self.motion.touch {
+        let touch = self.motion.touch;
+        match touch {
             Touch::Undecided if far > TAP_SLOP => {
                 self.close_menu();
                 if self.selecting.is_some() {
@@ -675,17 +676,13 @@ impl TimelineGrid {
                     self.moved(session, place, at, self.motion.origin, dt);
                 }
             }
-            Touch::Move => {
-                if self.moved(session, place, at, self.motion.origin, dt) {
-                    ui.ctx().request_repaint();
-                }
-            }
+            Touch::Move if self.moved(session, place, at, self.motion.origin, dt) => ui.ctx().request_repaint(),
             _ => {}
         }
     }
 
-    /// The press let go at `at`.
-    fn lifted(&mut self, ui: &Ui, session: &CanvasSession, place: &Place, at: Pos2, now: f64) {
+    /// The press let go.
+    fn lifted(&mut self, ui: &Ui, session: &CanvasSession, place: &Place, now: f64) {
         let closing = self.motion.closing;
         match self.motion.touch {
             Touch::Undecided => {
@@ -741,7 +738,6 @@ impl TimelineGrid {
             Touch::Move => self.move_ended(session),
             _ => {}
         }
-        let _ = at;
         self.read_at = None;
     }
 
@@ -846,7 +842,7 @@ impl TimelineGrid {
         if self.playing.is_some() {
             return;
         }
-        let Some((t, c)) = self.clip_at(place, at) else {
+        let Some((_, c)) = self.clip_at(place, at) else {
             // an empty frame: its own menu
             if self.selecting.is_none()
                 && let Some((r, f)) = place.cell(at)
@@ -863,7 +859,6 @@ impl TimelineGrid {
             Some(chosen) if chosen.contains(&c.id) => self.open_menu(Kind::Picked, at.x),
             Some(_) => {}
             None => {
-                let _ = t;
                 let kind = if c.kind == TimelineClipKind::Drawing {
                     Kind::Frame { clip: c.id }
                 } else {
