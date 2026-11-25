@@ -243,6 +243,8 @@ pub struct Interface {
     shortcut_list: crate::shortcuts::Shortcuts,
     /// Animation Assist's bar, while it is on, and sharing the layers as an animation.
     animation: crate::animation::AnimationBar,
+    /// The timeline's grid, while the artwork is on a timeline.
+    pub timeline: crate::timeline::TimelineGrid,
     animated_export: Option<crate::animated_export::AnimatedExport>,
     /// The export screen just ended, kept a frame: its preview's textures were drawn in the frame
     /// it ended in, and a texture let go of is gone before that frame is.
@@ -368,6 +370,7 @@ impl Interface {
             licences: false,
             shortcut_list: Default::default(),
             animation: crate::animation::AnimationBar::default(),
+            timeline: crate::timeline::TimelineGrid::default(),
             animated_export: None,
             ended_export: None,
             sprite_sheet: Default::default(),
@@ -1272,8 +1275,12 @@ impl Interface {
             if let Some(crate::animation::Said::NoRoom) = said {
                 crate::files::no_room(session);
             }
+            if let Some(said) = self.timeline.show(&ctx, &mut self.look, session) {
+                self.overlays.notice(said, true);
+            }
         } else {
             self.animation.reset(session);
+            self.timeline.reset(session);
         }
         // the Eraser band: how the eraser works, while erasing on a vector layer with nothing else
         // in its place under the top bar
@@ -3335,6 +3342,7 @@ impl Interface {
             time_lapse_recorded: self.time_lapse.recorded(),
             reference: self.reference.on,
             guide: session.guide().on,
+            timeline: session.timeline_info().is_some(),
             side_bar: self.side_bar_shown,
             model: self.model,
             model_flat: self.model && session.model_flat(),
@@ -3399,6 +3407,15 @@ impl Interface {
                 } else {
                     session.set_animation_assist(!on);
                 }
+            }
+            Some(Act::Timeline) => {
+                self.animation.reset(session);
+                self.timeline.set_on(session, !crate::timeline::TimelineGrid::on(session));
+            }
+            // (the settings' card is the app's to open)
+            Some(Act::TimelineSettings) => {
+                self.open = None;
+                self.timeline.settings_asked = true;
             }
             Some(Act::Licences) => self.licences = true,
             Some(Act::Shortcuts) => {
@@ -5439,6 +5456,12 @@ mod tests {
         assert!(!w.ui.comic_panels.open);
         let after = w.paper();
         assert!((after.center() - fitted.center()).length() < 1.0, "{after:?} {fitted:?}");
+    }
+
+    /// The timeline grid's tests (kept beside it), with this window.
+    mod timeline_grid {
+        use super::*;
+        include!("timeline/tests.rs");
     }
 
     /// While the Texture Packer is open, nothing reaches the canvas: a pen stroke or a mouse drag

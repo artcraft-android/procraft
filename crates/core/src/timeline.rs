@@ -49,6 +49,9 @@ mod tests_picked;
 mod tests_playback;
 mod timing;
 
+/// The rows the panel reads, for the apps that name them in Rust (see the crate's re-exports).
+pub use groups_inline::{TimelineRepeat, TimelineRow};
+
 /// For the media tests, which trim a sound's start as any clip's.
 #[cfg(test)]
 pub(crate) use edits::TimelineEdgePolicy;
