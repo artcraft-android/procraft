@@ -1922,9 +1922,10 @@ static PLUGIN_SETS_KEEPING: std::sync::Mutex<Option<std::thread::JoinHandle<()>>
 /// the brushes opened or kept only then, so none reads or writes their files as they are half kept.
 /// (Never called holding the canvas's state or [`library_writes`], which the keeping takes.)
 pub(crate) fn plugin_sets_kept() {
-    let keeping = PLUGIN_SETS_KEEPING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-    if let Some(keeping) = keeping {
-        let _ = keeping.join();
+    let mut pending = PLUGIN_SETS_KEEPING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(writer) = pending.take() {
+        // Other callers opening the library must wait for this write too.
+        let _ = writer.join();
     }
 }
 
@@ -1947,7 +1948,6 @@ fn keep_meanwhile(session: &CanvasSession, keep: impl FnOnce(&CanvasSession) + S
     }) {
         Ok(started) => *keeping = Some(started),
         Err(e) => {
-            drop(keeping);
             log::warn!("the plugins' brushes kept on the calling thread: {e}");
             if let Some((before, keep)) = taken(work.as_ref()) {
                 if let Some(before) = before {
