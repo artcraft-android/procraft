@@ -336,7 +336,11 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             // a full-screen page covers the timeline, as it covers the canvas; the panels open over it
             val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.comicPanels.open || vm.timeLapseReplaying ||
                 vm.animatedExport != null || vm.modelAnimatedExport != null || vm.spriteSheetExport
-            if (!vm.barsHidden && !pageOver) AnimationBar(vm)
+            if (!vm.barsHidden && !pageOver) {
+                AnimationBar(vm)
+                // (on a timeline there is no Animation Assist: the core takes its frames over)
+                TimelineGridBar(vm)
+            }
             // the bottom toolbars rise from below the screen, and drop away
             FloatableBottom(
                 vm,

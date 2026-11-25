@@ -294,6 +294,24 @@ object PcIcons {
     }
     val ChevronRight by lazy { outline("chevron-right", 3f, "M9.5 6l6 6-6 6") }
     val ChevronLeft by lazy { outline("chevron-left", 3f, "M14.5 6l-6 6 6 6") }
+
+    // the timeline grid's header: a new track, and its settings (two sliders)
+    val GridTrack by lazy {
+        icon(
+            "grid-track",
+            Part("M6.2 5.4H17.8A2.3 2.3 0 0 1 17.8 10H6.2A2.3 2.3 0 0 1 6.2 5.4z", 0f, true),
+            Part("M6.4 13.9H17.6A2.2 2.2 0 0 1 17.6 18.3H6.4A2.2 2.2 0 0 1 6.4 13.9z", 1.8f, false),
+        )
+    }
+    val GridSettings by lazy {
+        icon(
+            "grid-settings",
+            Part("M4.5 8H9", 1.9f, false),
+            Part("M13.6 5.4H17.4A2.6 2.6 0 0 1 17.4 10.6H13.6A2.6 2.6 0 0 1 13.6 5.4z", 0f, true),
+            Part("M6.8 13.6H10.4A2.4 2.4 0 0 1 10.4 18.4H6.8A2.4 2.4 0 0 1 6.8 13.6z", 1.8f, false),
+            Part("M15 16H19.5", 1.9f, false),
+        )
+    }
     val Cross by lazy { outline("cross", 2.5f, "M6 6l12 12", "M18 6L6 18") }
 
     // the canvas information rail

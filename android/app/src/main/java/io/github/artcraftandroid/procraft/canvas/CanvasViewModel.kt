@@ -194,6 +194,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var session: CanvasSession? = null
         private set
 
+    /** The timeline at the bottom of the canvas while the artwork is on one (see TimelineTool.kt). */
+    val timeline = TimelineTool(this)
+
+    /** The timeline's settings asked for (Actions → Canvas → Timeline Settings, or the grid's header): their card shows while it is set. */
+    var timelineSettingsAsked by mutableStateOf(false)
+
     /** Frosted panels open over the canvas, for the engine to blur what is behind them. */
     val backdrops = io.github.artcraftandroid.procraft.ui.Backdrops { regions, windows -> session?.setGlass(regions, windows) }
 
@@ -10031,6 +10037,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (adjustment == null && !currentIsText()) currentTakesChanges(paint = true)
         refreshFlags()
         if (animation != null) refreshFrameThumbnails()
+        // on a timeline: a first stroke on an empty frame made a drawing there, and the drawing
+        // painted on has a new picture
+        if (timeline.on) timeline.strokeEnded()
         refreshReference()
         recordFrame()
         // the stroke's colour went into the history (painting with the brush, not an adjustment on)
@@ -10278,6 +10287,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopPlaying() {
+        timeline.stopPlaying()
         playJob?.cancel()
         playJob = null
         if (playingFrame != null) {
@@ -10721,6 +10731,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // an undo or a cut changes the panels Comic Panels outlines
         if (comicPanels.open) comicPanels.read(s)
         refreshAnimation()
+        timeline.refresh()
     }
 
     private fun refreshFlags() {
