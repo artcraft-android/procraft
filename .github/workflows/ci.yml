@@ -29,19 +29,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          targets: aarch64-apple-darwin, aarch64-apple-ios
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # the code only Apple's systems build (the Mac's pen, Finder, video, PDF and fonts; the iPad
-      # app's layer and render thread), checked without linking: no Mac needed
-      - name: Clippy for macOS and iPadOS
-        run: |
-          cargo clippy --target aarch64-apple-darwin -p procraft-desktop -- -D warnings
-          cargo clippy --target aarch64-apple-ios -p procraft-core --lib -- -D warnings
       # the GPU tests skip themselves: the runner has no GPU
       - run: cargo test --workspace
+
+  apple:
+    name: Clippy for macOS and iPadOS
+    if: ${{ !github.event.repository.private || github.event_name == 'workflow_dispatch' }}
+    # The Store's TLS dependency compiles native code with Apple's compiler and SDKs.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-darwin, aarch64-apple-ios
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy for macOS
+        run: cargo clippy --target aarch64-apple-darwin -p procraft-desktop -- -D warnings
+      - name: Clippy for iPadOS
+        run: cargo clippy --target aarch64-apple-ios -p procraft-core --lib -- -D warnings
 
   android:
     name: Android (clippy, lint, unit tests, release APK)

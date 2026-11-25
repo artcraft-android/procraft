@@ -307,11 +307,11 @@ impl Library {
                 self.renaming_library = Some((place, name, false));
             }
             "Share" => {
-                let name = libraries.iter().find(|l| l.current).map_or("Brushes", |l| l.name.as_str());
-                match session.brush_library_as_file() {
-                    Some(bytes) => crate::files::save_file(&bytes, name, "brushlibrary", "Brush library"),
-                    None => crate::files::say("This library has no brushes to share."),
-                }
+                let name = libraries
+                    .iter()
+                    .find(|library| library.current)
+                    .map_or_else(|| "Brushes".to_owned(), |library| library.name.clone());
+                self.store_package.share(crate::store_package::BrushShare::Library, name, None);
             }
             "Back to libraries" => self.showing_libraries = true,
             _ => {

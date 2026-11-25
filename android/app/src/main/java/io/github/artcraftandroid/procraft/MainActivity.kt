@@ -27,6 +27,7 @@ import io.github.artcraftandroid.procraft.canvas.penKeyButton
 import io.github.artcraftandroid.procraft.canvas.pointerKindOf
 import kotlinx.coroutines.launch
 import io.github.artcraftandroid.procraft.ui.AppRoot
+import io.github.artcraftandroid.procraft.ui.StoreSheet
 
 /** How long a finger's touch stays where it landed with tap assistance on. */
 private const val TAP_HOLD_MS = 300L
@@ -67,6 +68,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // the log's file first, so that what follows is in it
         AppLog.start(this)
+        io.github.artcraftandroid.procraft.store.registerStoreDecoder(applicationContext)
         // which graphics backend the app is trying, kept before the model (made at its first use
         // below) makes the GPU device: a driver that crashes the app then sends the next start to
         // the next backend (one that drew is trusted until the app or the system is updated); and
@@ -229,6 +231,15 @@ class MainActivity : ComponentActivity() {
      * field took). Ctrl and Meta are both the command key.
      */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        // the store's sheet is up over everything: the keys are the sheet's own, its own escape
+        // among them, and neither a pen's nor the canvas's shortcuts reach what is under it
+        if (StoreSheet.open) {
+            if (keyCode == android.view.KeyEvent.KEYCODE_ESCAPE) {
+                if (event.repeatCount == 0) StoreSheet.escape()
+                return true
+            }
+            return super.onKeyDown(keyCode, event)
+        }
         // a pen's double-tap that comes as a key of its own: as its first button, once for each
         if (keyCode == PEN_DOUBLE_TAP_KEY) {
             if (event.repeatCount == 0 && penDoubleTaps.isNew(event.eventTime)) vm.penKey(false, PenKeyAction.DOUBLE_TAPPED)
@@ -255,6 +266,8 @@ class MainActivity : ComponentActivity() {
     private fun typing() = currentFocus?.onCheckIsTextEditor() == true
 
     override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        // the sheet keeps the keys until it goes, as it does with the keys coming down
+        if (StoreSheet.open) return keyCode == android.view.KeyEvent.KEYCODE_ESCAPE || super.onKeyUp(keyCode, event)
         // a pen's side button that comes as a key, let go (held to erase, the eraser goes back)
         val penButton = event.device?.let { penKeyButton(keyCode, it.sources or event.source, it.keyboardType, it.name) }
         if (penButton != null && vm.penKey(penButton, PenKeyAction.LET_GO)) return true

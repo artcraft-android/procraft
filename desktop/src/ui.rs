@@ -143,6 +143,8 @@ pub struct Interface {
     drop: ColourDrop,
     library: Library,
     overlays: Overlays,
+    /// What the app had to say at length, in its own alert rather than a passing line.
+    said_alert: crate::alert::Alert,
     /// The Layers panel and the brush library floating in windows of their own.
     floating: crate::floating_panels::Floating,
     /// The interface's bars as Edit layout moves them (the core's), and whether it is on (their
@@ -188,6 +190,8 @@ pub struct Interface {
     gesture_controls: crate::gesture_controls::GestureControls,
     /// Canvas information, while it is open.
     canvas_info: Option<crate::canvas_info::CanvasInfo>,
+    /// The store's sheet, and the store it draws.
+    store: crate::store::StoreSheet,
     /// The reference window.
     reference: crate::reference::Reference,
     /// The Reference windows opened besides the artwork's own, while a plugin lets more be open.
@@ -299,6 +303,7 @@ impl Interface {
             drop: ColourDrop::default(),
             library: Library::default(),
             overlays: Overlays::default(),
+            said_alert: crate::alert::Alert::default(),
             floating: crate::floating_panels::Floating::kept(prefs.panel_layout.as_deref(), prefs.floating),
             bars: crate::edit_layout::kept_bars(prefs.bar_layout.as_deref()),
             named_layouts: {
@@ -329,6 +334,7 @@ impl Interface {
             gestures: procraft_core::GestureSettings::new(crate::files::kept_gestures()),
             gesture_controls: crate::gesture_controls::GestureControls::default(),
             canvas_info: None,
+            store: crate::store::StoreSheet::default(),
             reference: crate::reference::Reference::default(),
             more_references: Vec::new(),
             crop: crate::crop::Crop::default(),
@@ -380,6 +386,12 @@ impl Interface {
     }
 }
 
+/// Whether a message needs the app's alert rather than the passing line: a long one gets the room,
+/// and an OK to read it at its own pace.
+pub fn said_at_length(text: &str) -> bool {
+    text.chars().count() > 72
+}
+
 impl Interface {
     /// A Save As written meanwhile: its file kept as where the artwork saves, or why it couldn't
     /// be told. True while one is still being written.
@@ -391,7 +403,7 @@ impl Interface {
                 self.path = Some(path);
                 self.saved_edits = edits;
             }
-            Ok(Err(e)) => crate::files::tell("Can't save", &e),
+            Ok(Err(e)) => self.overlays.done(format!("Can't save: {e}"), true),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
         self.saving = None;
@@ -424,6 +436,18 @@ impl Interface {
                     .collect();
             }
             _ => {}
+        }
+    }
+
+    /// Says what the app was told while it ran, in its own passing message: a warning lasts longer.
+    /// A long one is said in the app's own alert, where the whole sentence fits, with an OK.
+    pub fn say_moment(&mut self, text: impl Into<String>, went_wrong: bool) {
+        let text = text.into();
+        if said_at_length(&text) {
+            let title = if went_wrong { "Something went wrong" } else { "ProCraft" };
+            self.said_alert.tell(title, &text, None);
+        } else {
+            self.overlays.done(text, went_wrong);
         }
     }
 
@@ -552,6 +576,12 @@ impl Interface {
         session.set_fit_insets(left, bar * scale, right, 0.0);
     }
 
+    /// The store's sheet is open over the work. The canvas still draws and animates under it, but
+    /// takes no input: no stroke, gesture, key or panel under the sheet is heard.
+    pub fn store_open(&self) -> bool {
+        self.store.open || self.library.store_package.open
+    }
+
     /// The app's fonts and look, set the first time anything shows.
     pub fn style_once(&mut self, ctx: &egui::Context) {
         if !self.styled {
@@ -575,12 +605,28 @@ impl Interface {
         // the library closed this frame lets go of what draws its strokes
         self.library.after_frame(session);
         let ctx = ui.ctx();
-        self.follow_held(ctx, session);
+        if !self.store_open() && !self.said_alert.is_open() {
+            self.follow_held(ctx, session);
+        }
         if !typing && escape_untaken(ctx) && self.canvas_shown() && input.idle() {
             session.settle_upright();
         }
         self.typing = ctx.memory(|m| m.focused().is_some());
         input.keys_taken = self.keys_taken();
+        // the store's sheet goes last of all, over the canvas as it is being drawn and over every
+        // bar, panel and popover: its scrim takes the presses that land on any of them
+        if self.store.open {
+            self.store.show(ctx, &mut self.look, session, &self.prefs.plugins);
+            if self.store.take_brushes_changed() {
+                self.library.library_changed();
+            }
+        }
+        if self.library.store_package.open {
+            self.library.store_package.show(ctx, &mut self.look, session);
+        }
+        if self.said_alert.is_open() {
+            self.said_alert.show(ctx, &mut self.look);
+        }
     }
 
     fn show_frame(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
@@ -627,7 +673,7 @@ impl Interface {
         // held), where the pointer is; one set to the eyedropper picks while it is held, where the
         // pen hovers, and lets go to take it; with the canvas out of sight they do nothing, then
         // or later: the tool would change unseen (and one held to erase is let go)
-        let covered = self.studio.open || self.time_lapse.replaying();
+        let covered = self.studio.open || self.time_lapse.replaying() || self.store_open();
         let presses = crate::pen::take_button_presses().map(|n| if covered { 0 } else { n });
         let held = crate::pen::buttons_held().map(|h| h && !covered);
         let purposes = [Trigger::PenDoubleTap, Trigger::PenSqueeze].map(|t| self.gestures.purpose_of(t));
@@ -713,6 +759,11 @@ impl Interface {
         if session.take_brushes_changed() {
             self.library.library_changed();
         }
+        // the store's own hooks (debug builds): a sheet opened, an install made, for a capture
+        #[cfg(debug_assertions)]
+        crate::store::shot_setup(&mut self.store);
+        #[cfg(debug_assertions)]
+        self.store.shot_install();
         if self.studio.open {
             self.canvas_rect = Rect::NOTHING;
             self.animation.reset(session);
@@ -730,7 +781,7 @@ impl Interface {
             self.canvas_rect = Rect::NOTHING;
             self.animation.reset(session);
             if let Some(said) = self.time_lapse.show(&ctx, &mut self.look, &session.name(), &self.prefs.plugins) {
-                crate::files::tell("Time-lapse", said);
+                self.overlays.done(said, true);
             }
             session.set_backdrops(Vec::new());
             self.popover_open = false;
@@ -744,7 +795,7 @@ impl Interface {
             if let Some(ended) = ended {
                 self.ended_export = self.animated_export.take();
                 if matches!(ended, crate::animated_export::Ended::Failed) {
-                    crate::files::tell("Share", "The animation could not be exported.");
+                    self.overlays.done("Share: the animation could not be exported.", true);
                 }
                 if std::mem::take(&mut self.exporting_from_gallery) {
                     self.actions.push(Action::Gallery);
@@ -1244,7 +1295,7 @@ impl Interface {
             }
         }
         if let Some(said) = self.time_lapse.show(&ctx, &mut self.look, &session.name(), &self.prefs.plugins) {
-            crate::files::tell("Time-lapse", said);
+            self.overlays.done(said, true);
         }
         self.touch_companion(&ctx, session);
         self.advanced_settings(&ctx, session);
@@ -2096,7 +2147,7 @@ impl Interface {
                         crate::files::no_room(session);
                     }
                 }
-                Inserted::Failed(what) => crate::files::tell("Can't insert it", what),
+                Inserted::Failed(what) => self.overlays.done(what, true),
             }
         }
         !self.inserting.is_empty()
@@ -3004,7 +3055,7 @@ impl Interface {
             self.floating.changed = true;
             return;
         }
-        if !modal {
+        if !modal && !self.store_open() && !self.said_alert.is_open() {
             self.close_outside(ctx, space.to_window.mul_rect(shown), on_window);
         }
     }
@@ -3311,7 +3362,7 @@ impl Interface {
                 self.actions.push(Action::PluginExport(i));
                 self.open = None;
             }
-            Some(Act::About) => crate::files::about(),
+            Some(Act::About) => self.overlays.done(format!("ProCraft version {}", env!("PROCRAFT_VERSION")), false),
             Some(Act::GestureControls) => {
                 self.open = None;
                 self.gesture_controls.open = true;
@@ -3325,6 +3376,10 @@ impl Interface {
             Some(Act::Crop) => {
                 self.open = None;
                 self.crop.begin(session);
+            }
+            Some(Act::Store) => {
+                self.open = None;
+                self.store.open();
             }
             Some(Act::CanvasInfo) => {
                 self.open = None;
@@ -3728,7 +3783,10 @@ impl Interface {
 
     /// A hex keypad, or text being edited, takes the keys (a text field's are egui's own).
     fn keys_taken(&self) -> bool {
-        self.text.editing()
+        // the store's sheet takes the keys while it shows (its search field, its Escape)
+        self.store_open()
+            || self.said_alert.is_open()
+            || self.text.editing()
             || ((self.open == Some(Popover::Colour)
                 || self.colours.floating.is_some()
                 || self.background_pick.is_some())
@@ -3739,6 +3797,8 @@ impl Interface {
     /// Nothing covers the canvas: no full-screen page or editor is open.
     fn canvas_shown(&self) -> bool {
         !(self.studio.open
+            || self.store_open()
+            || self.said_alert.is_open()
             || self.time_lapse.replaying()
             || self.animated_export.is_some()
             || self.lighting.open
@@ -4159,11 +4219,18 @@ fn piece_title(piece: procraft_core::LayoutPiece) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_message_goes_to_the_alert_when_it_needs_the_room() {
+        assert!(!said_at_length("Layer cleared"));
+        assert!(!said_at_length(&"a".repeat(72)));
+        assert!(said_at_length(&"a".repeat(73)));
+    }
+
     use egui::{Event, Pos2, RawInput, pos2};
     use winit::dpi::PhysicalPosition;
     use winit::event::{DeviceId, ElementState, Force, MouseButton, Touch, TouchPhase, WindowEvent};
-
-    use super::*;
 
     /// The interface over a canvas in a window (a pixel a point), its input handed on as the app's
     /// window hands it on: a touch to egui (the first one down its pointer as well, as egui-winit
@@ -4274,7 +4341,8 @@ mod tests {
         /// A window event to the canvas, which leaves what lands on the interface to it.
         fn canvas_hears(&mut self, event: &WindowEvent) {
             let canvas = self.ui.canvas_rect;
-            let blocked = (self.ui.popover_open && !self.ui.panel_lets_through) || self.ui.editing_layout;
+            let blocked =
+                (self.ui.popover_open && !self.ui.panel_lets_through) || self.ui.store_open() || self.ui.editing_layout;
             let ctx = &self.ctx;
             self.input
                 .on_event(&self.session, event, false, |p| blocked || crate::screen::on_interface(ctx, p, canvas));
@@ -4289,8 +4357,9 @@ mod tests {
                 Touch { device_id: DeviceId::dummy(), phase, location, force: Some(Force::Normalized(0.5)), id: PEN };
             let canvas = self.ui.canvas_rect;
             let ctx = &self.ctx;
-            for heard in self.touches.route(WindowEvent::Touch(touch), |p| crate::screen::on_interface(ctx, p, canvas))
-            {
+            for heard in self.touches.route(WindowEvent::Touch(touch), |p| {
+                self.ui.store_open() || crate::screen::on_interface(ctx, p, canvas)
+            }) {
                 if let WindowEvent::Touch(t) = heard {
                     self.egui_touch(&t);
                 }
@@ -4686,6 +4755,62 @@ mod tests {
         w.frame();
         assert_eq!(to_hex(w.ui.colours.rgb()), 0xFF0000);
         assert_eq!(w.steps(), (true, false));
+    }
+
+    /// The store's sheet draws over the work, not in place of it: the canvas keeps its place on the
+    /// screen, the sheet takes the keys, and nothing pressed or dragged on the canvas under it
+    /// reaches the work - which is still the same canvas, and paints again once the sheet goes.
+    #[test]
+    fn the_store_s_sheet_leaves_the_canvas_where_it_is_and_takes_its_presses() {
+        let Some(mut w) = Window::open(vec2(1200.0, 800.0), false) else { return };
+        w.draw_canvas();
+        w.frame();
+        let canvas = w.ui.canvas_rect;
+        let paper = w.paper();
+        let (from, to) = (paper.center() - vec2(80.0, 40.0), paper.center() + vec2(80.0, 40.0));
+        assert!(paper.contains(from) && paper.contains(to), "{from:?} {to:?} {paper:?}");
+        let edits = w.session.edits();
+        // the sheet shows over the work, as the store's does while it is open
+        w.ui.store.open = true;
+        assert_eq!(w.ui.canvas_rect, canvas, "the canvas is not taken off the screen");
+        assert!(!w.ui.canvas_shown() && w.ui.keys_taken(), "the sheet takes the keys");
+        // (no frame in between: the sheet here has no store of its own and would close)
+        w.pen(TouchPhase::Started, from);
+        w.pen(TouchPhase::Moved, to);
+        w.pen(TouchPhase::Ended, to);
+        assert_eq!(w.session.edits(), edits, "nothing is painted under the sheet");
+        // let go of the sheet: the same drag paints, on the canvas that was under it all along
+        w.ui.store.open = false;
+        w.pen_stroke(from, to, 8);
+        assert!(w.session.edits() > edits, "the canvas under the sheet paints once it goes");
+    }
+
+    #[test]
+    fn store_package_takes_the_keys_and_releases_a_click_inside_its_own_sheet() {
+        let Some(mut w) = Window::open(vec2(1200.0, 800.0), false) else { return };
+        w.ui.open = Some(Popover::Brushes);
+        w.frame();
+        w.ui.library.store_package.share(crate::store_package::BrushShare::Set(0, 0), "Test Brushes".to_owned(), None);
+        for _ in 0..3 {
+            w.frame();
+        }
+        assert!(w.ui.keys_taken(), "the format chooser blocks input");
+        w.click(pos2(550.0, 386.0));
+        for _ in 0..3 {
+            w.frame();
+        }
+        assert!(w.ui.keys_taken());
+        assert!(w.ui.store_open());
+        let in_sheet = pos2(520.0, 135.0);
+        w.hover(in_sheet);
+        w.mouse_button(in_sheet, true);
+        assert!(w.ui.library.store_package.open);
+        w.mouse_button(in_sheet, false);
+        assert!(w.ui.library.store_package.open);
+        assert_eq!(w.ui.open, Some(Popover::Brushes));
+        w.click(pos2(380.0, 115.0));
+        assert!(!w.ui.library.store_package.open, "Cancel receives the click after mouse-up");
+        assert!(!w.ui.keys_taken());
     }
 
     #[test]

@@ -31,7 +31,7 @@ png = { workspace = true }
 # what plugins hand the app to unpack (see plugin_commands.rs)
 miniz_oxide = { workspace = true }
 # the time-lapse's frames, kept as JPEG; a model's textures, PNG or JPEG
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 # text laid out and drawn alike in both apps: shaping, wrapping and glyphs, and the outline's stroke
 cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
 swash = "0.2"
@@ -44,6 +44,9 @@ uniffi = { version = "=0.32.2", default-features = false }
 # A patch's module, interpreted: no code is made at run time, which the iPad wouldn't allow. Portable
 # dispatch: the default's tail calls can overflow the stack on a long module, which ends the process.
 wasmi = { version = "2", default-features = false, features = ["std", "validate", "stable", "portable-dispatch"] }
+tempfile = "3"
+ring = "0.17"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = { version = "0.15", default-features = false }

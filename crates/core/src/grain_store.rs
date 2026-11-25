@@ -573,6 +573,34 @@ mod tests {
     }
 
     #[test]
+    fn the_store_decoder_keeps_a_brushs_large_tip_and_grain() {
+        use crate::studio::SourceKind::Shape;
+        let dir = tempfile::tempdir().unwrap();
+        let session = CanvasSession::new(64, 64);
+        session.save_brush_library_file(dir.path().join("library.json").to_string_lossy().into_owned());
+        let set = session.import_brushes(brush_file()).unwrap();
+        assert!(session.select_brush(set, 0));
+        session.studio_begin();
+        assert!(session.set_studio_source(Shape, fine(1024, 0)));
+        session.studio_end(true);
+        let original = imported(&session);
+        let primary_planes = |brush: &Brush| {
+            let grain = brush.grain_file_now().and_then(|file| file.full.as_ref()).unwrap();
+            let shape = &brush.shape_file_now().unwrap().full;
+            [(grain.id, grain.side), (shape.id, shape.side)]
+        };
+        let expected = primary_planes(&original);
+        let archive = session.brush_set_as_file(set).unwrap();
+        let reply = crate::store_decode::decode_bytes(crate::StoreDecodeKind::BrushSet, &archive).unwrap();
+        let (_, brushes) = crate::brush_library::read_decoded_store_set(reply).unwrap();
+        let brush = brushes.iter().find(|brush| brush.name == original.name).unwrap();
+        for grain in brush.full_grains() {
+            assert_eq!(grain.pixels.as_ref().map(|pixels| pixels.len()), Some((grain.side as usize).pow(2)));
+        }
+        assert_eq!(primary_planes(brush), expected);
+    }
+
+    #[test]
     fn a_shape_written_out_comes_back_at_its_own_size() {
         let dir = folder("written-shape");
         let s = CanvasSession::new(64, 64);

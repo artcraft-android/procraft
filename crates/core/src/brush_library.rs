@@ -29,6 +29,7 @@ pub(crate) struct LibrarySet {
     /// [`CanvasSession::give_plugin_sets`]): it comes and goes with the switch that set comes under.
     /// None for every other set, a copy of that one too.
     pub(crate) plugin: Option<String>,
+    pub(crate) store: Option<crate::Installed>,
 }
 
 /// How many set icons there are: the 42 to choose from, then the six shipped sets' own.
@@ -119,6 +120,7 @@ impl LibrarySet {
                 origins: whole(s, set).collect(),
                 icon: shipped_icon(set.name),
                 plugin: None,
+                store: None,
             })
             .collect();
         let ours: Vec<(usize, &BrushSet)> = SHELF.iter().filter_map(|&s| sets.get(s).map(|set| (s, set))).collect();
@@ -129,6 +131,7 @@ impl LibrarySet {
                 origins: ours.iter().flat_map(|&(s, set)| whole(s, set)).collect(),
                 icon: shipped_icon(LEGACY_SET),
                 plugin: None,
+                store: None,
             });
         }
         shelf
@@ -347,6 +350,8 @@ struct SavedSet {
     /// never in a set shared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plugin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    store: Option<crate::Installed>,
 }
 
 /// The sets kept in `json`, as many of them and of their brushes as can be read: in a damaged
@@ -592,7 +597,7 @@ pub(crate) fn read_library(
             let icon = set.icon_now();
             let origins = set.brushes.iter().map(|b| b.from).collect();
             let brushes = set.brushes.into_iter().map(|b| State::restored_from(&shipped, b, &pictures)).collect();
-            LibrarySet { name: set.name, brushes, origins, icon, plugin: set.plugin }
+            LibrarySet { name: set.name, brushes, origins, icon, plugin: set.plugin, store: set.store }
         })
         .collect();
     Some(library)
@@ -697,6 +702,117 @@ fn origin_in(shipped: &[BrushSet], origin: Option<(usize, usize)>) -> Brush {
     origin.and_then(|(s, i)| shipped.get(s).and_then(|set| set.brushes.get(i))).cloned().unwrap_or_else(blank_brush)
 }
 
+// The Store exchange uses the saved brush settings and raw pixels. Publisher-supplied preview and
+// author pictures are omitted here so another codec does not have to open them in the app.
+const STORE_BRUSH_SETTINGS: usize = 16 << 20;
+
+pub(crate) fn decode_store_set(input: std::fs::File, out: &mut impl std::io::Write) -> Result<(), String> {
+    use crate::store_decode::{write_blob, write_u32};
+    let (name, brushes) = crate::brush_files::decode_store_brush_set(input)?;
+    let name: String = name.chars().take(256).collect();
+    let write = (|| -> std::io::Result<()> {
+        write_blob(out, name.as_bytes())?;
+        write_u32(out, brushes.len() as u32)?;
+        for brush in brushes {
+            let mut saved = State::saved_against(&brush, None, &blank_brush(), Images::Whole, &[]);
+            clean_store_brush(&mut saved);
+            let text = serde_json::to_vec(&saved)?;
+            if text.len() > STORE_BRUSH_SETTINGS {
+                return Err(std::io::Error::other("A brush has too much decoded data."));
+            }
+            write_blob(out, &text)?;
+            let full = brush.full_grains();
+            let present: Vec<_> = full.into_iter().filter(|grain| grain.pixels.is_some()).collect();
+            write_u32(out, present.len() as u32)?;
+            for grain in present {
+                write_u32(out, grain.side)?;
+                out.write_all(grain.pixels.as_deref().ok_or_else(|| std::io::Error::other("Missing brush pixels."))?)?;
+            }
+        }
+        Ok(())
+    })();
+    write.map_err(|e| e.to_string())
+}
+
+fn clean_store_brush(saved: &mut SavedBrush) {
+    saved.from = None;
+    saved.thumbnail = None;
+    if let Some(author) = &mut saved.author {
+        author.picture = None;
+        author.signature = None;
+    }
+    if let Some(reset) = &mut saved.reset {
+        clean_store_brush(&mut reset.brush);
+    }
+    if let Some(secondary) = &mut saved.secondary {
+        clean_store_brush(secondary);
+    }
+}
+
+pub(crate) fn read_decoded_set_name(mut input: impl std::io::Read) -> Result<String, String> {
+    crate::store_decode::read_blob(&mut input, 1024)
+        .ok()
+        .and_then(|name| String::from_utf8(name).ok())
+        .ok_or_else(|| "The Store decoder returned an invalid brush set name.".to_owned())
+}
+
+pub(crate) fn read_decoded_store_set(mut input: impl std::io::Read) -> Result<(String, Vec<Brush>), String> {
+    use crate::store_decode::{end, read_blob, read_u32};
+    use procraft_engine::brush::FULL_GRAIN_MOST;
+    use procraft_engine::textures::TEXTURE_SIZE;
+    let bad = || "The Store decoder returned an invalid brush set.".to_owned();
+    let name = read_decoded_set_name(&mut input)?;
+    let count = read_u32(&mut input).map_err(|_| bad())? as usize;
+    if count == 0 || count > crate::brush_files::STORE_SET_ENTRIES {
+        return Err(bad());
+    }
+    let mut brushes = Vec::with_capacity(count);
+    let pictures = std::collections::HashMap::new();
+    for _ in 0..count {
+        let text = read_blob(&mut input, STORE_BRUSH_SETTINGS).map_err(|_| bad())?;
+        let mut saved = serde_json::from_slice(&text).map_err(|_| bad())?;
+        clean_store_brush(&mut saved);
+        let mut brush = State::restored_from(&[], saved, &pictures);
+        let planes = read_u32(&mut input).map_err(|_| bad())? as usize;
+        if planes > brush.full_grains().len() {
+            return Err(bad());
+        }
+        let mut full = std::collections::HashMap::new();
+        for _ in 0..planes {
+            let side = read_u32(&mut input).map_err(|_| bad())?;
+            if !(TEXTURE_SIZE + 1..=FULL_GRAIN_MOST).contains(&(side as usize)) || !side.is_power_of_two() {
+                return Err(bad());
+            }
+            let mut pixels = vec![0; (side * side) as usize];
+            input.read_exact(&mut pixels).map_err(|_| bad())?;
+            let grain = FullGrain::new(side, pixels).ok_or_else(bad)?;
+            full.insert((grain.id, side), grain);
+        }
+        restore_store_grains(&mut brush, &full).ok_or_else(bad)?;
+        brushes.push(brush);
+    }
+    end(&mut input).map_err(|_| bad())?;
+    Ok((name, brushes))
+}
+
+fn restore_store_grains(brush: &mut Brush, full: &std::collections::HashMap<(u64, u32), FullGrain>) -> Option<()> {
+    for grain in brush
+        .grain_file
+        .iter_mut()
+        .filter_map(|file| file.full.as_mut())
+        .chain(brush.shape_file.iter_mut().map(|file| &mut file.full))
+    {
+        *grain = full.get(&(grain.id, grain.side))?.clone();
+    }
+    if let Some(second) = &mut brush.secondary {
+        restore_store_grains(second, full)?;
+    }
+    if let Some(reset) = &mut brush.reset_point {
+        restore_store_grains(&mut reset.brush, full)?;
+    }
+    Some(())
+}
+
 impl State {
     /// What brush `origin` started as.
     pub(crate) fn origin_brush(&self, origin: Option<(usize, usize)>) -> Brush {
@@ -728,6 +844,7 @@ impl State {
                 icon: Some(set.icon),
                 icons: ICON_NUMBERING,
                 plugin: set.plugin.clone(),
+                store: set.store.clone(),
             })
             .collect()
     }
@@ -784,17 +901,17 @@ impl State {
     /// `brush` as kept, as changed from what it started as (`from`), its images put as `images`
     /// says.
     fn saved_brush(&self, brush: &Brush, from: Option<(usize, usize)>, images: Images<'_>) -> SavedBrush {
-        self.saved_against(brush, from, &self.origin_brush(from), images)
+        Self::saved_against(brush, from, &self.origin_brush(from), images, &self.shipped)
     }
 
     /// `brush` as kept, as changed from `base` (what it started as, `from`); a dual brush's second
     /// as changed from its origin's second, if that has one.
     fn saved_against(
-        &self,
         brush: &Brush,
         from: Option<(usize, usize)>,
         base: &Brush,
         images: Images<'_>,
+        shipped: &[BrushSet],
     ) -> SavedBrush {
         let kept = |c: &Curve, b: &Curve| -> Vec<[f32; 2]> {
             if c == b { Vec::new() } else { c.points().iter().map(|p| [p.x, p.y]).collect() }
@@ -845,10 +962,10 @@ impl State {
                 picture: text(&a.picture),
                 signature: text(&a.signature),
             }),
-            reset: brush
-                .reset_point
-                .as_ref()
-                .map(|r| SavedReset { made: r.made, brush: Box::new(self.saved_brush(&r.brush, from, images)) }),
+            reset: brush.reset_point.as_ref().map(|r| SavedReset {
+                made: r.made,
+                brush: Box::new(Self::saved_against(&r.brush, from, &origin_in(shipped, from), images, shipped)),
+            }),
             shape_stock: brush.stock.shape.as_ref().map(|s| (s.name.clone(), s.inverted)),
             grain_stock: brush.stock.grain.as_ref().map(|s| (s.name.clone(), s.inverted)),
             metallic_source: brush.metallic.source.as_ref().map(source),
@@ -859,7 +976,7 @@ impl State {
             roughness_stock: brush.stock.roughness.as_ref().map(|s| (s.name.clone(), s.inverted)),
             secondary: brush.secondary.as_ref().map(|s| {
                 let second = base.secondary.as_deref().cloned().unwrap_or_else(blank_brush);
-                Box::new(self.saved_against(s, None, &second, images))
+                Box::new(Self::saved_against(s, None, &second, images, shipped))
             }),
             engine: brush.engine.as_ref().map(|e| (e.engine.clone(), images.bytes(&e.data))),
         }
@@ -1108,6 +1225,7 @@ impl State {
             origins: Vec::new(),
             icon: shipped_icon(LEGACY_SET),
             plugin: None,
+            store: None,
         };
         // each place's new one, the folded set's by their place in it (usize::MAX for the set)
         let mut moves: std::collections::HashMap<(usize, usize), (usize, usize)> = std::collections::HashMap::new();
@@ -1563,6 +1681,7 @@ impl CanvasSession {
                 origins: Vec::new(),
                 icon: BRUSH_ICON,
                 plugin: None,
+                store: None,
             },
         );
         st.move_brush_refs(|(s, i)| Some((s + 1, i)));
@@ -1782,11 +1901,13 @@ impl CanvasSession {
             } else if given.contains(&id) {
                 // given before sets were marked as a plugin's (an earlier version): its set is the
                 // one of its name, if the library still has it; none, it was deleted and stays so
-                changed |= self.mark_plugin_set(&id, &set);
+                if let Some(name) = set.name() {
+                    changed |= self.mark_plugin_set(&id, &name);
+                }
                 continue;
             }
             // one that can't be read never will be: written down all the same
-            match self.import_brushes(set.to_vec()) {
+            match set.add_to(self) {
                 Some(at) => {
                     if let Some(set) = self.shared.lock().library.get_mut(at as usize) {
                         set.plugin = Some(id.clone());
@@ -1902,11 +2023,7 @@ impl CanvasSession {
 
     /// The set of the name of plugin `id`'s (its file `set`) marked as that plugin's, if the library
     /// has one not marked as anyone's: one it gave before sets were marked. False if none was.
-    fn mark_plugin_set(&self, id: &str, set: &[u8]) -> bool {
-        let Some((name, _)) = procraft_engine::zip::ZipReader::new(set).and_then(|zip| brushfile::set_folders(&zip))
-        else {
-            return false;
-        };
+    fn mark_plugin_set(&self, id: &str, name: &str) -> bool {
         let mut st = self.shared.lock();
         let Some(found) = st.library.iter_mut().find(|s| s.plugin.is_none() && s.name == name) else { return false };
         found.plugin = Some(id.to_owned());
@@ -2227,8 +2344,14 @@ impl CanvasSession {
         let had = |library: &[LibrarySet], s: usize| {
             library.iter().any(|l| l.origins.iter().flatten().any(|&(from, _)| from == s))
         };
-        let mut late =
-            LibrarySet { name: LEGACY_SET.to_owned(), brushes: Vec::new(), origins: Vec::new(), icon: 0, plugin: None };
+        let mut late = LibrarySet {
+            name: LEGACY_SET.to_owned(),
+            brushes: Vec::new(),
+            origins: Vec::new(),
+            icon: 0,
+            plugin: None,
+            store: None,
+        };
         let mut new = Vec::new();
         for set in LibrarySet::shipped(&st.shipped) {
             let Some((first, _)) = set.origins.first().copied().flatten() else { continue };
@@ -2351,6 +2474,7 @@ impl CanvasSession {
                 icon: Some(entry.icon),
                 icons: ICON_NUMBERING,
                 plugin: None,
+                store: None,
             },
         })
         .ok()
@@ -2376,6 +2500,7 @@ impl CanvasSession {
             origins: entry.origins.clone(),
             icon: entry.icon,
             plugin: None,
+            store: None,
         };
         st.library.insert(s, copy);
         st.move_brush_refs(|(rs, ri)| Some(if rs >= s { (rs + 1, ri) } else { (rs, ri) }));
@@ -2391,7 +2516,7 @@ impl CanvasSession {
             let origins = saved.set.brushes.iter().map(|b| b.from).collect();
             let brushes = saved.set.brushes.into_iter().map(|b| st.restored(b)).collect();
             let name = if saved.set.name.trim().is_empty() { "Untitled Set".to_owned() } else { saved.set.name };
-            st.library.insert(0, LibrarySet { name, brushes, origins, icon, plugin: None });
+            st.library.insert(0, LibrarySet { name, brushes, origins, icon, plugin: None, store: None });
             st.move_brush_refs(|(rs, ri)| Some((rs + 1, ri)));
             return Some(0);
         }

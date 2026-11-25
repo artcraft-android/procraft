@@ -11,8 +11,12 @@ pub(crate) fn sample(x: f32, y: f32, t: f64) -> PenSample {
 
 /// A session on a headless GPU with a `window` × `window` "screen", or `None` without a GPU.
 pub(crate) fn session(canvas: u32, window: u32) -> Option<std::sync::Arc<CanvasSession>> {
+    Some(session_on(headless_gpu()?, canvas, window))
+}
+
+fn headless_gpu() -> Option<Gpu> {
     match Gpu::headless() {
-        Ok(gpu) => Some(session_on(gpu, canvas, window)),
+        Ok(gpu) => Some(gpu),
         Err(e) => {
             eprintln!("skipped: {e}");
             None
@@ -24164,6 +24168,7 @@ fn paint_laid_in_place_laid_again_as_it_ends_goes_back_to_a_mark_and_ends_as_lai
 #[test]
 fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_again() {
     let side = 512;
+    let Some(gpu) = headless_gpu() else { return };
     let point = |k: usize| PenSample {
         pressure: 0.4 + 0.5 * (k as f32 * 0.06).sin().abs(),
         tilt: 0.4,
@@ -24175,7 +24180,7 @@ fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_ag
         // the layer, the dispatches at its end, and whether it held its start: ended as it ends, laid
         // again from scratch (no marks to go back to), or all of it laid again whole
         let ended = |rewinds: bool, whole: bool| -> Option<(Vec<u8>, u64, bool)> {
-            let s = session(side, side)?;
+            let s = session_on(gpu.clone(), side, side);
             let (set, index) = library_brush(&s, |b| b.name == name && timed(b))?;
             assert!(s.select_brush(set, index));
             s.set_brush_size(0.3);
@@ -24238,6 +24243,7 @@ const TIMED_START_WET: [&str; 5] = ["Lundy", "Kingsley", "Dunlin", "Copperwing",
 #[test]
 fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_its_own() {
     let side = 512;
+    let Some(gpu) = headless_gpu() else { return };
     let point = |k: usize| PenSample {
         pressure: 0.3 + 0.6 * (k as f32 * 0.05).sin().abs(),
         tilt: 0.4,
@@ -24250,7 +24256,7 @@ fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_it
     for (name, size) in brushes {
         // the picture every tenth event, the layer as it ends, and the windows laid while drawn
         let drawn = |joined: bool| -> Option<(Vec<Vec<u8>>, Vec<u8>, u64)> {
-            let s = session(side, side)?;
+            let s = session_on(gpu.clone(), side, side);
             let (set, index) = library_brush(&s, |b| b.name == name && b.secondary.is_some())?;
             assert!(s.select_brush(set, index));
             s.set_brush_size(size);
@@ -24413,6 +24419,7 @@ fn a_wet_dual_brushs_stroke_gone_back_to_a_mark_ends_as_with_its_second_put_toge
 #[test]
 fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
     let side = 1024;
+    let Some(gpu) = headless_gpu() else { return };
     let point = |k: usize| PenSample {
         pressure: 0.5 + 0.3 * (k as f32 * 0.05).sin(),
         ..sample(40.0 + k as f32 * 2.0, 512.0 + (k as f32 * 0.02).sin() * 400.0, k as f64 * 4.17)
@@ -24421,7 +24428,7 @@ fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
         // the layer, the most the canvas held past what it held before, the side of its tiles, and
         // whether it is on OpenGL
         let drawn = |tiles: Option<u32>| -> Option<(Vec<u8>, u64, u32, bool)> {
-            let s = session(side, side)?;
+            let s = session_on(gpu.clone(), side, side);
             let (set, index) = library_brush(&s, |b| b.name == name)?;
             assert!(s.select_brush(set, index));
             s.set_brush_size(size);
@@ -25336,4 +25343,68 @@ fn time_lapse_hold_back_to_back() {
     assert!(run.in_order, "frames out of order");
     assert!(run.last_all, "a stroke missing from the last frame");
     assert!(run.kept as usize >= run.strokes, "{} frames for {} strokes", run.kept, run.strokes);
+}
+
+/// The store previews real items make, saved as PNGs in `PROCRAFT_DUMP`: a brush set's as the
+/// package sheet draws it (read into a session on a headless GPU), an asset pack's as it is laid
+/// out from the pictures in the archive (no GPU). `BRUSH_SET` and `ASSET_SET` take a `;` separated
+/// list of files each. `PROCRAFT_COVER_CATALOG=1` also saves every offered template.
+/// `BRUSH_SET=a.brushset ASSET_SET=b.assetset PROCRAFT_DUMP=dir cargo test -p procraft-core
+/// dump_store_previews -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn dump_store_previews() {
+    let Ok(root) = std::env::var("PROCRAFT_DUMP") else { return };
+    let _ = std::fs::create_dir_all(&root);
+    let paths = |key: &str| -> Vec<std::path::PathBuf> {
+        std::env::var(key)
+            .unwrap_or_default()
+            .split(';')
+            .filter(|path| !path.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .collect()
+    };
+    let stem = |path: &std::path::Path| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let save = |name: &str, preview: crate::StorePreview| {
+        let png = crate::project::png_of(preview.width, preview.height, &preview.rgba).unwrap();
+        std::fs::write(root.clone() + "/" + name + ".png", png).unwrap();
+    };
+    let catalog = std::env::var_os("PROCRAFT_COVER_CATALOG").is_some();
+    let covers = |cover: &crate::StoreCover, name: &str, label: &str| {
+        eprintln!("{label}: Auto = {:?}, {} templates", cover.recommended(), cover.templates().len());
+        save(label, cover.render(None, Some(name)));
+        save(&format!("{label}-untitled"), cover.render(None, None));
+        if catalog {
+            for template in cover.templates() {
+                for (suffix, title) in [("title", Some(name)), ("art", None)] {
+                    save(&format!("{label}--{}--{suffix}", template.name()), cover.render(Some(template), title));
+                }
+            }
+        }
+    };
+    for path in paths("BRUSH_SET") {
+        let s = session(100, 100).expect("dumping real brush covers requires a headless GPU");
+        let label = stem(&path);
+        let set = s.import_brushes(std::fs::read(&path).unwrap()).unwrap();
+        let started = std::time::Instant::now();
+        let library = s.brush_library();
+        let imported = &library[set as usize];
+        let name = &imported.name;
+        let cover = s.brush_set_store_cover(0, set, name).unwrap();
+        eprintln!("{label}: brush probes drawn in {:?}", started.elapsed());
+        covers(&cover, name, &label);
+        let previews = s.brush_set_store_specimens(0, set, name);
+        eprintln!("{label}: {} brushes, {} specimen pages", imported.brushes.len(), previews.len());
+        for (at, preview) in previews.into_iter().enumerate() {
+            save(&format!("{label}-strokes-{}", at + 1), preview);
+        }
+    }
+    for path in paths("ASSET_SET") {
+        let label = stem(&path);
+        let name = crate::asset_pack_name(path.to_string_lossy().into_owned()).unwrap();
+        let started = std::time::Instant::now();
+        let cover = crate::asset_pack_store_cover(&path).unwrap();
+        eprintln!("{label}: pack scans prepared in {:?}", started.elapsed());
+        covers(&cover, &name, &label);
+    }
 }

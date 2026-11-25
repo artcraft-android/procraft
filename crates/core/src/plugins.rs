@@ -1017,6 +1017,7 @@ impl Listed {
 #[derive(Debug, uniffi::Object)]
 pub struct Plugins {
     list: Mutex<Listed>,
+    install_gate: Mutex<()>,
     /// The folder imported plugins are kept in, `<id>/<version>/` each. None: none can be.
     store: Option<PathBuf>,
     /// The plugins that are on, running.
@@ -1030,6 +1031,12 @@ pub struct Plugins {
     controls_set: Mutex<Vec<PluginControl>>,
     /// The folders plugins name, and the work for them (interface 22).
     folders: Arc<crate::folders::Folders>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StorePluginState {
+    pub version: String,
+    pub permissions: Vec<crate::plugin_commands::PluginPermission>,
 }
 
 /// A plugin's panel open: whose, what it shows, and the copy of its code its touches go to (under a
@@ -1104,6 +1111,7 @@ impl Plugins {
         let hooks = Arc::new(Hooks::kept_in(store.clone()));
         Arc::new_cyclic(|me| Plugins {
             list: Mutex::new(list),
+            install_gate: Mutex::new(()),
             folders: crate::folders::Folders::new(me.clone(), Arc::clone(&hooks)),
             hooks,
             store,
@@ -1578,7 +1586,7 @@ impl Plugins {
     /// The set of brushes each plugin on holds (interface 14), while the switch it comes under is
     /// on (interface 19), by the id it is given by: its own, or that of the plugin it takes the
     /// place of whose set it is. Its set file, as kept.
-    pub(crate) fn brush_sets(&self) -> Vec<(String, std::sync::Arc<[u8]>)> {
+    pub(crate) fn brush_sets(&self) -> Vec<(String, plugin_file::PluginBrushSet)> {
         let Some(store) = &self.store else { return Vec::new() };
         let holders: Vec<(String, String, String)> = {
             let list = self.listed();
@@ -1594,7 +1602,7 @@ impl Plugins {
         };
         let sets = holders.into_iter().map(|(id, version, given_as)| {
             let set = plugin_file::read_brush_set(store, &id, &version);
-            set.map(|set| (given_as, set.into()))
+            set.map(|set| (given_as, set))
         });
         sets.flatten().collect()
     }
@@ -1602,9 +1610,37 @@ impl Plugins {
     /// Takes `bytes` in, as `install` says.
     fn take_in(&self, bytes: &[u8]) -> Result<(), Refusal> {
         let package = plugin_file::read_package(bytes)?;
+        let _installing = self.install_gate.lock().unwrap_or_else(|error| error.into_inner());
+        self.take_package(&package)
+    }
+
+    pub(crate) fn store_plugin_state(&self, manifest: &Manifest) -> Result<Option<StorePluginState>, String> {
+        if !manifest.shape.replaces.is_empty() || !manifest.shape.takes.is_empty() {
+            return Err("A Store plugin cannot take over another plugin or its features.".to_owned());
+        }
+        self.can_take(manifest).map_err(|reason| reason.text().to_owned())?;
+        Ok(self.listed().files.iter().find(|plugin| plugin.id == manifest.id).map(|plugin| StorePluginState {
+            version: plugin.version.clone(),
+            permissions: plugin.permissions.clone(),
+        }))
+    }
+
+    pub(crate) fn install_reviewed_store_plugin(
+        &self,
+        package: plugin_file::Package,
+        reviewed: &Option<StorePluginState>,
+    ) -> Result<(), String> {
+        let _installing = self.install_gate.lock().unwrap_or_else(|error| error.into_inner());
+        if self.store_plugin_state(&package.manifest)? != *reviewed {
+            return Err("The installed plugin changed. Review the download again.".to_owned());
+        }
+        self.take_package(&package).map_err(|reason| reason.text().to_owned())
+    }
+
+    fn take_package(&self, package: &plugin_file::Package) -> Result<(), Refusal> {
         self.can_take(&package.manifest)?;
         let store = self.store.as_ref().ok_or(Refusal::NotKept)?;
-        let folder = plugin_file::keep(store, &package)?;
+        let folder = plugin_file::keep(store, package)?;
         // as the next start will find it, or not at all
         let (id, version) = (&package.manifest.id, &package.manifest.version);
         let manifest = plugin_file::read_folder(&folder, id, version).ok_or(Refusal::NotKept)?;
@@ -2549,6 +2585,7 @@ impl Plugins {
     /// Removes the imported plugin `id`: its folder goes, at once, no restart. The keys to take out
     /// of where values are kept; none if it can't be removed.
     pub fn remove(&self, id: String) -> Option<Vec<String>> {
+        let _installing = self.install_gate.lock().unwrap_or_else(|error| error.into_inner());
         let mut list = self.listed();
         let at = list.files.iter().position(|p| p.id == id)?;
         if let Some(store) = &self.store

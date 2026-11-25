@@ -35,6 +35,7 @@ mod guide_editor;
 mod held_layers;
 mod icons;
 mod input;
+mod install;
 mod interface_pass;
 mod layer_choice;
 mod layers;
@@ -49,6 +50,7 @@ mod overlays;
 mod panel;
 mod pdf;
 mod pen;
+mod pictures;
 mod prefs;
 mod projection;
 mod questions;
@@ -62,6 +64,10 @@ mod shortcuts;
 mod sound;
 mod source_editor;
 mod startup;
+mod store;
+mod store_decoder;
+mod store_gallery;
+mod store_package;
 mod stroke_sound;
 mod studio;
 mod system_clipboard;
@@ -274,6 +280,10 @@ fn getting_ready_note(ctx: &egui::Context) {
 }
 
 fn main() {
+    if let Some(success) = store_decoder::run_if_requested() {
+        std::process::exit(if success { 0 } else { 1 });
+    }
+    store_decoder::register();
     // the log, to the app folder's file too, and a crash's message into it
     startup::init();
     // artworks being opened, noted until they show: one the app ended while opening is asked about
@@ -640,7 +650,8 @@ impl ApplicationHandler for App {
         screen.egui.set_clipboard_shortcuts(!canvas_keys);
         // a finger landing on the interface while a hand rests on the canvas takes the pointer over
         let canvas = self.ui.canvas_rect;
-        let heard = self.interface_touches.route(event.clone(), |p| screen.over_interface(p, canvas));
+        let heard =
+            self.interface_touches.route(event.clone(), |p| self.ui.store_open() || screen.over_interface(p, canvas));
         let mut response = egui_winit::EventResponse { consumed: false, repaint: false };
         for each in &heard {
             let one = screen.egui.on_window_event(&screen.window, each);
@@ -714,7 +725,7 @@ impl ApplicationHandler for App {
                 // with a popover open, a press on the canvas only closes it (a panel alone lets it
                 // through, to wait there to be a tap or a drag); while the artwork is being
                 // exported, or a plugin finishes a fill, none reaches it (nothing either would end is
-                // started)
+                // started); nor does one while the store's sheet is over the work
                 let through = self.ui.popover_open && self.ui.panel_lets_through;
                 session.set_touch_panel_open(through);
                 let canvas = self.ui.canvas_rect;
@@ -722,6 +733,7 @@ impl ApplicationHandler for App {
                 // (nor while Edit Layout moves the bars: the canvas takes no press then)
                 let blocked = || {
                     (self.ui.popover_open && !through)
+                        || self.ui.store_open()
                         || self.ui.editing_layout()
                         || files::exporting_since().is_some()
                         || session.pour_finishing()
@@ -936,6 +948,11 @@ impl App {
         if self.screen.is_none() {
             return;
         }
+        // what the app was told while it ran is said in its own passing message, never in a window
+        // of the system's
+        for (text, went_wrong) in files::take_said() {
+            self.ui.say_moment(text, went_wrong);
+        }
         // on OpenGL nothing is drawn while the canvases' pipelines are made (see
         // `Screen::gl_busy`), and nothing that would draw is taken in: looked at again soon (the
         // window answers meanwhile)
@@ -1126,6 +1143,12 @@ impl App {
             // the New canvas list offers the kinds of artwork the plugins on make
             gallery.kinds = interface.plugins().kinds();
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
+            // a debug hook: a capture of the store needs a work to draw over, so open one as the
+            // New canvas list would, with no hand on the mouse
+            #[cfg(debug_assertions)]
+            if asked.is_none() && std::env::var("PROCRAFT_STORE_SHOT").is_ok() {
+                asked = Some(gallery::Asked::ScreenSize(gallery.folder()));
+            }
             // layers held out of an artwork: held a moment over another, it opens; let go here,
             // they go nowhere
             if let Some(held) = interface.held.as_mut() {

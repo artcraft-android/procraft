@@ -141,6 +141,7 @@ android {
     ndkVersion = "29.0.14206865"
 
     defaultConfig {
+        testInstrumentationRunner = "io.github.artcraftandroid.procraft.store.StoreDecoderSmokeTest"
         applicationId = "io.github.artcraftandroid.procraft"
         minSdk = minApi
         targetSdk = 36

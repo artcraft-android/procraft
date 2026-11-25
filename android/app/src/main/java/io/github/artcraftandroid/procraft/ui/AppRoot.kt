@@ -58,8 +58,14 @@ fun AppRoot(vm: CanvasViewModel) {
     val interfaceSize = fittedInterfaceSize(vm.plugins, vm.pluginList, keptClear)
     androidx.compose.runtime.SideEffect { vm.interfaceShownAt(interfaceSize) }
     ProCraftTheme(interfaceSize, keptClear) {
-        // layers lifted out of the panel stay held across the gallery and into another artwork
-        HoldingLayers(vm) { Screens(vm, keptClear) }
+        Box(Modifier.fillMaxSize()) {
+            // layers lifted out of the panel stay held across the gallery and into another artwork
+            HoldingLayers(vm) { Screens(vm, keptClear) }
+            // the store is a sheet over the work, as it is on the desk, not a screen of its own
+            StoreOverlay(vm)
+            BrushShareOverlay(vm)
+            StorePackageOverlay(vm)
+        }
     }
 }
 

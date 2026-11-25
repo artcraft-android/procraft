@@ -12,7 +12,7 @@ use procraft_engine::brush::Brush;
 
 use crate::brush_library::{LibrarySet, library_writes, stamp};
 use crate::layers::ThumbnailImage;
-use crate::{BrushInfo, BrushSetInfo, CanvasSession};
+use crate::{BrushInfo, BrushSetInfo, CanvasSession, Installed, ItemKind, StoreItem};
 
 /// How many libraries not in use are kept as read (or as left): for their cards' previews, and to
 /// bring one into use again without reading it.
@@ -298,6 +298,172 @@ fn write(path: &Path, text: &str) -> bool {
     written.is_ok()
 }
 
+impl CanvasSession {
+    /// The brushes of the set at `set` in the library at `library`: the one in use's, or another's
+    /// read from its files (once, and kept a while).
+    pub(crate) fn brush_set_brushes(&self, library: u32, set: u32) -> Option<Vec<Brush>> {
+        self.with_library_set(library, set, |set| Some(set.brushes.clone()))
+    }
+
+    fn with_library_set<T>(&self, library: u32, set: u32, read: impl FnOnce(&LibrarySet) -> Option<T>) -> Option<T> {
+        let (id, dir) = {
+            let st = self.shared.lock();
+            let l = &st.libraries;
+            let id = &l.list.get(library as usize)?.id;
+            if id == &l.held {
+                return read(st.library.get(set as usize)?);
+            }
+            (id.clone(), l.dir.clone()?)
+        };
+        let (sets, _) = self.library_read(&id, &dir)?;
+        read(sets.get(set as usize)?)
+    }
+
+    pub(crate) fn store_brush_installs(&self) -> Vec<Installed> {
+        let (mut records, held, dir) = {
+            let st = self.shared.lock();
+            let records: Vec<_> = st.library.iter().filter_map(|set| set.store.clone()).collect();
+            (records, st.libraries.held.clone(), st.libraries.dir.clone())
+        };
+        if let Some(dir) = dir {
+            let (list, _) = libraries_in(&dir);
+            for entry in list.iter().filter(|entry| entry.id != held) {
+                records.extend(installed_at(&files(&dir, &entry.id).0));
+            }
+        }
+        records
+    }
+}
+
+/// Read just the installation records from the library JSON, without loading brushes or images.
+fn installed_at(path: &Path) -> Vec<Installed> {
+    #[derive(serde::Deserialize)]
+    struct SetInstall {
+        store: Option<Installed>,
+    }
+    let Some(file) = std::fs::File::open(path).ok() else { return Vec::new() };
+    let sets: Vec<SetInstall> = serde_json::from_reader(std::io::BufReader::new(file)).unwrap_or_default();
+    sets.into_iter().filter_map(|set| set.store).collect()
+}
+
+pub(crate) fn installed_in(dir: &Path) -> Vec<Installed> {
+    let (list, _) = libraries_in(dir);
+    list.into_iter().flat_map(|entry| installed_at(&files(dir, &entry.id).0)).collect()
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// Installs the verified brush set, replacing only its previous Store version if it has one.
+    /// An error leaves the package eligible for retry.
+    pub fn install_store_brushes(&self, item: StoreItem, path: String) -> Option<String> {
+        if item.kind != ItemKind::BrushSet {
+            return Some("This file is not listed as a brush set.".to_owned());
+        }
+        let path = Path::new(&path);
+        if let Err(reason) = crate::store::check_listing_file(&item, path) {
+            return Some(reason);
+        }
+        let decoded = crate::store_decode::decode(crate::StoreDecodeKind::BrushSet, path)
+            .and_then(crate::brush_library::read_decoded_store_set);
+        self.install_decoded_store_brushes(item, decoded)
+    }
+}
+
+impl CanvasSession {
+    pub(crate) fn install_decoded_store_brushes(
+        &self,
+        item: StoreItem,
+        decoded: Result<(String, Vec<procraft_engine::brush::Brush>), String>,
+    ) -> Option<String> {
+        if item.kind != ItemKind::BrushSet {
+            return Some("This file is not listed as a brush set.".to_owned());
+        }
+        let (name, mut brushes) = match decoded {
+            Ok(set) => set,
+            Err(reason) => return Some(reason),
+        };
+
+        let _writing = library_writes();
+        let (dir, held, list) = {
+            let mut st = self.shared.lock();
+            let Some(dir) = st.libraries.dir.clone() else {
+                return Some("Open a brush library before installing this set.".to_owned());
+            };
+            brushes.iter_mut().for_each(|brush| st.grain_store.take(brush));
+            (dir, st.libraries.held.clone(), st.libraries.list.iter().map(|entry| entry.id.clone()).collect::<Vec<_>>())
+        };
+        let mut set = LibrarySet {
+            name: if name.trim().is_empty() { item.name.clone() } else { name },
+            origins: vec![None; brushes.len()],
+            brushes,
+            icon: crate::brush_library::IMPORTED_ICON,
+            plugin: None,
+            store: Some(Installed::from_item(&item)),
+        };
+        let matches = |set: &LibrarySet| set.store.as_ref().is_some_and(|one| one.matches(&item));
+        let failure = || Some("The brush library couldn't be saved. You can try again.".to_owned());
+
+        for id in list.iter().filter(|id| **id != held) {
+            let path = files(&dir, id).0;
+            if !installed_at(&path).iter().any(|one| one.matches(&item)) {
+                continue;
+            }
+            let Some((mut sets, _)) = self.library_at(&path, true) else { return failure() };
+            let Some(previous) = sets.iter_mut().find(|candidate| matches(candidate)) else {
+                return failure();
+            };
+            set.icon = previous.icon;
+            *previous = set;
+            if !self.write_library_file(&path, &sets) {
+                return failure();
+            }
+            self.shared.lock().libraries.read.retain(|read| &read.id != id);
+            self.update_index(&dir, |list, _| {
+                if let Some(entry) = list.iter_mut().find(|entry| &entry.id == id) {
+                    entry.sets = sets.iter().map(CardSet::of_set).collect();
+                }
+            });
+            return None;
+        }
+
+        let (at, replaced) = {
+            let mut st = self.shared.lock();
+            if let Some((at, previous)) = st.library.iter_mut().enumerate().find(|(_, candidate)| matches(candidate)) {
+                set.icon = previous.icon;
+                let replaced = std::mem::replace(previous, set);
+                (at, Some(replaced))
+            } else {
+                st.library.insert(0, set);
+                st.move_brush_refs(|(s, i)| Some((s + 1, i)));
+                (0, None)
+            }
+        };
+        if self.save_library_at(&files(&dir, &held).0).is_none() {
+            let mut st = self.shared.lock();
+            if let Some(at) = st.library.iter().position(matches) {
+                if let Some(old) = replaced {
+                    if let Some(previous) = st.library.get_mut(at) {
+                        *previous = old;
+                    }
+                } else {
+                    st.library.remove(at);
+                    st.move_brush_refs(|(s, i)| (s != at).then(|| (s - usize::from(s > at), i)));
+                }
+            }
+            return failure();
+        }
+        if replaced.is_some() {
+            let mut st = self.shared.lock();
+            let count = st.library.get(at).map_or(0, |set| set.brushes.len());
+            st.move_brush_refs(|(s, i)| (s != at || i < count).then_some((s, i)));
+        }
+        if !CanvasSession::write_choices(&files(&dir, &held).1, &self.saved_brush_choices()) || !self.keep_card(&dir) {
+            log::warn!("choices or the card for the installed brush set could not be saved");
+        }
+        None
+    }
+}
+
 #[uniffi::export]
 impl CanvasSession {
     /// Every brush library in order, the one in use among them.
@@ -329,16 +495,7 @@ impl CanvasSession {
         width: u32,
         height: u32,
     ) -> Option<ThumbnailImage> {
-        let (held, id, dir) = {
-            let st = self.shared.lock();
-            let l = &st.libraries;
-            (l.held.clone(), l.list.get(library as usize)?.id.clone(), l.dir.clone())
-        };
-        if id == held {
-            return self.brush_preview(set, index, width, height);
-        }
-        let (sets, _) = self.library_read(&id, &dir?)?;
-        let brush = sets.get(set as usize)?.brushes.get(index as usize)?.clone();
+        let brush = self.with_library_set(library, set, |set| set.brushes.get(index as usize).cloned())?;
         self.drawn_preview(brush, width, height)
     }
 
@@ -739,6 +896,7 @@ impl CanvasSession {
                 brushes,
                 icon,
                 plugin: None,
+                store: None,
             })
             .collect();
         {
