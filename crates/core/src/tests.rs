@@ -25131,7 +25131,7 @@ fn time_lapse_hold_back_to_back() {
 /// The store previews real items make, saved as PNGs in `PROCRAFT_DUMP`: a brush set's as the
 /// package sheet draws it (read into a session on a headless GPU), an asset pack's as it is laid
 /// out from the pictures in the archive (no GPU). `BRUSH_SET` and `ASSET_SET` take a `;` separated
-/// list of files each.
+/// list of files each. `PROCRAFT_COVER_CATALOG=1` also saves every offered template.
 /// `BRUSH_SET=a.brushset ASSET_SET=b.assetset PROCRAFT_DUMP=dir cargo test -p procraft-core
 /// dump_store_previews -- --ignored --nocapture`
 #[test]
@@ -25152,25 +25152,42 @@ fn dump_store_previews() {
         let png = crate::project::png_of(preview.width, preview.height, &preview.rgba).unwrap();
         std::fs::write(root.clone() + "/" + name + ".png", png).unwrap();
     };
+    let catalog = std::env::var_os("PROCRAFT_COVER_CATALOG").is_some();
+    let covers = |cover: &crate::StoreCover, name: &str, label: &str| {
+        eprintln!("{label}: Auto = {:?}, {} templates", cover.recommended(), cover.templates().len());
+        save(label, cover.render(None, Some(name)));
+        save(&format!("{label}-untitled"), cover.render(None, None));
+        if catalog {
+            for template in cover.templates() {
+                for (suffix, title) in [("title", Some(name)), ("art", None)] {
+                    save(&format!("{label}--{}--{suffix}", template.name()), cover.render(Some(template), title));
+                }
+            }
+        }
+    };
     for path in paths("BRUSH_SET") {
-        let Some(s) = session(100, 100) else { return };
-        let name = stem(&path);
+        let s = session(100, 100).expect("dumping real brush covers requires a headless GPU");
+        let label = stem(&path);
         let set = s.import_brushes(std::fs::read(&path).unwrap()).unwrap();
         let started = std::time::Instant::now();
-        let previews = s.brush_set_store_previews(0, set, name.clone());
-        let brushes = s.brush_library()[set as usize].brushes.len();
-        eprintln!("{name}: {brushes} brushes, {} previews drawn in {:?}", previews.len(), started.elapsed());
+        let library = s.brush_library();
+        let imported = &library[set as usize];
+        let name = &imported.name;
+        let cover = s.brush_set_store_cover(0, set, name).unwrap();
+        eprintln!("{label}: brush probes drawn in {:?}", started.elapsed());
+        covers(&cover, name, &label);
+        let previews = s.brush_set_store_specimens(0, set, name);
+        eprintln!("{label}: {} brushes, {} specimen pages", imported.brushes.len(), previews.len());
         for (at, preview) in previews.into_iter().enumerate() {
-            let png = crate::project::png_of(preview.width, preview.height, &preview.rgba).unwrap();
-            let file = if at == 0 { format!("{name}.png") } else { format!("{name}-strokes-{at}.png") };
-            std::fs::write(root.clone() + "/" + &file, png).unwrap();
+            save(&format!("{label}-strokes-{}", at + 1), preview);
         }
     }
     for path in paths("ASSET_SET") {
-        let name = stem(&path);
+        let label = stem(&path);
+        let name = crate::asset_pack_name(path.to_string_lossy().into_owned()).unwrap();
         let started = std::time::Instant::now();
-        let preview = crate::asset_pack_store_preview(path.to_string_lossy().into_owned(), name.clone()).unwrap();
-        eprintln!("{name}: pack preview drawn in {:?}", started.elapsed());
-        save(&name, preview);
+        let cover = crate::asset_pack_store_cover(&path).unwrap();
+        eprintln!("{label}: pack scans prepared in {:?}", started.elapsed());
+        covers(&cover, &name, &label);
     }
 }

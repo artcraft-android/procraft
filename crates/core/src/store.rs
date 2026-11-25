@@ -16,6 +16,11 @@ const CATALOGUE_FILE: &str = "catalogue.json";
 const READ_FILE: &str = "read.json";
 /// What has been installed from the store.
 const INSTALLED_FILE: &str = "installed.json";
+const PENDING: &str = "pending-brushes";
+const PAYLOAD: &str = "payload";
+const DECODED_BRUSHES: &str = "decoded-brushes-v1";
+const LISTING: &str = "listing.json";
+static PENDING_WRITES: Mutex<()> = Mutex::new(());
 
 // The caps a catalogue and its items hold to (store-spec.md's cap table). Every one is a refusal
 // or a drop, never a truncation.
@@ -28,7 +33,12 @@ const LICENCE_CHARS: usize = 64;
 const DESCRIPTION_CHARS: usize = 512;
 const LINK_CHARS: usize = 2048;
 const BODY_CHARS: usize = 4096;
-const PREVIEWS_MOST: usize = 6;
+pub const STORE_SPECIMEN_LIMIT: usize = 6;
+pub const STORE_MAKER_IMAGE_LIMIT: usize = 4;
+pub(crate) const STORE_CONTENTS_LIMIT: usize = 128;
+pub(crate) const PREVIEWS_MOST: usize = 1 + STORE_CONTENTS_LIMIT + STORE_MAKER_IMAGE_LIMIT;
+const ITEM_BYTES: usize = 256 * 1024 * 1024;
+const PLUGIN_BYTES: usize = 32 * 1024 * 1024;
 const TAGS_MOST: usize = 12;
 const TAG_CHARS: usize = 32;
 
@@ -37,11 +47,13 @@ pub const CATEGORIES: [&str; 8] =
     ["Brushes", "Papers and Textures", "Colour", "Layers", "Interface", "Effects", "Canvas", "Other"];
 
 /// What a catalogue says an item is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum ItemKind {
     Plugin,
     BrushSet,
     AssetPack,
+    Brush,
+    BrushLibrary,
 }
 
 impl ItemKind {
@@ -50,14 +62,27 @@ impl ItemKind {
         match self {
             ItemKind::Plugin => "Plugin",
             ItemKind::BrushSet => "Brush set",
+            ItemKind::Brush => "Brush",
+            ItemKind::BrushLibrary => "Brush library",
             ItemKind::AssetPack => "Asset pack",
         }
+    }
+
+    pub fn browse_group(self) -> Self {
+        match self {
+            Self::Brush | Self::BrushLibrary => Self::BrushSet,
+            other => other,
+        }
+    }
+
+    pub fn supports_install(self) -> bool {
+        matches!(self, Self::Plugin | Self::BrushSet)
     }
 }
 
 /// One item a catalogue lists, as the store draws it. An empty string is a field the catalogue
 /// left out.
-#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct StoreItem {
     pub id: String,
     pub kind: ItemKind,
@@ -72,6 +97,9 @@ pub struct StoreItem {
     pub tags: Vec<String>,
     /// The card's picture, empty when the app draws the item's own.
     pub preview: String,
+    /// Separate static square artwork for compact listing surfaces.
+    #[serde(default)]
+    pub icon: String,
     /// The item page's pictures, in the order to show them.
     pub previews: Vec<String>,
     /// A longer description for the item's own page.
@@ -85,6 +113,42 @@ pub struct StoreItem {
     pub source_name: String,
 }
 
+impl StoreItem {
+    /// The cover followed by the listing's gallery, in order and with duplicates removed.
+    pub fn gallery(&self) -> Vec<&str> {
+        let mut gallery = Vec::new();
+        for address in std::iter::once(&self.preview).chain(&self.previews) {
+            if !address.is_empty() && !gallery.contains(&address.as_str()) {
+                gallery.push(address.as_str());
+                if gallery.len() == PREVIEWS_MOST {
+                    break;
+                }
+            }
+        }
+        gallery
+    }
+}
+
+#[uniffi::export]
+pub fn store_gallery(item: StoreItem) -> Vec<String> {
+    item.gallery().into_iter().map(str::to_owned).collect()
+}
+
+/// Selects up to five listings for a UTC day, independently of catalogue order.
+#[uniffi::export]
+pub fn store_featured_order(listings: Vec<String>, day: u64) -> Vec<u32> {
+    let mut order: Vec<_> = listings.iter().enumerate().collect();
+    order.sort_by_cached_key(|(_, listing)| {
+        let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+        hash.update(&day.to_le_bytes());
+        hash.update(listing.as_bytes());
+        let digest = hash.finish();
+        let rank = digest.as_ref().first_chunk::<8>().copied().unwrap_or_default();
+        (rank, *listing)
+    });
+    order.into_iter().take(5).map(|(index, _)| index as u32).collect()
+}
+
 /// What a fetch brought back: the bytes when it worked, and why when it did not.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Fetched {
@@ -92,8 +156,50 @@ pub struct Fetched {
     pub failure: String,
 }
 
+/// The exact plugin package presented for approval.
+#[derive(uniffi::Object)]
+pub struct StorePluginReview {
+    name: String,
+    message: String,
+    item: StoreItem,
+    source_address: String,
+    previous: Option<crate::plugins::StorePluginState>,
+    plugins: Arc<crate::Plugins>,
+    package: Mutex<Option<crate::plugin_file::Package>>,
+}
+
+#[uniffi::export]
+impl StorePluginReview {
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn message(&self) -> String {
+        self.message.clone()
+    }
+
+    pub fn is_update(&self) -> bool {
+        self.previous.is_some()
+    }
+}
+
+#[derive(uniffi::Record)]
+pub struct StorePluginInspection {
+    pub review: Option<Arc<StorePluginReview>>,
+    pub failure: Option<String>,
+}
+
+impl StorePluginInspection {
+    fn from_result(result: Result<StorePluginReview, String>) -> Self {
+        match result {
+            Ok(review) => Self { review: Some(Arc::new(review)), failure: None },
+            Err(failure) => Self { review: None, failure: Some(failure) },
+        }
+    }
+}
+
 /// What the store installed: what its card may say, and the digest an update is told by.
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct Installed {
     pub id: String,
     pub kind: ItemKind,
@@ -102,10 +208,79 @@ pub struct Installed {
     pub publisher: String,
     /// The source it came from, empty when it came with the app.
     pub source: String,
+    /// A fingerprint of the approved catalogue address, without storing any credentials.
+    #[serde(default)]
+    pub source_pin: String,
     /// The digest of the file that was taken, which a second copy under the same id changes.
     pub digest: String,
     /// Seconds since the epoch.
     pub at: u64,
+}
+
+impl Installed {
+    pub(crate) fn from_item(item: &StoreItem) -> Self {
+        Self {
+            id: item.id.clone(),
+            kind: item.kind,
+            name: item.name.clone(),
+            version: item.version.clone(),
+            publisher: item.publisher.clone(),
+            source: item.source.clone(),
+            source_pin: String::new(),
+            digest: item.sha256.clone(),
+            at: now(),
+        }
+    }
+
+    pub(crate) fn matches(&self, item: &StoreItem) -> bool {
+        self.id == item.id && self.source == item.source
+    }
+}
+
+/// The outcome of taking one queued brush set into the saved library.
+#[derive(uniffi::Record)]
+pub struct StoreBrushResult {
+    pub item: StoreItem,
+    pub failure: Option<String>,
+}
+
+#[uniffi::export]
+pub fn apply_queued_store_brushes(dir: String, session: Arc<crate::CanvasSession>) -> Vec<StoreBrushResult> {
+    let _writing = PENDING_WRITES.lock().unwrap_or_else(|error| error.into_inner());
+    pending_at(Path::new(&dir))
+        .into_iter()
+        .map(|(folder, item)| {
+            let decoded = folder.join(DECODED_BRUSHES);
+            let failure = if decoded.is_file() {
+                let set = std::fs::File::open(decoded)
+                    .map(std::io::BufReader::new)
+                    .map_err(|error| error.to_string())
+                    .and_then(crate::brush_library::read_decoded_store_set);
+                session.install_decoded_store_brushes(item.clone(), set)
+            } else {
+                session.install_store_brushes(item.clone(), folder.join(PAYLOAD).to_string_lossy().into_owned())
+            };
+            if let Err(error) = std::fs::remove_dir_all(&folder) {
+                log::warn!("removing a processed Store brush set: {error}");
+            }
+            StoreBrushResult { item, failure }
+        })
+        .collect()
+}
+
+fn pending_at(dir: &Path) -> Vec<(PathBuf, StoreItem)> {
+    let Ok(entries) = std::fs::read_dir(dir.join(PENDING)) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            if entry.file_name().to_string_lossy().starts_with('.') || !entry.file_type().ok()?.is_dir() {
+                return None;
+            }
+            let folder = entry.path();
+            let bytes = std::fs::read(folder.join(LISTING)).ok()?;
+            Some((folder, serde_json::from_slice(&bytes).ok()?))
+        })
+        .collect()
 }
 
 /// A source as Settings lists it: one catalogue, where it came from, and how its last read went.
@@ -132,6 +307,7 @@ struct Saved {
     name: String,
     address: String,
     on: bool,
+    local_network: bool,
 }
 
 /// One source held: what was saved, the catalogue last read from it, and how that read went.
@@ -141,6 +317,7 @@ struct Held {
     catalogue: Option<Catalogue>,
     read: u64,
     failure: String,
+    refresh: Arc<()>,
 }
 
 /// A catalogue that held up: what it calls itself and the items it lists, in its own order.
@@ -183,8 +360,10 @@ impl Refusal {
 pub struct Store {
     dir: Option<PathBuf>,
     held: Mutex<Vec<Held>>,
+    source_writes: Mutex<()>,
     /// What has been installed from the store, by catalogue id.
     installed: Mutex<Vec<Installed>>,
+    installed_brushes: Mutex<Vec<Installed>>,
     /// How a web address is read. A store of files on this machine never uses it.
     transport: std::sync::Arc<dyn crate::fetch::Transport>,
 }
@@ -197,7 +376,8 @@ impl Store {
     pub fn open(dir: String) -> Arc<Store> {
         let root = PathBuf::from(dir);
         let _ = std::fs::create_dir_all(&root);
-        Store::with_transport(&root, sources_at(&root), installed_at(&root), std::sync::Arc::new(crate::fetch::Web))
+        let installed = installed_at(&root).into_iter().filter(|one| one.kind != ItemKind::BrushSet).collect();
+        Store::with_transport(&root, sources_at(&root), installed, std::sync::Arc::new(crate::fetch::Web))
     }
 
     /// The sources, in the order they were added.
@@ -218,50 +398,36 @@ impl Store {
     /// What the store installed, newest first.
     pub fn installed(&self) -> Vec<Installed> {
         let mut list = self.records().clone();
+        list.extend(self.brush_records().iter().cloned());
         list.sort_by_key(|one| std::cmp::Reverse(one.at));
         list
     }
 
-    /// One installed item, by its catalogue id.
-    pub fn installed_one(&self, id: String) -> Option<Installed> {
-        self.records().iter().find(|one| one.id == id).cloned()
+    /// One installed item, including the catalogue that supplied it.
+    pub fn installed_listing(&self, source: String, id: String) -> Option<Installed> {
+        let matches = |one: &&Installed| one.source == source && one.id == id;
+        self.brush_records().iter().find(matches).cloned().or_else(|| self.records().iter().find(matches).cloned())
     }
 
-    /// Records that `id` was installed, with the digest of the file that was taken. False when no
-    /// source lists it any more, so nothing can be recorded about an item that is gone.
-    pub fn keep_installed(&self, id: String, digest: String) -> bool {
-        let Some(item) = self.items().into_iter().find(|item| item.id == id) else { return false };
-        let one = Installed {
-            id: item.id,
-            kind: item.kind,
-            name: item.name,
-            version: item.version,
-            publisher: item.publisher,
-            source: item.source,
-            digest,
-            at: now(),
-        };
-        {
-            let mut list = self.records();
-            list.retain(|held| held.id != one.id);
-            list.push(one);
+    /// Rereads the brush installations in the persisted libraries.
+    pub fn read_brush_installs(&self, dir: String) {
+        *self.brush_records() = crate::brush_libraries::installed_in(Path::new(&dir));
+    }
+
+    /// Reads brush-install state from an open library, including changes awaiting the next save.
+    pub fn sync_brush_installs(&self, session: Arc<crate::CanvasSession>) {
+        self.follow_brush_installs(&session);
+    }
+
+    /// Forgets a specific installed listing.
+    pub fn forget_listing(&self, source: String, id: String) -> bool {
+        let mut list = self.records();
+        let kept: Vec<_> = list.iter().filter(|one| one.source != source || one.id != id).cloned().collect();
+        if kept.len() == list.len() || !self.write_installed_list(&kept) {
+            return false;
         }
-        self.keep_installed_list();
+        *list = kept;
         true
-    }
-
-    /// Forgets an installed item. False when it was not recorded.
-    pub fn forget_installed(&self, id: String) -> bool {
-        let removed = {
-            let mut list = self.records();
-            let before = list.len();
-            list.retain(|one| one.id != id);
-            list.len() != before
-        };
-        if removed {
-            self.keep_installed_list();
-        }
-        removed
     }
 
     /// Every item in every source that is on: one item where two sources list the same bytes, two
@@ -282,79 +448,121 @@ impl Store {
         merged(&held).into_iter().filter(|i| holds(i, &query)).collect()
     }
 
-    /// Adds the catalogue at `address`: a web address is kept and waits for the app to fetch it, a
-    /// file on this machine is read now. None when it was added, or the reason it was not.
+    /// Adds a local or web catalogue. None when it was added, or the reason it was not.
     pub fn add_source(&self, address: String) -> Option<String> {
+        self.add_source_with_local_network(address, false)
+    }
+
+    /// Allows this catalogue and links on its exact HTTPS origin to reach its local host.
+    pub fn add_source_with_local_network(&self, address: String, local_network: bool) -> Option<String> {
         let address = address.trim().to_owned();
+        let local_network = local_network && crate::fetch::web_address(&address).is_ok();
         if address.is_empty() {
             return Some("the address is empty".to_owned());
         }
-        let mut held = self.held();
-        if held.iter().any(|h| h.saved.address == address) {
+        let already_added = |held: &[Held]| held.iter().any(|h| h.saved.address == address);
+        if already_added(&self.held()) {
             return Some("that address is already added".to_owned());
         }
-        let saved = Saved { id: fresh_id(&address, &held), name: String::new(), address, on: true };
-        let read = if web(&saved.address) { self.read_web(&saved) } else { read_local(&saved) };
-        match read {
-            Ok((catalogue, bytes)) => {
-                self.keep(&saved, &bytes, &catalogue);
-                held.push(Held { saved, catalogue: Some(catalogue), read: now(), failure: String::new() });
-                self.keep_sources(&held);
-                None
+        let mut saved = Saved { address: address.clone(), on: true, local_network, ..Saved::default() };
+        let (mut catalogue, bytes) = match self.read(&saved) {
+            Ok(read) => read,
+            Err(reason) => return Some(reason),
+        };
+        let _writing = self.writing_sources();
+        {
+            let held = self.held();
+            if already_added(&held) {
+                return Some("that address is already added".to_owned());
             }
-            Err(reason) => Some(reason),
+            saved.id = fresh_id(&address, &held);
         }
+        for item in &mut catalogue.items {
+            item.source.clone_from(&saved.id);
+        }
+        self.keep(&saved, &bytes, &catalogue);
+        self.held().push(Held {
+            saved,
+            catalogue: Some(catalogue),
+            read: now(),
+            failure: String::new(),
+            refresh: Arc::new(()),
+        });
+        self.keep_sources();
+        None
     }
 
     /// Switches a source on or off: off hides its items and stops it being read.
     pub fn set_on(&self, id: String, on: bool) {
-        let mut held = self.held();
-        if let Some(h) = held.iter_mut().find(|h| h.saved.id == id) {
+        let _writing = self.writing_sources();
+        {
+            let mut held = self.held();
+            let Some(h) = held.iter_mut().find(|h| h.saved.id == id) else { return };
             h.saved.on = on;
-            self.keep_sources(&held);
         }
+        self.keep_sources();
     }
 
-    /// Forgets a source: its catalogue, its copy on disk and its place in the list. Nothing it
-    /// installed is touched.
+    /// Removes a known source and its cache. It leaves what was installed from it.
     pub fn remove_source(&self, id: String) {
-        // the shipped source never leaves: it can only be switched off
-        if id == SHIPPED {
-            return;
+        let Some(dir) = self.cache_dir(&id) else { return };
+        let _writing = self.writing_sources();
+        {
+            let mut held = self.held();
+            let Some(at) = held.iter().position(|h| h.saved.id == id) else { return };
+            held.remove(at);
         }
-        let mut held = self.held();
-        held.retain(|h| h.saved.id != id);
-        self.keep_sources(&held);
-        if let Some(dir) = self.cache_dir(&id) {
-            let _ = std::fs::remove_dir_all(dir);
+        self.keep_sources();
+        if let (Some(root), Ok(target)) = (&self.dir, dir.canonicalize())
+            && root
+                .canonicalize()
+                .is_ok_and(|root| target.parent() == Some(root.as_path()) && target.file_name() == dir.file_name())
+        {
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
-    /// Reads a source again: a file now, a web address once the app can fetch one. None when it
-    /// was read, or why it was not; the copy it had stays either way.
+    /// Reads a catalogue again. A failed refresh leaves the last successful copy available.
     pub fn refresh(&self, id: String) -> Option<String> {
-        // nothing to read: the shipped catalogue is already in the binary
         if id == SHIPPED {
             return None;
         }
-        let mut held = self.held();
-        let Some(h) = held.iter_mut().find(|h| h.saved.id == id) else {
-            return Some("that source is gone".to_owned());
+        let token = Arc::new(());
+        let saved = {
+            let _writing = self.writing_sources();
+            let mut held = self.held();
+            let Some(h) = held.iter_mut().find(|h| h.saved.id == id) else {
+                return Some("that source is gone".to_owned());
+            };
+            h.refresh = Arc::clone(&token);
+            h.saved.clone()
         };
-        let saved = h.saved.clone();
-        let read = if web(&saved.address) { self.read_web(&saved) } else { read_local(&saved) };
+        let read = self.read(&saved);
+        let _writing = self.writing_sources();
+        {
+            let held = self.held();
+            let Some(h) = held.iter().find(|h| h.saved.id == id) else {
+                return Some("that source is gone".to_owned());
+            };
+            if !Arc::ptr_eq(&h.refresh, &token) {
+                return None;
+            }
+        }
+        match &read {
+            Ok((catalogue, bytes)) => self.keep(&saved, bytes, catalogue),
+            Err(reason) => self.keep_read_failure(&saved.id, reason),
+        }
+        let mut held = self.held();
+        let h = held.iter_mut().find(|h| h.saved.id == id)?;
         match read {
-            Ok((catalogue, bytes)) => {
-                self.keep(&saved, &bytes, &catalogue);
+            Ok((catalogue, _)) => {
                 h.catalogue = Some(catalogue);
                 h.read = now();
-                h.failure = String::new();
-                self.keep_sources(&held);
+                h.failure.clear();
                 None
             }
             Err(reason) => {
-                h.failure = reason.clone();
-                self.keep_sources(&held);
+                h.failure.clone_from(&reason);
                 Some(reason)
             }
         }
@@ -365,27 +573,135 @@ impl Store {
         self.held().iter().find(|h| h.saved.id == id).map_or(0, |h| h.read)
     }
 
-    /// Fetches the file of the item `id`, up to the size the catalogue said it is, and says why
-    /// when it does not come. Nothing is installed here: the bytes are handed back to be checked
-    /// and taken by whichever app asked.
-    pub fn fetch_item(&self, id: String) -> Fetched {
-        let Some(item) = self.items().into_iter().find(|item| item.id == id) else {
-            return Fetched { bytes: Vec::new(), failure: "no source lists that item".to_owned() };
+    /// Downloads the exact selected listing to a new file and checks its size and digest.
+    /// The caller owns the file after success. An unsuccessful download leaves no file.
+    pub fn download_listing(&self, item: StoreItem, path: String) -> Option<String> {
+        let Some(listed) = self.listing(&item.source, &item.id).filter(|listed| {
+            listed.sha256 == item.sha256
+                && listed.kind == item.kind
+                && listed.version == item.version
+                && listed.bytes == item.bytes
+        }) else {
+            return Some("the listing has changed; open it again".to_owned());
         };
-        if item.file.is_empty() {
-            return Fetched {
-                bytes: Vec::new(),
-                failure: "it came with the app, so there is nothing to fetch".to_owned(),
-            };
+        let result = (|| {
+            crate::fetch::web_address(&listed.file)?;
+            let cap = listing_size(&listed)?;
+            let path = Path::new(&path);
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|e| format!("the download could not be staged: {e}"))?;
+            let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+            let result = self
+                .transport
+                .get_into_scoped(
+                    &listed.file,
+                    cap,
+                    crate::fetch::FETCH_TIME,
+                    self.local_origin(&listed.source).as_deref(),
+                    &mut HashWriter { inner: &mut file, digest: &mut digest },
+                )
+                .and_then(|size| check_listing(&listed, size as u64, digest.finish().as_ref()));
+            drop(file);
+            if result.is_err() {
+                let _ = std::fs::remove_file(path);
+            }
+            result
+        })();
+        result.err()
+    }
+
+    /// Downloads a brush set into the queue used when no Android canvas is open.
+    pub fn queue_brush_listing(&self, item: StoreItem) -> Option<String> {
+        if item.kind != ItemKind::BrushSet {
+            return Some("Choose a brush set to add to the library.".to_owned());
         }
-        if let Err(why) = crate::fetch::web_address(&item.file) {
-            return Fetched { bytes: Vec::new(), failure: why };
-        }
-        let cap = usize::try_from(item.bytes).unwrap_or(usize::MAX).max(1);
-        match self.transport.get(&item.file, cap, crate::fetch::FETCH_TIME) {
-            Ok(bytes) => Fetched { bytes, failure: String::new() },
-            Err(why) => Fetched { bytes: Vec::new(), failure: why },
-        }
+        let result = (|| {
+            let dir = self.dir.as_ref().ok_or("the Store folder is unavailable")?.join(PENDING);
+            std::fs::create_dir_all(&dir).map_err(|e| format!("the download couldn't be queued: {e}"))?;
+            let stage = tempfile::Builder::new()
+                .prefix(".download-")
+                .tempdir_in(&dir)
+                .map_err(|e| format!("the download couldn't be staged: {e}"))?;
+            if let Some(error) =
+                self.download_listing(item.clone(), stage.path().join(PAYLOAD).to_string_lossy().into_owned())
+            {
+                return Err(error);
+            }
+            let payload = stage.path().join(PAYLOAD);
+            let mut decoded = crate::store_decode::decode(crate::StoreDecodeKind::BrushSet, &payload)?;
+            let mut prepared = std::fs::File::create(stage.path().join(DECODED_BRUSHES)).map_err(|e| e.to_string())?;
+            std::io::copy(&mut decoded, &mut prepared).map_err(|e| e.to_string())?;
+            prepared.sync_all().map_err(|e| e.to_string())?;
+            drop(prepared);
+            std::fs::remove_file(payload).map_err(|e| e.to_string())?;
+            let listing = serde_json::to_vec(&item).map_err(|e| e.to_string())?;
+            std::fs::write(stage.path().join(LISTING), listing)
+                .map_err(|e| format!("the download couldn't be queued: {e}"))?;
+            let _writing = PENDING_WRITES.lock().unwrap_or_else(|error| error.into_inner());
+            let key = sha256_hex(format!("{}:{}", item.source, item.id).as_bytes());
+            let target = dir.join(key);
+            if target.exists() {
+                return Ok(());
+            }
+            std::fs::rename(stage.path(), &target).map_err(|e| format!("the download couldn't be queued: {e}"))
+        })();
+        result.err()
+    }
+
+    pub fn queued_brushes(&self) -> Vec<StoreItem> {
+        self.dir.as_deref().map_or_else(Vec::new, |dir| pending_at(dir).into_iter().map(|(_, item)| item).collect())
+    }
+
+    /// Downloads and inspects a plugin without installing it.
+    pub fn review_plugin_listing(&self, item: StoreItem, plugins: Arc<crate::Plugins>) -> StorePluginInspection {
+        let result = (|| {
+            self.plugin_source(&item)?;
+            let dir = self.dir.as_ref().ok_or("The Store folder is unavailable.")?;
+            let stage =
+                tempfile::tempdir_in(dir).map_err(|error| format!("The download couldn't be staged: {error}"))?;
+            let path = stage.path().join(PAYLOAD);
+            if let Some(reason) = self.download_listing(item.clone(), path.to_string_lossy().into_owned()) {
+                return Err(reason);
+            }
+            self.prepare_plugin_review(item, plugins, &path)
+        })();
+        StorePluginInspection::from_result(result)
+    }
+
+    /// Inspects a manually selected file using the same checks as a Store download.
+    pub fn review_plugin_file(
+        &self,
+        item: StoreItem,
+        plugins: Arc<crate::Plugins>,
+        path: String,
+    ) -> StorePluginInspection {
+        StorePluginInspection::from_result(self.prepare_plugin_review(item, plugins, Path::new(&path)))
+    }
+
+    /// Installs the exact plugin presented for approval, after the user confirms the review.
+    pub fn approve_plugin_listing(&self, approval: Arc<StorePluginReview>) -> Option<String> {
+        let result = (|| {
+            let _writing = self.writing_sources();
+            let source = self.plugin_source(&approval.item)?;
+            if source.address != approval.source_address {
+                return Err("The catalogue address changed. Review the plugin again.".to_owned());
+            }
+            self.check_plugin_origin(&approval.item, &source.address, approval.previous.as_ref())?;
+            let package = approval
+                .package
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+                .ok_or("This plugin review has already been used.")?;
+            approval.plugins.install_reviewed_store_plugin(package, &approval.previous)?;
+            let mut record = Installed::from_item(&approval.item);
+            record.source_pin = sha256_hex(source.address.as_bytes());
+            self.save_install(record).then_some(()).ok_or_else(|| "The install record couldn't be saved.".to_owned())
+        })();
+        result.err()
     }
 
     /// Fetches a picture by its address: an item's preview, at the size a card or a page shows it.
@@ -393,15 +709,58 @@ impl Store {
         if let Err(why) = crate::fetch::web_address(&address) {
             return Fetched { bytes: Vec::new(), failure: why };
         }
-        match self.transport.get(&address, PICTURE_BYTES, crate::fetch::FETCH_TIME) {
+        match self.transport.get(&address, crate::store_media::PICTURE_BYTES, crate::fetch::FETCH_TIME) {
             Ok(bytes) => Fetched { bytes, failure: String::new() },
             Err(why) => Fetched { bytes: Vec::new(), failure: why },
         }
     }
 }
 
-/// The largest a picture may be before it is refused.
-const PICTURE_BYTES: usize = 4 * 1024 * 1024;
+impl Store {
+    fn local_origin(&self, source: &str) -> Option<String> {
+        self.held()
+            .iter()
+            .find(|held| held.saved.id == source && held.saved.on && held.saved.local_network)
+            .map(|held| held.saved.address.clone())
+    }
+
+    pub(crate) fn fetch_media_bytes(&self, source: &str, address: &str, cap: usize) -> Result<Vec<u8>, String> {
+        crate::fetch::web_address(address)?;
+        self.transport.get_scoped(address, cap, crate::fetch::FETCH_TIME, self.local_origin(source).as_deref())
+    }
+
+    pub(crate) fn copy_media(
+        &self,
+        source: &str,
+        address: &str,
+        cap: usize,
+        out: &mut dyn std::io::Write,
+    ) -> Result<usize, String> {
+        crate::fetch::web_address(address)?;
+        self.transport.get_into_scoped(
+            address,
+            cap,
+            std::time::Duration::from_secs(120),
+            self.local_origin(source).as_deref(),
+            out,
+        )
+    }
+}
+
+/// Decodes a Store preview within a pixel budget, then scales it to the presentation size.
+pub fn store_picture(bytes: &[u8], edge: u32) -> Option<image::RgbaImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    let decoded = reader.decode().ok()?;
+    if decoded.width().max(decoded.height()) > edge {
+        return Some(decoded.resize(edge, edge, image::imageops::FilterType::Triangle).into_rgba8());
+    }
+    Some(decoded.into_rgba8())
+}
 
 /// What a web source that has never been read says on its row.
 const NOT_READ: &str = "it has not been read yet.";
@@ -414,7 +773,13 @@ const SHIPPED_NAME: &str = "ProCraft Store";
 /// The shipped source: the bundled plugins as one catalogue.
 fn shipped_held(on: bool) -> Held {
     Held {
-        saved: Saved { id: SHIPPED.to_owned(), name: SHIPPED_NAME.to_owned(), address: String::new(), on },
+        saved: Saved {
+            id: SHIPPED.to_owned(),
+            name: SHIPPED_NAME.to_owned(),
+            address: String::new(),
+            on,
+            local_network: false,
+        },
         catalogue: Some(Catalogue {
             name: SHIPPED_NAME.to_owned(),
             publisher: "ProCraft".to_owned(),
@@ -422,6 +787,7 @@ fn shipped_held(on: bool) -> Held {
         }),
         read: 0,
         failure: String::new(),
+        refresh: Arc::new(()),
     }
 }
 
@@ -447,6 +813,7 @@ fn shipped_items() -> &'static [StoreItem] {
                     category: shipped_category(folder).to_owned(),
                     tags: Vec::new(),
                     preview: String::new(),
+                    icon: String::new(),
                     previews: Vec::new(),
                     body: String::new(),
                     // nothing to fetch: the file is already in the binary, at the size it carries
@@ -459,6 +826,11 @@ fn shipped_items() -> &'static [StoreItem] {
             })
             .collect()
     })
+}
+
+#[cfg(test)]
+pub(crate) fn bundled_plugin_for_cover_test() -> Option<StoreItem> {
+    shipped_items().first().cloned()
 }
 
 /// The shelf each bundled plugin sits on, as store-categories.md maps them.
@@ -491,7 +863,9 @@ impl Store {
         Arc::new(Store {
             dir: Some(root.to_path_buf()),
             held: Mutex::new(held),
+            source_writes: Mutex::new(()),
             installed: Mutex::new(installed),
+            installed_brushes: Mutex::new(Vec::new()),
             transport,
         })
     }
@@ -499,7 +873,12 @@ impl Store {
     /// Reads a source from its web address, or says why it could not be read.
     fn read_web(&self, saved: &Saved) -> Result<(Catalogue, Vec<u8>), String> {
         crate::fetch::web_address(&saved.address)?;
-        let bytes = self.transport.get(&saved.address, CATALOGUE_BYTES, crate::fetch::FETCH_TIME)?;
+        let bytes = self.transport.get_scoped(
+            &saved.address,
+            CATALOGUE_BYTES,
+            crate::fetch::FETCH_TIME,
+            saved.local_network.then_some(&saved.address),
+        )?;
         let catalogue = parse(&bytes, saved).map_err(|r| r.text())?;
         Ok((catalogue, bytes))
     }
@@ -515,26 +894,164 @@ impl Store {
         self.installed.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Writes what has been installed out whole.
-    fn keep_installed_list(&self) {
-        let Some(dir) = &self.dir else { return };
-        let text = write_installed(&self.records());
-        let written = write_atomically(&dir.join(INSTALLED_FILE), |tmp| {
-            std::fs::write(tmp, &text).map_err(|e| file_error("saving what was installed", e))
-        });
-        if let Err(e) = written {
-            log::warn!("keeping what the store installed: {e}");
+    fn brush_records(&self) -> std::sync::MutexGuard<'_, Vec<Installed>> {
+        self.installed_brushes.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn follow_brush_installs(&self, session: &crate::CanvasSession) {
+        *self.brush_records() = session.store_brush_installs();
+    }
+
+    fn plugin_source(&self, item: &StoreItem) -> Result<SourceInfo, String> {
+        if item.kind != ItemKind::Plugin {
+            return Err("This listing isn't for a plugin.".to_owned());
         }
+        let held = self.held();
+        let source = held
+            .iter()
+            .find(|source| source.saved.id == item.source && source.saved.on)
+            .ok_or("The catalogue is unavailable.")?;
+        let same =
+            source.catalogue.as_ref().is_some_and(|catalogue| catalogue.items.iter().any(|listed| listed == item));
+        if !same || item.file.is_empty() {
+            return Err("The plugin listing changed. Open it again.".to_owned());
+        }
+        Ok(described(source))
+    }
+
+    fn check_plugin_origin(
+        &self,
+        item: &StoreItem,
+        address: &str,
+        previous: Option<&crate::plugins::StorePluginState>,
+    ) -> Result<(), String> {
+        let Some(previous) = previous else { return Ok(()) };
+        let records = self.records();
+        let pin = sha256_hex(address.as_bytes());
+        let same = records.iter().any(|record| {
+            record.kind == ItemKind::Plugin
+                && record.id == item.id
+                && record.version == previous.version
+                && record.source == item.source
+                && (record.source_pin.is_empty() || record.source_pin == pin)
+        });
+        same.then_some(())
+            .ok_or_else(|| "Store updates must come from the catalogue that installed the existing plugin.".to_owned())
+    }
+
+    fn prepare_plugin_review(
+        &self,
+        item: StoreItem,
+        plugins: Arc<crate::Plugins>,
+        path: &Path,
+    ) -> Result<StorePluginReview, String> {
+        let source = self.plugin_source(&item)?;
+        listing_size(&item)?;
+        let bytes = crate::plugin_file::read_plugin_file(path).ok_or("The plugin file couldn't be read.")?;
+        let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
+        check_listing(&item, bytes.len() as u64, digest.as_ref())?;
+        let package = crate::plugin_file::read_decoded_plugin(crate::store_decode::decode_bytes(
+            crate::StoreDecodeKind::Plugin,
+            &bytes,
+        )?)?;
+        let manifest = &package.manifest;
+        if item.id != manifest.id || item.version != manifest.version {
+            return Err("The plugin file's ID or version differs from the catalogue listing.".to_owned());
+        }
+        if !manifest.publisher.is_empty() && plain(&manifest.publisher) != item.publisher {
+            return Err("The publisher in the plugin file differs from the catalogue listing.".to_owned());
+        }
+        let previous = plugins.store_plugin_state(manifest)?;
+        self.check_plugin_origin(&item, &source.address, previous.as_ref())?;
+
+        let name = plain(&manifest.name);
+        let origin = source
+            .address
+            .strip_prefix("https://")
+            .and_then(|url| url.split(['/', '?', '#']).next())
+            .and_then(|authority| authority.rsplit('@').next())
+            .map(|host| plain(host).chars().take(100).collect::<String>())
+            .unwrap_or_else(|| "Local catalogue".to_owned());
+        let mut lines = vec![format!("Version {}", manifest.version), format!("{} · {origin}", plain(&source.name))];
+        if !manifest.publisher.is_empty() {
+            lines.push(format!("{} · Publisher identity unverified", plain(&manifest.publisher)));
+        } else {
+            lines.push("Publisher identity unverified".to_owned());
+        }
+        let contents: Vec<_> = manifest
+            .holds
+            .iter()
+            .map(|part| match part {
+                crate::PluginPart::Hooks => "plugin code",
+                crate::PluginPart::Filter => "filters",
+                crate::PluginPart::Brushes => "brushes",
+            })
+            .collect();
+        lines.push(format!("Package contains {}", contents.join(", ")));
+        let added: Vec<_> = manifest
+            .permissions
+            .iter()
+            .filter(|permission| previous.as_ref().is_some_and(|previous| !previous.permissions.contains(permission)))
+            .collect();
+        if !added.is_empty() {
+            let added: Vec<_> = added.iter().map(|permission| permission.review_label()).collect();
+            lines.push(format!("New permissions in this update\n{}", added.join(", ")));
+        }
+        if !manifest.permissions.is_empty() {
+            let permissions: Vec<_> = manifest.permissions.iter().map(|permission| permission.review_label()).collect();
+            lines.push(format!("Requested permissions\n{}", permissions.join(", ")));
+        }
+        if manifest.controls.iter().any(|control| matches!(control, crate::PluginControl::Folder { .. })) {
+            lines.push(
+                "ProCraft can read or write files on its behalf in folders you choose for this plugin.".to_owned(),
+            );
+            if previous.is_some() {
+                lines.push("This update can use folders you already chose for the plugin.".to_owned());
+            }
+        }
+        Ok(StorePluginReview {
+            name,
+            message: lines.join("\n\n"),
+            item,
+            source_address: source.address,
+            previous,
+            plugins,
+            package: Mutex::new(Some(package)),
+        })
+    }
+
+    fn save_install(&self, one: Installed) -> bool {
+        let mut list = self.records();
+        let mut updated: Vec<_> =
+            list.iter().filter(|old| old.id != one.id || old.source != one.source).cloned().collect();
+        updated.push(one);
+        if !self.write_installed_list(&updated) {
+            return false;
+        }
+        *list = updated;
+        true
+    }
+
+    fn write_installed_list(&self, list: &[Installed]) -> bool {
+        let Some(dir) = &self.dir else { return true };
+        let text = write_installed(list);
+        write_atomically(&dir.join(INSTALLED_FILE), |tmp| {
+            std::fs::write(tmp, &text).map_err(|e| file_error("saving what was installed", e))
+        })
+        .is_ok()
     }
 
     fn cache_dir(&self, id: &str) -> Option<PathBuf> {
-        self.dir.as_ref().map(|d| d.join(id))
+        valid_source_id(id).then(|| self.dir.as_ref().map(|d| d.join(id))).flatten()
     }
 
-    /// Writes the sources' list out whole.
-    fn keep_sources(&self, held: &[Held]) {
+    fn writing_sources(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.source_writes.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn keep_sources(&self) {
         let Some(dir) = &self.dir else { return };
-        let text = write_sources(held);
+        let text = write_sources(&self.held());
         let written = write_atomically(&dir.join(SOURCES_FILE), |tmp| {
             std::fs::write(tmp, &text).map_err(|e| file_error("saving the sources", e))
         });
@@ -543,10 +1060,132 @@ impl Store {
         }
     }
 
+    fn read(&self, saved: &Saved) -> Result<(Catalogue, Vec<u8>), String> {
+        if web(&saved.address) { self.read_web(saved) } else { read_local(saved) }
+    }
+
+    fn listing(&self, source: &str, id: &str) -> Option<StoreItem> {
+        self.held()
+            .iter()
+            .find(|h| h.saved.id == source && h.saved.on)?
+            .catalogue
+            .as_ref()?
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+    }
+
+    #[cfg(test)]
+    fn installed_one(&self, id: String) -> Option<Installed> {
+        self.records().iter().find(|one| one.id == id).cloned()
+    }
+
+    #[cfg(test)]
+    fn keep_installed(&self, id: String, digest: String) -> bool {
+        let Some(mut item) = self.items().into_iter().find(|item| item.id == id) else { return false };
+        item.sha256 = digest;
+        self.save_install(Installed::from_item(&item))
+    }
+
+    #[cfg(test)]
+    fn forget_installed(&self, id: String) -> bool {
+        self.installed_one(id.clone()).is_some_and(|one| self.forget_listing(one.source, id))
+    }
+
+    #[cfg(test)]
+    fn fetch_item(&self, id: String) -> Fetched {
+        let result = self
+            .items()
+            .into_iter()
+            .find(|item| item.id == id)
+            .ok_or_else(|| "no source lists that item".to_owned())
+            .and_then(|item| {
+                if item.file.is_empty() {
+                    return Err("it came with the app, so there is nothing to fetch".to_owned());
+                }
+                crate::fetch::web_address(&item.file)?;
+                self.transport.get(&item.file, listing_size(&item)?, crate::fetch::FETCH_TIME)
+            });
+        match result {
+            Ok(bytes) => Fetched { bytes, failure: String::new() },
+            Err(failure) => Fetched { bytes: Vec::new(), failure },
+        }
+    }
+
+    fn keep_read_failure(&self, id: &str, reason: &str) {
+        let Some(dir) = self.cache_dir(id) else { return };
+        let path = dir.join(READ_FILE);
+        let Ok(contents) = std::fs::read_to_string(&path) else { return };
+        let Ok(mut record) = serde_json::from_str::<serde_json::Value>(&contents) else { return };
+        let Some(fields) = record.as_object_mut() else { return };
+        fields.insert("failure".to_owned(), serde_json::json!(reason));
+        fields.insert("failed_at".to_owned(), serde_json::json!(iso(now())));
+        let result = write_atomically(&path, |tmp| {
+            std::fs::write(tmp, record.to_string()).map_err(|error| file_error("saving catalogue status", error))
+        });
+        if let Err(error) = result {
+            log::warn!("saving catalogue status: {error}");
+        }
+    }
+
     fn keep(&self, saved: &Saved, bytes: &[u8], catalogue: &Catalogue) {
         if let Some(dir) = &self.dir {
             keep_catalogue(dir, saved, bytes, catalogue);
         }
+    }
+}
+
+fn valid_source_id(id: &str) -> bool {
+    id.len() == 6 && id.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn listing_size(item: &StoreItem) -> Result<usize, String> {
+    let max = if item.kind == ItemKind::Plugin { PLUGIN_BYTES } else { ITEM_BYTES };
+    usize::try_from(item.bytes)
+        .ok()
+        .filter(|&size| size > 0 && size <= max)
+        .ok_or_else(|| format!("the listed file is outside the Store's {} MiB limit", max / (1024 * 1024)))
+}
+
+fn check_listing(item: &StoreItem, len: u64, digest: &[u8]) -> Result<(), String> {
+    if len != item.bytes {
+        return Err(format!("the file is {len} bytes and the catalogue says {}", item.bytes));
+    }
+    if hex(digest) != item.sha256 {
+        return Err("the file does not match the catalogue".to_owned());
+    }
+    Ok(())
+}
+
+pub fn check_listing_file(item: &StoreItem, path: &Path) -> Result<(), String> {
+    use std::io::Read as _;
+    let cap = listing_size(item)?;
+    let file = std::fs::File::open(path).map_err(|e| format!("the file could not be read: {e}"))?;
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    let len = std::io::copy(
+        &mut file.take(cap as u64 + 1),
+        &mut HashWriter { inner: &mut std::io::sink(), digest: &mut digest },
+    )
+    .map_err(|e| format!("the file could not be read: {e}"))?;
+    check_listing(item, len, digest.finish().as_ref())
+}
+
+struct HashWriter<'a> {
+    inner: &'a mut dyn std::io::Write,
+    digest: &'a mut ring::digest::Context,
+}
+
+impl std::io::Write for HashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let count = self.inner.write(bytes)?;
+        let written = bytes.get(..count).ok_or_else(|| std::io::Error::other("invalid write count"))?;
+        self.digest.update(written);
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -648,16 +1287,16 @@ fn read_source(root: &Path, saved: Saved) -> Held {
     let cached = std::fs::read(dir.join(CATALOGUE_FILE)).ok().and_then(|b| parse(&b, &saved).ok());
     let (read, failure) = read_record_of(&dir);
     if web(&saved.address) {
-        let failure = if cached.is_some() && failure.is_empty() { String::new() } else { NOT_READ.to_owned() };
-        return Held { saved, catalogue: cached, read, failure };
+        let failure = if cached.is_some() { failure } else { NOT_READ.to_owned() };
+        return Held { saved, catalogue: cached, read, failure, refresh: Arc::new(()) };
     }
     match read_local(&saved) {
         Ok((catalogue, bytes)) => {
             keep_catalogue(root, &saved, &bytes, &catalogue);
-            Held { saved, catalogue: Some(catalogue), read: now(), failure: String::new() }
+            Held { saved, catalogue: Some(catalogue), read: now(), failure: String::new(), refresh: Arc::new(()) }
         }
         // a file that will not read now still shows the copy it had, with the reason it is stale
-        Err(reason) => Held { saved, catalogue: cached, read, failure: reason },
+        Err(reason) => Held { saved, catalogue: cached, read, failure: reason, refresh: Arc::new(()) },
     }
 }
 
@@ -686,6 +1325,9 @@ fn write_sources(held: &[Held]) -> String {
             let key = if web(&h.saved.address) { "url" } else { "path" };
             one.insert(key.to_owned(), serde_json::json!(h.saved.address.clone()));
             one.insert("on".to_owned(), serde_json::json!(h.saved.on));
+            if h.saved.local_network {
+                one.insert("local_network".to_owned(), serde_json::Value::Bool(true));
+            }
             serde_json::Value::Object(one)
         })
         .collect();
@@ -701,14 +1343,15 @@ fn read_sources(text: &str) -> (Vec<Saved>, bool) {
         .iter()
         .filter_map(|s| {
             let id = s.get("id")?.as_str()?.to_owned();
-            if id == SHIPPED {
+            if !valid_source_id(&id) {
                 return None;
             }
             let name = s.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
             let address =
                 s.get("url").and_then(|v| v.as_str()).or_else(|| s.get("path").and_then(|v| v.as_str()))?.to_owned();
             let on = s.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
-            (!id.is_empty() && !address.is_empty()).then_some(Saved { id, name, address, on })
+            let local_network = s.get("local_network").and_then(|v| v.as_bool()).unwrap_or(false);
+            (!address.is_empty()).then_some(Saved { id, name, address, on, local_network })
         })
         .collect();
     (saved, shipped)
@@ -751,6 +1394,35 @@ pub fn package_details(
     exported: &str,
 ) -> String {
     let preview = pictures.first().map_or("", String::as_str);
+    package_details_with_cover(
+        kind,
+        name,
+        author,
+        description,
+        category,
+        licence,
+        tags,
+        pictures,
+        preview,
+        "",
+        exported,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn package_details_with_cover(
+    kind: &str,
+    name: &str,
+    author: &str,
+    description: &str,
+    category: &str,
+    licence: &str,
+    tags: &[String],
+    pictures: &[String],
+    preview: &str,
+    icon: &str,
+    exported: &str,
+) -> String {
     serde_json::json!({
         "schema": 1,
         "kind": kind,
@@ -761,6 +1433,7 @@ pub fn package_details(
         "licence": licence,
         "tags": tags,
         "preview": preview,
+        "icon": icon,
         "pictures": pictures,
         "exported": exported,
     })
@@ -784,7 +1457,7 @@ fn fresh_id(address: &str, held: &[Held]) -> String {
     }
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(since) => since.as_secs(),
         Err(_) => 0,
@@ -792,7 +1465,7 @@ fn now() -> u64 {
 }
 
 /// `secs` since the epoch, as `YYYY-MM-DDTHH:MM:SSZ`.
-fn iso(secs: u64) -> String {
+pub(crate) fn iso(secs: u64) -> String {
     let (year, month, day) = civil((secs / 86_400) as i64);
     let rest = secs % 86_400;
     format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, (rest % 3600) / 60, rest % 60)
@@ -838,78 +1511,17 @@ fn from_iso(text: &str) -> Option<u64> {
     u64::try_from(epoch_days).ok().map(|d| d * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
-/// The digest a read record keeps, 64 lowercase hex characters.
 fn sha256_hex(bytes: &[u8]) -> String {
+    hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
+}
+
+fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
-    let mut text = String::with_capacity(64);
-    for byte in sha256(bytes) {
+    let mut text = String::with_capacity(2 * bytes.len());
+    for byte in bytes {
         let _ = write!(text, "{byte:02x}");
     }
     text
-}
-
-/// SHA-256 of `bytes` (FIPS 180-4), the digest a read record names its catalogue by. Written out
-/// here because the crate has no digest dependency.
-fn sha256(bytes: &[u8]) -> Vec<u8> {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98,
-        0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8,
-        0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819,
-        0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-    let word = |part: &[u8]| part.iter().fold(0u32, |so_far, byte| (so_far << 8) | u32::from(*byte));
-    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] =
-        [0x6a09e667u32, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-    let mut message = bytes.to_vec();
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
-    }
-    message.extend_from_slice(&(bytes.len() as u64).wrapping_mul(8).to_be_bytes());
-    for block in message.chunks(64) {
-        let mut w: Vec<u32> = block.chunks(4).map(word).collect();
-        w.truncate(16);
-        // each of the next 48 words is built from the sixteen before it, newest last
-        let back =
-            |words: &[u32], from_end: usize| words.iter().rev().nth(from_end.saturating_sub(1)).copied().unwrap_or(0);
-        while w.len() < 64 {
-            let s0 = back(&w, 15).rotate_right(7) ^ back(&w, 15).rotate_right(18) ^ (back(&w, 15) >> 3);
-            let s1 = back(&w, 2).rotate_right(17) ^ back(&w, 2).rotate_right(19) ^ (back(&w, 2) >> 10);
-            let next = back(&w, 16).wrapping_add(s0).wrapping_add(back(&w, 7)).wrapping_add(s1);
-            w.push(next);
-        }
-        // eight working words, added back into the digest once the block's rounds are done
-        let (mut wa, mut wb, mut wc, mut wd, mut we, mut wf, mut wg, mut wh) = (a, b, c, d, e, f, g, h);
-        for (k, x) in K.iter().zip(w.iter()) {
-            let s1 = we.rotate_right(6) ^ we.rotate_right(11) ^ we.rotate_right(25);
-            let choice = (we & wf) ^ (!we & wg);
-            let temp1 = wh.wrapping_add(s1).wrapping_add(choice).wrapping_add(*k).wrapping_add(*x);
-            let s0 = wa.rotate_right(2) ^ wa.rotate_right(13) ^ wa.rotate_right(22);
-            let majority = (wa & wb) ^ (wa & wc) ^ (wb & wc);
-            let temp2 = s0.wrapping_add(majority);
-            wh = wg;
-            wg = wf;
-            wf = we;
-            we = wd.wrapping_add(temp1);
-            wd = wc;
-            wc = wb;
-            wb = wa;
-            wa = temp1.wrapping_add(temp2);
-        }
-        a = a.wrapping_add(wa);
-        b = b.wrapping_add(wb);
-        c = c.wrapping_add(wc);
-        d = d.wrapping_add(wd);
-        e = e.wrapping_add(we);
-        f = f.wrapping_add(wf);
-        g = g.wrapping_add(wg);
-        h = h.wrapping_add(wh);
-    }
-    [a, b, c, d, e, f, g, h].iter().flat_map(|part| part.to_be_bytes()).collect()
 }
 
 /// A catalogue's bytes, checked against the caps and the rules, or why they were not taken.
@@ -970,12 +1582,16 @@ fn item_of(value: &serde_json::Value, saved: &Saved) -> Option<StoreItem> {
     let category = CATEGORIES.iter().copied().find(|c| *c == named).map_or_else(|| "Other".to_owned(), str::to_owned);
     let tags = tags_of(value.get("tags"))?;
     let previews = links_of(value.get("previews"))?;
-    let preview = value
-        .get("preview")
-        .and_then(|v| v.as_str())
-        .map(plain)
-        .filter(|link| https(link) && link.chars().count() <= LINK_CHARS)
-        .unwrap_or_default();
+    let artwork_link = |key| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(plain)
+            .filter(|link| https(link) && link.chars().count() <= LINK_CHARS)
+            .unwrap_or_default()
+    };
+    let preview = artwork_link("preview");
+    let icon = artwork_link("icon");
     // every item a catalogue lists is one to fetch: the app's own catalogue is built in code
     // rather than parsed here, so an item without a file is a broken listing
     let file = text(value.get("file"), LINK_CHARS)?;
@@ -999,6 +1615,7 @@ fn item_of(value: &serde_json::Value, saved: &Saved) -> Option<StoreItem> {
         category,
         tags,
         preview,
+        icon,
         previews,
         body,
         file,
@@ -1013,6 +1630,8 @@ fn kind_of(text: &str) -> Option<ItemKind> {
     match text {
         "plugin" => Some(ItemKind::Plugin),
         "brushset" => Some(ItemKind::BrushSet),
+        "brush" => Some(ItemKind::Brush),
+        "brushlibrary" => Some(ItemKind::BrushLibrary),
         "asset pack" => Some(ItemKind::AssetPack),
         _ => None,
     }
@@ -1023,6 +1642,8 @@ fn kind_key(kind: ItemKind) -> &'static str {
     match kind {
         ItemKind::Plugin => "plugin",
         ItemKind::BrushSet => "brushset",
+        ItemKind::Brush => "brush",
+        ItemKind::BrushLibrary => "brushlibrary",
         ItemKind::AssetPack => "asset pack",
     }
 }
@@ -1039,6 +1660,7 @@ fn write_installed(list: &[Installed]) -> String {
                 "version": one.version,
                 "publisher": one.publisher,
                 "source": one.source,
+                "source_pin": one.source_pin,
                 "digest": one.digest,
                 "at": one.at,
             })
@@ -1064,6 +1686,7 @@ fn installed_of(value: &serde_json::Value) -> Option<Installed> {
         version: text_of("version"),
         publisher: text_of("publisher"),
         source: text_of("source"),
+        source_pin: text_of("source_pin"),
         digest: text_of("digest"),
         at: value.get("at").and_then(|v| v.as_u64()).unwrap_or(0),
     })
@@ -1117,15 +1740,12 @@ fn tags_of(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
     Some(tags)
 }
 
-/// The pictures an item page shows: https links only, at most six, each within the link cap.
+/// The HTTPS links an item page can display, bounded by the gallery and link limits.
 fn links_of(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
     let Some(value) = value else { return Some(Vec::new()) };
     let list = value.as_array()?;
-    if list.len() > PREVIEWS_MOST {
-        return None;
-    }
-    let mut links = Vec::with_capacity(list.len());
-    for one in list {
+    let mut links = Vec::with_capacity(list.len().min(PREVIEWS_MOST));
+    for one in list.iter().take(PREVIEWS_MOST) {
         let link = plain(one.as_str()?);
         if link.chars().count() > LINK_CHARS {
             return None;
@@ -1230,7 +1850,7 @@ mod tests {
     }
 
     fn saved(address: &str) -> Saved {
-        Saved { id: "a1b2c3".into(), name: String::new(), address: address.into(), on: true }
+        Saved { id: "a1b2c3".into(), name: String::new(), address: address.into(), on: true, local_network: false }
     }
 
     const CATALOGUE: &str = r#"{
@@ -1397,6 +2017,27 @@ mod tests {
     }
 
     #[test]
+    fn featured_order_uses_the_day_and_every_candidate_without_repeating_a_listing() {
+        let listings: Vec<_> = (0..16).map(|id| format!("{}:item-{id}", id % 3)).collect();
+        let selected = |listings: Vec<String>, day| {
+            store_featured_order(listings.clone(), day)
+                .into_iter()
+                .map(|index| listings[index as usize].clone())
+                .collect::<Vec<_>>()
+        };
+        let current = selected(listings.clone(), 20_000);
+        assert_eq!(current.len(), 5);
+        assert_eq!(current.iter().collect::<std::collections::HashSet<_>>().len(), 5);
+        assert_eq!(current, selected(listings.iter().rev().cloned().collect(), 20_000));
+        assert_ne!(current, selected(listings.clone(), 20_001));
+        let over_time: std::collections::HashSet<_> =
+            (20_000..20_030).flat_map(|day| selected(listings.clone(), day)).collect();
+        assert_eq!(over_time.len(), listings.len());
+        assert_eq!(selected(listings[..2].to_vec(), 20_000).len(), 2);
+        assert!(selected(Vec::new(), 20_000).is_empty());
+    }
+
+    #[test]
     fn one_id_with_one_digest_is_one_item_and_two_digests_are_two() {
         let store = dir("merge");
         let one = catalogue_file(&store, "one.json", CATALOGUE);
@@ -1494,6 +2135,224 @@ mod tests {
             assert!(!s.fetch_item(item.id).failure.is_empty(), "a bundled item is not fetched");
         }
         let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn selected_downloads_accept_both_sources_and_remove_a_failed_stage() {
+        let root = tempfile::tempdir().unwrap();
+        let first = "first brush file";
+        let second = "a different brush file";
+        let catalogue = |file: &str, bytes: &str| {
+            serde_json::json!({
+                "schema": 1,
+                "store": {"name": "Example", "publisher": "Maker", "updated": "2026-11-25"},
+                "items": [{
+                    "id": "org.example.ink", "kind": "brushset", "name": "Ink", "publisher": "Maker",
+                    "description": "Brushes", "version": "1.0.0", "file": file,
+                    "bytes": bytes.len(), "sha256": digest_of(bytes.as_bytes())
+                }]
+            })
+            .to_string()
+        };
+        let first_url = "https://example.org/first";
+        let second_url = "https://example.org/second";
+        let a_url = "https://example.org/a.json";
+        let b_url = "https://example.org/b.json";
+        let c_url = "https://example.org/c.json";
+        let answers = [
+            (a_url, catalogue(first_url, first)),
+            (b_url, catalogue(second_url, second)),
+            (c_url, catalogue(first_url, "wrong on purpose")),
+            (first_url, first.to_owned()),
+            (second_url, second.to_owned()),
+        ]
+        .into_iter()
+        .map(|(address, body)| (address.to_owned(), Ok(body.into_bytes())))
+        .collect();
+        let store = Store::open_with(root.path().to_string_lossy().into_owned(), Arc::new(Fake(answers)));
+        for url in [a_url, b_url, c_url] {
+            assert_eq!(store.add_source(url.to_owned()), None);
+        }
+        for (at, url, expected) in [(0, a_url, first), (1, b_url, second), (2, c_url, "")] {
+            let source = store.sources().into_iter().find(|source| source.address == url).unwrap();
+            let listing = store.listing(&source.id, "org.example.ink").unwrap();
+            let path = root.path().join(format!("payload-{at}"));
+            let result = store.download_listing(listing, path.to_string_lossy().into_owned());
+            if expected.is_empty() {
+                assert!(result.is_some());
+                assert!(!path.exists());
+            } else {
+                assert_eq!(result, None);
+                assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn preview_limit_holds_every_package_picture_without_dropping_the_item() {
+        let mut catalogue: serde_json::Value = serde_json::from_str(CATALOGUE).unwrap();
+        let pictures =
+            (0..PREVIEWS_MOST + 2).map(|index| format!("https://example.org/picture-{index}.png")).collect::<Vec<_>>();
+        catalogue["items"][0]["preview"] = serde_json::json!(pictures[0]);
+        catalogue["items"][0]["previews"] = serde_json::json!(pictures);
+        let parsed = parse(catalogue.to_string().as_bytes(), &saved("test")).unwrap();
+        let gallery = parsed.items[0].gallery();
+        assert_eq!(gallery.len(), PREVIEWS_MOST);
+        assert!(gallery[0].ends_with("picture-0.png"));
+        assert!(gallery[PREVIEWS_MOST - 1].ends_with(&format!("picture-{}.png", PREVIEWS_MOST - 1)));
+    }
+
+    #[test]
+    fn store_plugins_are_bound_to_their_listing_and_require_approval_of_new_permissions() {
+        use crate::plugin_file::tests::{coded, pack};
+        use crate::plugin_run::{
+            MODULE,
+            tests::{ACTS, position_module},
+        };
+        use serde_json::json;
+
+        let root = tempfile::tempdir().unwrap();
+        let text = |path: &Path| path.to_string_lossy().into_owned();
+        let store = Store::open(text(&root.path().join("store")));
+        let plugins = crate::Plugins::with_store(text(&root.path().join("plugins")));
+        let id = "org.example.reviewed";
+        let v1 = position_module("", "(i64.const 0)");
+        let first = pack(&coded(id, &v1), &[(MODULE, &v1)]);
+        let v2 = wat::parse_str(ACTS).unwrap();
+        let mut manifest = coded(id, &v2);
+        manifest["version"] = json!("2.0.0");
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        manifest["hooks"] = json!([]);
+        manifest["permissions"] = json!(["artwork.write"]);
+        manifest["actions"] = json!([{ "key": "grid", "label": "Add a grid layer" }]);
+        let update = pack(&manifest, &[(MODULE, &v2)]);
+
+        let listings = |path: &Path, id: &str, version: &str, bytes: &[u8]| {
+            let catalogue = json!({
+                "schema": 1,
+                "store": { "name": "Test Catalogue", "updated": "2026-11-25" },
+                "items": [{
+                    "id": id, "kind": "plugin", "name": "A plugin", "publisher": "Someone",
+                    "version": version, "description": "A test plugin", "file": "https://example.org/download",
+                    "bytes": bytes.len(), "sha256": digest_of(bytes),
+                }]
+            });
+            std::fs::write(path, catalogue.to_string()).unwrap();
+        };
+        let source_file = root.path().join("source.json");
+        let plugin_file = root.path().join("plugin");
+        std::fs::write(&plugin_file, &first).unwrap();
+        listings(&source_file, "org.example.other", "1.0.0", &first);
+        assert_eq!(store.add_source(text(&source_file)), None);
+        let source = added(&store).unwrap().id;
+        let other = store.listing(&source, "org.example.other").unwrap();
+        let review = store.review_plugin_file(other, plugins.clone(), text(&plugin_file));
+        assert!(review.failure.unwrap().contains("ID or version"));
+        assert!(plugins.plugins().is_empty());
+
+        listings(&source_file, id, "1.1.0", &first);
+        assert_eq!(store.refresh(source.clone()), None);
+        let wrong_version = store.listing(&source, id).unwrap();
+        assert!(
+            store
+                .review_plugin_file(wrong_version, plugins.clone(), text(&plugin_file))
+                .failure
+                .unwrap()
+                .contains("ID or version")
+        );
+
+        listings(&source_file, id, "1.0.0", &first);
+        assert_eq!(store.refresh(source.clone()), None);
+        let listed = store.listing(&source, id).unwrap();
+        let inspected = store.review_plugin_file(listed, plugins.clone(), text(&plugin_file));
+        assert!(inspected.failure.is_none(), "{:?}", inspected.failure);
+        assert!(plugins.plugins().is_empty(), "review hasn't installed any code");
+        assert!(store.installed_listing(source.clone(), id.to_owned()).is_none());
+        let approved = inspected.review.unwrap();
+        assert_eq!(store.approve_plugin_listing(approved.clone()), None);
+        assert!(store.approve_plugin_listing(approved).is_some(), "an approval is single-use");
+        assert!(plugins.set_on(id.to_owned(), true));
+
+        std::fs::write(&plugin_file, &update).unwrap();
+        let elsewhere = root.path().join("other.json");
+        listings(&elsewhere, id, "2.0.0", &update);
+        assert_eq!(store.add_source(text(&elsewhere)), None);
+        let other = store.sources().into_iter().find(|entry| entry.address == text(&elsewhere)).unwrap();
+        let cross_source = store.listing(&other.id, id).unwrap();
+        let rejected = store.review_plugin_file(cross_source, plugins.clone(), text(&plugin_file));
+        assert!(rejected.failure.unwrap().contains("catalogue that installed"));
+
+        listings(&source_file, id, "2.0.0", &update);
+        assert_eq!(store.refresh(source.clone()), None);
+        let listed = store.listing(&source, id).unwrap();
+        let inspected = store.review_plugin_file(listed, plugins.clone(), text(&plugin_file));
+        assert!(inspected.failure.is_none(), "{:?}", inspected.failure);
+        let reviewed = inspected.review.unwrap();
+        assert!(reviewed.is_update());
+        assert!(reviewed.message().contains("New permissions in this update"));
+        assert!(reviewed.message().contains("Change artwork and layers"));
+        assert_eq!(plugins.plugins().first().unwrap().version, "1.0.0");
+        assert_eq!(store.approve_plugin_listing(reviewed), None);
+        assert_eq!(plugins.plugins().first().unwrap().version, "2.0.0");
+        assert_eq!(
+            store.installed_listing(source, id.to_owned()).unwrap().source_pin,
+            digest_of(text(&source_file).as_bytes())
+        );
+    }
+
+    #[test]
+    fn a_store_brush_listing_requires_a_real_brush_set() {
+        let root = tempfile::tempdir().unwrap();
+        let file = |name: &str| root.path().join(name);
+        let brush = file("brush");
+        let library = file("library");
+        let set = file("set");
+        let session = crate::CanvasSession::new(8, 8);
+        session.write_brush_file(0, 0, brush.to_string_lossy().into_owned()).unwrap();
+        session.write_brush_library_file(library.to_string_lossy().into_owned(), None).unwrap();
+        session.write_brush_set_file(0, set.to_string_lossy().into_owned(), None).unwrap();
+        for wrong in [brush, library] {
+            assert!(crate::brush_files::decode_store_brush_set(std::fs::File::open(wrong).unwrap()).is_err());
+        }
+        assert!(!crate::brush_files::decode_store_brush_set(std::fs::File::open(set).unwrap()).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn a_broken_plugin_cover_uses_the_same_artwork_as_a_missing_cover() {
+        let root = tempfile::tempdir().unwrap();
+        let bad = "https://example.org/bad.png";
+        let answers = [(bad.to_owned(), Ok(b"not an image".to_vec()))].into_iter().collect();
+        let store = Store::open_with(root.path().to_string_lossy().into_owned(), Arc::new(Fake(answers)));
+        let item = bundled_plugin_for_cover_test().unwrap();
+        let missing = store.fetch_store_cover(item.clone()).unwrap();
+        let mut broken = item;
+        broken.preview = bad.to_owned();
+        assert_eq!(store.fetch_store_cover(broken), Some(missing));
+    }
+
+    #[test]
+    fn video_stages_a_valid_clip_and_removes_a_rejected_file() {
+        let root = tempfile::tempdir().unwrap();
+        let good = "https://example.org/demo.webm?version=2";
+        let bad = "https://example.org/bad.webm";
+        let oversized = "https://example.org/big.mp4";
+        let header = b"\x1a\x45\xdf\xa3\x87\x42\x82\x84webm\x18\x53\x80\x67\x92\x15\x49\xa9\x66\x81\x00\x16\x54\xae\x6b\x81\x00\x1f\x43\xb6\x75\x81\x00";
+        let answers = [
+            (good.to_owned(), Ok(header.to_vec())),
+            (bad.to_owned(), Ok(b"wrong format".to_vec())),
+            (oversized.to_owned(), Ok(vec![0; 25 * 1024 * 1024 + 1])),
+        ]
+        .into_iter()
+        .collect();
+        let store = Store::open_with(root.path().to_string_lossy().into_owned(), Arc::new(Fake(answers)));
+        let path = root.path().join("preview.webm");
+        let text = path.to_string_lossy().into_owned();
+        assert!(store.download_store_video(bad.to_owned(), text.clone()).is_some());
+        assert!(!path.exists());
+        assert!(store.download_store_video(oversized.to_owned(), text.clone()).is_some());
+        assert!(!path.exists());
+        assert_eq!(store.download_store_video(good.to_owned(), text), None);
+        assert_eq!(std::fs::read(path).unwrap(), header);
     }
 
     #[test]

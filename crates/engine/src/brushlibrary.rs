@@ -129,16 +129,13 @@ pub fn is_library<'n>(names: impl Iterator<Item = &'n str>) -> bool {
     false
 }
 
-/// Reads a brush library file (its empty sets too); none if it isn't one or holds no brushes.
-pub fn read(bytes: &[u8]) -> Option<LibraryFile> {
-    read_with(&ZipReader::new(bytes)?, Some)
+struct OrderedSet {
+    name: String,
+    meta: Meta,
+    brushes: Vec<String>,
 }
 
-/// Reads the brush library file that is the archive `zip` as [`read`] does, each brush made
-/// `make` of it as soon as it is read (a few side by side, a set's brush files read one at a time
-/// from the archive), so a big library is never held whole; a brush `make` makes nothing of is
-/// left out.
-pub fn read_with<B: Send>(zip: &ZipReader<'_>, make: impl Fn(BrushFile) -> Option<B> + Sync) -> Option<LibraryFile<B>> {
+fn ordered_paths(zip: &ZipReader<'_>, meta_cap: usize) -> (Meta, Vec<OrderedSet>) {
     let prefix = meta_prefix();
     let names: Vec<String> = zip.names().map(str::to_owned).collect();
     let meta_in = |folder: Option<&str>| {
@@ -147,10 +144,8 @@ pub fn read_with<B: Send>(zip: &ZipReader<'_>, make: impl Fn(BrushFile) -> Optio
             (Some(f), Some((d, file))) => d == f && file.starts_with(&prefix),
             _ => false,
         })?;
-        Meta::read(&zip.read(name)?)
+        (zip.size(name)? <= meta_cap).then(|| Meta::read(&zip.read(name)?)).flatten()
     };
-    // (a brush file read and made at once: no more of them held at a time than there are threads)
-    let made = |path: &String| zip.read(path).and_then(|b| brushfile::read(&b)).and_then(&make);
     // the sets' folders (an empty one kept by its empty file) and their brush files, as the zip
     // has them
     let mut folders: Vec<(String, Vec<String>)> = Vec::new();
@@ -167,26 +162,58 @@ pub fn read_with<B: Send>(zip: &ZipReader<'_>, make: impl Fn(BrushFile) -> Optio
         }
     }
     let top = meta_in(None).unwrap_or_default();
-    let set_names: Vec<String> = folders.iter().map(|(f, _)| f.clone()).collect();
+    let names: Vec<_> = folders.iter().map(|(folder, _)| folder.clone()).collect();
+    let sets = top
+        .order(&names)
+        .into_iter()
+        .filter_map(|index| {
+            let (folder, files) = folders.get(index)?;
+            let meta = meta_in(Some(folder)).unwrap_or_default();
+            let brushes = meta
+                .order(files)
+                .into_iter()
+                .filter_map(|index| files.get(index))
+                .map(|file| format!("{folder}/{file}"))
+                .collect();
+            Some(OrderedSet { name: folder.clone(), meta, brushes })
+        })
+        .collect();
+    (top, sets)
+}
+
+/// The library's groups and nested brush entries in their saved order, without decoding the brushes.
+pub fn brush_paths(zip: &ZipReader<'_>) -> Option<Vec<(String, Vec<String>)>> {
+    is_library(zip.names())
+        .then(|| ordered_paths(zip, 1 << 20).1.into_iter().map(|set| (set.name, set.brushes)).collect())
+}
+
+/// Reads a brush library file (its empty sets too); none if it isn't one or holds no brushes.
+pub fn read(bytes: &[u8]) -> Option<LibraryFile> {
+    read_with(&ZipReader::new(bytes)?, Some)
+}
+
+/// Reads the brush library file that is the archive `zip` as [`read`] does, each brush made
+/// `make` of it as soon as it is read (a few side by side, a set's brush files read one at a time
+/// from the archive), so a big library is never held whole; a brush `make` makes nothing of is
+/// left out.
+pub fn read_with<B: Send>(zip: &ZipReader<'_>, make: impl Fn(BrushFile) -> Option<B> + Sync) -> Option<LibraryFile<B>> {
+    let (top, listed) = ordered_paths(zip, usize::MAX);
+    let made = |path: &String| zip.read(path).and_then(|b| brushfile::read(&b)).and_then(&make);
     let mut sets = Vec::new();
-    // each set's brushes by their file's name, for the tools
     let mut stems: Vec<Vec<String>> = Vec::new();
     let mut metas: Vec<Meta> = Vec::new();
-    for s in top.order(&set_names) {
-        let Some((folder, files)) = folders.get(s) else { continue };
-        let meta = meta_in(Some(folder)).unwrap_or_default();
-        let ordered: Vec<&String> = meta.order(files).into_iter().filter_map(|f| files.get(f)).collect();
-        let paths: Vec<String> = ordered.iter().map(|file| format!("{folder}/{file}")).collect();
+    for set in listed {
         let mut brushes = Vec::new();
         let mut kept = Vec::new();
-        for (file, brush) in ordered.iter().zip(crate::par::side_by_side(&paths, made)) {
+        for (path, brush) in set.brushes.iter().zip(crate::par::side_by_side(&set.brushes, made)) {
             let Some(brush) = brush.flatten() else { continue };
+            let Some((_, file)) = path.split_once('/') else { continue };
             brushes.push(brush);
             kept.push(file.trim_end_matches(".brush").to_owned());
         }
-        sets.push(LibrarySetFile { name: folder.clone(), icon: meta.property("icon_preset"), brushes });
+        sets.push(LibrarySetFile { name: set.name, icon: set.meta.property("icon_preset"), brushes });
         stems.push(kept);
-        metas.push(meta);
+        metas.push(set.meta);
     }
     if sets.iter().all(|s| s.brushes.is_empty()) {
         return None;

@@ -236,5 +236,11 @@
             android:authorities="${applicationId}.drag"
             android:exported="false"
             android:grantUriPermissions="true" />
+        <service
+            android:name=".store.StoreDecoderService"
+            android:exported="false"
+            android:isolatedProcess="true"
+            android:process=":store_decoder" />
+
     </application>
 </manifest>

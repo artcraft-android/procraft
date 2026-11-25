@@ -265,20 +265,25 @@ pub fn tell_what_was_told() {
 /// Asks where to keep a file called `name` (ending `extension`, a `kind` of file) and writes
 /// `bytes` there.
 pub fn save_file(bytes: &[u8], name: &str, extension: &str, kind: &str) {
+    if let Some(path) = pick_share_path(name, extension, kind)
+        && let Err(error) = write_whole(&path, bytes)
+    {
+        tell("Can't share", &error.to_string());
+    }
+}
+
+pub(crate) fn share_file_name(name: &str, extension: &str) -> String {
     let safe: String = name.chars().map(|c| if c.is_alphanumeric() || " _-".contains(c) { c } else { '_' }).collect();
-    let safe = if safe.trim().is_empty() { "Brush".to_owned() } else { safe };
-    let Some(path) = dialog()
+    let safe = if safe.trim().is_empty() { "Brush" } else { safe.trim() };
+    format!("{safe}.{extension}")
+}
+
+pub(crate) fn pick_share_path(name: &str, extension: &str, kind: &str) -> Option<std::path::PathBuf> {
+    dialog()
         .set_title(format!("Share {kind}"))
         .add_filter(kind, &[extension])
-        .set_file_name(format!("{safe}.{extension}"))
+        .set_file_name(share_file_name(name, extension))
         .save_file()
-    else {
-        return;
-    };
-    // a file there already is replaced only once this one is written whole
-    if let Err(e) = write_whole(&path, bytes) {
-        tell("Can't share", &e.to_string());
-    }
 }
 
 /// A sound the user picks (titled `title`): a WAV file, read whole, with its name.

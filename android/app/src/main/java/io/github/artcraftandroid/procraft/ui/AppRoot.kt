@@ -62,7 +62,9 @@ fun AppRoot(vm: CanvasViewModel) {
             // layers lifted out of the panel stay held across the gallery and into another artwork
             HoldingLayers(vm) { Screens(vm, keptClear) }
             // the store is a sheet over the work, as it is on the desk, not a screen of its own
-            StoreOverlay(onTakeKeptBrushes = { vm.addPendingBrushes() })
+            StoreOverlay(vm)
+            BrushShareOverlay(vm)
+            StorePackageOverlay(vm)
         }
     }
 }

@@ -123,7 +123,11 @@ mod stock_brushes;
 mod stock_library;
 mod storage;
 mod store;
+mod store_decode;
+mod store_media;
+mod store_package;
 mod store_previews;
+mod store_video;
 mod stroke_sound;
 mod studio;
 mod surround;
@@ -302,12 +306,29 @@ pub use side_slider::{
     ShadowStep, SideSliderTap, side_slider_drag_share, side_slider_shown_percent, side_slider_tap, side_thumb_shadow,
 };
 pub use storage::{NO_ROOM, save_failure_to_tell, storage_full_writes, storage_was_full};
-pub use store::{Fetched, Installed, ItemKind, SourceInfo, Store, StoreItem, digest_of, package_details};
+pub use store::{
+    Fetched, Installed, ItemKind, SourceInfo, Store, StoreItem, StorePluginInspection, StorePluginReview,
+    check_listing_file, digest_of, package_details,
+};
+pub use store::{
+    STORE_MAKER_IMAGE_LIMIT, StoreBrushResult, apply_queued_store_brushes, store_featured_order, store_gallery,
+    store_picture,
+};
+pub use store_decode::{StoreDecodeKind, StoreDecoder, run_store_decoder, set_store_decoder};
+pub use store_media::{
+    StoreGalleryEntry, StoreGalleryFrame, StoreGalleryImage, StoreVideo, store_cover_key, store_gallery_entries,
+    store_icon_key,
+};
+pub use store_package::{
+    StorePackageArtwork, StorePackageCover, StorePackageDetails, StorePackageImageChoices, StoreSharedFile,
+    open_asset_package_cover, read_store_maker_image, square_store_art, store_package_gallery, store_shared_file,
+    store_square_png, write_store_package, write_store_package_artwork, write_store_package_with_cover,
+};
 pub use store_previews::{
-    BrushShape, Gesture, MOST_PICTURES, MOST_SHEETS, MOST_SHOWN, PREVIEW_HEIGHT, PREVIEW_WIDTH, PathShape,
-    SHEET_COLUMNS, SHEET_ROWS, SHEET_STROKES, StorePreview, Stroke, Tile, asset_pack_name, asset_pack_store_preview,
-    card_gestures, pack_card, pack_picture_choices, picture_tiles, seed_of, select_brushes, stroke_placements,
-    stroke_sheet, strokes_picture,
+    BrushShape, CoverTemplate, Gesture, MOST_PICTURES, MOST_SHEETS, MOST_SHOWN, PREVIEW_HEIGHT, PREVIEW_WIDTH,
+    PathShape, SHEET_COLUMNS, SHEET_ROWS, SHEET_STROKES, StoreCover, StorePreview, Stroke, Tile, asset_pack_name,
+    asset_pack_store_cover, asset_pack_store_preview, card_gestures, pack_card, pack_picture_choices, picture_tiles,
+    seed_of, select_brushes, stroke_placements, stroke_sheet, strokes_picture,
 };
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
@@ -819,7 +840,7 @@ pub(crate) struct State {
     /// until it is told the plugins), and the folder the brushes were opened from (none until they
     /// are): the library is given each set once it is open, and a set given goes again with the
     /// switch it comes under (see [`CanvasSession::give_plugin_sets`]).
-    pub(crate) plugin_sets: Option<Vec<(String, std::sync::Arc<[u8]>)>>,
+    pub(crate) plugin_sets: Option<Vec<(String, plugin_file::PluginBrushSet)>>,
     pub(crate) brushes_dir: Option<std::path::PathBuf>,
     /// The tile of the picture a plugin's paper is, made again only as its file changes.
     pub(crate) paper_picture: Option<std::sync::Arc<paper_picture::PaperPicture>>,

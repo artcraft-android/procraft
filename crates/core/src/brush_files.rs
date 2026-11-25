@@ -262,7 +262,7 @@ impl CanvasSession {
                 let name = if name.trim().is_empty() { IMPORTED.to_owned() } else { name.trim().to_owned() };
                 let origins = vec![None; brushes.len()];
                 let icon = crate::brush_library::IMPORTED_ICON;
-                st.library.insert(0, LibrarySet { name, brushes, origins, icon, plugin: None });
+                st.library.insert(0, LibrarySet { name, brushes, origins, icon, plugin: None, store: None });
                 st.move_brush_refs(|(rs, ri)| Some((rs + 1, ri)));
                 Some(0)
             }
@@ -281,6 +281,7 @@ impl CanvasSession {
                                 origins: Vec::new(),
                                 icon: crate::brush_library::IMPORTED_ICON,
                                 plugin: None,
+                                store: None,
                             },
                         );
                         st.move_brush_refs(|(rs, ri)| Some((rs + 1, ri)));
@@ -540,6 +541,129 @@ impl BrushFileReading {
 /// the least (a few are read side by side, as many as fit in the budget for such work).
 const BRUSH_READ_BYTES: usize = 64 << 20;
 
+fn read_set_zip(
+    zip: &procraft_engine::zip::ZipReader<'_>,
+    folders: &[String],
+    reading: &BrushFileReading,
+) -> Option<Vec<Brush>> {
+    reading.begin(folders.len());
+    // as many side by side as their pictures fit, by the biggest brush's files
+    let mut sizes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for f in zip.facts() {
+        if let Some((folder, _)) = f.name.split_once('/') {
+            let size = sizes.entry(folder).or_default();
+            *size = size.saturating_add(f.size);
+        }
+    }
+    let each = sizes.values().max().map_or(0, |&s| s.saturating_mul(4)).max(BRUSH_READ_BYTES);
+    let made = procraft_engine::par::side_by_side_within(folders, each, |folder| {
+        reading.made(brushfile::read_folder(zip, folder))
+    });
+    if reading.cancelled() {
+        return None;
+    }
+    let brushes: Vec<Brush> = made.into_iter().flatten().flatten().collect();
+    Some(brushes)
+}
+
+pub(crate) const STORE_SET_ENTRIES: usize = 8192;
+const STORE_SET_ENTRY_BYTES: usize = 128 * 1024 * 1024;
+const STORE_SET_UNPACKED_BYTES: usize = 512 * 1024 * 1024;
+const STORE_SET_MANIFEST_BYTES: usize = 1024 * 1024;
+
+fn safe_brush_entry(name: &str) -> bool {
+    name.len() <= 1024
+        && !name.chars().any(char::is_control)
+        && !name.contains(['\\', ':', '\0'])
+        && name.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn store_brush_archive(bytes: &[u8]) -> Option<()> {
+    let archive = procraft_engine::keyed::Archive::read(bytes)?;
+    let root = archive.root()?;
+    let known_class = matches!(root.class(), Some("SilicaBrush" | "ValkyrieBrush"));
+    let has_settings = ["maxSize", "plotSpacing"]
+        .into_iter()
+        .any(|key| root.raw(key).and_then(procraft_engine::plist::Value::as_real).is_some_and(f64::is_finite));
+    (known_class && has_settings).then_some(())
+}
+
+fn store_brush_set(
+    mut input: std::fs::File,
+) -> Result<(procraft_engine::zip::ZipReader<'static>, String, Vec<String>), String> {
+    let wrong_kind = || "This file doesn't contain a brush set.".to_owned();
+    if !input.metadata().is_ok_and(|m| m.is_file() && m.len() <= 256 * 1024 * 1024) {
+        return Err(wrong_kind());
+    }
+    use std::io::Read as _;
+    let mut header = [0; 4];
+    if input.read_exact(&mut header).is_err() || &header != b"PK\x03\x04" {
+        return Err(wrong_kind());
+    }
+    let zip = procraft_engine::zip::ZipReader::from_file(input).ok_or_else(wrong_kind)?;
+    if zip.size("brushset.plist").is_none_or(|size| size == 0 || size > STORE_SET_MANIFEST_BYTES)
+        || brushlibrary::is_library(zip.names())
+        || zip.names().any(|name| matches!(name, "craft-extension.json" | "assets.json" | "artwork.json"))
+    {
+        return Err(wrong_kind());
+    }
+
+    let mut names = std::collections::HashSet::new();
+    let mut unpacked = 0usize;
+    for (index, entry) in zip.facts().enumerate() {
+        let path = entry.name.strip_suffix('/').unwrap_or(entry.name);
+        unpacked = unpacked.saturating_add(entry.size);
+        if index >= STORE_SET_ENTRIES || entry.size > STORE_SET_ENTRY_BYTES || unpacked > STORE_SET_UNPACKED_BYTES {
+            return Err("This Store brush set is too large to unpack.".to_owned());
+        }
+        if entry.encrypted
+            || (!entry.plain && !(entry.directory && entry.size == 0))
+            || !safe_brush_entry(path)
+            || !names.insert(path.to_ascii_lowercase())
+        {
+            return Err("This brush set contains an unsafe archive entry.".to_owned());
+        }
+    }
+    if !zip.names_agree() {
+        return Err("This brush set has conflicting archive records.".to_owned());
+    }
+
+    let (name, folders) = brushfile::set_folders(&zip).ok_or_else(wrong_kind)?;
+    let mut seen = std::collections::HashSet::new();
+    if folders.is_empty()
+        || folders.len() > STORE_SET_ENTRIES
+        || folders.iter().any(|folder| {
+            !safe_brush_entry(folder)
+                || folder.contains('/')
+                || !seen.insert(folder.to_ascii_lowercase())
+                || zip
+                    .size(&format!("{folder}/Brush.archive"))
+                    .is_none_or(|size| size == 0 || size > STORE_SET_MANIFEST_BYTES)
+        })
+    {
+        return Err("The brush set lists invalid or missing brushes.".to_owned());
+    }
+    Ok((zip, name, folders))
+}
+
+pub(crate) fn decode_store_brush_set(input: std::fs::File) -> Result<(String, Vec<Brush>), String> {
+    let (zip, name, folders) = store_brush_set(input)?;
+    // Verify even entries the brush importer may ignore. The original archive is never extracted.
+    if zip.names().filter(|name| !name.ends_with('/')).any(|name| zip.read(name).is_none()) {
+        return Err("This brush set contains a damaged or unsupported archive entry.".to_owned());
+    }
+    if folders.iter().any(|folder| {
+        zip.read(&format!("{folder}/Brush.archive")).and_then(|bytes| store_brush_archive(&bytes)).is_none()
+    }) {
+        return Err("A brush in this set doesn't have a recognized brush archive.".to_owned());
+    }
+    let reading = BrushFileReading::default();
+    let brushes = read_set_zip(&zip, &folders, &reading)
+        .filter(|brushes| brushes.len() == folders.len())
+        .ok_or("One or more brushes in the set couldn't be read.")?;
+    Ok((name, brushes))
+}
+
 /// The brushes in the file at `path` the user chose, called `file_name` (if known), as
 /// [`read_any_brushes`] reads them, not yet added. A brush, set or library file (an archive) is
 /// read a brush at a time, each made a brush as it is read and its file's bytes let go, so however
@@ -565,27 +689,14 @@ pub fn read_brushes_from(
                 return Some(library_brushes(file, stem));
             }
         }
-        if let Some((set_name, folders)) = brushfile::set_folders(&zip) {
-            reading.begin(folders.len());
-            // as many side by side as their pictures fit, by the biggest brush's files
-            let mut sizes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-            for f in zip.facts() {
-                if let Some((folder, _)) = f.name.split_once('/') {
-                    let size = sizes.entry(folder).or_default();
-                    *size = size.saturating_add(f.size);
-                }
-            }
-            let each = sizes.values().max().map_or(0, |&s| s.saturating_mul(4)).max(BRUSH_READ_BYTES);
-            let made = procraft_engine::par::side_by_side_within(&folders, each, |folder| {
-                reading.made(brushfile::read_folder(&zip, folder))
-            });
-            if reading.cancelled() {
-                return None;
-            }
-            let brushes: Vec<Brush> = made.into_iter().flatten().flatten().collect();
-            if !brushes.is_empty() {
-                return Some(ReadBrushes::Set { name: set_name, brushes, file: None });
-            }
+        if let Some((name, folders)) = brushfile::set_folders(&zip)
+            && let Some(brushes) = read_set_zip(&zip, &folders, reading)
+            && !brushes.is_empty()
+        {
+            return Some(ReadBrushes::Set { name, brushes, file: None });
+        }
+        if reading.cancelled() {
+            return None;
         }
         if let Some(file) = brushfile::read_zip(&zip) {
             return Some(ReadBrushes::One(Box::new(brush_from(&file))));

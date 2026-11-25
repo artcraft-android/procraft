@@ -5,7 +5,7 @@
 //! which it has no way to claim.
 
 use std::collections::HashSet;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -61,6 +61,7 @@ pub(crate) const PICTURE_CODE: &str = "picture.wgsl";
 /// so many brushes.
 pub(crate) const BRUSH_SET: &str = "brushes.brushset";
 const MOST_SET_BRUSHES: usize = 64;
+const DECODED_BRUSH_SET: &str = ".decoded-brushes-v1";
 /// Where each of the filters a plugin lists keeps its code, as `<key>.wgsl`.
 const FILTERS_FOLDER: &str = "filters";
 /// The most filters a plugin lists, and plugins it takes the place of.
@@ -408,6 +409,7 @@ pub(crate) struct Package {
     pub manifest: Manifest,
     text: Vec<u8>,
     files: Vec<(String, Vec<u8>)>,
+    decoded_brushes: Option<std::fs::File>,
 }
 
 #[cfg(test)]
@@ -1865,7 +1867,51 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<Package, Refusal> {
         }
         files.push((listed.path.clone(), data));
     }
-    Ok(Package { manifest, text, files })
+    Ok(Package { manifest, text, files, decoded_brushes: None })
+}
+
+/// Unpack and inspect the original archive in the Store decoder process.
+pub(crate) fn decode_store_plugin(input: std::fs::File, out: &mut impl std::io::Write) -> Result<(), String> {
+    use crate::store_decode::write_blob;
+    let mut bytes = Vec::new();
+    input.take(MOST_FILE as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if !bytes.starts_with(b"PK\x03\x04") {
+        return Err(Refusal::NotAPlugin.text().to_owned());
+    }
+    let package = read_package(&bytes).map_err(|reason| reason.text().to_owned())?;
+    write_blob(out, &package.text).map_err(|e| e.to_string())?;
+    for (_, data) in package.files {
+        write_blob(out, &data).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Only the bounded manifest and its declared files come back. Recheck names, size and hashes
+/// before using any result. Code received from the worker still goes through the plugin sandbox.
+pub(crate) fn read_decoded_plugin(mut input: impl Read) -> Result<Package, String> {
+    use crate::store_decode::{end, read_blob};
+    let damaged = || Refusal::Damaged.text().to_owned();
+    let text = read_blob(&mut input, MOST_MANIFEST).map_err(|_| damaged())?;
+    let manifest = read_manifest(&text).map_err(|reason| reason.text().to_owned())?;
+    let mut files = Vec::with_capacity(manifest.files.len());
+    for listed in &manifest.files {
+        let data = read_blob(&mut input, listed.size.min(MOST_ENTRY)).map_err(|_| damaged())?;
+        if data.len() != listed.size || sha256(&data) != listed.sha256 {
+            return Err(Refusal::Mismatch.text().to_owned());
+        }
+        files.push((listed.path.clone(), data));
+    }
+    end(&mut input).map_err(|_| damaged())?;
+    let decoded_brushes = if manifest.holds.contains(&PluginPart::Brushes) {
+        let (_, data) = files.iter().find(|(path, _)| path == BRUSH_SET).ok_or_else(damaged)?;
+        let mut decoded = crate::store_decode::decode_bytes(crate::StoreDecodeKind::BrushSet, data)?;
+        let mut staged = tempfile::tempfile().map_err(|error| error.to_string())?;
+        std::io::copy(&mut decoded, &mut staged).map_err(|error| error.to_string())?;
+        Some(staged)
+    } else {
+        None
+    };
+    Ok(Package { manifest, text, files, decoded_brushes })
 }
 
 /// What a plugin file at `path` holds, read if it is a plain file of a size worth reading: a pipe
@@ -1900,6 +1946,14 @@ pub(crate) fn keep(dir: &Path, package: &Package) -> Result<PathBuf, Refusal> {
     let staged = (|| -> std::io::Result<()> {
         std::fs::create_dir_all(&stage)?;
         write_new(&stage.join(MANIFEST), &package.text)?;
+        if let Some(decoded) = &package.decoded_brushes {
+            let mut decoded = decoded.try_clone()?;
+            decoded.rewind()?;
+            let mut target =
+                std::fs::OpenOptions::new().write(true).create_new(true).open(stage.join(DECODED_BRUSH_SET))?;
+            std::io::copy(&mut decoded, &mut target)?;
+            target.sync_all()?;
+        }
         for (path, data) in &package.files {
             let to = stage.join(path);
             if let Some(folder) = to.parent() {
@@ -2082,7 +2136,7 @@ fn files_under(folder: &Path, prefix: &str, depth: usize, found: &mut Vec<String
         } else {
             return None;
         }
-        if found.len() > MOST_ENTRIES {
+        if found.len() > MOST_ENTRIES + 1 {
             return None;
         }
     }
@@ -2102,7 +2156,12 @@ pub(crate) fn read_folder(folder: &Path, id: &str, version: &str) -> Option<Mani
     }
     let text = read_capped(&folder.join(MANIFEST), MOST_MANIFEST)?;
     let manifest = read_manifest(&text).ok()?;
-    if manifest.id != id || manifest.version != version || found.len() != manifest.files.len() + 1 {
+    let decoded_brushes =
+        manifest.holds.contains(&PluginPart::Brushes) && found.iter().any(|path| path == DECODED_BRUSH_SET);
+    if manifest.id != id
+        || manifest.version != version
+        || found.len() != manifest.files.len() + 1 + usize::from(decoded_brushes)
+    {
         return None;
     }
     for listed in &manifest.files {
@@ -2113,7 +2172,7 @@ pub(crate) fn read_folder(folder: &Path, id: &str, version: &str) -> Option<Mani
         if data.len() != listed.size || sha256(&data) != listed.sha256 {
             return None;
         }
-        if code_refused(&manifest, &listed.path, &data).is_some() {
+        if !(decoded_brushes && listed.path == BRUSH_SET) && code_refused(&manifest, &listed.path, &data).is_some() {
             return None;
         }
     }
@@ -2169,11 +2228,44 @@ fn hold_up(folder: &Path, stamps: Vec<Stamp>, manifest: &Manifest) {
 
 /// The set of brushes (interface 14) of the plugin `id` at `version` in `dir`, if it holds one and
 /// all of it holds up as it did.
-pub(crate) fn read_brush_set(dir: &Path, id: &str, version: &str) -> Option<Vec<u8>> {
+pub(crate) fn read_brush_set(dir: &Path, id: &str, version: &str) -> Option<PluginBrushSet> {
     let folder = dir.join(id).join(version);
     let manifest = read_folder(&folder, id, version)?;
     manifest.holds.contains(&PluginPart::Brushes).then_some(())?;
-    read_capped(&folder.join(BRUSH_SET), MOST_ENTRY)
+    let decoded = folder.join(DECODED_BRUSH_SET);
+    if decoded.is_file() {
+        Some(PluginBrushSet::Decoded(decoded))
+    } else {
+        read_capped(&folder.join(BRUSH_SET), MOST_ENTRY).map(|bytes| PluginBrushSet::Archive(bytes.into()))
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum PluginBrushSet {
+    Archive(std::sync::Arc<[u8]>),
+    Decoded(PathBuf),
+}
+
+impl PluginBrushSet {
+    pub(crate) fn name(&self) -> Option<String> {
+        match self {
+            Self::Archive(bytes) => {
+                procraft_engine::brushfile::set_folders(&ZipReader::new(bytes)?).map(|(name, _)| name)
+            }
+            Self::Decoded(path) => crate::brush_library::read_decoded_set_name(std::fs::File::open(path).ok()?).ok(),
+        }
+    }
+
+    pub(crate) fn add_to(&self, session: &crate::CanvasSession) -> Option<u32> {
+        match self {
+            Self::Archive(bytes) => session.import_brushes(bytes.to_vec()),
+            Self::Decoded(path) => {
+                let decoded = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+                let (name, brushes) = crate::brush_library::read_decoded_store_set(decoded).ok()?;
+                session.add_read_brushes(crate::brush_files::ReadBrushes::Set { name, brushes, file: None }, 0)
+            }
+        }
+    }
 }
 
 /// The hooks and the module of the plugin `id` at `version` in `dir`, if all of it holds up as it
@@ -3069,8 +3161,14 @@ pub(crate) mod tests {
             let mut st = s.shared.lock();
             let origins = vec![None; count];
             let icon = crate::brush_library::IMPORTED_ICON;
-            let set =
-                crate::brush_library::LibrarySet { name: "Fills".to_owned(), brushes, origins, icon, plugin: None };
+            let set = crate::brush_library::LibrarySet {
+                name: "Fills".to_owned(),
+                brushes,
+                origins,
+                icon,
+                plugin: None,
+                store: None,
+            };
             st.library.insert(0, set);
         }
         s.brushes_as_set_file(0, 0..count, "Fills", 1).unwrap()

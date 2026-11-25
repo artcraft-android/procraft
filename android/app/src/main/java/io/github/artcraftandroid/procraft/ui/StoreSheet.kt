@@ -2,19 +2,25 @@ package io.github.artcraftandroid.procraft.ui
 
 import android.app.Application
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PageSize
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -27,6 +33,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,12 +52,14 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -62,6 +73,9 @@ import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
@@ -76,15 +90,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.AppLog
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
-import io.github.artcraftandroid.procraft.canvas.KeptBrush
-import io.github.artcraftandroid.procraft.canvas.keepBrushesForLater
+import io.github.artcraftandroid.procraft.core.CanvasSession
 import io.github.artcraftandroid.procraft.core.Installed
 import io.github.artcraftandroid.procraft.core.ItemKind
 import io.github.artcraftandroid.procraft.core.SourceInfo
 import io.github.artcraftandroid.procraft.core.Store
 import io.github.artcraftandroid.procraft.core.StoreItem
+import io.github.artcraftandroid.procraft.core.StorePluginReview
+import io.github.artcraftandroid.procraft.core.StoreBrushResult
+import io.github.artcraftandroid.procraft.core.Plugins
+import io.github.artcraftandroid.procraft.core.storeGalleryEntries
+import io.github.artcraftandroid.procraft.core.storeCoverKey
+import io.github.artcraftandroid.procraft.core.storeFeaturedOrder
+import io.github.artcraftandroid.procraft.core.storeIconKey
+import io.github.artcraftandroid.procraft.core.StorePreview
 import java.io.File
-import java.security.MessageDigest
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -92,20 +112,13 @@ import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
-/**
- * The store: the catalogues someone added, what they list, and the one kind of thing this app
- * takes from them. Android has no plugin host and no asset library, so a brush set is installed
- * here (into the library's queue) and the other kinds say plainly where they belong.
- *
- * It is a sheet over the work, as it is on the desk, not a screen of its own: [open] draws it over
- * the gallery or the canvas, which keep running under it, and the reader below is kept here rather
- * than in a screen, so opening it again does not read the store again.
- */
+/** The Store overlay and the catalogue state it keeps across openings. */
 object StoreSheet {
     var open by mutableStateOf(false)
         private set
@@ -120,6 +133,17 @@ object StoreSheet {
      * and then the file waits for the next canvas, as it always did.
      */
     internal var takeKeptBrushes: (() -> Unit)? = null
+    internal var plugins: Plugins? = null
+    internal var pluginsChanged: (() -> Unit)? = null
+    internal var currentSession: (() -> CanvasSession?)? = null
+    internal var queueVersion by mutableStateOf(0)
+        private set
+
+    internal fun brushesApplied(results: List<StoreBrushResult>) {
+        if (results.isEmpty()) return
+        results.forEach { result -> front?.setProblem(result.item, result.failure) }
+        queueVersion++
+    }
 
     private var front: StoreFront? = null
 
@@ -129,6 +153,7 @@ object StoreSheet {
 
     fun hide() {
         open = false
+        front?.cancelPluginReview()
     }
 
     /**
@@ -145,11 +170,21 @@ object StoreSheet {
 
 /** The sheet over the work: what the app shows, dimmed, with the store's sheet centred on it. */
 @Composable
-fun StoreOverlay(onTakeKeptBrushes: () -> Unit) {
+fun StoreOverlay(vm: CanvasViewModel) {
     // a just-installed set goes into the canvas that is up; once it is gone the file waits as before
-    SideEffect { StoreSheet.takeKeptBrushes = onTakeKeptBrushes }
+    SideEffect {
+        StoreSheet.takeKeptBrushes = vm::addPendingBrushes
+        StoreSheet.plugins = vm.plugins
+        StoreSheet.pluginsChanged = vm::pluginsChanged
+        StoreSheet.currentSession = { vm.session }
+    }
     DisposableEffect(Unit) {
-        onDispose { StoreSheet.takeKeptBrushes = null }
+        onDispose {
+            StoreSheet.takeKeptBrushes = null
+            StoreSheet.plugins = null
+            StoreSheet.pluginsChanged = null
+            StoreSheet.currentSession = null
+        }
     }
     if (StoreSheet.open) {
         val app = LocalContext.current.applicationContext as Application
@@ -164,27 +199,27 @@ fun StoreOverlay(onTakeKeptBrushes: () -> Unit) {
                 Modifier.fillMaxWidth(SHEET_W).fillMaxHeight(SHEET_H)
                     .clip(RoundedCornerShape(SHEET_CORNER)).background(BG),
             ) {
-                StorePage(StoreSheet.front(dir), app)
+                StorePage(StoreSheet.front(dir))
             }
         }
     }
 }
 
 // The sheet, under desktop/src/store.rs's names, so the two can be read side by side.
-private val BG = Color(0xFF212121)
-private val TITLE = Color(0xFFFFFFFF)
-private val ROW_INK = Color(0x99EBEBF5)
-private val HINT = Color(0x61EBEBF5)
-private val IDLE = Color(0x80EBEBF5)
-private val SEARCH_FILL = Color(0x2E767680)
-private val PILL_FILL = Color(0x38767680)
+internal val BG get() = Color(if (Pc.light) 0xFFF0F0F0 else 0xFF212121)
+internal val TITLE get() = Color(if (Pc.light) 0xFF111111 else 0xFFFFFFFF)
+internal val ROW_INK get() = Color(if (Pc.light) 0xA63C3C43 else 0x99EBEBF5)
+private val HINT get() = Color(if (Pc.light) 0x613C3C43 else 0x61EBEBF5)
+internal val IDLE get() = Color(if (Pc.light) 0x803C3C43 else 0x80EBEBF5)
+private val SEARCH_FILL get() = Color(if (Pc.light) 0x1F767680 else 0x2E767680)
+private val PILL_FILL get() = Color(if (Pc.light) 0x1F767680 else 0x38767680)
 private val PILL_STATE_FILL = Color(0x47787880)
-private val PILL_ON = Color(0xFFEDEDED)
-private val PILL_ON_INK = Color(0xFF1B1B1B)
-private val TILE_FILL = Color(0x14FFFFFF)
-private val GROUP_FILL = Color(0x0EFFFFFF)
-private val SEP = Color(0x99545458)
-private val ACCENT get() = Pc.tinted(Color(0xFF0076FD))
+private val PILL_ON get() = Color(if (Pc.light) 0xFF1B1B1B else 0xFFEDEDED)
+private val PILL_ON_INK get() = Color(if (Pc.light) 0xFFEDEDED else 0xFF1B1B1B)
+internal val TILE_FILL get() = Color(if (Pc.light) 0x14000000 else 0x14FFFFFF)
+internal val GROUP_FILL get() = Color(if (Pc.light) 0xFFFFFFFF else 0x0EFFFFFF)
+internal val SEP get() = Color(if (Pc.light) 0x4A3C3C43 else 0x99545458)
+internal val ACCENT get() = Pc.tinted(Color(if (Pc.light) 0xFF007AFF else 0xFF0A84FF))
 
 // 60 per cent black over the app's screen: what the sheet sits on
 private val SCRIM = Color(0x99000000)
@@ -221,9 +256,10 @@ private val LIST_TOP = 40.dp
 private val BAND_HEIGHT = 260.dp
 private val BAND_GAP = 24.dp
 private val BAND_CORNER = 20.dp
+private val FEATURE_SPACING = 14.dp
 // the band's scrim: nearly clear where the picture starts to show, deep at its foot
-private val SCRIM_TOP = Color(0x08000000)
-private val SCRIM_FOOT = Color(0xD0000000)
+private val SCRIM_TOP = Color(0x2A000000)
+private val SCRIM_FOOT = Color(0xF0000000)
 private val HEADING_ABOVE = 40.dp
 private val HEADING_BELOW = 16.dp
 private val HEADING_LINE = 30.dp
@@ -237,26 +273,22 @@ private val PILL_STATE = 28.dp
 private val CARD_CORNER = 16.dp
 private const val SHELF_CARDS = 4
 private val SHELF_GAP = 13.dp
-// the card's foot: the name, then one row holding the second line and the state
-private val SHELF_FOOT = 64.dp
-// when the state cannot share that row it drops under the line, which takes the card
-private val SHELF_FOOT_DROPPED = 92.dp
 private val FADE_HEIGHT = 22.dp
 
 // the item page, as item_page() draws it
 private val ITEM_ICON = 120.dp
 private val ITEM_ICON_CORNER = 27.dp
-private val ITEM_NAME = 34.dp
+
 private val CHIP_KIND = 20.dp
 private val PILL_BUTTON = 30.dp
 private val PILL_BUTTON_SIDE = 18.dp
 private val FACTS_HEIGHT = 68.dp
 // the item page's picture block, as wide as the page: 377 of 520 tall, the desktop's ratio
 private const val ITEM_PICTURE_SHARE = 377f / 520f
-private val GROUP_ROW = 56.dp
-private val GROUP_CORNER = 10.dp
+internal val GROUP_ROW = 56.dp
+internal val GROUP_CORNER = 10.dp
 private val MORE_GAP = 16.dp
-private val MORE_FOOT = 56.dp
+
 
 // the pages behind the bar, as settings_page, source_page, downloads_page, see_all_page draw them
 private val GROUP_HEAD = 16.dp
@@ -265,7 +297,7 @@ private val GROUP_HEAD_ABOVE = 16.dp
 private val GROUP_HEAD_LINE = 17.dp
 private val GROUP_HEAD_BELOW = 8.dp
 // the separator's inset from the leading and trailing content edge
-private val GROUP_RULE_INSET = 16.dp
+internal val GROUP_RULE_INSET = 16.dp
 private val GROUP_FOOT = 26.dp
 private val SWITCH_W = 51.dp
 private val SWITCH_H = 31.dp
@@ -273,7 +305,7 @@ private val SWITCH_OFF = Color(0x52787880)
 private val RECORD_TILE = 34.dp
 private val RECORD_TILE_CORNER = 8.dp
 private val WALL_GAP = 20.dp
-private val WALL_FOOT = 66.dp
+
 private val MENU_W = 262.dp
 private val MENU_CORNER = 22.dp
 private val MENU_TOP = 50.dp
@@ -293,6 +325,7 @@ private val Danger = Color(0xFFE84F51)
 /** What a brush set's row says its standing is. */
 internal enum class Standing(val text: String) {
     GET("Get"),
+    PREVIEW("Preview"),
     UPDATE("Update"),
     INSTALLED("Installed"),
 }
@@ -300,7 +333,7 @@ internal enum class Standing(val text: String) {
 /** What the sheet shows: the list, one item, one source, the settings, the downloads, or a wall. */
 private sealed interface SheetPage {
     data object Browse : SheetPage
-    data class Item(val id: String) : SheetPage
+    data class Item(val listing: Listing) : SheetPage
     data class Source(val id: String) : SheetPage
     data object Settings : SheetPage
     data object Downloads : SheetPage
@@ -310,37 +343,56 @@ private sealed interface SheetPage {
 /** How the wall orders what it shows, and which way up. */
 private enum class SortBy { TITLE, AUTHOR, SIZE }
 
-/**
- * The picture at [address], asked for the first time something wants it: null until it is here,
- * and null for good where the address gave nothing, which is when the glyph stands in.
- */
+/** The same static cover serves the cards and the first gallery page. */
 @Composable
-private fun pictureFor(address: String, front: StoreFront): Bitmap? {
-    LaunchedEffect(address) { front.want(address) }
-    return front.picture(address)
+private fun coverFor(item: StoreItem, front: StoreFront): Bitmap? {
+    val key = remember(item) { storeCoverKey(item) }
+    LaunchedEffect(key, front.imageVersion()) { front.wantCover(key, item) }
+    return front.picture(key)
 }
 
-/**
- * A catalogue's picture in a card's art rect, cropped to fill it. Painted square: the rounded
- * fill sits under it, so the corners read as the desktop's do, the picture not following them.
- */
 @Composable
-private fun ArtPicture(bitmap: Bitmap, corner: Dp, modifier: Modifier = Modifier) {
-    Box(modifier) {
-        Box(Modifier.matchParentSize().clip(RoundedCornerShape(corner)).background(TILE_FILL))
-        Image(
-            bitmap = bitmap.asImageBitmap(),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.matchParentSize(),
-        )
+private fun ArtPicture(bitmap: Bitmap, corner: Dp, modifier: Modifier = Modifier, scale: ContentScale = ContentScale.Crop) {
+    Image(
+        bitmap = bitmap.asImageBitmap(),
+        contentDescription = null,
+        contentScale = scale,
+        modifier = modifier.clip(RoundedCornerShape(corner)).background(TILE_FILL),
+    )
+}
+
+@Composable
+private fun ItemArtwork(item: StoreItem, front: StoreFront, corner: Dp, glyph: Dp, modifier: Modifier, square: Boolean = false) {
+    val hasIcon = square && (item.icon.isNotEmpty() || item.kind == ItemKind.PLUGIN)
+    val icon = if (hasIcon) {
+        val key = remember(item) { storeIconKey(item) }
+        LaunchedEffect(key, front.imageVersion()) { front.wantCover(key, item, square = true) }
+        front.picture(key)
+    } else null
+    val picture = icon ?: coverFor(item, front)
+    if (picture != null) {
+        ArtPicture(picture, corner, modifier, if (square) ContentScale.Fit else ContentScale.Crop)
+    } else {
+        Box(modifier.clip(RoundedCornerShape(corner)).background(TILE_FILL), contentAlignment = Alignment.Center) {
+            Icon(kindIcon(item.kind), contentDescription = null, tint = IDLE, modifier = Modifier.size(glyph))
+        }
     }
 }
+
+internal data class Listing(val source: String, val id: String)
+private val StoreItem.listing get() = Listing(source, id)
+private val Installed.listing get() = Listing(source, id)
 
 /**
  * The store in the app's folder, read off the main thread: its sources, what they list and what
  * was installed, read again after anything changes them.
  */
+internal class PendingStorePlugin(val item: StoreItem, val review: StorePluginReview) {
+    val title = "Review " + review.name()
+    val message = review.message()
+    val action = if (review.isUpdate()) "Approve Update" else "Approve Install"
+}
+
 internal class StoreFront(private val dir: File) {
     var store by mutableStateOf<Store?>(null)
         private set
@@ -348,14 +400,25 @@ internal class StoreFront(private val dir: File) {
         private set
     var items by mutableStateOf<List<StoreItem>>(emptyList())
         private set
-    var installed by mutableStateOf<Map<String, Installed>>(emptyMap())
+    var installed by mutableStateOf<Map<Listing, Installed>>(emptyMap())
         private set
+    var queued by mutableStateOf<List<StoreItem>>(emptyList())
+        private set
+    val installing = mutableStateMapOf<Listing, StoreItem>()
+    var pluginReview by mutableStateOf<PendingStorePlugin?>(null)
+        private set
+    private val problems = mutableStateMapOf<Listing, String>()
+    private val installs = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     var failure by mutableStateOf<String?>(null)
         private set
 
     /** The store opened and read: opening reads every local catalogue again, as the desktop's does. */
     suspend fun open() {
-        if (store != null) return
+        if (store != null) {
+            read()
+            return
+        }
         val opened = withContext(Dispatchers.IO) {
             runCatching { Store.open(dir.path) }.onFailure { AppLog.e("store", "opening the store", it) }.getOrNull()
         }
@@ -369,22 +432,27 @@ internal class StoreFront(private val dir: File) {
 
     suspend fun read() {
         val s = store ?: return
+        val session = StoreSheet.currentSession?.invoke()
         val read = withContext(Dispatchers.IO) {
-            runCatching { Triple(s.sources(), s.items(), s.installed()) }
-                .onFailure { AppLog.e("store", "reading the store", it) }
+            runCatching {
+                if (session == null) s.readBrushInstalls(File(dir.parentFile, "brushes").path) else s.syncBrushInstalls(session)
+                Triple(s.sources(), s.items(), s.installed()) to s.queuedBrushes()
+            }.onFailure { AppLog.e("store", "reading the store", it) }
         }
-        read.onSuccess { (readSources, readItems, readInstalled) ->
+        read.onSuccess { (catalogue, pending) ->
+            val (readSources, readItems, readInstalled) = catalogue
             sources = readSources
             items = readItems
-            installed = readInstalled.associateBy { it.id }
+            installed = readInstalled.associateBy { it.listing }
+            queued = pending
         }
         failure = read.exceptionOrNull()?.let { "The store couldn't be read." }
     }
 
     /** Adds the catalogue at [address] (a web address or a file on the device): null, or why not. */
-    suspend fun add(address: String): String? {
+    suspend fun add(address: String, localNetwork: Boolean): String? {
         val s = store ?: return "The store isn't open."
-        val reason = withContext(Dispatchers.IO) { s.addSource(address) }
+        val reason = withContext(Dispatchers.IO) { s.addSourceWithLocalNetwork(address, localNetwork) }
         if (reason == null) read()
         return reason
     }
@@ -399,6 +467,7 @@ internal class StoreFront(private val dir: File) {
     suspend fun refresh(id: String): String? {
         val s = store ?: return "The store isn't open."
         val reason = withContext(Dispatchers.IO) { s.refresh(id) }
+        if (reason == null) clearPictures()
         read()
         return reason
     }
@@ -419,7 +488,8 @@ internal class StoreFront(private val dir: File) {
      * and a record whose digest the catalogue has moved past is an update.
      */
     fun standing(item: StoreItem): Standing {
-        val one = installed[item.id]
+        if (!item.kind.supportsInstall()) return Standing.PREVIEW
+        val one = installed[item.listing]
         val changed = one != null && item.sha256.isNotEmpty() && !one.digest.equals(item.sha256, ignoreCase = true)
         return when {
             changed -> Standing.UPDATE
@@ -428,41 +498,151 @@ internal class StoreFront(private val dir: File) {
         }
     }
 
+    fun problem(item: StoreItem): String? = problems[item.listing]
+
+    fun setProblem(item: StoreItem, reason: String?) {
+        if (reason == null) problems.remove(item.listing) else problems[item.listing] = reason
+    }
+
+    fun install(item: StoreItem) {
+        if (!item.kind.supportsInstall()) return
+        val opened = store ?: return
+        if (installing.containsKey(item.listing) || queued.any { it.listing == item.listing }) return
+        if (item.kind == ItemKind.PLUGIN) {
+            reviewPlugin(opened, item)
+            return
+        }
+        installing[item.listing] = item
+        installs.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    opened.queueBrushListing(item)
+                }
+            }
+            val reason = result.getOrElse {
+                AppLog.e("store", "installing a listing", it)
+                "The file couldn't be installed."
+            }
+            setProblem(item, reason)
+            read()
+            installing.remove(item.listing)
+            if (reason == null && item.kind == ItemKind.BRUSH_SET) StoreSheet.takeKeptBrushes?.invoke()
+        }
+    }
+
+    private fun reviewPlugin(opened: Store, item: StoreItem) {
+        if (pluginReview != null || installing.values.any { it.kind == ItemKind.PLUGIN }) return
+        val plugins = StoreSheet.plugins
+        if (plugins == null) {
+            setProblem(item, "Plugins are unavailable.")
+            return
+        }
+        installing[item.listing] = item
+        installs.launch {
+            val inspected = runCatching {
+                withContext(Dispatchers.IO) { opened.reviewPluginListing(item, plugins) }
+            }.onFailure { AppLog.e("store", "inspecting a plugin", it) }.getOrNull()
+            installing.remove(item.listing)
+            val review = inspected?.review
+            if (review == null) {
+                setProblem(item, inspected?.failure ?: "The plugin couldn't be inspected.")
+            } else if (StoreSheet.open) {
+                pluginReview = PendingStorePlugin(item, review)
+            } else {
+                review.destroy()
+            }
+        }
+    }
+
+    fun cancelPluginReview() {
+        val waiting = pluginReview ?: return
+        pluginReview = null
+        waiting.review.destroy()
+    }
+
+    fun approvePlugin(waiting: PendingStorePlugin) {
+        if (pluginReview !== waiting) return
+        val opened = store ?: return
+        pluginReview = null
+        val item = waiting.item
+        val review = waiting.review
+        installing[item.listing] = item
+        installs.launch {
+            val reason = try {
+                withContext(Dispatchers.IO) { opened.approvePluginListing(review) }
+            } catch (error: Exception) {
+                AppLog.e("store", "installing a reviewed plugin", error)
+                "The plugin couldn't be installed."
+            } finally {
+                review.destroy()
+            }
+            setProblem(item, reason)
+            if (reason == null) StoreSheet.pluginsChanged?.invoke()
+            read()
+            installing.remove(item.listing)
+        }
+    }
+
     /** The categories a catalogue may name, as the pill row lists them. */
     fun categories(): List<String> = store?.categories().orEmpty()
 
-    // the pictures the catalogues gave, by address: fetched once, decoded once, kept with the
-    // store; an address that gave nothing is kept as nothing, so it is never asked again
     private val pictures = mutableStateMapOf<String, Bitmap?>()
-    private val asking = mutableSetOf<String>()
+    private val recent = LinkedHashSet<String>()
+    private val asking = mutableSetOf<Pair<Int, String>>()
+    private var pictureVersion by mutableStateOf(0)
     private val slots = Semaphore(4)
-    private val work = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val work = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    /** The picture [address] holds, once it is here; null while it comes, or when it gave nothing. */
     fun picture(address: String): Bitmap? = pictures[address]
 
-    /**
-     * Asks for [address] the first time something wants it: a worker of its own, four at a time,
-     * the decode off the main thread too. Whatever came back is remembered for good.
-     */
-    fun want(address: String) {
-        if (address.isEmpty() || pictures.containsKey(address) || !asking.add(address)) return
+    private fun clearPictures() {
+        pictureVersion++
+        pictures.clear()
+        recent.clear()
+    }
+
+    fun wantCover(address: String, item: StoreItem, square: Boolean = false) {
+        if (!square && item.preview.isEmpty() && item.kind != ItemKind.PLUGIN) return
+        if (pictures.containsKey(address)) {
+            recent.remove(address)
+            recent.add(address)
+            return
+        }
+        val opened = store ?: return
+        val version = pictureVersion
+        val request = version to address
+        if (!asking.add(request)) return
         work.launch {
-            val opened = store
-            if (opened == null) {
-                asking.remove(address)
-                return@launch
+            val picture = withContext(Dispatchers.IO) {
+                slots.withPermit {
+                    runCatching {
+                        (if (square) opened.fetchStoreIcon(item) else opened.fetchStoreCover(item))?.toStoreBitmap()
+                    }.getOrNull()
+                }
             }
-            val fetched = slots.withPermit { runCatching { opened.fetchPicture(address) }.getOrNull() }
-            val picture = fetched?.bytes?.takeIf { it.isNotEmpty() && fetched.failure.isEmpty() }
-                ?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
-            withContext(Dispatchers.Main) { pictures[address] = picture }
+            asking.remove(request)
+            if (version == pictureVersion) {
+                pictures[address] = picture
+                recent.add(address)
+                if (recent.size > 32) {
+                    val old = recent.first()
+                    recent.remove(old)
+                    pictures.remove(old)
+                }
+            }
         }
     }
+
+    fun imageVersion(): Int = pictureVersion
 }
 
+internal fun StorePreview.toStoreBitmap(): Bitmap =
+    Bitmap.createBitmap(width.toInt(), height.toInt(), Bitmap.Config.ARGB_8888).apply {
+        copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(rgba))
+    }
+
 @Composable
-private fun StorePage(front: StoreFront, app: Application) {
+private fun StorePage(front: StoreFront) {
     val scope = rememberCoroutineScope()
     var page by remember { mutableStateOf<SheetPage>(SheetPage.Browse) }
     // the pages it came through, so back goes up one at a time as the desktop's does
@@ -479,12 +659,11 @@ private fun StorePage(front: StoreFront, app: Application) {
     var filterFrom by remember { mutableStateOf<String?>(null) }
     var adding by remember { mutableStateOf(false) }
     // the last try at an item left a problem: its button says so until its reason is asked for
-    var problem by remember { mutableStateOf<Pair<String, String>?>(null) }
     // what the sheet has to say itself: a reason, or the question before a source goes
     var said by remember { mutableStateOf<Pair<String, String>?>(null) }
     var removing by remember { mutableStateOf<SourceInfo?>(null) }
 
-    LaunchedEffect(front) { front.open() }
+    LaunchedEffect(front, StoreSheet.queueVersion) { front.open() }
     LaunchedEffect(query, front.items) {
         hits = if (query.isBlank()) null else front.search(query)
     }
@@ -505,7 +684,7 @@ private fun StorePage(front: StoreFront, app: Application) {
     }
 
     // what the page really is: an item or a source that has gone falls back to the list under it
-    val item = (page as? SheetPage.Item)?.let { at -> front.items.firstOrNull { it.id == at.id } }
+    val item = (page as? SheetPage.Item)?.let { at -> front.items.firstOrNull { it.listing == at.listing } }
     val source = (page as? SheetPage.Source)?.let { at -> front.sources.firstOrNull { it.id == at.id } }
     val showing: SheetPage = when (page) {
         is SheetPage.Item -> if (item != null) page else SheetPage.Browse
@@ -516,6 +695,7 @@ private fun StorePage(front: StoreFront, app: Application) {
     // back takes what is over the page first, then goes up one page, and from the list it leaves
     fun stepOut() {
         when {
+            front.pluginReview != null -> front.cancelPluginReview()
             said != null -> said = null
             removing != null -> removing = null
             adding -> adding = false
@@ -561,16 +741,14 @@ private fun StorePage(front: StoreFront, app: Application) {
                     kind = filterKind, from = filterFrom,
                     onFilters = { filtering = !filtering },
                     onSeeAll = { go(SheetPage.SeeAll(it)) },
-                ) { go(SheetPage.Item(it.id)) }
+                ) { go(SheetPage.Item(it.listing)) }
                 // the pages under the bar: 40 in from the sides, 20 above the sheet's foot
                 is SheetPage.Item -> PageScroll {
                     val open = item
                     if (open != null) ItemPage(
-                        front, open, app,
-                        problem = problem?.takeIf { it.first == open.id }?.second,
-                        onProblem = { why -> problem = why?.let { open.id to it } },
+                        front, open,
                         onTell = { said = "Not installed" to it },
-                        onItem = { other -> go(SheetPage.Item(other.id)) },
+                        onItem = { other -> go(SheetPage.Item(other.listing)) },
                     )
                 }
                 is SheetPage.Settings -> PageScroll {
@@ -594,11 +772,9 @@ private fun StorePage(front: StoreFront, app: Application) {
                     )
                 }
                 is SheetPage.Downloads -> PageScroll {
-                    DownloadsPage(front) { go(SheetPage.Item(it.id)) }
+                    DownloadsPage(front) { go(SheetPage.Item(it.listing)) }
                 }
-                is SheetPage.SeeAll -> PageScroll {
-                    SeeAllPage(front, showing.kind, sort, ascending) { go(SheetPage.Item(it.id)) }
-                }
+                is SheetPage.SeeAll -> SeeAllPage(front, showing.kind, sort, ascending, Modifier.weight(1f)) { go(SheetPage.Item(it.listing)) }
             }
         }
         // the menu the wall's bar opens: the order, one radio a line
@@ -623,6 +799,15 @@ private fun StorePage(front: StoreFront, app: Application) {
         if (adding) {
             AddSheet(front) { adding = false }
         }
+        Alert(
+            value = front.pluginReview,
+            title = { it.title },
+            message = { it.message },
+            action = front.pluginReview?.action ?: "Approve Install",
+            onCancel = { front.cancelPluginReview() },
+            onAction = front::approvePlugin,
+            destructive = false,
+        )
         // the sheet's own alerts, over it: what it has to say, and the question before a removal
         Alert(
             value = said,
@@ -712,7 +897,7 @@ private fun BrowsePage(
         val chosen = front.categories().getOrNull(category - 1)
         val items = (hits ?: front.items)
             .filter { chosen == null || it.category == chosen }
-            .filter { kind == null || it.kind == kind }
+            .filter { kind == null || it.kind.browseGroup() == kind }
             .filter { from == null || it.source == from }
         val failure = front.failure
         val scroll = rememberScrollState()
@@ -763,19 +948,16 @@ private fun StoreList(
     onSeeAll: (ItemKind) -> Unit,
 ) {
     val updates = items.filter { front.standing(it) == Standing.UPDATE }
-    val brushes = items.filter { it.kind == ItemKind.BRUSH_SET }
+    val brushes = items.filter { it.kind.browseGroup() == ItemKind.BRUSH_SET }
     val plugins = items.filter { it.kind == ItemKind.PLUGIN }
     val packs = items.filter { it.kind == ItemKind.ASSET_PACK }
     // what the records hold, in the order they were taken, as the desktop puts it at the foot
-    val took = front.installed.values.mapNotNull { one -> items.firstOrNull { it.id == one.id } }
+    val took = front.installed.values.mapNotNull { one -> items.firstOrNull { it.listing == one.listing } }
 
     Column(Modifier.fillMaxWidth()) {
         Spacer(Modifier.height(LIST_TOP))
         if (banded) {
-            // the first thing listed that has a picture, or the first there is, drawn large over
-            // the list as the page opens
-            val featured = items.firstOrNull { it.preview.isNotEmpty() } ?: items.first()
-            Band(featured, front, onItem)
+            FeaturedCarousel(items, front, onItem)
             Spacer(Modifier.height(BAND_GAP))
         }
         if (updates.isNotEmpty()) {
@@ -804,22 +986,82 @@ private fun StoreList(
     }
 }
 
-/**
- * The band: the first thing the store lists, drawn large over the list and opening it when
- * tapped. The picture the catalogue gave would fill it; the kind's own glyph stands there until
- * the pictures come.
- */
+@Composable
+private fun FeaturedCarousel(items: List<StoreItem>, front: StoreFront, onItem: (StoreItem) -> Unit) {
+    val day by produceState(Instant.now().epochSecond / 86_400L) {
+        while (true) {
+            val now = Instant.now().epochSecond
+            value = now / 86_400L
+            delay(minOf(60L, 86_400L - now.mod(86_400L)) * 1_000L)
+        }
+    }
+    val featured = remember(items, day) {
+        storeFeaturedOrder(items.map { "${it.source}:${it.id}" }, day.toULong()).map { items[it.toInt()] }
+    }
+    androidx.compose.runtime.key(featured.map { it.listing }) {
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val fullCards = if (maxWidth >= 680.dp) 2 else 1
+            val pageCount = (featured.size - fullCards + 1).coerceAtLeast(1)
+            val cardWidth = if (pageCount == 1) {
+                (maxWidth - FEATURE_SPACING * (featured.size - 1)) / featured.size
+            } else if (fullCards == 2) {
+                (maxWidth - FEATURE_SPACING * 2) / 2.4f
+            } else {
+                (maxWidth - FEATURE_SPACING) / 1.16f
+            }
+            val pager = rememberPagerState { featured.size }
+            val scope = rememberCoroutineScope()
+            Column {
+                HorizontalPager(
+                    state = pager,
+                    modifier = Modifier.fillMaxWidth().clipToBounds(),
+                    pageSize = PageSize.Fixed(cardWidth),
+                    pageSpacing = FEATURE_SPACING,
+                    userScrollEnabled = pageCount > 1,
+                ) { index -> Band(featured[index], front, onItem) }
+                if (pageCount > 1) {
+                    val selectedPage = when {
+                        !pager.canScrollBackward -> 0
+                        !pager.canScrollForward -> pageCount - 1
+                        else -> pager.currentPage.coerceAtMost(pageCount - 1)
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().selectableGroup(),
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        repeat(pageCount) { page ->
+                            val selected = selectedPage == page
+                            Box(
+                                Modifier.size(44.dp)
+                                    .semantics { contentDescription = "Featured page ${page + 1} of $pageCount" }
+                                    .selectable(selected, role = Role.Tab) {
+                                        scope.launch { pager.animateScrollToPage(page) }
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Box(Modifier.size(if (selected) 14.dp else 6.dp, 6.dp)
+                                    .background(if (selected) TITLE else IDLE, CircleShape))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The listing's cover and summary, opening its item page when tapped. */
 @Composable
 private fun Band(item: StoreItem, front: StoreFront, onItem: (StoreItem) -> Unit) {
     val shape = RoundedCornerShape(BAND_CORNER)
-    // the words sit on the band's own 20 in from its side, and 20 from its other end
-    val words = Modifier.offset(x = 20.dp).fillMaxWidth().padding(end = 40.dp)
-    val picture = pictureFor(item.preview, front)
-    BoxWithConstraints(
+    val picture = coverFor(item, front)
+    val titleInk = if (picture == null) TITLE else Color.White
+    val secondaryInk = if (picture == null) ROW_INK else Color(0xFFE9E9EF)
+    Box(
         Modifier.fillMaxWidth().height(BAND_HEIGHT).clip(shape).background(TILE_FILL)
-            .border(1.dp, SEP, shape).clickable { onItem(item) },
+            .border(1.dp, SEP, shape)
+            .clickable(role = Role.Button, onClickLabel = "Open ${item.name}") { onItem(item) },
     ) {
-        val bandWidth = maxWidth
         if (picture != null) {
             // the catalogue's picture fills it, cropped, rounded with the band's own mesh as the
             // desktop rounds it, under a scrim that deepens toward the foot
@@ -830,8 +1072,7 @@ private fun Band(item: StoreItem, front: StoreFront, onItem: (StoreItem) -> Unit
                 modifier = Modifier.matchParentSize(),
             )
             Box(
-                Modifier.align(Alignment.BottomStart).fillMaxWidth().height(BAND_HEIGHT * 0.8f)
-                    .clip(shape)
+                Modifier.matchParentSize()
                     .background(Brush.verticalGradient(listOf(SCRIM_TOP, SCRIM_FOOT))),
             )
         } else {
@@ -843,62 +1084,35 @@ private fun Band(item: StoreItem, front: StoreFront, onItem: (StoreItem) -> Unit
                 modifier = Modifier.align(Alignment.TopEnd).padding(top = 24.dp, end = 50.dp).size(120.dp),
             )
         }
-        // the words stack above the foot: the kicker, the name, one sentence, then the app row
-        Text(
-            item.category.uppercase(),
-            color = ROW_INK, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.offset(x = 20.dp, y = 122.dp),
-        )
-        Text(
-            item.name,
-            color = TITLE, fontSize = 30.sp, fontWeight = FontWeight.Bold,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = words.offset(y = 144.dp),
-        )
-        if (item.description.isNotEmpty()) {
-            // as much of the sentence as fits one line, ended with " ..." where it was cut, the
-            // way one_line() builds it: the same words, the same place, the same dots
+        Column(
+            Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             Text(
-                oneLine(item.description, bandWidth - 40.dp),
-                color = ROW_INK, fontSize = 15.sp, maxLines = 1,
-                modifier = words.offset(y = 182.dp),
+                item.category.uppercase(), color = secondaryInk, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
-        }
-        // its app row: the kind's tile, whose it is, and the state at the end
-        Box(Modifier.offset(y = 218.dp).then(words).height(PILL_STATE)) {
-            Box(
-                Modifier.align(Alignment.CenterStart).size(24.dp)
-                    .clip(RoundedCornerShape(6.dp)).background(PILL_FILL),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(kindIcon(item.kind), contentDescription = null, tint = TITLE, modifier = Modifier.size(14.dp))
+            Text(
+                item.name, color = titleInk, fontSize = 23.sp, lineHeight = 27.sp, fontWeight = FontWeight.Bold,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+            if (item.description.isNotEmpty()) {
+                Text(item.description, color = secondaryInk, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Text(
-                item.publisher,
-                color = ROW_INK, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.align(Alignment.CenterStart).padding(start = 32.dp),
-            )
-            StatePill(front.standing(item), Modifier.align(Alignment.CenterEnd))
+            Row(
+                Modifier.fillMaxWidth().padding(top = 4.dp).height(PILL_STATE),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ItemArtwork(item, front, 6.dp, 14.dp, Modifier.size(24.dp), square = true)
+                Text(
+                    item.publisher, color = secondaryInk, fontSize = 13.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                )
+                StatePill(front.standing(item))
+            }
         }
     }
-}
-
-/** As much of [sentence] as fits [width] on one line, ended with " ..." where it was cut. */
-@Composable
-private fun oneLine(sentence: String, width: Dp): String {
-    val measurer = rememberTextMeasurer()
-    // the theme's own face and tracking, so what is measured is what is drawn
-    val style = LocalTextStyle.current.merge(TextStyle(fontSize = 15.sp))
-    val limit = with(LocalDensity.current) { width.toPx() }
-    var kept = ""
-    for (word in sentence.split(' ')) {
-        val trying = if (kept.isEmpty()) word else "$kept $word"
-        if (measurer.measure("$trying ...", style).size.width > limit) {
-            return if (kept.isEmpty()) "" else "$kept ..."
-        }
-        kept = trying
-    }
-    return kept
 }
 
 /**
@@ -952,75 +1166,37 @@ private fun ColumnScope.StoreSection(
     rows()
 }
 
-/** A shelf of cards, four across: the art, the name, one line under it and the state. */
 @Composable
 private fun Shelf(items: List<StoreItem>, front: StoreFront, onItem: (StoreItem) -> Unit) {
-    val measurer = rememberTextMeasurer()
-    val density = LocalDensity.current
-    val base = LocalTextStyle.current
+    StoreCards(items.take(SHELF_CARDS), SHELF_CARDS, SHELF_GAP, front, onItem)
+}
+
+@Composable
+private fun StoreCards(items: List<StoreItem>, columns: Int, gap: Dp, front: StoreFront, onItem: (StoreItem) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        // a card takes what is left of the row once its three gaps are out
-        val each = (maxWidth - SHELF_GAP * (SHELF_CARDS - 1)) / SHELF_CARDS
-        Row(horizontalArrangement = Arrangement.spacedBy(SHELF_GAP)) {
-            for (item in items.take(SHELF_CARDS)) {
-                val picture = pictureFor(item.preview, front)
-                val standing = front.standing(item)
-                // the row is shared while the line and the state both fit on the card, as the
-                // wall and More-from cards do; otherwise the state drops under the line
-                val sharesLine = with(density) {
-                    val line = measurer.measure(secondLine(item), base.merge(TextStyle(fontSize = 13.sp))).size.width.toDp()
-                    val pill = measurer.measure(
-                        standing.text,
-                        base.merge(TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold)),
-                    ).size.width.toDp() + 28.dp + (if (standing == Standing.INSTALLED) 21.dp else 0.dp)
-                    line + 8.dp + pill <= each
-                }
-                Column(Modifier.width(each).clickable { onItem(item) }) {
-                    if (picture != null) {
-                        ArtPicture(picture, CARD_CORNER, Modifier.fillMaxWidth().height(each * 0.75f))
-                    } else {
-                        Box(
-                            Modifier.fillMaxWidth().height(each * 0.75f)
-                                .clip(RoundedCornerShape(CARD_CORNER)).background(TILE_FILL),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(kindIcon(item.kind), contentDescription = null, tint = IDLE, modifier = Modifier.size(36.dp))
-                        }
-                    }
-                    Box(Modifier.fillMaxWidth().height(if (sharesLine) SHELF_FOOT else SHELF_FOOT_DROPPED)) {
-                        Text(
-                            item.name,
-                            color = TITLE, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.offset(y = 10.dp).fillMaxWidth(),
-                        )
-                        if (sharesLine) {
-                            // the line and the state on one row, the state's right edge on the card's
-                            Row(
-                                Modifier.offset(y = 26.dp).fillMaxWidth().height(PILL_STATE),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    secondLine(item),
-                                    color = ROW_INK, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                StatePill(front.standing(item))
-                            }
-                        } else {
-                            // no room for both on one row: the line takes the card and the state drops
-                            // under it, still on the card's right
-                            Text(
-                                secondLine(item),
-                                color = ROW_INK, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.offset(y = 32.dp).fillMaxWidth(),
-                            )
-                            StatePill(front.standing(item), Modifier.align(Alignment.TopEnd).offset(y = 60.dp))
-                        }
-                    }
-                }
+        val width = ((maxWidth - gap * (columns - 1)) / columns).coerceAtLeast(156.dp)
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(gap)) {
+            for (item in items) StoreCard(item, front, width, onItem)
+        }
+    }
+}
+
+@Composable
+private fun StoreCard(item: StoreItem, front: StoreFront, width: Dp, onItem: (StoreItem) -> Unit) {
+    Column(Modifier.width(width).clip(RoundedCornerShape(CARD_CORNER)).clickable { onItem(item) }) {
+        ItemArtwork(item, front, CARD_CORNER, 36.dp, Modifier.fillMaxWidth().height(width * 0.75f))
+        Row(
+            Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(item.name, color = TITLE, fontSize = 15.sp, lineHeight = 21.sp,
+                    fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(secondLine(item), color = ROW_INK, fontSize = 13.sp, lineHeight = 18.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            StatePill(front.standing(item), compact = true)
         }
     }
 }
@@ -1028,21 +1204,10 @@ private fun Shelf(items: List<StoreItem>, front: StoreFront, onItem: (StoreItem)
 /** One row: its kind's tile, the name, one line under it, and the state at the trailing end. */
 @Composable
 private fun ItemRow(item: StoreItem, front: StoreFront, ruled: Boolean, onItem: (StoreItem) -> Unit) {
-    val picture = pictureFor(item.preview, front)
     Box(Modifier.fillMaxWidth().height(ROW_HEIGHT).clickable { onItem(item) }) {
-        // every row but a group's first carries the rule above it
         if (ruled) Box(Modifier.fillMaxWidth().height(1.dp).background(SEP))
         Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-            if (picture != null) {
-                ArtPicture(picture, TILE_CORNER, Modifier.size(TILE))
-            } else {
-                Box(
-                    Modifier.size(TILE).clip(RoundedCornerShape(TILE_CORNER)).background(TILE_FILL),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(kindIcon(item.kind), contentDescription = null, tint = IDLE, modifier = Modifier.size(24.dp))
-                }
-            }
+            ItemArtwork(item, front, TILE_CORNER, 24.dp, Modifier.size(TILE), square = true)
             Spacer(Modifier.width(TILE_GAP))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -1063,12 +1228,12 @@ private fun ItemRow(item: StoreItem, front: StoreFront, ruled: Boolean, onItem: 
 
 /** The state a card or a row ends with: Get, Update or Installed, with the tick once it is in. */
 @Composable
-private fun StatePill(standing: Standing, modifier: Modifier = Modifier) {
+private fun StatePill(standing: Standing, modifier: Modifier = Modifier, compact: Boolean = false) {
     val update = standing == Standing.UPDATE
-    val tick = standing == Standing.INSTALLED
+    val tick = !compact && standing == Standing.INSTALLED
     Row(
         modifier.height(PILL_STATE).clip(RoundedCornerShape(PILL_STATE / 2))
-            .background(if (update) ACCENT else PILL_STATE_FILL).padding(horizontal = 14.dp),
+            .background(if (update) ACCENT else PILL_STATE_FILL).padding(horizontal = if (compact) 10.dp else 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (tick) {
@@ -1077,7 +1242,7 @@ private fun StatePill(standing: Standing, modifier: Modifier = Modifier) {
         }
         Text(
             standing.text,
-            color = if (update) TITLE else if (tick) ROW_INK else ACCENT,
+            color = if (update) Color.White else if (standing == Standing.INSTALLED) ROW_INK else ACCENT,
             fontSize = 15.sp,
             fontWeight = FontWeight.SemiBold,
         )
@@ -1290,96 +1455,76 @@ private fun CategoryPill(name: String, on: Boolean, onClick: () -> Unit) {
 private fun ItemPage(
     front: StoreFront,
     item: StoreItem,
-    app: Application,
-    problem: String?,
-    onProblem: (String?) -> Unit,
     onTell: (String) -> Unit,
     onItem: (StoreItem) -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
-    var busy by remember(item.id) { mutableStateOf(false) }
+    val busy = front.installing.containsKey(item.listing)
+    val waiting = front.queued.any { it.listing == item.listing }
+    val problem = front.problem(item)
     val standing = front.standing(item)
     val isIn = standing != Standing.GET
     val update = standing == Standing.UPDATE
     // the button's word, in the desktop's order: on its way, then a problem, then an update
+    val available = item.kind.supportsInstall()
     val label = when {
+        !available -> "Preview only"
+        busy && item.kind == ItemKind.PLUGIN -> "Working"
         busy -> "Installing"
+        waiting -> "Queued"
         problem != null -> "Not installed"
         update -> "Update"
         isIn -> "Installed"
         else -> "Install"
     }
     // the accent while there is something to do, and the neutral fill when there is not
-    val filled = problem == null && (!isIn || update || busy)
-    val acts = !busy && (problem != null || !isIn || update)
-    // its width is its word's, 18 each side, as the desktop measures it
-    val measurer = rememberTextMeasurer()
-    val pillWidth = with(LocalDensity.current) {
-        measurer.measure(label, TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold)).size.width.toDp() +
-            PILL_BUTTON_SIDE * 2
-    }
-    // the name and the chip run from past the icon, under the button where they are long, as the
-    // desktop lets them: it draws the button over whatever reaches it
-    val beside = Modifier.padding(start = ITEM_ICON + 20.dp).fillMaxWidth()
-
+    val filled = available && problem == null && (!isIn || update || busy)
+    val acts = available && !busy && !waiting && (problem != null || !isIn || update)
     fun act() {
         if (!acts) return
         if (problem != null) {
             // the reason only when it is asked for, in the store's own alert
-            onProblem(null)
+            front.setProblem(item, null)
             onTell(problem)
             return
         }
-        busy = true
-        scope.launch {
-            val why = installBrushSet(front.store, item, app)
-            busy = false
-            if (why == null) front.read() else onProblem(why)
-        }
+        front.install(item)
     }
 
-    // the head: the icon, the name with its kind, the publisher, and the one action
     Spacer(Modifier.height(24.dp))
-    Box(Modifier.fillMaxWidth().height(ITEM_ICON)) {
-        Box(
-            Modifier.size(ITEM_ICON).clip(RoundedCornerShape(ITEM_ICON_CORNER)).background(TILE_FILL),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(kindIcon(item.kind), contentDescription = null, tint = IDLE, modifier = Modifier.size(56.dp))
-        }
-        // the name and the kind's chip, on the icon's 34th dp
-        Row(
-            beside.offset(y = ITEM_NAME - 21.dp).height(42.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                item.name,
-                color = TITLE, fontSize = 30.sp, fontWeight = FontWeight.Bold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-            Spacer(Modifier.width(10.dp))
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val compact = maxWidth < 480.dp
+        val iconSize = if (compact) 72.dp else ITEM_ICON
+        val action: @Composable () -> Unit = {
             Box(
-                Modifier.height(CHIP_KIND).clip(RoundedCornerShape(6.dp)).background(TILE_FILL).padding(horizontal = 7.dp),
+                Modifier.height(PILL_BUTTON).clip(RoundedCornerShape(PILL_BUTTON / 2))
+                    .background(if (filled) ACCENT else PILL_STATE_FILL)
+                    .clickable(enabled = acts, role = Role.Button, onClick = { act() })
+                    .padding(horizontal = PILL_BUTTON_SIDE),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(kindText(item.kind).uppercase(), color = ROW_INK, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                Text(label, color = if (filled) Color.White else ROW_INK, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             }
         }
-        // whose it is, in the accent, under the name
-        Box(beside.offset(y = ITEM_NAME + 16.dp).height(28.dp), contentAlignment = Alignment.CenterStart) {
-            Text(item.publisher, color = ACCENT, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        // the one action at the trailing end, its middle four under the name's
-        Box(
-            Modifier.align(Alignment.TopEnd).offset(y = ITEM_NAME + 4.dp - PILL_BUTTON / 2)
-                .width(pillWidth).height(PILL_BUTTON)
-                .clip(RoundedCornerShape(PILL_BUTTON / 2))
-                .background(if (filled) ACCENT else PILL_STATE_FILL)
-                .clickable(enabled = acts, onClick = { act() }),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(label, color = if (filled) TITLE else ROW_INK, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Row(horizontalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 20.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            ItemArtwork(item, front, if (compact) 16.dp else ITEM_ICON_CORNER,
+                if (compact) 34.dp else 56.dp, Modifier.size(iconSize), square = true)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(item.name, color = TITLE, fontSize = if (compact) 23.sp else 30.sp, fontWeight = FontWeight.Bold,
+                        maxLines = if (compact) 2 else 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false))
+                    if (!compact) ItemKindBadge(item.kind)
+                }
+                Text(item.publisher, color = ACCENT, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (compact) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        ItemKindBadge(item.kind)
+                        action()
+                    }
+                }
+            }
+            if (!compact) action()
         }
     }
     Spacer(Modifier.height(16.dp))
@@ -1390,19 +1535,7 @@ private fun ItemPage(
         Text(caveat(item.kind), color = ROW_INK, fontSize = 15.sp)
     }
     Spacer(Modifier.height(20.dp))
-    // the first picture the catalogue gave, filling the page's own width as the rest of it does
-    val picture = pictureFor(item.previews.firstOrNull().orEmpty(), front)
-    if (picture != null) {
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            Image(
-                bitmap = picture.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxWidth().height(maxWidth * ITEM_PICTURE_SHARE),
-            )
-        }
-        Spacer(Modifier.height(20.dp))
-    }
+    ItemGallery(item, front)
     // the facts, in columns ruled above and below
     val facts = factsOf(item)
     if (facts.isNotEmpty()) {
@@ -1441,31 +1574,101 @@ private fun ItemPage(
     }
 }
 
+@Composable
+private fun ItemKindBadge(kind: ItemKind) {
+    Box(Modifier.height(CHIP_KIND).clip(RoundedCornerShape(6.dp)).background(TILE_FILL).padding(horizontal = 7.dp),
+        contentAlignment = Alignment.Center) {
+        Text(kindText(kind).uppercase(), color = ROW_INK, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun ItemGallery(item: StoreItem, front: StoreFront) {
+    val gallery = remember(item) { storeGalleryEntries(item) }
+    if (gallery.isEmpty()) return
+
+    androidx.compose.runtime.key(item.listing) {
+        val pager = rememberPagerState { gallery.size }
+        val scope = rememberCoroutineScope()
+        val cover = if (gallery.first().cover) coverFor(item, front) else null
+        BoxWithConstraints {
+            // Keep the next page just in view on wider sheets and preserve the shape of previews.
+            val peek = if (gallery.size > 1 && maxWidth >= 560.dp) 40.dp else 0.dp
+            HorizontalPager(
+                state = pager,
+                contentPadding = PaddingValues(end = peek),
+                pageSpacing = if (peek > 0.dp) 12.dp else 0.dp,
+            ) { page ->
+                val entry = gallery[page]
+                Box(
+                    Modifier.fillMaxWidth().height((maxWidth - peek) * 0.75f)
+                        .clip(RoundedCornerShape(CARD_CORNER)).background(TILE_FILL),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (entry.cover && cover != null) {
+                        Image(cover.asImageBitmap(), "Cover", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                    } else if (!entry.cover) {
+                        StoreGalleryMedia(front.store, entry, front.imageVersion(), active = pager.settledPage == page)
+                    }
+                }
+            }
+        }
+        if (gallery.size > 1) BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val visible = minOf(gallery.size, 9, (maxWidth / 24.dp).toInt().coerceAtLeast(1))
+            val first = (pager.currentPage - visible / 2).coerceIn(0, gallery.size - visible)
+            Row(
+                Modifier.fillMaxWidth().selectableGroup(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                for (page in first until first + visible) {
+                    val selected = pager.currentPage == page
+                    val more = (page == first && first > 0) ||
+                        (page == first + visible - 1 && page < gallery.lastIndex)
+                    Box(
+                        Modifier.width(24.dp).height(44.dp)
+                            .semantics { contentDescription = "Image " + (page + 1) + " of " + gallery.size }
+                            .selectable(selected = selected, role = Role.Tab, onClick = {
+                                scope.launch { pager.animateScrollToPage(page) }
+                            }),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(Modifier.size(if (more && !selected) 4.dp else 6.dp)
+                            .background(if (selected) TITLE else IDLE, CircleShape))
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+    }
+}
+
 /** The facts in columns, ruled above and below and between, as the desktop's strip has them. */
 @Composable
 private fun FactsStrip(facts: List<Pair<String, String>>) {
-    Box(Modifier.fillMaxWidth().height(FACTS_HEIGHT)) {
-        Row(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().heightIn(min = FACTS_HEIGHT).height(IntrinsicSize.Min)) {
             facts.forEachIndexed { at, (label, value) ->
-                Box(Modifier.weight(1f).fillMaxHeight()) {
+                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.CenterStart) {
                     if (at > 0) {
                         Box(
                             Modifier.align(Alignment.CenterStart).width(1.dp).fillMaxHeight()
                                 .padding(vertical = 12.dp).background(SEP),
                         )
                     }
-                    // the first column shares the row content's 16, so the strip has one left edge
-                    val inset = 16.dp
-                    // a header's rhythm inside the strip too: 16 over the label, 8 under it
-                    Text(
-                        label, color = IDLE, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.offset(x = inset, y = 16.dp),
-                    )
-                    Text(
-                        value, color = TITLE, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.offset(x = inset, y = 41.dp).fillMaxWidth().padding(end = 10.dp),
-                    )
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        Text(
+                            label, color = IDLE, fontSize = 11.sp, lineHeight = 14.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            value, color = TITLE, fontSize = 16.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }
@@ -1492,51 +1695,9 @@ private fun DetailsCard(item: StoreItem) {
     }
 }
 
-/** Up to three of the maker's other things, each opening its own page. */
 @Composable
 private fun MoreFrom(items: List<StoreItem>, front: StoreFront, onItem: (StoreItem) -> Unit) {
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val each = (maxWidth - MORE_GAP * 2) / 3
-        Row(horizontalArrangement = Arrangement.spacedBy(MORE_GAP)) {
-            for (item in items) {
-                val picture = pictureFor(item.preview, front)
-                Column(Modifier.width(each).clickable { onItem(item) }) {
-                    if (picture != null) {
-                        ArtPicture(picture, CARD_CORNER, Modifier.fillMaxWidth().height(each * 0.75f))
-                    } else {
-                        Box(
-                            Modifier.fillMaxWidth().height(each * 0.75f)
-                                .clip(RoundedCornerShape(CARD_CORNER)).background(TILE_FILL),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(kindIcon(item.kind), contentDescription = null, tint = IDLE, modifier = Modifier.size(36.dp))
-                        }
-                    }
-                    Box(Modifier.fillMaxWidth().height(MORE_FOOT)) {
-                        Text(
-                            item.name,
-                            color = TITLE, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.offset(y = 12.dp).fillMaxWidth(),
-                        )
-                        // the line and the state share its row, so neither runs under the other
-                        Row(
-                            Modifier.offset(y = 20.dp).fillMaxWidth().height(PILL_STATE),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                item.publisher,
-                                color = ROW_INK, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            StatePill(front.standing(item))
-                        }
-                    }
-                }
-            }
-        }
-    }
+    StoreCards(items, 3, MORE_GAP, front, onItem)
 }
 
 /** The facts the strip carries: always the four the mock shows, then the requirement when given. */
@@ -1561,29 +1722,14 @@ private fun SettingsPage(front: StoreFront, onSource: (SourceInfo) -> Unit, onAd
     Spacer(Modifier.height(24.dp))
     // what the store reads, one row each, and the way to add one
     GroupHead("SOURCES")
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(GROUP_CORNER)).background(GROUP_FILL)) {
+    StoreFormGroup {
         front.sources.forEachIndexed { at, source ->
             if (at > 0) GroupRule()
-            Row(
-                Modifier.fillMaxWidth().height(GROUP_ROW).clickable { onSource(source) }.padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(source.name, color = if (source.on) TITLE else IDLE, fontSize = 17.sp)
-                    Text(sourceLine(source), color = ROW_INK, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                // a disclosure chevron: the app's own glyph at 13, its trailing edge 16 in from the
-                // row's edge (the row's own 16 of padding), its middle on the row's
-                Icon(PcIcons.ChevronRight, contentDescription = null, tint = IDLE, modifier = Modifier.size(13.dp))
-            }
+            StoreFormRow(source.name, subtitle = sourceLine(source), chevron = true,
+                labelColor = if (source.on) TITLE else IDLE, onClick = { onSource(source) })
         }
         if (front.sources.isNotEmpty()) GroupRule()
-        Row(
-            Modifier.fillMaxWidth().height(GROUP_ROW).clickable(onClick = onAdd).padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Add Source...", color = ACCENT, fontSize = 17.sp)
-        }
+        StoreFormRow("Add Source...", labelColor = ACCENT, onClick = onAdd)
     }
     GroupNote("The store reads these when it opens. Turning one off hides its items; nothing is uninstalled.")
     // when they were last read, which is the only checking there is so far
@@ -1644,15 +1790,13 @@ private fun SourcePage(front: StoreFront, source: SourceInfo, onRefresh: () -> U
     // source but the one that came with the app can go
     if (!bundled) {
         Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(GROUP_CORNER)).background(GROUP_FILL)) {
-            if (local) {
-                Row(
-                    Modifier.fillMaxWidth().height(GROUP_ROW).clickable(onClick = onRefresh).padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Refresh Now", color = ACCENT, fontSize = 17.sp)
-                }
-                GroupRule()
+            Row(
+                Modifier.fillMaxWidth().height(GROUP_ROW).clickable(onClick = onRefresh).padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Refresh Now", color = ACCENT, fontSize = 17.sp)
             }
+            GroupRule()
             Row(
                 Modifier.fillMaxWidth().height(GROUP_ROW).clickable(onClick = onRemove).padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1674,16 +1818,22 @@ private fun DownloadsPage(front: StoreFront, onItem: (StoreItem) -> Unit) {
     PageTitle("Downloads")
     Spacer(Modifier.height(8.dp))
     GroupHead("DOWNLOADING")
-    Text(
-        "Nothing downloading.",
-        color = ROW_INK, fontSize = 15.sp, fontWeight = FontWeight.Medium,
-        modifier = Modifier.padding(start = 16.dp),
-    )
+    val transfers = front.installing.values.distinctBy { it.listing }
+    if (transfers.isEmpty()) {
+        Text("Nothing downloading.", color = ROW_INK, fontSize = 15.sp, modifier = Modifier.padding(start = 16.dp))
+    } else {
+        RecordsCard(transfers, front, onItem, "Installing")
+    }
+    if (front.queued.isNotEmpty()) {
+        Spacer(Modifier.height(HEADING_LINE))
+        GroupHead("QUEUED FOR THE BRUSH LIBRARY")
+        RecordsCard(front.queued, front, onItem, "Queued")
+    }
     Spacer(Modifier.height(HEADING_LINE))
     // what has a newer file waiting in the catalogue, then everything that arrived
-    val waiting = front.installed.values.mapNotNull { one -> front.items.firstOrNull { it.id == one.id } }
+    val waiting = front.installed.values.mapNotNull { one -> front.items.firstOrNull { it.listing == one.listing } }
         .filter { front.standing(it) == Standing.UPDATE }
-    val finished = front.installed.values.mapNotNull { one -> front.items.firstOrNull { it.id == one.id } }
+    val finished = front.installed.values.mapNotNull { one -> front.items.firstOrNull { it.listing == one.listing } }
     if (waiting.isNotEmpty()) {
         GroupHead("WAITING FOR YOU")
         RecordsCard(waiting, front, onItem)
@@ -1697,7 +1847,7 @@ private fun DownloadsPage(front: StoreFront, onItem: (StoreItem) -> Unit) {
 
 /** What arrived, one row each: its kind's tile, its name, when it came, and its state. */
 @Composable
-private fun RecordsCard(items: List<StoreItem>, front: StoreFront, onItem: (StoreItem) -> Unit) {
+private fun RecordsCard(items: List<StoreItem>, front: StoreFront, onItem: (StoreItem) -> Unit, status: String? = null) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(GROUP_CORNER)).background(GROUP_FILL)) {
         items.forEachIndexed { at, item ->
             if (at > 0) GroupRule()
@@ -1705,22 +1855,17 @@ private fun RecordsCard(items: List<StoreItem>, front: StoreFront, onItem: (Stor
                 Modifier.fillMaxWidth().height(ROW_HEIGHT).clickable { onItem(item) }.padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(
-                    Modifier.size(RECORD_TILE).clip(RoundedCornerShape(RECORD_TILE_CORNER)).background(TILE_FILL),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(kindIcon(item.kind), contentDescription = null, tint = IDLE, modifier = Modifier.size(20.dp))
-                }
+                ItemArtwork(item, front, RECORD_TILE_CORNER, 20.dp, Modifier.size(RECORD_TILE), square = true)
                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
                     Text(item.name, color = TITLE, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    val when_ = readText(front.installed[item.id]?.at ?: 0uL)
+                    val when_ = status ?: readText(front.installed[item.listing]?.at ?: 0uL)
                     Text(
                         if (item.version.isEmpty()) when_ else "Version ${item.version} - $when_",
                         color = ROW_INK, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                 }
                 Spacer(Modifier.width(12.dp))
-                StatePill(front.standing(item))
+                if (status == null) StatePill(front.standing(item))
             }
         }
     }
@@ -1728,64 +1873,32 @@ private fun RecordsCard(items: List<StoreItem>, front: StoreFront, onItem: (Stor
 
 /** A kind's own wall, three across, in the order the bar's menu asked for. */
 @Composable
-private fun SeeAllPage(front: StoreFront, kind: ItemKind, sort: SortBy, ascending: Boolean, onItem: (StoreItem) -> Unit) {
-    PageTitle(sectionTitle(kind))
-    Spacer(Modifier.height(24.dp))
-    val items = remember(front.items, kind, sort, ascending) {
-        sorted(front.items.filter { it.kind == kind }, sort, ascending)
+private fun SeeAllPage(
+    front: StoreFront,
+    kind: ItemKind,
+    sort: SortBy,
+    ascending: Boolean,
+    modifier: Modifier,
+    onItem: (StoreItem) -> Unit,
+) {
+    val listings = remember(front.items, kind, sort, ascending) {
+        sorted(front.items.filter { it.kind.browseGroup() == kind }, sort, ascending)
     }
-    if (items.isEmpty()) {
-        Spacer(Modifier.height(24.dp))
-        Text(
-            "Nothing here yet.",
-            color = ROW_INK, fontSize = 15.sp, fontWeight = FontWeight.Medium,
-            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
-        )
-        return
-    }
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val each = (maxWidth - WALL_GAP * 2) / 3
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(24.dp)) {
-            for (row in items.chunked(3)) {
+    BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = INSET)) {
+        val columns = if (maxWidth < 360.dp) 1 else if (maxWidth < 540.dp) 2 else 3
+        val rows = remember(listings, columns) { listings.chunked(columns) }
+        val each = (maxWidth - WALL_GAP * (columns - 1)) / columns
+        LazyColumn(Modifier.fillMaxWidth(), contentPadding = PaddingValues(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
+            item { PageTitle(sectionTitle(kind)) }
+            if (rows.isEmpty()) item {
+                Text(
+                    "Nothing here yet.", color = ROW_INK, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            items(rows) { row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(WALL_GAP)) {
-                    for (item in row) {
-                        val picture = pictureFor(item.preview, front)
-                        Column(Modifier.width(each).clickable { onItem(item) }) {
-                            if (picture != null) {
-                                ArtPicture(picture, CARD_CORNER, Modifier.fillMaxWidth().height(each * 0.75f))
-                            } else {
-                                Box(
-                                    Modifier.fillMaxWidth().height(each * 0.75f)
-                                        .clip(RoundedCornerShape(CARD_CORNER)).background(TILE_FILL),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Icon(kindIcon(item.kind), contentDescription = null, tint = IDLE, modifier = Modifier.size(40.dp))
-                                }
-                            }
-                            // the name, the line under it, and the state on the same line
-                            Box(Modifier.fillMaxWidth().height(WALL_FOOT)) {
-                                Text(
-                                    item.name,
-                                    color = TITLE, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.offset(y = 12.dp).fillMaxWidth(),
-                                )
-                                // the line and the state share its row, so neither runs under the other
-                                Row(
-                                    Modifier.offset(y = 29.dp).fillMaxWidth().height(PILL_STATE),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Text(
-                                        secondLine(item),
-                                        color = ROW_INK, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    StatePill(front.standing(item))
-                                }
-                            }
-                        }
-                    }
+                    for (item in row) StoreCard(item, front, each, onItem)
                 }
             }
         }
@@ -1815,7 +1928,7 @@ private fun FiltersMenu(
             MenuHead("Kind")
             MenuPick("All kinds", kind == null) { onKind(null) }
             MenuPick("Plugins", kind == ItemKind.PLUGIN) { onKind(ItemKind.PLUGIN) }
-            MenuPick("Brush sets", kind == ItemKind.BRUSH_SET) { onKind(ItemKind.BRUSH_SET) }
+            MenuPick("Brushes", kind == ItemKind.BRUSH_SET) { onKind(ItemKind.BRUSH_SET) }
             MenuPick("Asset packs", kind == ItemKind.ASSET_PACK) { onKind(ItemKind.ASSET_PACK) }
             MenuHead("Source")
             MenuPick("All sources", from == null) { onFrom(null) }
@@ -1881,6 +1994,7 @@ private fun AddSheet(front: StoreFront, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     var address by remember { mutableStateOf("") }
     var reason by remember { mutableStateOf<String?>(null) }
+    var localNetwork by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     val ready = address.isNotBlank() && !busy
 
@@ -1889,7 +2003,7 @@ private fun AddSheet(front: StoreFront, onClose: () -> Unit) {
         busy = true
         reason = null
         scope.launch {
-            val why = front.add(address.trim())
+            val why = front.add(address.trim(), localNetwork)
             busy = false
             if (why == null) onClose() else reason = why
         }
@@ -1942,6 +2056,16 @@ private fun AddSheet(front: StoreFront, onClose: () -> Unit) {
                     }
                 },
             )
+            if (address.trim().startsWith("https://")) {
+                Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(
+                        checked = localNetwork,
+                        onCheckedChange = { localNetwork = it },
+                        enabled = !busy,
+                    )
+                    Text("Allow this HTTPS host on my local network", color = ROW_INK, fontSize = 13.sp)
+                }
+            }
             Spacer(Modifier.height(12.dp))
             Text(
                 reason ?: "A catalogue is a JSON file. Its address can be a web address, or the path to a file on this machine.",
@@ -1955,9 +2079,9 @@ private fun AddSheet(front: StoreFront, onClose: () -> Unit) {
 
 /** The store's own switch: a 51 by 31 track and a round knob, as the desktop draws it. */
 @Composable
-private fun StoreSwitch(on: Boolean) {
+internal fun StoreSwitch(on: Boolean, modifier: Modifier = Modifier) {
     Box(
-        Modifier.width(SWITCH_W).height(SWITCH_H).clip(RoundedCornerShape(16.dp))
+        modifier.width(SWITCH_W).height(SWITCH_H).clip(RoundedCornerShape(16.dp))
             .background(if (on) ACCENT else SWITCH_OFF),
     ) {
         Box(
@@ -1977,7 +2101,7 @@ private fun PageTitle(text: String) {
 
 /** A small heading over a card: 13, quiet, 16 above it and 8 under it, as a grouped list's is. */
 @Composable
-private fun GroupHead(text: String, inset: Boolean = true) {
+internal fun GroupHead(text: String, inset: Boolean = true) {
     Column(Modifier.fillMaxWidth()) {
         Spacer(Modifier.height(GROUP_HEAD_ABOVE))
         Text(
@@ -1990,7 +2114,7 @@ private fun GroupHead(text: String, inset: Boolean = true) {
 
 /** The line under a group: 16 under its card, and 52 tall, or 26 where it closes the page. */
 @Composable
-private fun GroupNote(text: String, danger: Boolean = false, last: Boolean = false) {
+internal fun GroupNote(text: String, danger: Boolean = false, last: Boolean = false) {
     val tail = if (last) GROUP_FOOT else GROUP_FOOT + 26.dp
     Box(Modifier.fillMaxWidth().height(GROUP_HEAD + tail)) {
         Text(
@@ -2003,23 +2127,17 @@ private fun GroupNote(text: String, danger: Boolean = false, last: Boolean = fal
 /** A card of rows: the label at one end, the value at the other, ruled between. */
 @Composable
 private fun RowsCard(rows: List<Pair<String, String>>) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(GROUP_CORNER)).background(GROUP_FILL)) {
+    StoreFormGroup {
         rows.forEachIndexed { at, (label, value) ->
             if (at > 0) GroupRule()
-            Row(
-                Modifier.fillMaxWidth().height(GROUP_ROW).padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(label, color = TITLE, fontSize = 17.sp, modifier = Modifier.weight(1f))
-                Text(value, color = ROW_INK, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
+            StoreFormRow(label, value = value)
         }
     }
 }
 
 /** The rule a card draws above every row but its first: inset 16 in from both content edges. */
 @Composable
-private fun GroupRule() {
+internal fun GroupRule() {
     Box(Modifier.fillMaxWidth().padding(horizontal = GROUP_RULE_INSET).height(1.dp).background(SEP))
 }
 
@@ -2033,8 +2151,15 @@ private fun sourceLine(source: SourceInfo): String {
 }
 
 /** The heading a kind's own wall carries, and the section that opens it. */
+private fun ItemKind.browseGroup(): ItemKind = when (this) {
+    ItemKind.BRUSH, ItemKind.BRUSH_LIBRARY -> ItemKind.BRUSH_SET
+    else -> this
+}
+
+private fun ItemKind.supportsInstall(): Boolean = this == ItemKind.BRUSH_SET || this == ItemKind.PLUGIN
+
 private fun sectionTitle(kind: ItemKind): String = when (kind) {
-    ItemKind.BRUSH_SET -> "Brushes"
+    ItemKind.BRUSH_SET, ItemKind.BRUSH, ItemKind.BRUSH_LIBRARY -> "Brushes"
     ItemKind.PLUGIN -> "Plugins"
     ItemKind.ASSET_PACK -> "Asset packs"
 }
@@ -2049,62 +2174,18 @@ private fun sorted(items: List<StoreItem>, sort: SortBy, ascending: Boolean): Li
     return if (ascending) ordered else ordered.reversed()
 }
 
-/**
- * The store's install for a brush set: its file fetched, the digest checked against the catalogue's,
- * then handed to the app's own brush importer, and recorded. Null when it is installed, or the
- * sentence saying why it is not.
- */
-private suspend fun installBrushSet(store: Store?, item: StoreItem, app: Application): String? {
-    if (store == null) return "The store isn't open."
-    if (item.kind != ItemKind.BRUSH_SET) return "This screen installs brush sets only."
-    val fetched = withContext(Dispatchers.IO) { store.fetchItem(item.id) }
-    if (fetched.failure.isNotEmpty()) return fetched.failure
-    if (fetched.bytes.isEmpty()) return "The file came back empty."
-    val digest = withContext(Dispatchers.Default) { digestOf(fetched.bytes) }
-    if (!digest.equals(item.sha256, ignoreCase = true)) return "The file doesn't match the catalogue, so nothing was kept."
-    val file = withContext(Dispatchers.IO) {
-        runCatching {
-            val dir = File(app.cacheDir, "store").apply { mkdirs() }
-            File(dir, fileName(item.id, CanvasViewModel.BRUSH_SET_EXTENSION)).also { it.writeBytes(fetched.bytes) }
-        }.onFailure { AppLog.e("store", "writing an item's file", it) }.getOrNull()
-    } ?: return "There isn't enough room on this device for this file."
-    val kept = try {
-        keepBrushesForLater(app, file, "${item.name}.${CanvasViewModel.BRUSH_SET_EXTENSION}")
-    } finally {
-        file.delete()
-    }
-    return when (kept) {
-        KeptBrush.Waiting -> {
-            withContext(Dispatchers.IO) { store.keepInstalled(item.id, digest) }
-            // the open canvas reads it in now, as the desk's store installs into its own library;
-            // with no canvas open the file waits for the next one, as before
-            StoreSheet.takeKeptBrushes?.invoke()
-            null
-        }
-        KeptBrush.Empty -> "The file holds no brushes."
-        KeptBrush.NoRoom -> CanvasViewModel.NO_ROOM_TO_IMPORT
-        KeptBrush.Stopped -> "Nothing was installed."
-    }
-}
-
-/** A file's name from an item's id, and the ending the app knows the kind by. */
-private fun fileName(id: String, extension: String): String =
-    id.map { if (it.isLetterOrDigit() || it in "-_.") it else '_' }.joinToString("").ifEmpty { "item" } + ".$extension"
-
-/** The sha256 of [bytes], lowercase hex, as a catalogue writes it. */
-private fun digestOf(bytes: ByteArray): String =
-    MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-
 /** The kind's words: the same ones the desktop's item rows use. */
 private fun kindText(kind: ItemKind): String = when (kind) {
     ItemKind.BRUSH_SET -> "Brush set"
+    ItemKind.BRUSH -> "Brush"
+    ItemKind.BRUSH_LIBRARY -> "Brush library"
     ItemKind.PLUGIN -> "Plugin"
     ItemKind.ASSET_PACK -> "Asset pack"
 }
 
 /** The glyph a kind's tile and cards draw while the catalogue has given no picture. */
 private fun kindIcon(kind: ItemKind) = when (kind) {
-    ItemKind.BRUSH_SET -> PcIcons.Brush
+    ItemKind.BRUSH_SET, ItemKind.BRUSH, ItemKind.BRUSH_LIBRARY -> PcIcons.Brush
     ItemKind.PLUGIN -> PcIcons.Actions
     ItemKind.ASSET_PACK -> PcIcons.FolderFill
 }
@@ -2125,7 +2206,7 @@ private fun sizeText(bytes: ULong): String =
 private fun caveat(kind: ItemKind): String = when (kind) {
     ItemKind.BRUSH_SET -> "Adds to the brush library."
     ItemKind.PLUGIN -> "Runs code on your hooks. You can turn it off in Plugins, and nothing it draws or stores survives."
-    ItemKind.ASSET_PACK -> "Adds to the asset library."
+    ItemKind.ASSET_PACK, ItemKind.BRUSH, ItemKind.BRUSH_LIBRARY -> "Browse the contents in the gallery."
 }
 
 private val readableDay = DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH)

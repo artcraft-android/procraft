@@ -82,7 +82,6 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -275,8 +274,6 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
     } else {
         shown?.brushes.orEmpty().map { it to false }
     }
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val focus = androidx.compose.ui.platform.LocalFocusManager.current
     var adding by remember { mutableStateOf(false) }
@@ -370,8 +367,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
         draggedSet = null
         setBounds.entries.firstOrNull { it.value.contains(dragAt) }?.key?.let { vm.moveBrushSet(from, it) }
     }
-    fun share(b: BrushInfo?) {
-        scope.launch { vm.brushFileToShare(b)?.let { shareFile(context, it, "application/octet-stream") } }
+    fun share(b: BrushInfo) {
+        vm.brushShare = BrushShare.Single(b)
     }
     // how far the search field (and the lists under it) has scrolled up out of sight: all of it
     // when the library opens
@@ -662,7 +659,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                             MenuDivider()
                             MenuItem(PcIcons.MenuShare, "Share") {
                                 setMenu = null
-                                share(null)
+                                vm.brushShare = BrushShare.Set(i, set.name, set.icon.toInt())
                             }
                             // the only set too: the library is then left with none
                             MenuDivider()
@@ -1052,8 +1049,6 @@ internal class MenuPlace(private val top: Int = 0, private val place: (IntRect, 
 /** A library's title menu: rename it, share it, or go back to every library's card. */
 @Composable
 private fun LibraryTitleMenu(vm: CanvasViewModel, open: Boolean, onDismiss: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     LibraryMenu(open, androidx.compose.ui.graphics.TransformOrigin(0f, 0f), MenuPlace { a, _ -> IntOffset(a.left, a.bottom) }, onDismiss = onDismiss, overPanel = true) {
         MenuItem(PcIcons.MenuRename, "Rename") {
             onDismiss()
@@ -1061,7 +1056,7 @@ private fun LibraryTitleMenu(vm: CanvasViewModel, open: Boolean, onDismiss: () -
         }
         MenuItem(PcIcons.MenuShare, "Share") {
             onDismiss()
-            scope.launch { vm.libraryFileToShare()?.let { shareFile(context, it, "application/octet-stream") } }
+            vm.brushShare = BrushShare.Library(vm.libraryName)
         }
         MenuDivider(11.dp)
         MenuItem(PcIcons.MenuLibraries, "Back to libraries") {

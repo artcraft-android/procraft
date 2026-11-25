@@ -3,44 +3,44 @@
 
 use std::sync::Arc;
 
-use procraft_core::{CanvasSession, ItemKind, Plugins, StoreItem};
+use procraft_core::{CanvasSession, ItemKind, StoreItem};
 
-/// Why `bytes` cannot be the file the catalogue listed, if they cannot be. The catalogue's size and
-/// digest are what a web address cannot quietly swap out.
-pub fn refusal(item: &StoreItem, bytes: &[u8]) -> Option<String> {
-    if bytes.is_empty() {
-        return Some("The file came through empty.".to_owned());
+/// Takes the verified staged file, streaming brush sets into the library.
+pub fn take(session: &Arc<CanvasSession>, item: &StoreItem, path: &std::path::Path) -> Result<(), String> {
+    match item.kind {
+        ItemKind::BrushSet => {
+            session.install_store_brushes(item.clone(), path.to_string_lossy().into_owned()).map_or(Ok(()), Err)
+        }
+        ItemKind::Plugin => Err("A Store plugin requires review before it can be installed.".to_owned()),
+        ItemKind::AssetPack | ItemKind::Brush | ItemKind::BrushLibrary => {
+            Err("This Store listing is available for preview.".to_owned())
+        }
     }
-    if item.bytes > 0 && bytes.len() as u64 != item.bytes {
-        return Some(format!("The file is {} bytes, and the catalogue said {}.", bytes.len(), item.bytes));
-    }
-    if !item.sha256.is_empty() && procraft_core::digest_of(bytes) != item.sha256 {
-        return Some("The file is not the one the catalogue lists, so it was not taken.".to_owned());
-    }
-    None
 }
 
-/// Installs `bytes` as `item`, by kind. Ok means the app has it now; Err says why not, in words a
-/// person can read.
-pub fn take(
+/// Takes a chosen file through the same private staging used by a Store download.
+pub fn take_local_brushes(
     session: &Arc<CanvasSession>,
-    plugins: &Arc<Plugins>,
     item: &StoreItem,
-    bytes: &[u8],
+    path: &std::path::Path,
 ) -> Result<(), String> {
-    if let Some(no) = refusal(item, bytes) {
-        return Err(no);
+    use std::io::Read as _;
+
+    if item.kind != ItemKind::BrushSet {
+        return take(session, item, path);
     }
-    match item.kind {
-        // None is a plugin taken in; Some is the reason it was not
-        ItemKind::Plugin => plugins.install(bytes.to_vec()).map_or(Ok(()), Err),
-        // None is nothing readable in the file
-        ItemKind::BrushSet => session
-            .import_any_brushes(bytes.to_vec(), None, 0)
-            .map(|_| ())
-            .ok_or_else(|| "No brushes could be read from it.".to_owned()),
-        ItemKind::AssetPack => Err("Asset packs need the asset library, which the app does not have yet.".to_owned()),
+    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return Err("Choose a regular brush set file.".to_owned());
     }
+    procraft_core::check_listing_file(item, path)?;
+    let failed = |error| format!("The brush set couldn't be staged: {error}");
+    let stage = tempfile::tempdir().map_err(failed)?;
+    let staged = stage.path().join("brushset");
+    let source = std::fs::File::open(path).map_err(failed)?;
+    let mut target = std::fs::File::create(&staged).map_err(failed)?;
+    std::io::copy(&mut source.take(item.bytes + 1), &mut target).map_err(failed)?;
+    drop(target);
+    take(session, item, &staged)
 }
 
 #[cfg(test)]
@@ -60,6 +60,7 @@ mod tests {
             category: "Brushes".into(),
             tags: Vec::new(),
             preview: String::new(),
+            icon: String::new(),
             previews: Vec::new(),
             body: String::new(),
             file: "https://example.org/dry-ink.brushset".into(),
@@ -74,45 +75,24 @@ mod tests {
     fn a_file_of_the_wrong_size_or_digest_is_refused_before_anything_is_installed() {
         let bytes = b"the file the catalogue listed";
         let digest = procraft_core::digest_of(bytes);
-        assert_eq!(refusal(&item(bytes.len() as u64, &digest), bytes), None, "the one it lists is taken");
-        assert!(refusal(&item(bytes.len() as u64 + 1, &digest), bytes).is_some(), "a size that is off is refused");
-        assert!(
-            refusal(&item(bytes.len() as u64, &digest), b"another file").is_some(),
-            "a digest that is off is refused"
-        );
-        assert!(refusal(&item(0, ""), b"").is_some(), "an empty file is refused");
-        // nothing said about the file means nothing to check against
-        assert_eq!(refusal(&item(0, ""), bytes), None);
-    }
-
-    #[test]
-    fn a_plugin_file_is_taken_in_and_still_lists_once() {
-        let root = std::env::temp_dir().join(format!("procraft-plugin-install-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::create_dir_all(&root);
-        let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../crates/core/bundled-plugins/colour-labels.procraft-plugin");
-        let Ok(bytes) = std::fs::read(&file) else { return };
-        let plugins = procraft_core::Plugins::with_bundled(root.join("plugins").to_string_lossy().into_owned());
-        let before = plugins.plugins().len();
-        let mut listed = item(bytes.len() as u64, &procraft_core::digest_of(&bytes));
-        listed.kind = ItemKind::Plugin;
-        let Ok(session) = procraft_core::CanvasSession::open(root.join("work").to_string_lossy().into_owned()) else {
-            return;
-        };
-        assert_eq!(take(&session, &plugins, &listed, &bytes), Ok(()), "the plugin file is taken in");
-        assert_eq!(plugins.plugins().len(), before, "taking it in again does not add a second card");
-        let _ = std::fs::remove_dir_all(&root);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+        let check = |len, digest: &str| procraft_core::check_listing_file(&item(len, digest), file.path());
+        assert!(check(bytes.len() as u64, &digest).is_ok());
+        assert!(check(bytes.len() as u64 + 1, &digest).is_err());
+        assert!(check(bytes.len() as u64, &"a".repeat(64)).is_err());
+        assert!(check(0, "").is_err());
     }
 
     #[test]
     fn the_whole_way_from_a_catalogue_to_an_installed_set() {
+        crate::store_decoder::register();
         let root = std::env::temp_dir().join(format!("procraft-install-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::create_dir_all(&root);
         // a file the repo already has, listed by a catalogue written for this test
         let set = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy-brushes/Inking.brushset");
-        let Ok(bytes) = std::fs::read(&set) else { return };
+        let bytes = std::fs::read(&set).unwrap();
         let digest = procraft_core::digest_of(&bytes);
         let catalogue = root.join("catalogue.json");
         let listing = format!(
@@ -131,18 +111,19 @@ mod tests {
         let listed = store.items().into_iter().find(|item| item.id == "com.example.inking");
         assert!(listed.is_some(), "the catalogue lists the set");
         let Some(item) = listed else { return };
-        assert_eq!(refusal(&item, &bytes), None, "the file on disk is the one the catalogue lists");
-        let Ok(session) = procraft_core::CanvasSession::open(root.join("work").to_string_lossy().into_owned()) else {
-            return;
-        };
-        let plugins = procraft_core::Plugins::new();
-        assert_eq!(take(&session, &plugins, &item, &bytes), Ok(()), "the set is taken in");
-        store.keep_installed(item.id.clone(), digest.clone());
-        assert_eq!(
-            store.installed_one(item.id.clone()).map(|one| one.digest),
-            Some(digest),
-            "what was taken is recorded with its digest"
-        );
+        assert!(procraft_core::check_listing_file(&item, &set).is_ok());
+        let session = procraft_core::CanvasSession::new(32, 32);
+        session.open_brushes(root.join("brushes").to_string_lossy().into_owned());
+        assert_eq!(take_local_brushes(&session, &item, &set), Ok(()), "the chosen set is taken in");
+        store.read_brush_installs(root.join("brushes").to_string_lossy().into_owned());
+        assert_eq!(store.installed_listing(item.source.clone(), item.id.clone()).map(|one| one.digest), Some(digest));
+        let count = session.brush_library().len();
+        assert_eq!(take(&session, &item, &set), Ok(()), "a retry finds the same set");
+        assert_eq!(session.brush_library().len(), count);
+        assert!(session.delete_brush_set(0));
+        assert!(session.keep_brushes(root.join("brushes").to_string_lossy().into_owned()));
+        store.read_brush_installs(root.join("brushes").to_string_lossy().into_owned());
+        assert!(store.installed_listing(item.source, item.id).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -50,6 +50,18 @@ impl PluginPermission {
         }
     }
 
+    pub(crate) fn review_label(self) -> &'static str {
+        match self {
+            Self::ArtworkRead => "Read artwork and layer pixels",
+            Self::ArtworkWrite => "Change artwork and layers",
+            Self::Brush => "Read and change brush controls",
+            Self::Notice => "Show messages",
+            Self::Panel => "Open its own panels",
+            Self::BrushData => "Change its own brushes' settings",
+            Self::View => "Read and turn the canvas view",
+        }
+    }
+
     /// What it lets a plugin do, for the screen that asks whether to import one.
     pub(crate) fn sentence(self) -> &'static str {
         match self {

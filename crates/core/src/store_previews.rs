@@ -1,9 +1,6 @@
-//! The pictures a store listing shows for a brush set or an asset pack: a painting of the set's
-//! brushes, each stroke along a path of its own and laid down by the brush engine, or the pictures
-//! a pack holds as a collage, and the pages after it, where every brush's stroke is shown with its
-//! name under it. All of it on the store's dark backdrop, so a brush's stroke shows as it does in
-//! the app's own library. What is shown and where it goes is worked out from the item's name
-//! alone, so the same item always makes the same pictures.
+//! Store listing artwork. The package picker prepares brush probes or paper scans in `cover`.
+//! The brush specimen pages pair each named brush with an impression on warm paper. The original
+//! automatic card and collage entry points also serve callers that do not use the cover picker.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -17,6 +14,11 @@ use procraft_engine::zip::ZipReader;
 use crate::CanvasSession;
 use crate::brushes::Painted;
 use crate::text::{TextAlignment, TextInfo};
+
+mod cover;
+pub(crate) mod quick_look;
+pub use cover::{CoverTemplate, StoreCover, asset_pack_store_cover};
+pub(crate) use cover::{plugin_cover, plugin_icon};
 
 /// The picture a preview is: 4:3, the shape the store's cards show, large enough for its band.
 pub const PREVIEW_WIDTH: u32 = 1200;
@@ -47,6 +49,7 @@ const COOL: [[u8; 3]; 2] = [
 /// The colours words are set in: a set's name, a brush's name under its stroke, and the dimmer
 /// one a page's heading is.
 const TITLE_INK: [f32; 3] = [0.94, 0.92, 0.88];
+#[cfg(test)]
 const CAPTION: [f32; 3] = [0.84, 0.84, 0.86];
 const HEADING: [f32; 3] = [0.55, 0.55, 0.58];
 
@@ -1200,7 +1203,7 @@ pub const SHEET_ROWS: usize = 4;
 /// How many strokes one page holds, and the most pages a listing shows after its card: the six
 /// pictures a store's item page is given.
 pub const SHEET_STROKES: usize = SHEET_COLUMNS * SHEET_ROWS;
-pub const MOST_SHEETS: usize = 6;
+pub const MOST_SHEETS: usize = crate::store::STORE_SPECIMEN_LIMIT;
 
 /// The face brush names are set in: the app's own Inter, carried here so a page of strokes reads
 /// the same on every machine.
@@ -1338,19 +1341,21 @@ pub fn stroke_sheet(
     pages: usize,
     size: (u32, u32),
 ) -> RgbaImage {
-    let mut picture = backdrop(size, false);
+    let mut picture = RgbaImage::from_pixel(size.0, size.1, Rgba([242, 232, 211, 255]));
+    let specimen_ink = [0x2e, 0x2b, 0x27];
+    let caption = [0.24, 0.21, 0.18];
     let (width, height) = (size.0 as f32, size.1 as f32);
     let margin = 0.047 * width;
     let heading = 0.0185 * height;
-    write_words(&mut picture, title, heading, HEADING, margin, 0.030 * height, true, width - 2.0 * margin - 80.0);
+    write_words(&mut picture, title, heading, caption, margin, 0.030 * height, true, width - 2.0 * margin - 80.0);
     let number = format!("{} / {}", page + 1, pages.max(1));
     let number_width = words_width(&number, heading, false);
-    write_words(&mut picture, &number, heading, HEADING, width - margin - number_width, 0.030 * height, false, 80.0);
+    write_words(&mut picture, &number, heading, caption, width - margin - number_width, 0.030 * height, false, 80.0);
     // the rule under the heading
     Layer {
         source: None,
         tint: None,
-        fill: [66, 66, 70, 255],
+        fill: [171, 155, 133, 255],
         cx: width / 2.0,
         cy: 0.083 * height,
         hw: width / 2.0 - margin,
@@ -1365,7 +1370,7 @@ pub fn stroke_sheet(
     let cell = (width - 2.0 * margin - gap) / SHEET_COLUMNS as f32;
     let top = 0.108 * height;
     let row = (0.955 * height - top) / SHEET_ROWS as f32;
-    let caption = 0.021 * height;
+    let caption_size = 0.021 * height;
     for (at, (stroke, name)) in entries.iter().take(SHEET_STROKES).enumerate() {
         let left = margin + (at % SHEET_COLUMNS) as f32 * (cell + gap);
         let at_top = top + (at / SHEET_COLUMNS) as f32 * row;
@@ -1379,14 +1384,14 @@ pub fn stroke_sheet(
             row * 0.62,
             0.0,
             false,
-            BONE,
+            specimen_ink,
             0.0,
             1.0,
         );
-        let shown = fitted_words(name, caption, false, cell - 8.0);
-        let name_width = words_width(&shown, caption, false);
+        let shown = fitted_words(name, caption_size, false, cell - 8.0);
+        let name_width = words_width(&shown, caption_size, false);
         let x = left + ((cell - name_width) / 2.0).max(0.0);
-        write_words(&mut picture, name, caption, CAPTION, x, at_top + row * 0.80, false, cell - 8.0);
+        write_words(&mut picture, name, caption_size, caption, x, at_top + row * 0.80, false, cell - 8.0);
     }
     picture
 }
@@ -1502,9 +1507,27 @@ impl CanvasSession {
             .iter()
             .filter_map(|&at| {
                 let brush = brushes.get(at)?;
+                if let Some(tap) = cover::stamp_specimen(self, brush) {
+                    return Some((tap, brush.name.clone()));
+                }
                 let index = u32::try_from(at).ok()?;
                 let sample = self.brush_library_preview(library, set, index, width, height)?;
                 Some((RgbaImage::from_raw(sample.width, sample.height, sample.rgba)?, brush.name.clone()))
+            })
+            .collect()
+    }
+
+    fn store_specimens(&self, library: u32, set: u32, brushes: &[Brush], name: &str) -> Vec<StorePreview> {
+        let all = brush_indices(brushes);
+        let pages = all.len().div_ceil(SHEET_STROKES).min(MOST_SHEETS);
+        all.chunks(SHEET_STROKES)
+            .take(pages)
+            .enumerate()
+            .filter_map(|(page, slice)| {
+                let entries = self.draw_strokes(library, set, brushes, slice);
+                (!entries.is_empty()).then(|| {
+                    StorePreview::of(&stroke_sheet(&entries, name, page, pages, (PREVIEW_WIDTH, PREVIEW_HEIGHT)))
+                })
             })
             .collect()
     }
@@ -1549,7 +1572,7 @@ impl CanvasSession {
                 if at > 0 && focus > 0.0 {
                     diameter = diameter.min(focus * 0.55);
                 }
-                Some(Painted { ink, diameter: diameter.max(2.0), samples, brush })
+                Some(Painted { ink, diameter: diameter.max(2.0), samples, brush, second_scale: 1.0 })
             })
             .collect();
         let painting = if painted.is_empty() {
@@ -1595,21 +1618,9 @@ impl CanvasSession {
         let Some(brushes) = self.brush_set_brushes(library, set) else { return Vec::new() };
         let seed = seed_of(&key);
         let indices = shown_brushes(&brushes, seed);
-        let all = brush_indices(&brushes);
-        let card = self.store_card(&brushes, &indices, seed, &key, all.len());
+        let card = self.store_card(&brushes, &indices, seed, &key, brush_indices(&brushes).len());
         let mut pictures = vec![StorePreview::of(&card)];
-        let pages = all.len().div_ceil(SHEET_STROKES).min(MOST_SHEETS);
-        for page in 0..pages {
-            let from = page * SHEET_STROKES;
-            let end = (from + SHEET_STROKES).min(all.len());
-            let Some(slice) = all.get(from.min(end)..end) else { continue };
-            let entries = self.draw_strokes(library, set, &brushes, slice);
-            if entries.is_empty() {
-                continue;
-            }
-            let sheet = stroke_sheet(&entries, &key, page, pages, (PREVIEW_WIDTH, PREVIEW_HEIGHT));
-            pictures.push(StorePreview::of(&sheet));
-        }
+        pictures.extend(self.store_specimens(library, set, &brushes, &key));
         pictures
     }
 }

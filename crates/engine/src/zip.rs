@@ -70,6 +70,8 @@ pub struct EntryFacts<'a> {
     pub encrypted: bool,
     /// A plain file, by its attributes: not a link, a folder or a device.
     pub plain: bool,
+    /// A folder entry with folder attributes or absent Unix attributes.
+    pub directory: bool,
 }
 
 /// The largest entry read: anything claiming more is refused.
@@ -110,17 +112,25 @@ impl<'a> ZipReader<'a> {
             let plain = (kind == 0 || kind == 0o100_000) && e.attributes & 0x10 == 0 && !e.name.ends_with('/');
             let size = usize::try_from(e.size).unwrap_or(usize::MAX);
             let compressed = usize::try_from(e.compressed).unwrap_or(usize::MAX);
-            EntryFacts { name: &e.name, size, compressed, encrypted: e.flags & 1 != 0, plain }
+            let directory = (kind == 0 || kind == 0o040_000) && e.name.ends_with('/');
+            EntryFacts { name: &e.name, size, compressed, encrypted: e.flags & 1 != 0, plain, directory }
         })
     }
 
-    /// Whether each entry's own header names what the directory says it does: two readers of an
-    /// archive that doesn't would see different files.
+    /// Whether each local header agrees with the directory on the name and how to read the entry.
     pub fn names_agree(&self) -> bool {
         self.entries.iter().all(|e| {
             let named = || {
                 let header = self.source.get(e.local, 30)?;
-                (u32le(&header, 0)? == 0x0403_4B50).then_some(())?;
+                (u32le(&header, 0)? == 0x0403_4B50 && u16le(&header, 6)? == e.flags && u16le(&header, 8)? == e.method)
+                    .then_some(())?;
+                if e.flags & 8 == 0 {
+                    let size_matches = |small: u32, large| small == u32::MAX || u64::from(small) == large;
+                    (u32le(&header, 14)? == e.crc
+                        && size_matches(u32le(&header, 18)?, e.compressed)
+                        && size_matches(u32le(&header, 22)?, e.size))
+                    .then_some(())?;
+                }
                 let len = usize::from(u16le(&header, 26)?);
                 self.source.get(e.local.checked_add(30)?, len)
             };
@@ -159,6 +169,11 @@ impl ZipReader<'static> {
     /// entries each when they are read (a big archive is never held whole).
     pub fn open(path: &std::path::Path) -> Option<ZipReader<'static>> {
         let file = std::fs::File::open(path).ok()?;
+        Self::from_file(file)
+    }
+
+    /// An already-open, seekable archive.
+    pub fn from_file(file: std::fs::File) -> Option<ZipReader<'static>> {
         let len = file.metadata().ok()?.len();
         ZipReader::of(Source::File { file: std::sync::Mutex::new(file), len })
     }

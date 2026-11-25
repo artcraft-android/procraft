@@ -910,7 +910,7 @@ impl CanvasSession {
                     let mode = brush.setting("dual_blend").round().max(0.0) as u32;
                     let classic = brush.setting("classic_combine") >= 0.5;
                     let threshold = second_style.alpha_threshold;
-                    let diameter = preview::diameter(&second);
+                    let diameter = preview::diameter(&second) * stroke.second_scale;
                     let dual = procraft_gpu::SecondStroke { style: second_style, mode, threshold, classic };
                     (second, dual, diameter)
                 });
@@ -957,6 +957,8 @@ pub(crate) struct Painted {
     pub ink: [f32; 3],
     pub samples: Vec<procraft_engine::input::Sample>,
     pub diameter: f32,
+    /// Scales the secondary impression when the whole stroke is drawn at a different resolution.
+    pub second_scale: f32,
 }
 
 /// What an engine's preview strokes are seeded with: the same each time.

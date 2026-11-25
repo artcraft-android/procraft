@@ -68,6 +68,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // the log's file first, so that what follows is in it
         AppLog.start(this)
+        io.github.artcraftandroid.procraft.store.registerStoreDecoder(applicationContext)
         // which graphics backend the app is trying, kept before the model (made at its first use
         // below) makes the GPU device: a driver that crashes the app then sends the next start to
         // the next backend (one that drew is trusted until the app or the system is updated); and

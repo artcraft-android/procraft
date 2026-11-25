@@ -1092,7 +1092,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** What the plugins do now; one nothing answers to does nothing. */
-    private fun pluginsChanged() {
+    internal fun pluginsChanged() {
         readPlugins()
         session?.let { s ->
             applyPlugins(s)
@@ -6591,6 +6591,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         shadedNames.putAll(shaded)
     }
 
+    internal var brushShare by mutableStateOf<io.github.artcraftandroid.procraft.ui.BrushShare?>(null)
+    internal var storePackageSharedFile by mutableStateOf<File?>(null)
+    var storePackageSet by mutableStateOf<Int?>(null)
+
     fun duplicateBrushSet(i: Int) {
         shownSet = session?.duplicateBrushSet(i.toUInt())?.toInt() ?: return
         libraryChanged()
@@ -6607,9 +6611,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * the file itself, a brush at a time (nothing of it comes through here); a set shows the export
      * card meanwhile, its pie following the brushes written, and its Cancel stops it.
      */
-    suspend fun brushFileToShare(b: BrushInfo?): File? {
+    suspend fun brushFileToShare(b: BrushInfo?, setIndex: Int = shownSet): File? {
         val s = session ?: return null
-        val name = b?.name ?: brushSets.getOrNull(shownSet)?.name ?: return null
+        val name = b?.name ?: brushSets.getOrNull(setIndex)?.name ?: return null
         val file = File(exportFolder(), brushFileName(name, single = b != null))
         if (b != null) {
             val written = withContext(Dispatchers.IO) {
@@ -6618,7 +6622,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             if (!written) showNotice("This brush couldn't be shared.", warning = true)
             return file.takeIf { written }
         }
-        val set = shownSet.toUInt()
+        val set = setIndex.toUInt()
         val writing = io.github.artcraftandroid.procraft.core.BrushFileWriting()
         return withCard("This brush set couldn't be shared.", writing::progress, writing::cancel) {
             withContext(Dispatchers.IO) {
@@ -6851,9 +6855,30 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * Called when a canvas opens and by the store once an install lands; the reading job in flight
      * keeps the two from taking the same file twice.
      */
+    private var storeBrushesRequested = false
+
+    private suspend fun applyPendingStoreBrushes() {
+        val owner = session ?: return
+        val storeDir = File(getApplication<Application>().filesDir, "store")
+        val results = withContext(Dispatchers.IO + NonCancellable) {
+            brushLibraryWrites.withLock {
+                if (session !== owner) emptyList() else
+                    io.github.artcraftandroid.procraft.core.applyQueuedStoreBrushes(storeDir.path, owner)
+            }
+        }
+        io.github.artcraftandroid.procraft.ui.StoreSheet.brushesApplied(results)
+        if (results.any { it.failure == null } && session === owner) libraryChanged()
+        results.firstOrNull { it.failure != null }?.failure?.let { showNotice(it, warning = true) }
+    }
+
     internal fun addPendingBrushes() {
-        if (pendingBrushesReading?.isActive == true) return
+        storeBrushesRequested = true
+        if (pendingBrushesReading?.isActive == true || session == null) return
         pendingBrushesReading = viewModelScope.launch {
+            do {
+                storeBrushesRequested = false
+                applyPendingStoreBrushes()
+            } while (storeBrushesRequested && session != null)
             var any = false
             var unread = false
             while (session != null) {
@@ -6885,6 +6910,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 message = "A brush file couldn't be read."
             } else if (any) {
                 message = "Brushes added to the library."
+            }
+            if (storeBrushesRequested && session != null) {
+                pendingBrushesReading = null
+                addPendingBrushes()
             }
         }
     }
@@ -7236,6 +7265,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             return null
         }
         return withContext(Dispatchers.Default) { sourceFrom(bitmap) }
+    }
+
+    /** The original colors of the image offered by the same clipboard as the canvas. */
+    internal fun storeClipboardImage(): Pair<android.net.Uri?, io.github.artcraftandroid.procraft.core.ThumbnailImage?> {
+        val clip = runCatching { systemClipboard?.primaryClip }.getOrNull()?.takeIf { it.itemCount > 0 }
+        val uri = clip?.getItemAt(0)?.uri
+        val own = clipboard
+        val other = uri != null && pastesSystemPicture(uri == clipUri, clip?.description?.timestamp ?: 0L,
+            own != null, clipboardAt, clipPutAt)
+        return if (own != null && !other) null to own else uri to null
     }
 
     /** A picture on the clipboard as a source image; none if there isn't one. */

@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use crate::store_package::BrushShare;
 use std::time::{Duration, Instant};
 
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
@@ -416,7 +418,8 @@ impl Library {
 
     /// A menu or question of the library's is up: a press elsewhere only closes it.
     pub fn modal(&self) -> bool {
-        self.plus_menu.is_open()
+        self.store_package.open
+            || self.plus_menu.is_open()
             || self.set_menu.is_open()
             || self.recent_menu.is_open()
             || self.icon_picker.is_open()
@@ -1009,9 +1012,8 @@ impl Library {
             self.swiped = None;
             match chose {
                 Swiped::Share => {
-                    if let Some(bytes) = session.brush_as_file(key.0, key.1) {
-                        crate::files::save_file(&bytes, &name, "brush", "Brush");
-                    }
+                    let preview = self.share_preview(key);
+                    self.store_package.share(BrushShare::Brush(key.0, key.1), name, preview);
                 }
                 Swiped::Duplicate => {
                     if session.duplicate_brush(key.0, key.1).is_some() {
@@ -1043,10 +1045,6 @@ impl Library {
         self.libraries_plus_menu(ctx, look, session, plus, backdrops);
         self.card_menu(ctx, look, session, &libraries, backdrops);
         self.follow_pinch(ctx, session, rect, &libraries);
-        // the store package sheet, over the library and the work
-        if self.store_package.open {
-            self.store_package.show(ctx, look, session);
-        }
         if self.deleting.show(ctx, look) == Some(Answer::Action) {
             match self.delete_what.take() {
                 Some(Deleting::Set(i)) => {
@@ -1184,7 +1182,7 @@ impl Library {
         &mut self,
         ctx: &egui::Context,
         look: &mut Look,
-        session: &CanvasSession,
+        session: &Arc<CanvasSession>,
         library: &[BrushSetInfo],
         backdrops: &mut Vec<f32>,
     ) {
@@ -1199,8 +1197,6 @@ impl Library {
             Entry::More(set_icon, "Customize icon", ink),
             menu::DIVIDER,
             Entry::Item(&icons::MENU_SHARE, "Share", ink),
-            // the same set again, as the folder a store reads
-            Entry::Item(&icons::MENU_FOLDER, "Store Package", ink),
             // the only set too: the library is then left with none
             menu::DIVIDER,
             Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER),
@@ -1263,15 +1259,12 @@ impl Library {
                 }
             }
             "Share" => {
-                let name = library.get(i).map_or("Brushes", |s| s.name.as_str());
-                if let Some(bytes) = session.brush_set_as_file(i as u32) {
-                    crate::files::save_file(&bytes, name, "brushset", "Brush set");
-                }
-            }
-            "Store Package" => {
-                let name = library.get(i).map_or("Brushes", |s| s.name.as_str());
-                let icon = library.get(i).map_or(0, |s| s.icon as usize);
-                self.store_package.begin(ctx, session, i as u32, name, icon);
+                let name = library.get(i).map_or_else(|| "Brushes".to_owned(), |set| set.name.clone());
+                let preview = library
+                    .get(i)
+                    .and_then(|set| set.brushes.first())
+                    .and_then(|brush| self.share_preview((brush.set, brush.index)));
+                self.store_package.share(BrushShare::Set(i as u32, own), name, preview);
             }
             _ => self.ask_delete(Deleting::Set(i as u32)),
         }
@@ -1331,9 +1324,8 @@ impl Library {
                 }
             }
             "Share" => {
-                if let Some(bytes) = session.brush_as_file(key.0, key.1) {
-                    crate::files::save_file(&bytes, &name, "brush", "Brush");
-                }
+                let preview = self.share_preview(key);
+                self.store_package.share(BrushShare::Brush(key.0, key.1), name, preview);
             }
             "Delete" => self.ask_delete(Deleting::Brush(key.0, key.1)),
             // shown in its own set, chosen there
@@ -2036,6 +2028,10 @@ impl Library {
                 });
         });
         tapped
+    }
+
+    fn share_preview(&self, key: (u32, u32)) -> Option<TextureHandle> {
+        self.previews.get(&key)?.as_ref().map(|preview| preview.texture.clone())
     }
 
     /// Draws brush `key`'s sample stroke filling `at`'s height (white on blue when `selected`,

@@ -3,7 +3,7 @@
 //! measurements of the board the design was drawn on.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, Vec2};
 
@@ -30,9 +30,11 @@ const ROWS_SHOWN: usize = 4;
 /// its state.
 const SHELF_CARDS: usize = 4;
 const SHELF_GAP: f32 = 13.0;
-/// The band the board gives the first thing listed, at the top of the list.
+const CARD_FOOT: f32 = 54.0;
 const BAND_HEIGHT: f32 = 260.0;
 const BAND_GAP: f32 = 24.0;
+const FEATURE_SPACING: f32 = 14.0;
+const FEATURE_DOT_SIZE: f32 = 32.0;
 const TILE: f32 = 42.0;
 const PILL_STATE: f32 = 28.0;
 const HEADING_ABOVE: f32 = 40.0;
@@ -43,14 +45,14 @@ const ICON: f32 = 120.0;
 const PROSE: f32 = 620.0;
 const CHIP: f32 = 28.0;
 /// Settings: a group's heading, its card of rows, and the line that explains it.
-const GROUP_ROW: f32 = 56.0;
-const GROUP_HEAD: f32 = 16.0;
+pub(crate) const GROUP_ROW: f32 = 56.0;
+pub(crate) const GROUP_HEAD: f32 = 16.0;
 const GROUP_FOOT: f32 = 26.0;
 // a grouped list's header rhythm: the header's line, and the 8 between it and what it labels
-const GROUP_LINE: f32 = 17.0;
+pub(crate) const GROUP_LINE: f32 = 17.0;
 // a grouped list's separator: inset 16 in from both content edges
-const GROUP_RULE_INSET: f32 = 16.0;
-const GROUP_HEAD_BELOW: f32 = 8.0;
+pub(crate) const GROUP_RULE_INSET: f32 = 16.0;
+pub(crate) const GROUP_HEAD_BELOW: f32 = 8.0;
 
 /// The same colours the board writes, as the interface's pairs: dark first, light second.
 pub(crate) const BG: Themed = Themed(0xFF212121, 0xFFF0F0F0);
@@ -62,8 +64,6 @@ const SEARCH_FILL: Themed = Themed(0x2E767680, 0x1F767680);
 pub(crate) const SEP: Themed = Themed(0x99545458, 0x4A3C3C43);
 pub(crate) const TILE_FILL: Themed = Themed(0x14FFFFFF, 0x14000000);
 pub(crate) const GROUP_FILL: Themed = Themed(0x0EFFFFFF, 0xFFF7F7F7);
-/// The warm paper a drawn picture stands on.
-pub(crate) const PAPER: Themed = Themed(0xFFFBF9F4, 0xFFFBF9F4);
 const PILL_FILL: Themed = Themed(0x38767680, 0x1F767680);
 const PILL_STATE_FILL: Themed = Themed(0x47787880, 0x47787880);
 const PILL_ON: Themed = Themed(0xFFEDEDED, 0xFF1B1B1B);
@@ -73,7 +73,7 @@ const SWITCH_OFF: Themed = Themed(0x52787880, 0x52787880);
 pub(crate) const ACCENT: Themed = Themed(0xFF0A84FF, 0xFF007AFF);
 /// The white a filled accent pill writes in.
 const ACCENT_ON: Themed = Themed(0xFFFFFFFF, 0xFFFFFFFF);
-const DANGER: Themed = Themed(0xFFFF453A, 0xFFD32B21);
+pub(crate) const DANGER: Themed = Themed(0xFFFF453A, 0xFFD32B21);
 const DISABLED: Themed = Themed(0x42EBEBF5, 0x42424242);
 
 /// How long the sheet takes to come in, and how dark the work behind it goes.
@@ -128,19 +128,68 @@ enum JobWhat {
     Adding,
     Refreshing,
     Installing(Box<procraft_core::StoreItem>),
+    Applying(Box<procraft_core::StoreItem>),
 }
 
 /// What it brought back.
 enum Finished {
     Added(Option<String>),
     Refreshed(Option<String>),
-    Fetched(procraft_core::Fetched),
+    Fetched(Result<tempfile::TempDir, String>),
+    Installed(Result<(), String>),
+    Reviewed(procraft_core::StorePluginInspection),
 }
 
 /// A read on a thread of its own: the sheet keeps drawing while a web address answers.
 struct Job {
     done: std::sync::mpsc::Receiver<Finished>,
     what: JobWhat,
+}
+
+#[derive(Default)]
+struct FeaturedCarousel {
+    day: u64,
+    candidates: Vec<(String, String)>,
+    order: Vec<u32>,
+    page: usize,
+    offset: f32,
+    scroll_end: Option<f64>,
+}
+
+impl FeaturedCarousel {
+    fn update(&mut self, items: &[procraft_core::StoreItem], ctx: &egui::Context) {
+        let seconds = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let day = seconds / 86_400;
+        ctx.request_repaint_after(Duration::from_secs(86_400 - seconds % 86_400));
+        if self.day == day
+            && self.candidates.len() == items.len()
+            && self.candidates.iter().zip(items).all(|((source, id), item)| *source == item.source && *id == item.id)
+        {
+            return;
+        }
+        let listings = items.iter().map(|item| format!("{}:{}", item.source, item.id)).collect();
+        let order = procraft_core::store_featured_order(listings, day);
+        self.day = day;
+        self.candidates = items.iter().map(|item| (item.source.clone(), item.id.clone())).collect();
+        self.order = order;
+        self.page = 0;
+        self.offset = 0.0;
+        self.scroll_end = None;
+    }
+}
+
+/// Show a little of the next cover, keeping the trailing edge full on the last page.
+fn featured_layout(width: f32, count: usize) -> (f32, usize) {
+    let full = if width >= 680.0 { 2 } else { 1 };
+    let pages = count.saturating_sub(full) + 1;
+    let card = if pages == 1 {
+        (width - FEATURE_SPACING * count.saturating_sub(1) as f32) / count.max(1) as f32
+    } else if full == 2 {
+        (width - 2.0 * FEATURE_SPACING) / 2.4
+    } else {
+        (width - FEATURE_SPACING) / 1.16
+    };
+    (card, pages)
 }
 
 /// The store's sheet: what it is showing, and the store it is showing.
@@ -162,18 +211,26 @@ pub struct StoreSheet {
     /// Adding a source: its sheet, its field and the line saying why it was not taken.
     adding: bool,
     address: String,
+    local_network: bool,
     refusal: String,
     /// The question a removal asks, and the source it is about.
     alert: Alert,
     removing: Option<String>,
     /// The item waiting on a file to be chosen, while the store cannot fetch one.
     installing: Option<procraft_core::StoreItem>,
+    plugin_review: Option<(procraft_core::StoreItem, Arc<procraft_core::StorePluginReview>)>,
     /// The read in flight, if one is.
     job: Option<Job>,
     /// Whether the debug install hook already ran.
     shot_installed: bool,
     /// The reason the last try at an item did not install it, kept for its button.
-    problem: Option<(String, String)>,
+    problem: Option<((String, String), String)>,
+    brushes_changed: bool,
+    check_brushes: bool,
+    featured: FeaturedCarousel,
+    gallery: usize,
+    gallery_drag_start: Option<Pos2>,
+    gallery_media: crate::store_gallery::GalleryView,
     /// The pictures the catalogues gave, fetched and kept by address.
     pictures: crate::pictures::Pictures,
     /// The filters the list is cut by, and the menu that sets them.
@@ -256,13 +313,21 @@ impl Default for StoreSheet {
             opened: None,
             adding: false,
             address: String::new(),
+            local_network: false,
             refusal: String::new(),
             alert: Alert::default(),
             removing: None,
             installing: None,
+            plugin_review: None,
             job: None,
             shot_installed: false,
             problem: None,
+            brushes_changed: false,
+            check_brushes: false,
+            featured: FeaturedCarousel::default(),
+            gallery: 0,
+            gallery_drag_start: None,
+            gallery_media: crate::store_gallery::GalleryView::default(),
             pictures: crate::pictures::Pictures::default(),
             kind: None,
             from: None,
@@ -283,6 +348,12 @@ impl StoreSheet {
             self.store = Some(procraft_core::Store::open(dir));
         }
         self.open = true;
+        self.check_brushes = true;
+        self.featured.page = 0;
+        self.featured.offset = 0.0;
+        self.featured.scroll_end = None;
+        self.gallery = 0;
+        self.gallery_media.select(None);
         self.opened = Some(Instant::now());
         self.view = View::Browse;
         self.history.clear();
@@ -293,6 +364,8 @@ impl StoreSheet {
 
     pub fn close(&mut self) {
         self.open = false;
+        self.plugin_review = None;
+        self.gallery_media.select(None);
         self.typing = None;
         self.adding = false;
         self.view = View::Browse;
@@ -301,6 +374,8 @@ impl StoreSheet {
 
     /// A step back, to the page this one was opened from; with nothing behind it, the store closes.
     fn back(&mut self) {
+        self.gallery = 0;
+        self.gallery_media.select(None);
         if self.adding {
             self.adding = false;
             self.typing = None;
@@ -323,6 +398,8 @@ impl StoreSheet {
 
     /// Goes to `view`, keeping the page it leaves behind for Back.
     fn go(&mut self, view: View) {
+        self.gallery = 0;
+        self.gallery_media.select(None);
         self.history.push(std::mem::replace(&mut self.view, view));
         self.scroll = 0.0;
         self.typing = None;
@@ -341,6 +418,9 @@ impl StoreSheet {
             self.close();
             return;
         };
+        if std::mem::take(&mut self.check_brushes) {
+            store.follow_brush_installs(session);
+        }
         // what a worker read comes back here, one answer a frame
         self.poll(ctx, session, plugins, &store);
         self.pictures.poll(ctx);
@@ -476,6 +556,8 @@ impl StoreSheet {
                     if let Some(id) = self.removing.take() {
                         store.remove_source(id);
                         self.back();
+                    } else if let Some((item, review)) = self.plugin_review.take() {
+                        self.approve_plugin(&store, item, review);
                     } else if let Some(item) = self.installing.take() {
                         self.install_from_file(session, plugins, &store, item);
                     }
@@ -483,6 +565,7 @@ impl StoreSheet {
                 Some(_) => {
                     self.removing = None;
                     self.installing = None;
+                    self.plugin_review = None;
                 }
                 None => {}
             }
@@ -501,29 +584,54 @@ impl StoreSheet {
         let Some(path) = rfd::FileDialog::new().set_title("The file the catalogue lists").pick_file() else {
             return;
         };
-        let Ok(bytes) = std::fs::read(&path) else {
-            self.alert.tell("Not installed", &format!("{} could not be read.", path.display()), None);
-            return;
-        };
-        self.take_bytes(session, plugins, store, item, &bytes);
+        self.apply_file(session, plugins, store, item, path, None);
     }
 
-    /// Checks the bytes against what the catalogue said, installs them, and records what was taken.
-    fn take_bytes(
+    pub fn take_brushes_changed(&mut self) -> bool {
+        std::mem::take(&mut self.brushes_changed)
+    }
+
+    fn apply_file(
         &mut self,
         session: &Arc<procraft_core::CanvasSession>,
         plugins: &Arc<procraft_core::Plugins>,
         store: &Arc<procraft_core::Store>,
         item: procraft_core::StoreItem,
-        bytes: &[u8],
+        path: std::path::PathBuf,
+        download: Option<tempfile::TempDir>,
     ) {
-        match crate::install::take(session, plugins, &item, bytes) {
-            // the pill itself says it is installed: no message, and no window over the work
-            Ok(()) => {
-                store.keep_installed(item.id.clone(), procraft_core::digest_of(bytes));
-            }
-            Err(why) => self.problem = Some((item.id.clone(), why)),
-        }
+        let (sender, done) = std::sync::mpsc::channel();
+        let (session, plugins, store, listed) = (session.clone(), plugins.clone(), store.clone(), item.clone());
+        std::thread::spawn(move || {
+            let answer = if listed.kind == procraft_core::ItemKind::Plugin {
+                Finished::Reviewed(store.review_plugin_file(listed, plugins, path.to_string_lossy().into_owned()))
+            } else {
+                let result = if download.is_some() {
+                    crate::install::take(&session, &listed, &path)
+                } else {
+                    crate::install::take_local_brushes(&session, &listed, &path)
+                }
+                .map(|()| store.follow_brush_installs(&session));
+                Finished::Installed(result)
+            };
+            let _ = sender.send(answer);
+        });
+        self.job = Some(Job { done, what: JobWhat::Applying(Box::new(item)) });
+    }
+
+    fn approve_plugin(
+        &mut self,
+        store: &Arc<procraft_core::Store>,
+        item: procraft_core::StoreItem,
+        review: Arc<procraft_core::StorePluginReview>,
+    ) {
+        let (sender, done) = std::sync::mpsc::channel();
+        let store = store.clone();
+        std::thread::spawn(move || {
+            let result = store.approve_plugin_listing(review).map_or(Ok(()), Err);
+            let _ = sender.send(Finished::Installed(result));
+        });
+        self.job = Some(Job { done, what: JobWhat::Applying(Box::new(item)) });
     }
 
     /// Picks up what a worker brought back, one answer a frame.
@@ -552,6 +660,7 @@ impl StoreSheet {
                     self.adding = false;
                     self.typing = None;
                     self.address.clear();
+                    self.local_network = false;
                     self.refusal.clear();
                 }
                 Some(why) => self.refusal = format!("Not added: {why}"),
@@ -559,25 +668,47 @@ impl StoreSheet {
             (JobWhat::Refreshing, Finished::Refreshed(Some(why))) => {
                 self.alert.tell("Not read", &why, None);
             }
-            (JobWhat::Refreshing, Finished::Refreshed(None)) => {}
-            (JobWhat::Installing(item), Finished::Fetched(fetched)) => {
-                if fetched.failure.is_empty() {
-                    self.take_bytes(session, plugins, store, *item, &fetched.bytes);
-                } else {
-                    // no fetch of it worked, so the file can be chosen by hand instead
-                    self.installing = Some(*item);
+            (JobWhat::Refreshing, Finished::Refreshed(None)) => self.pictures.clear(),
+            (JobWhat::Installing(item), Finished::Fetched(Ok(download))) => {
+                let path = download.path().join("payload");
+                self.apply_file(session, plugins, store, *item, path, Some(download));
+            }
+            (JobWhat::Installing(item), Finished::Fetched(Err(reason))) => {
+                self.installing = Some(*item);
+                self.alert.ask(crate::alert::Asking {
+                    title: "Not installed".to_owned(),
+                    message: format!("{reason}. You can choose the file yourself instead."),
+                    action: "Choose File".to_owned(),
+                    icon: Some(&icons::FOLDER_FILL),
+                    destructive: false,
+                    extra: None,
+                    first: None,
+                    alone: false,
+                });
+            }
+            (JobWhat::Applying(item), Finished::Reviewed(inspection)) => {
+                if let Some(review) = inspection.review {
+                    let action = if review.is_update() { "Approve Update" } else { "Approve Install" };
                     self.alert.ask(crate::alert::Asking {
-                        title: "Not installed".to_owned(),
-                        message: format!("{}. You can choose the file yourself instead.", fetched.failure),
-                        action: "Choose File".to_owned(),
-                        icon: Some(&icons::FOLDER_FILL),
+                        title: format!("Review {}", review.name()),
+                        message: review.message(),
+                        action: action.to_owned(),
+                        icon: None,
                         destructive: false,
                         extra: None,
                         first: None,
                         alone: false,
                     });
+                    self.plugin_review = Some((*item, review));
+                } else {
+                    let reason = inspection.failure.unwrap_or_else(|| "The plugin couldn't be inspected.".to_owned());
+                    self.problem = Some(((item.source, item.id), reason));
                 }
             }
+            (JobWhat::Applying(item), Finished::Installed(result)) => match result {
+                Ok(()) => self.brushes_changed |= item.kind == procraft_core::ItemKind::BrushSet,
+                Err(why) => self.problem = Some(((item.source, item.id), why)),
+            },
             _ => {}
         }
     }
@@ -590,8 +721,9 @@ impl StoreSheet {
         let (sender, done) = std::sync::mpsc::channel();
         let store = store.clone();
         let address = self.address.clone();
+        let local_network = self.local_network;
         std::thread::spawn(move || {
-            let _ = sender.send(Finished::Added(store.add_source(address)));
+            let _ = sender.send(Finished::Added(store.add_source_with_local_network(address, local_network)));
         });
         self.job = Some(Job { done, what: JobWhat::Adding });
     }
@@ -631,14 +763,20 @@ impl StoreSheet {
     }
 
     fn start_install(&mut self, store: &Arc<procraft_core::Store>, item: procraft_core::StoreItem) {
-        if self.job.is_some() {
+        if !item.kind.supports_install() || self.job.is_some() {
             return;
         }
         let (sender, done) = std::sync::mpsc::channel();
         let store = store.clone();
-        let id = item.id.clone();
+        let listed = item.clone();
         std::thread::spawn(move || {
-            let _ = sender.send(Finished::Fetched(store.fetch_item(id)));
+            let result = tempfile::tempdir()
+                .map_err(|error| format!("The download couldn't be staged: {error}"))
+                .and_then(|dir| {
+                    let path = dir.path().join("payload").to_string_lossy().into_owned();
+                    store.download_listing(listed, path).map_or(Ok(dir), Err)
+                });
+            let _ = sender.send(Finished::Fetched(result));
         });
         self.job = Some(Job { done, what: JobWhat::Installing(Box::new(item)) });
     }
@@ -649,10 +787,10 @@ impl StoreSheet {
     }
 
     /// Whether this item's file is being fetched.
-    fn installing_now(&self, id: &str) -> bool {
+    fn installing_now(&self, listed: &procraft_core::StoreItem) -> bool {
         matches!(
             self.job.as_ref().map(|job| &job.what),
-            Some(JobWhat::Installing(item)) if item.id == id
+            Some(JobWhat::Installing(item) | JobWhat::Applying(item)) if item.id == listed.id && item.source == listed.source
         )
     }
 
@@ -810,7 +948,7 @@ impl StoreSheet {
             items.retain(|item| &item.category == category);
         }
         if let Some(kind) = self.kind {
-            items.retain(|item| item.kind == kind);
+            items.retain(|item| item.kind.browse_group() == kind);
         }
         if let Some(from) = &self.from {
             items.retain(|item| &item.source == from);
@@ -827,27 +965,32 @@ impl StoreSheet {
         // a source that could not be read says so once, above the list, with the day of its copy
         let groups =
             [procraft_core::ItemKind::BrushSet, procraft_core::ItemKind::Plugin, procraft_core::ItemKind::AssetPack];
+        let banded = query.is_empty() && self.category == 0 && self.kind.is_none() && self.from.is_none();
+        let featured_height = if banded && !items.is_empty() {
+            self.featured.update(&items, ui.ctx());
+            let (_, pages) = featured_layout(list.width(), self.featured.order.len());
+            BAND_HEIGHT + BAND_GAP + if pages > 1 { FEATURE_DOT_SIZE } else { 0.0 }
+        } else {
+            0.0
+        };
         let content = if empty.is_empty() {
-            let mut content = 40.0;
-            // the band comes first, and only on the page as it opens: cut by a search, a category
-            // or a filter it would be showing something the list below does not
-            let banded =
-                self.query.trim().is_empty() && self.category == 0 && self.kind.is_none() && self.from.is_none();
-            if banded && !items.is_empty() {
-                content += BAND_HEIGHT + BAND_GAP;
-            }
+            let mut content = 40.0 + featured_height;
             // what has changed since it was installed sits above the kinds, in rows as the board has it
             let updated = items.iter().filter(|item| needs_update(store, item)).count();
             if updated > 0 {
                 content += HEADING_ABOVE + 30.0 + HEADING_BELOW + updated.min(ROWS_SHOWN) as f32 * ROW_HEIGHT;
             }
             // and what the store took sits under them
-            let took = store.installed().iter().filter(|one| items.iter().any(|item| item.id == one.id)).count();
+            let took = store
+                .installed()
+                .iter()
+                .filter(|one| items.iter().any(|item| item.id == one.id && item.source == one.source))
+                .count();
             if took > 0 {
                 content += HEADING_ABOVE + 30.0 + HEADING_BELOW + shelf_height(list.width());
             }
             for kind in groups {
-                let count = items.iter().filter(|i| i.kind == kind).count();
+                let count = items.iter().filter(|i| i.kind.browse_group() == kind).count();
                 if count == 0 {
                     continue;
                 }
@@ -879,13 +1022,10 @@ impl StoreSheet {
             return;
         }
         let mut y = list.top() - self.scroll;
-        // the band, then what has changed since it was installed, as the board has them
-        let banded = self.query.trim().is_empty() && self.category == 0 && self.kind.is_none() && self.from.is_none();
-        if banded && !items.is_empty() {
-            // an item with a picture the publisher gave comes first, as the band is a picture
-            let featured = items.iter().find(|item| !item.preview.is_empty()).or_else(|| items.first());
-            self.band(&painter, look, ui, store, featured, list, y, ink);
-            y += BAND_HEIGHT + BAND_GAP;
+        if featured_height > 0.0 {
+            let area = Rect::from_min_size(Pos2::new(list.left(), y), Vec2::new(list.width(), BAND_HEIGHT));
+            self.featured_carousel(&painter, look, ui, store, &items, area, ink);
+            y += featured_height;
         }
         let updated: Vec<&procraft_core::StoreItem> = items.iter().filter(|item| needs_update(store, item)).collect();
         if !updated.is_empty() {
@@ -897,12 +1037,13 @@ impl StoreSheet {
             y += HEADING_ABOVE + 30.0 + HEADING_BELOW;
             for (at, item) in updated.iter().take(ROWS_SHOWN).enumerate() {
                 let row = Rect::from_min_size(Pos2::new(list.left(), y), Vec2::new(list.width(), ROW_HEIGHT));
-                self.row(&painter, look, ui, store, item, row, at, ink);
+                self.row(&painter, look, ui, store, item, row, at, "updates", ink);
                 y += ROW_HEIGHT;
             }
         }
         for kind in groups {
-            let group: Vec<&procraft_core::StoreItem> = items.iter().filter(|i| i.kind == kind).collect();
+            let group: Vec<&procraft_core::StoreItem> =
+                items.iter().filter(|i| i.kind.browse_group() == kind).collect();
             if group.is_empty() {
                 continue;
             }
@@ -940,19 +1081,22 @@ impl StoreSheet {
                 for (at, item) in group.iter().take(ROWS_SHOWN).enumerate() {
                     let row = Rect::from_min_size(Pos2::new(list.left(), y), Vec2::new(list.width(), ROW_HEIGHT));
                     if row.bottom() > clip.top() && row.top() < clip.bottom() {
-                        self.row(&painter, look, ui, store, item, row, at, ink);
+                        self.row(&painter, look, ui, store, item, row, at, "plugins", ink);
                     }
                     y += ROW_HEIGHT;
                 }
             } else {
                 // brushes and asset packs are a shelf of pictures, as the board draws them
-                self.shelf(&painter, look, ui, store, &group, list, y, ink);
+                self.shelf(&painter, look, ui, store, &group, list, y, kind.text(), ink);
                 y += shelf_height(list.width());
             }
         }
         // what the store took, at the foot, as the board puts it
-        let took: Vec<&procraft_core::StoreItem> =
-            store.installed().iter().filter_map(|one| items.iter().find(|item| item.id == one.id)).collect();
+        let took: Vec<&procraft_core::StoreItem> = store
+            .installed()
+            .iter()
+            .filter_map(|one| items.iter().find(|item| item.id == one.id && item.source == one.source))
+            .collect();
         if !took.is_empty() {
             let head = Rect::from_min_size(
                 Pos2::new(list.left() + 16.0, y + HEADING_ABOVE),
@@ -960,7 +1104,7 @@ impl StoreSheet {
             );
             text(&painter, head.left_top(), Align2::LEFT_TOP, "Installed", SECTION, Weight::Bold, ink(TITLE));
             y += HEADING_ABOVE + 30.0 + HEADING_BELOW;
-            self.shelf(&painter, look, ui, store, &took, list, y, ink);
+            self.shelf(&painter, look, ui, store, &took, list, y, "installed", ink);
         }
         // the list's top edge dissolves under the pills rather than being cut level with them; at
         // the top of the page there is nothing to dissolve
@@ -971,76 +1115,209 @@ impl StoreSheet {
         }
     }
 
-    /// The band: the first thing the store lists, drawn large over the list, and opening it when
-    /// tapped. The picture the catalogue gave would fill it where there is one.
+    fn featured_carousel(
+        &mut self,
+        painter: &egui::Painter,
+        look: &mut Look,
+        ui: &egui::Ui,
+        store: &Arc<procraft_core::Store>,
+        items: &[procraft_core::StoreItem],
+        area: Rect,
+        ink: impl Fn(Themed) -> Color32 + Copy,
+    ) {
+        let count = self.featured.order.len();
+        let (card_width, pages) = featured_layout(area.width(), count);
+        let step = card_width + FEATURE_SPACING;
+        let end = (step * count as f32 - FEATURE_SPACING - area.width()).max(0.0);
+        let clipped = area.intersect(painter.clip_rect());
+        let id = ui.scope_id().with("store featured");
+        let state = &mut self.featured;
+        state.page = state.page.min(pages - 1);
+        state.offset = state.offset.min(end);
+        if pages > 1 && clipped.is_positive() {
+            let drag = ui.interact(clipped, id, Sense::DRAG);
+            let (time, wheel) = ui.input(|input| {
+                let wheel = input
+                    .pointer
+                    .hover_pos()
+                    .filter(|p| clipped.contains(*p))
+                    .map_or(0.0, |_| input.smooth_scroll_delta.x);
+                (input.time, wheel)
+            });
+            if wheel.abs() > 0.1 {
+                state.scroll_end = Some(time + 0.12);
+            }
+            if drag.dragged() || state.scroll_end.is_some() {
+                state.offset = (state.offset - drag.drag_delta().x - wheel).clamp(0.0, end);
+                state.page = ((state.offset / step).round() as usize).min(pages - 1);
+            }
+            if let Some(deadline) = state.scroll_end {
+                if deadline > time {
+                    ui.ctx().request_repaint_after(Duration::from_secs_f64(deadline - time));
+                } else {
+                    state.scroll_end = None;
+                }
+            }
+            if !drag.dragged() && state.scroll_end.is_none() {
+                let target = (step * state.page as f32).min(end);
+                if (state.offset - target).abs() <= 0.5 {
+                    state.offset = target;
+                } else {
+                    let advance = ui.input(|input| (input.stable_dt * 20.0).min(1.0));
+                    state.offset = egui::lerp(state.offset..=target, advance);
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+
+        if clipped.is_positive() {
+            let cards = painter.with_clip_rect(clipped);
+            let offset = state.offset;
+            for at in 0..count {
+                let Some(item) = self.featured.order.get(at).and_then(|&index| items.get(index as usize)) else {
+                    continue;
+                };
+                let left = area.left() + at as f32 * step - offset;
+                let band = Rect::from_min_size(Pos2::new(left, area.top()), Vec2::new(card_width, BAND_HEIGHT));
+                if band.intersect(clipped).is_positive() {
+                    self.band(&cards, look, ui, store, item, band, ink);
+                }
+            }
+        }
+
+        if pages <= 1 {
+            return;
+        }
+        let left = area.center().x - FEATURE_DOT_SIZE * (pages - 1) as f32 / 2.0;
+        for page in 0..pages {
+            let center = Pos2::new(left + FEATURE_DOT_SIZE * page as f32, area.bottom() + FEATURE_DOT_SIZE / 2.0);
+            let rect = Rect::from_center_size(center, Vec2::splat(FEATURE_DOT_SIZE)).intersect(painter.clip_rect());
+            if !rect.is_positive() {
+                continue;
+            }
+            let selected = self.featured.page == page;
+            let dot = ui.interact(rect, id.with(page), Sense::click());
+            let label = format!("Featured page {} of {pages}", page + 1);
+            dot.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &label));
+            if dot.clicked() {
+                self.featured.page = page;
+                self.featured.scroll_end = None;
+                ui.ctx().request_repaint();
+            }
+            if dot.has_focus() {
+                let next = ui.input(|input| {
+                    if input.key_pressed(egui::Key::ArrowLeft) {
+                        page.saturating_sub(1)
+                    } else if input.key_pressed(egui::Key::ArrowRight) {
+                        (page + 1).min(pages - 1)
+                    } else {
+                        page
+                    }
+                });
+                if next != page {
+                    self.featured.page = next;
+                    self.featured.scroll_end = None;
+                    ui.memory_mut(|memory| memory.request_focus(id.with(next)));
+                    ui.ctx().request_repaint();
+                }
+                painter.circle_stroke(center, 10.0, Stroke::new(1.0, ink(ACCENT)));
+            }
+            let dot_size = Vec2::new(if selected { 14.0 } else { 6.0 }, 6.0);
+            painter.rect_filled(
+                Rect::from_center_size(center, dot_size),
+                3.0,
+                ink(if selected || dot.hovered() || dot.is_pointer_button_down_on() { TITLE } else { IDLE }),
+            );
+        }
+    }
+
+    /// The listing's cover and summary, opening its item page when selected.
     fn band(
         &mut self,
         painter: &egui::Painter,
         look: &mut Look,
         ui: &egui::Ui,
         store: &Arc<procraft_core::Store>,
-        item: Option<&procraft_core::StoreItem>,
-        area: Rect,
-        y: f32,
+        item: &procraft_core::StoreItem,
+        band: Rect,
         ink: impl Fn(Themed) -> Color32 + Copy,
     ) {
-        let Some(item) = item else { return };
-        let band = Rect::from_min_size(Pos2::new(area.left(), y), Vec2::new(area.width(), BAND_HEIGHT));
+        let response = ui.interact(
+            band.intersect(painter.clip_rect()),
+            ui.scope_id().with(("store band", &item.source, &item.id)),
+            Sense::click(),
+        );
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &item.name));
         painter.rect_filled(band, 20.0, ink(TILE_FILL));
-        painter.rect_stroke(band, 20.0, Stroke::new(1.0, ink(SEP)), egui::StrokeKind::Inside);
-        // the picture the catalogue gave fills it, cropped, under a scrim that keeps the words legible
-        match self.pictures.get(ui.ctx(), store, &item.preview) {
-            Some(picture) => {
-                picture_rounded(painter, &picture, band, 20.0, fill_uv(picture.size_vec2(), band.size()));
-                // a scrim that deepens toward the foot: its vertex colours interpolate across the
-                // mesh, so the words hold on any picture with no step to see
-                let scrim = Rect::from_min_max(Pos2::new(band.left(), band.top() + BAND_HEIGHT * 0.2), band.max);
-                scrim_rounded(painter, scrim, 20.0, 8, 208);
-            }
-            None => look.icon_on(
+        let picture = self.pictures.cover(ui.ctx(), store, item);
+        let (title, secondary) = if let Some(picture) = picture {
+            picture_rounded(painter, &picture, band, 20.0, fill_uv(picture.size_vec2(), band.size()));
+            scrim_rounded(painter, band, 20.0, 42, 240);
+            (Color32::WHITE, Color32::from_rgb(233, 233, 239))
+        } else {
+            look.icon_on(
                 ui,
                 painter,
                 kind_icon(item.kind),
-                Pos2::new(band.right() - 110.0, band.top() + 84.0),
+                Pos2::new(band.right() - 84.0, band.top() + 84.0),
                 120.0,
                 ink(IDLE).gamma_multiply(0.35),
-            ),
+            );
+            (ink(TITLE), ink(ROW_INK))
+        };
+        let left = band.left() + 16.0;
+        let right = band.right() - 16.0;
+        let width = (right - left).max(1.0);
+        let row = band.bottom() - 30.0;
+        let mut name_bottom = row - 22.0;
+        if !item.description.is_empty() {
+            ellipsized(
+                painter,
+                Pos2::new(left, name_bottom - 7.0),
+                &item.description,
+                width,
+                14.0,
+                Weight::Regular,
+                secondary,
+            );
+            name_bottom -= 20.0;
         }
-        let left = band.left() + 20.0;
-        // the words stack above the foot: the app row, then one sentence, the name, the kicker
-        let row = band.bottom() - 28.0;
-        let sentence_top = band.bottom() - 78.0;
-        let name_top = band.bottom() - 116.0;
-        let kicker_top = band.bottom() - 138.0;
-        let kicker = item.category.to_uppercase();
-        text(painter, Pos2::new(left, kicker_top), Align2::LEFT_TOP, &kicker, 12.0, Weight::SemiBold, ink(ROW_INK));
-        text(painter, Pos2::new(left, name_top), Align2::LEFT_TOP, &item.name, 30.0, Weight::Bold, ink(TITLE));
-        let sentence = one_line(&item.description, band.width() - 40.0, painter);
-        text(painter, Pos2::new(left, sentence_top), Align2::LEFT_TOP, &sentence, 15.0, Weight::Regular, ink(ROW_INK));
-        // the app row: its icon, the publisher, and the state at the end
-        let tile = Rect::from_center_size(Pos2::new(left + 12.0, row), Vec2::splat(24.0));
-        painter.rect_filled(tile, 6.0, ink(PILL_FILL));
-        look.icon_on(ui, painter, kind_icon(item.kind), tile.center(), 14.0, ink(TITLE));
-        text(
+        let name = limited_text(painter, &item.name, width, 2, 23.0, Weight::Bold, title);
+        let name_top = name_bottom - name.size().y;
+        painter.galley(Pos2::new(left, name_top), name, title);
+        ellipsized(
             painter,
-            Pos2::new(tile.right() + 8.0, tile.center().y),
-            Align2::LEFT_CENTER,
+            Pos2::new(left, name_top - 10.0),
+            &item.category.to_uppercase(),
+            width,
+            11.0,
+            Weight::SemiBold,
+            secondary,
+        );
+        let tile = Rect::from_center_size(Pos2::new(left + 12.0, row), Vec2::splat(24.0));
+        self.artwork(ui, painter, look, store, item, tile, 6.0, 14.0, ink);
+        let pill = state_pill(painter, look, ui, standing(store, item), false, right, row, ink);
+        let publisher_x = tile.right() + 8.0;
+        ellipsized(
+            painter,
+            Pos2::new(publisher_x, row),
             &item.publisher,
+            pill.left() - publisher_x - 8.0,
             13.0,
             Weight::Regular,
-            ink(ROW_INK),
+            secondary,
         );
-        state_pill(
-            painter,
-            look,
-            ui,
-            installed(store, item),
-            needs_update(store, item),
-            band.right() - 20.0,
-            tile.center().y,
-            ink,
-        );
-        if ui.interact(band, ui.scope_id().with(("store band", item.id.clone())), Sense::click()).clicked() {
+        let focused = response.has_focus();
+        let hovered = response.hovered() || response.is_pointer_button_down_on();
+        let border = if focused {
+            ink(ACCENT)
+        } else if hovered {
+            ink(IDLE)
+        } else {
+            ink(SEP)
+        };
+        painter.rect_stroke(band, 20.0, Stroke::new(if focused { 2.0 } else { 1.0 }, border), egui::StrokeKind::Inside);
+        if response.clicked() {
             self.go(View::Item { source: item.source.clone(), id: item.id.clone() });
         }
     }
@@ -1055,51 +1332,73 @@ impl StoreSheet {
         group: &[&procraft_core::StoreItem],
         area: Rect,
         y: f32,
+        section: &str,
         ink: impl Fn(Themed) -> Color32 + Copy,
     ) {
         let each = card_width(area.width());
-        let art_height = each * 0.75;
         for (at, item) in group.iter().take(SHELF_CARDS).enumerate() {
             let left = area.left() + (each + SHELF_GAP) * at as f32;
-            let art = Rect::from_min_size(Pos2::new(left, y), Vec2::new(each, art_height));
-            painter.rect_filled(art, 16.0, ink(TILE_FILL));
-            match self.pictures.get(ui.ctx(), store, &item.preview) {
-                Some(picture) => {
-                    painter.image(picture.id(), art, fill_uv(picture.size_vec2(), art.size()), Color32::WHITE);
-                }
-                None => look.icon_on(ui, painter, kind_icon(item.kind), art.center(), 36.0, ink(IDLE)),
+            let art = Rect::from_min_size(Pos2::new(left, y), Vec2::new(each, each * 0.75));
+            self.card(ui, painter, look, store, item, art, section, ink);
+        }
+    }
+
+    fn card(
+        &mut self,
+        ui: &egui::Ui,
+        painter: &egui::Painter,
+        look: &mut Look,
+        store: &Arc<procraft_core::Store>,
+        item: &procraft_core::StoreItem,
+        art: Rect,
+        section: &str,
+        ink: impl Fn(Themed) -> Color32 + Copy,
+    ) {
+        self.artwork(ui, painter, look, store, item, art, 16.0, 36.0, ink);
+        let pill = state_pill(painter, look, ui, standing(store, item), true, art.right(), art.bottom() + 30.0, ink);
+        let width = (pill.left() - art.left() - 8.0).max(0.0);
+        for (line, y, size, weight, colour) in [
+            (item.name.as_str(), 21.0, 15.0, Weight::SemiBold, ink(TITLE)),
+            (&second_line(item), 39.0, 13.0, Weight::Regular, ink(ROW_INK)),
+        ] {
+            ellipsized(painter, Pos2::new(art.left(), art.bottom() + y), line, width, size, weight, colour);
+        }
+        let card = art.with_max_y(art.bottom() + CARD_FOOT).intersect(painter.clip_rect());
+        if ui
+            .interact(card, ui.scope_id().with(("store card", section, &item.source, &item.id)), Sense::click())
+            .clicked()
+        {
+            self.go(View::Item { source: item.source.clone(), id: item.id.clone() });
+        }
+    }
+
+    fn artwork(
+        &mut self,
+        ui: &egui::Ui,
+        painter: &egui::Painter,
+        look: &mut Look,
+        store: &Arc<procraft_core::Store>,
+        item: &procraft_core::StoreItem,
+        rect: Rect,
+        corner: f32,
+        glyph: f32,
+        ink: impl Fn(Themed) -> Color32,
+    ) {
+        painter.rect_filled(rect, corner, ink(TILE_FILL));
+        let square = (rect.width() - rect.height()).abs() < 0.01;
+        let picture =
+            if square { self.pictures.icon(ui.ctx(), store, item) } else { self.pictures.cover(ui.ctx(), store, item) };
+        if let Some(picture) = picture {
+            if square {
+                let fit = picture.size_vec2() * (rect.size() / picture.size_vec2()).min_elem();
+                let area = Rect::from_center_size(rect.center(), fit);
+                let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                picture_rounded(painter, &picture, area, corner, uv);
+            } else {
+                picture_rounded(painter, &picture, rect, corner, fill_uv(picture.size_vec2(), rect.size()));
             }
-            text(
-                painter,
-                Pos2::new(left, art.bottom() + 10.0),
-                Align2::LEFT_TOP,
-                &item.name,
-                15.0,
-                Weight::SemiBold,
-                ink(TITLE),
-            );
-            text(
-                painter,
-                Pos2::new(left, art.bottom() + 32.0),
-                Align2::LEFT_TOP,
-                &second_line(item),
-                13.0,
-                Weight::Regular,
-                ink(ROW_INK),
-            );
-            state_pill(
-                painter,
-                look,
-                ui,
-                installed(store, item),
-                needs_update(store, item),
-                left + each,
-                art.bottom() + 66.0,
-                ink,
-            );
-            if ui.interact(art, ui.scope_id().with(("shelf art", item.id.clone())), Sense::click()).clicked() {
-                self.go(View::Item { source: item.source.clone(), id: item.id.clone() });
-            }
+        } else {
+            look.icon_on(ui, painter, kind_icon(item.kind), rect.center(), glyph, ink(IDLE));
         }
     }
 
@@ -1113,36 +1412,23 @@ impl StoreSheet {
         item: &procraft_core::StoreItem,
         row: Rect,
         at: usize,
+        section: &str,
         ink: impl Fn(Themed) -> Color32 + Copy,
     ) {
         let tile = Rect::from_min_size(Pos2::new(row.left(), row.center().y - TILE / 2.0), Vec2::splat(TILE));
-        painter.rect_filled(tile, 10.0, ink(TILE_FILL));
-        match self.pictures.get(ui.ctx(), store, &item.preview) {
-            Some(picture) => {
-                painter.image(picture.id(), tile, fill_uv(picture.size_vec2(), tile.size()), Color32::WHITE);
-            }
-            None => look.icon_on(ui, painter, kind_icon(item.kind), tile.center(), 24.0, ink(IDLE)),
-        }
+        self.artwork(ui, painter, look, store, item, tile, 10.0, 24.0, ink);
         let name = Pos2::new(tile.right() + 12.0, row.center().y - 11.0);
-        text(painter, name, Align2::LEFT_CENTER, &item.name, 17.0, Weight::Regular, ink(TITLE));
-        text(
+        let pill = state_pill(painter, look, ui, standing(store, item), false, row.right(), row.center().y, ink);
+        let width = (pill.left() - name.x - 8.0).max(0.0);
+        ellipsized(painter, name, &item.name, width, 17.0, Weight::Regular, ink(TITLE));
+        ellipsized(
             painter,
             Pos2::new(name.x, row.center().y + 11.0),
-            Align2::LEFT_CENTER,
             &second_line(item),
+            width,
             15.0,
             Weight::Regular,
             ink(ROW_INK),
-        );
-        state_pill(
-            painter,
-            look,
-            ui,
-            installed(store, item),
-            needs_update(store, item),
-            row.right(),
-            row.center().y,
-            ink,
         );
         // every row but a group's first carries the rule above it
         if at > 0 {
@@ -1154,7 +1440,10 @@ impl StoreSheet {
                 Stroke::new(1.0, ink(SEP)),
             );
         }
-        if ui.interact(row, ui.scope_id().with(("store row", item.id.clone())), Sense::click()).clicked() {
+        if ui
+            .interact(row, ui.scope_id().with(("store row", section, &item.source, &item.id)), Sense::click())
+            .clicked()
+        {
             self.go(View::Item { source: item.source.clone(), id: item.id.clone() });
         }
     }
@@ -1171,39 +1460,40 @@ impl StoreSheet {
     ) {
         let painter = ui.painter().with_clip_rect(body.intersect(ui.clip_rect()));
         let mut y = body.top() + 24.0 - self.scroll;
-        // the head: the icon, the name with its kind, the publisher, and the one action
-        let icon = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::splat(ICON));
-        painter.rect_filled(icon, 27.0, ink(TILE_FILL));
-        look.icon_on(ui, &painter, kind_icon(item.kind), icon.center(), 56.0, ink(IDLE));
-        let mut x = icon.right() + 20.0;
-        let name_y = icon.top() + 34.0;
-        text(&painter, Pos2::new(x, name_y), Align2::LEFT_CENTER, &item.name, 30.0, Weight::Bold, ink(TITLE));
-        x += text_width(&painter, &item.name, 30.0, Weight::Bold) + 10.0;
-        let kind = item.kind.text().to_uppercase();
-        let chip = Rect::from_min_size(
-            Pos2::new(x, name_y - 10.0),
-            Vec2::new(text_width(&painter, &kind, 11.0, Weight::SemiBold) + 14.0, 20.0),
-        );
-        painter.rect_filled(chip, 6.0, ink(TILE_FILL));
-        text(&painter, chip.center(), Align2::CENTER_CENTER, &kind, 11.0, Weight::SemiBold, ink(ROW_INK));
-        text(
+        let compact = body.width() < 470.0;
+        let icon_size = if compact { 76.0 } else { ICON };
+        let icon = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::splat(icon_size));
+        self.artwork(
+            ui,
             &painter,
-            Pos2::new(icon.right() + 20.0, name_y + 30.0),
-            Align2::LEFT_CENTER,
-            &item.publisher,
-            15.0,
-            Weight::Regular,
-            ink(ACCENT),
+            look,
+            store,
+            item,
+            icon,
+            if compact { 17.0 } else { 27.0 },
+            if compact { 34.0 } else { 56.0 },
+            ink,
         );
+        let x = icon.right() + if compact { 12.0 } else { 20.0 };
+        let name_y = icon.top() + if compact { 18.0 } else { 34.0 };
         // the action, at the trailing end: what came with the app is already in, what the
         // catalogue has changed since is an update, and what is on its way says so
         let is_in = installed(store, item);
         let update = needs_update(store, item);
-        let fetching = self.installing_now(&item.id);
+        let fetching = self.installing_now(item);
         // the last try at this item left a problem: the button says so, and keeps the reason until
         // it is asked for
-        let problem = self.problem.as_ref().filter(|(id, _)| *id == item.id).map(|(_, why)| why.clone());
-        let label = if fetching {
+        let problem = self
+            .problem
+            .as_ref()
+            .filter(|((source, id), _)| *id == item.id && *source == item.source)
+            .map(|(_, why)| why.clone());
+        let available = item.kind.supports_install();
+        let label = if !available {
+            "Preview only"
+        } else if fetching && item.kind == procraft_core::ItemKind::Plugin {
+            "Working"
+        } else if fetching {
             "Installing"
         } else if problem.is_some() {
             "Not installed"
@@ -1215,9 +1505,30 @@ impl StoreSheet {
             "Install"
         };
         let width = text_width(&painter, label, 15.0, Weight::SemiBold) + 36.0;
-        let button =
-            Rect::from_center_size(Pos2::new(body.right() - width / 2.0, name_y + 4.0), Vec2::new(width, 30.0));
-        let filled = problem.is_none() && (!is_in || update || fetching);
+        let button_y = if compact { icon.bottom() + 16.0 } else { name_y + 4.0 };
+        let button = Rect::from_center_size(Pos2::new(body.right() - width / 2.0, button_y), Vec2::new(width, 30.0));
+        let right = if compact { body.right() } else { button.left() - 16.0 };
+        let title_size = if compact { 23.0 } else { 30.0 };
+        let kind = item.kind.text().to_uppercase();
+        let chip_width = text_width(&painter, &kind, 11.0, Weight::SemiBold) + 14.0;
+        let title_width = if compact { right - x } else { (right - x - chip_width - 10.0).max(0.0) };
+        let name =
+            ellipsized(&painter, Pos2::new(x, name_y), &item.name, title_width, title_size, Weight::Bold, ink(TITLE));
+        let chip_left = if compact { x } else { x + name + 10.0 };
+        let chip_y = if compact { name_y + 48.0 } else { name_y };
+        let chip = Rect::from_min_size(Pos2::new(chip_left, chip_y - 10.0), Vec2::new(chip_width, 20.0));
+        painter.rect_filled(chip, 6.0, ink(TILE_FILL));
+        text(&painter, chip.center(), Align2::CENTER_CENTER, &kind, 11.0, Weight::SemiBold, ink(ROW_INK));
+        ellipsized(
+            &painter,
+            Pos2::new(x, name_y + if compact { 24.0 } else { 30.0 }),
+            &item.publisher,
+            right - x,
+            15.0,
+            Weight::Regular,
+            ink(ACCENT),
+        );
+        let filled = available && problem.is_none() && (!is_in || update || fetching);
         painter.rect_filled(button, 15.0, ink(if filled { ACCENT } else { PILL_STATE_FILL }));
         text(
             &painter,
@@ -1230,7 +1541,8 @@ impl StoreSheet {
         );
         // taking something from a catalogue: its file is fetched, and when no fetch of it works
         // the alert offers to take the file from this machine instead
-        if (problem.is_some() || (!is_in || update))
+        if available
+            && (problem.is_some() || (!is_in || update))
             && !fetching
             && ui.interact(button, ui.scope_id().with("store install"), Sense::click()).clicked()
         {
@@ -1243,10 +1555,10 @@ impl StoreSheet {
                 None => self.start_install(store, item.clone()),
             }
         }
-        y = icon.bottom() + 16.0;
+        y = icon.bottom().max(button.bottom()) + 16.0;
         // what taking it means, in words, once per kind
         let caveat = caveat(item.kind);
-        let galley = wrapped(&painter, caveat, 15.0, Weight::Regular, ink(ROW_INK), PROSE - 24.0);
+        let galley = wrapped(&painter, caveat, 15.0, Weight::Regular, ink(ROW_INK), body.width().min(PROSE) - 24.0);
         let info = Pos2::new(body.left() + 8.0, y + 10.0);
         painter.circle_stroke(info, 7.0, Stroke::new(1.4, ink(IDLE)));
         painter.line_segment(
@@ -1257,11 +1569,85 @@ impl StoreSheet {
         let height = galley.size().y;
         painter.galley(Pos2::new(body.left() + 24.0, y), galley, ink(ROW_INK));
         y += height + 20.0;
-        // the first picture the catalogue gave, in the store's own frame
-        if let Some(picture) = item.previews.first().and_then(|address| self.pictures.get(ui.ctx(), store, address)) {
-            let art = Rect::from_min_size(Pos2::new(body.left(), y), Vec2::new(PROSE, PROSE * 377.0 / 520.0));
-            painter.image(picture.id(), art, fill_uv(picture.size_vec2(), art.size()), Color32::WHITE);
-            y = art.bottom() + 20.0;
+        let gallery = item.gallery_entries();
+        if !gallery.is_empty() {
+            self.gallery = self.gallery.min(gallery.len() - 1);
+            let width = body.width().min(PROSE);
+            let art = Rect::from_min_size(Pos2::new(body.center().x - width / 2.0, y), Vec2::new(width, width * 0.75));
+            painter.rect_filled(art, 16.0, ink(TILE_FILL));
+            if gallery.len() > 1 && art.intersects(painter.clip_rect()) {
+                let drag =
+                    ui.interact(art.intersect(painter.clip_rect()), ui.scope_id().with("gallery drag"), Sense::drag());
+                if drag.drag_started() {
+                    self.gallery_drag_start = ui.input(|input| input.pointer.press_origin());
+                }
+                if drag.drag_stopped()
+                    && let Some(start) = self.gallery_drag_start.take()
+                    && let Some(end) = ui.input(|input| input.pointer.latest_pos())
+                {
+                    let distance = end - start;
+                    if distance.x.abs() > 32.0 && distance.x.abs() > distance.y.abs() {
+                        self.gallery = if distance.x < 0.0 {
+                            (self.gallery + 1).min(gallery.len() - 1)
+                        } else {
+                            self.gallery.saturating_sub(1)
+                        };
+                    }
+                }
+            }
+            if let Some(entry) = gallery.get(self.gallery) {
+                if entry.cover {
+                    self.gallery_media.select(None);
+                    if let Some(picture) = self.pictures.cover(ui.ctx(), store, item) {
+                        crate::store_gallery::paint_picture(&painter, art, &picture);
+                    }
+                } else if art.intersects(painter.clip_rect()) {
+                    self.gallery_media.select(Some(entry));
+                    self.gallery_media.draw(ui, &painter, art, store, ink(ACCENT), ink(ROW_INK));
+                }
+            }
+            y = art.bottom() + 12.0;
+            if gallery.len() > 1 {
+                let pitch = 24.0;
+                let slots = (art.width() / pitch).floor().clamp(1.0, 9.0) as usize;
+                let count = gallery.len().min(slots);
+                let first = self.gallery.saturating_sub(count / 2).min(gallery.len() - count);
+                let left = art.center().x - pitch * (count - 1) as f32 / 2.0;
+                for slot in 0..count {
+                    let page = first + slot;
+                    let selected = page == self.gallery;
+                    let edge = (slot == 0 && first > 0) || (slot + 1 == count && page + 1 < gallery.len());
+                    let center = Pos2::new(left + slot as f32 * pitch, y + 14.0);
+                    let rect = Rect::from_center_size(center, Vec2::new(pitch, 32.0));
+                    if !rect.intersects(painter.clip_rect()) {
+                        continue;
+                    }
+                    let dot = ui.interact(
+                        rect.intersect(painter.clip_rect()),
+                        ui.scope_id().with(("gallery page", page)),
+                        Sense::click(),
+                    );
+                    let label = format!("Image {} of {}", page + 1, gallery.len());
+                    dot.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &label));
+                    let dot = dot.on_hover_text(label);
+                    if dot.clicked() {
+                        self.gallery = page;
+                        self.gallery_media.select(None);
+                        ui.ctx().request_repaint();
+                    }
+                    if dot.has_focus() {
+                        painter.circle_stroke(center, 8.0, Stroke::new(1.0, ink(ACCENT)));
+                    }
+                    painter.circle_filled(
+                        center,
+                        if edge && !selected { 2.0 } else { 3.5 },
+                        ink(if selected || dot.hovered() { TITLE } else { IDLE }),
+                    );
+                }
+                y += 42.0;
+            } else {
+                y += 8.0;
+            }
         }
         // the facts: a column each, ruled above and below, at the width of the page
         let facts = facts_of(item);
@@ -1278,33 +1664,21 @@ impl StoreSheet {
                         Stroke::new(1.0, ink(SEP)),
                     );
                 }
-                let at_x = left + if at == 0 { 16.0 } else { 10.0 };
-                // a header's rhythm here too: 16 over the label, 8 between it and its value
-                text(
-                    &painter,
-                    Pos2::new(at_x, strip.top() + GROUP_HEAD),
-                    Align2::LEFT_TOP,
-                    label,
-                    11.0,
-                    Weight::SemiBold,
-                    ink(IDLE),
-                );
-                text(
-                    &painter,
-                    Pos2::new(at_x, strip.top() + GROUP_HEAD + GROUP_LINE + GROUP_HEAD_BELOW),
-                    Align2::LEFT_TOP,
-                    value,
-                    16.0,
-                    Weight::SemiBold,
-                    ink(TITLE),
-                );
+                let width = (column - 32.0).max(1.0);
+                let label = limited_text(&painter, label, width, 1, 11.0, Weight::SemiBold, ink(IDLE));
+                let value = limited_text(&painter, value, width, 1, 16.0, Weight::SemiBold, ink(TITLE));
+                let label_height = label.size().y;
+                let gap = 3.0;
+                let top = strip.center().y - (label_height + gap + value.size().y) * 0.5;
+                painter.galley(Pos2::new(left + 16.0, top), label, ink(IDLE));
+                painter.galley(Pos2::new(left + 16.0, top + label_height + gap), value, ink(TITLE));
             }
             y = strip.bottom() + 24.0;
         }
         // the words, then the details, then the maker's other work
         let words = if item.body.is_empty() { item.description.as_str() } else { item.body.as_str() };
         if !words.is_empty() {
-            let galley = wrapped(&painter, words, 16.0, Weight::Regular, ink(ROW_INK), PROSE);
+            let galley = wrapped(&painter, words, 16.0, Weight::Regular, ink(ROW_INK), body.width().min(PROSE));
             y += galley.size().y;
             painter.galley(Pos2::new(body.left(), y - galley.size().y), galley, ink(ROW_INK));
             y += 40.0;
@@ -1423,46 +1797,9 @@ impl StoreSheet {
             for (at, other) in more.iter().enumerate() {
                 let left = body.left() + (each + gap) * at as f32;
                 let art = Rect::from_min_size(Pos2::new(left, y), Vec2::new(each, each * 0.75));
-                painter.rect_filled(art, 16.0, ink(TILE_FILL));
-                match self.pictures.get(ui.ctx(), store, &other.preview) {
-                    Some(picture) => {
-                        painter.image(picture.id(), art, fill_uv(picture.size_vec2(), art.size()), Color32::WHITE);
-                    }
-                    None => look.icon_on(ui, &painter, kind_icon(other.kind), art.center(), 36.0, ink(IDLE)),
-                }
-                text(
-                    &painter,
-                    Pos2::new(left, art.bottom() + 12.0),
-                    Align2::LEFT_TOP,
-                    &other.name,
-                    16.0,
-                    Weight::SemiBold,
-                    ink(TITLE),
-                );
-                text(
-                    &painter,
-                    Pos2::new(left, art.bottom() + 34.0),
-                    Align2::LEFT_TOP,
-                    &other.publisher,
-                    14.0,
-                    Weight::Regular,
-                    ink(ROW_INK),
-                );
-                state_pill(
-                    &painter,
-                    look,
-                    ui,
-                    installed(store, other),
-                    needs_update(store, other),
-                    left + each,
-                    art.bottom() + 34.0,
-                    ink,
-                );
-                if ui.interact(art, ui.scope_id().with(("more art", other.id.clone())), Sense::click()).clicked() {
-                    self.go(View::Item { source: other.source.clone(), id: other.id.clone() });
-                }
+                self.card(ui, &painter, look, store, other, art, "more", ink);
             }
-            y += each * 0.75 + 34.0 + 22.0;
+            y += each * 0.75 + CARD_FOOT;
         }
         self.height = (y + self.scroll) - body.top();
         self.scroll = self.scrolled(ui, body);
@@ -1831,7 +2168,7 @@ impl StoreSheet {
     /// its bar, the address under its own heading, and the line saying why it was not taken.
     fn add_sheet(
         &mut self,
-        ui: &egui::Ui,
+        ui: &mut egui::Ui,
         store: &Arc<procraft_core::Store>,
         sheet: Rect,
         ink: impl Fn(Themed) -> Color32 + Copy,
@@ -1916,6 +2253,10 @@ impl StoreSheet {
         if self.typing == Some(Field::Add) && ui.input(|i| i.key_pressed(egui::Key::Enter)) && ready {
             self.start_add(store);
         }
+        let local = Rect::from_min_size(
+            Pos2::new(field.left() + 16.0, field.bottom() + 4.0),
+            Vec2::new(field.width() - 32.0, 34.0),
+        );
         // what it says under the field: why it was not taken, or what to paste
         let line = if self.refusal.is_empty() {
             "A catalogue is a JSON file. Its address can be a web address, or the path to a file on this machine."
@@ -1925,7 +2266,11 @@ impl StoreSheet {
         };
         let colour = if self.refusal.is_empty() { ROW_INK } else { DANGER };
         let galley = wrapped(painter, &line, 13.0, Weight::Regular, ink(colour), field.width() - 32.0);
-        painter.galley(Pos2::new(field.left() + 16.0, field.bottom() + 12.0), galley, ink(colour));
+        painter.galley(Pos2::new(field.left() + 16.0, local.bottom() + 4.0), galley, ink(colour));
+        if self.address.trim().starts_with("https://") {
+            let mut controls = ui.new_child(egui::UiBuilder::new().max_rect(local));
+            controls.checkbox(&mut self.local_network, "Allow this HTTPS host on my local network");
+        }
     }
 
     /// One kind's whole list: a wall of its cards three across, the sort in the bar.
@@ -1951,7 +2296,8 @@ impl StoreSheet {
             ink(TITLE),
         );
         // the same cuts the list has, applied to one kind, then the order the bar asked for
-        let mut items: Vec<procraft_core::StoreItem> = store.items().into_iter().filter(|i| i.kind == kind).collect();
+        let mut items: Vec<procraft_core::StoreItem> =
+            store.items().into_iter().filter(|i| i.kind.browse_group() == kind).collect();
         if let Some(from) = &self.from {
             items.retain(|item| &item.source == from);
         }
@@ -1979,7 +2325,7 @@ impl StoreSheet {
         }
         let gap = 20.0;
         let each = (body.width() - gap * 2.0) / 3.0;
-        let card = each * 0.75 + 66.0;
+        let card = each * 0.75 + CARD_FOOT;
         let rows = items.len().div_ceil(3);
         self.height = (title.bottom() + 24.0 + rows as f32 * (card + 24.0)) - body.top();
         self.scroll = self.scrolled(ui, body);
@@ -1992,44 +2338,7 @@ impl StoreSheet {
             }
             let left = body.left() + (each + gap) * column as f32;
             let art = Rect::from_min_size(Pos2::new(left, y), Vec2::new(each, each * 0.75));
-            painter.rect_filled(art, 16.0, ink(TILE_FILL));
-            match self.pictures.get(ui.ctx(), store, &item.preview) {
-                Some(picture) => {
-                    painter.image(picture.id(), art, fill_uv(picture.size_vec2(), art.size()), Color32::WHITE);
-                }
-                None => look.icon_on(ui, &painter, kind_icon(item.kind), art.center(), 40.0, ink(IDLE)),
-            }
-            text(
-                &painter,
-                Pos2::new(left, art.bottom() + 12.0),
-                Align2::LEFT_TOP,
-                &item.name,
-                16.0,
-                Weight::SemiBold,
-                ink(TITLE),
-            );
-            text(
-                &painter,
-                Pos2::new(left, art.bottom() + 34.0),
-                Align2::LEFT_TOP,
-                &second_line(item),
-                14.0,
-                Weight::Regular,
-                ink(ROW_INK),
-            );
-            state_pill(
-                &painter,
-                look,
-                ui,
-                installed(store, item),
-                needs_update(store, item),
-                left + each,
-                art.bottom() + 43.0,
-                ink,
-            );
-            if ui.interact(art, ui.scope_id().with(("wall art", item.id.clone())), Sense::click()).clicked() {
-                self.go(View::Item { source: item.source.clone(), id: item.id.clone() });
-            }
+            self.card(ui, &painter, look, store, item, art, "wall", ink);
         }
     }
 
@@ -2058,7 +2367,9 @@ impl StoreSheet {
         let items = store.items();
         let waiting: Vec<&procraft_core::Installed> = records
             .iter()
-            .filter(|one| items.iter().any(|item| item.id == one.id && changes(&one.digest, item)))
+            .filter(|one| {
+                items.iter().any(|item| item.id == one.id && item.source == one.source && changes(&one.digest, item))
+            })
             .collect();
         let mut content = (title.bottom() + 8.0) - body.top();
         content += GROUP_HEAD + 30.0;
@@ -2138,8 +2449,13 @@ impl StoreSheet {
             );
         }
         let tile = Rect::from_min_size(Pos2::new(row.left() + 16.0, row.center().y - 17.0), Vec2::splat(34.0));
-        painter.rect_filled(tile, 8.0, ink(TILE_FILL));
-        look.icon_on(ui, painter, kind_icon(one.kind), tile.center(), 20.0, ink(IDLE));
+        let listing = store.items().into_iter().find(|item| item.id == one.id && item.source == one.source);
+        if let Some(item) = &listing {
+            self.artwork(ui, painter, look, store, item, tile, 8.0, 20.0, ink);
+        } else {
+            painter.rect_filled(tile, 8.0, ink(TILE_FILL));
+            look.icon_on(ui, painter, kind_icon(one.kind), tile.center(), 20.0, ink(IDLE));
+        }
         let name = Pos2::new(tile.right() + 12.0, row.center().y - 10.0);
         text(painter, name, Align2::LEFT_CENTER, &one.name, 17.0, Weight::Regular, ink(TITLE));
         let line = format!("Version {} - {}", one.version, date_text(one.at, false));
@@ -2152,9 +2468,18 @@ impl StoreSheet {
             Weight::Regular,
             ink(ROW_INK),
         );
-        state_pill(painter, look, ui, true, update, row.right() - 16.0, row.center().y, ink);
-        if ui.interact(row, ui.scope_id().with(("download row", one.id.clone())), Sense::click()).clicked()
-            && let Some(item) = store.items().into_iter().find(|item| item.id == one.id)
+        state_pill(
+            painter,
+            look,
+            ui,
+            if update { Standing::Update } else { Standing::Installed },
+            false,
+            row.right() - 16.0,
+            row.center().y,
+            ink,
+        );
+        if ui.interact(row, ui.scope_id().with(("download row", &one.source, &one.id)), Sense::click()).clicked()
+            && let Some(item) = listing
         {
             self.go(View::Item { source: item.source.clone(), id: item.id.clone() });
         }
@@ -2341,7 +2666,7 @@ impl StoreSheet {
 
 /// Whether an item is in the app already: the ones that came with it, and anything the store took.
 fn installed(store: &procraft_core::Store, item: &procraft_core::StoreItem) -> bool {
-    item.file.is_empty() || store.installed_one(item.id.clone()).is_some()
+    item.file.is_empty() || store.installed_listing(item.source.clone(), item.id.clone()).is_some()
 }
 
 /// Whether the catalogue now lists other bytes than the ones that were installed.
@@ -2351,7 +2676,27 @@ fn changes(digest: &str, item: &procraft_core::StoreItem) -> bool {
 
 /// Whether an installed item has a newer file waiting for it.
 fn needs_update(store: &procraft_core::Store, item: &procraft_core::StoreItem) -> bool {
-    store.installed_one(item.id.clone()).is_some_and(|one| changes(&one.digest, item))
+    store.installed_listing(item.source.clone(), item.id.clone()).is_some_and(|one| changes(&one.digest, item))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    Get,
+    Preview,
+    Update,
+    Installed,
+}
+
+fn standing(store: &procraft_core::Store, item: &procraft_core::StoreItem) -> Standing {
+    if !item.kind.supports_install() {
+        Standing::Preview
+    } else if needs_update(store, item) {
+        Standing::Update
+    } else if installed(store, item) {
+        Standing::Installed
+    } else {
+        Standing::Get
+    }
 }
 
 /// The state one item is in, at the trailing end of a line: the app's own are already in, and
@@ -2360,24 +2705,26 @@ fn state_pill(
     painter: &egui::Painter,
     look: &mut Look,
     ui: &egui::Ui,
-    installed: bool,
-    update: bool,
+    standing: Standing,
+    compact: bool,
     right: f32,
     middle: f32,
     ink: impl Fn(Themed) -> Color32,
-) {
-    let label = if update {
-        "Update"
-    } else if installed {
-        "Installed"
-    } else {
-        "Get"
+) -> Rect {
+    let label = match standing {
+        Standing::Get => "Get",
+        Standing::Preview => "Preview",
+        Standing::Update => "Update",
+        Standing::Installed => "Installed",
     };
-    let tick = installed && !update;
-    let width = text_width(painter, label, 15.0, Weight::SemiBold) + 28.0 + if tick { 21.0 } else { 0.0 };
+    let update = standing == Standing::Update;
+    let installed = standing == Standing::Installed;
+    let tick = !compact && installed;
+    let pad = if compact { 10.0 } else { 14.0 };
+    let width = text_width(painter, label, 15.0, Weight::SemiBold) + pad * 2.0 + if tick { 21.0 } else { 0.0 };
     let pill = Rect::from_center_size(Pos2::new(right - width / 2.0, middle), Vec2::new(width, PILL_STATE));
     painter.rect_filled(pill, PILL_STATE / 2.0, ink(if update { ACCENT } else { PILL_STATE_FILL }));
-    let mut x = pill.left() + 14.0;
+    let mut x = pill.left() + pad;
     if tick {
         look.icon_on(ui, painter, &icons::TICK, Pos2::new(x + 7.0, pill.center().y), 15.0, ink(ROW_INK));
         x += 21.0;
@@ -2390,6 +2737,7 @@ fn state_pill(
         ACCENT
     };
     text(painter, Pos2::new(x, pill.center().y), Align2::LEFT_CENTER, label, 15.0, Weight::SemiBold, ink(colour));
+    pill
 }
 
 /// One line of a choice menu: a head, or a row that is one choice.
@@ -2415,7 +2763,9 @@ fn caveat(kind: procraft_core::ItemKind) -> &'static str {
             "Runs code on your hooks. You can turn it off in Plugins, and nothing it draws or stores survives."
         }
         procraft_core::ItemKind::BrushSet => "Adds to the brush library.",
-        procraft_core::ItemKind::AssetPack => "Adds to the asset library.",
+        procraft_core::ItemKind::AssetPack | procraft_core::ItemKind::Brush | procraft_core::ItemKind::BrushLibrary => {
+            "Browse the contents in the gallery."
+        }
     }
 }
 
@@ -2473,7 +2823,7 @@ fn white_uv() -> Rect {
 /// A grouped list's head, the only way the store draws one: 16 under whatever came before it, its
 /// own 17 line in 13, and 8 between it and the card or field it labels. Returns where the next
 /// block starts.
-fn group_head(painter: &egui::Painter, body: Rect, y: f32, label: &str, colour: Color32) -> f32 {
+pub(crate) fn group_head(painter: &egui::Painter, body: Rect, y: f32, label: &str, colour: Color32) -> f32 {
     text(
         painter,
         Pos2::new(body.left() + 16.0, y + GROUP_HEAD),
@@ -2487,7 +2837,13 @@ fn group_head(painter: &egui::Painter, body: Rect, y: f32, label: &str, colour: 
 }
 
 /// A picture drawn inside a rounded rect.
-fn picture_rounded(painter: &egui::Painter, texture: &egui::TextureHandle, rect: Rect, corner: f32, uv: Rect) {
+pub(crate) fn picture_rounded(
+    painter: &egui::Painter,
+    texture: &egui::TextureHandle,
+    rect: Rect,
+    corner: f32,
+    uv: Rect,
+) {
     let mesh = rounded_mesh(rect, corner, uv, |_| Color32::WHITE, texture.id());
     painter.add(egui::Shape::mesh(mesh));
 }
@@ -2517,7 +2873,7 @@ fn scrim_rounded(painter: &egui::Painter, rect: Rect, corner: f32, top: u8, bott
 }
 
 /// The part of a picture to show so it fills `area` without stretching it out of shape.
-fn fill_uv(picture: Vec2, area: Vec2) -> Rect {
+pub(crate) fn fill_uv(picture: Vec2, area: Vec2) -> Rect {
     let whole = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     if picture.x <= 0.0 || picture.y <= 0.0 || area.x <= 0.0 || area.y <= 0.0 {
         return whole;
@@ -2537,17 +2893,36 @@ fn fill_uv(picture: Vec2, area: Vec2) -> Rect {
     Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1))
 }
 
-/// As much of a sentence as fits `width` on one line, with an ellipsis where it was cut.
-fn one_line(sentence: &str, width: f32, painter: &egui::Painter) -> String {
-    let mut kept = String::new();
-    for word in sentence.split_whitespace() {
-        let trying = if kept.is_empty() { word.to_owned() } else { format!("{kept} {word}") };
-        if text_width(painter, &format!("{trying} ..."), 15.0, Weight::Regular) > width {
-            return if kept.is_empty() { String::new() } else { format!("{kept} ...") };
-        }
-        kept = trying;
+pub(crate) fn ellipsized(
+    painter: &egui::Painter,
+    center_left: Pos2,
+    line: &str,
+    width: f32,
+    size: f32,
+    weight: Weight,
+    colour: Color32,
+) -> f32 {
+    if width <= 0.0 {
+        return 0.0;
     }
-    kept
+    let galley = limited_text(painter, line, width, 1, size, weight, colour);
+    let size = galley.size();
+    painter.galley(center_left - Vec2::new(0.0, size.y / 2.0), galley, colour);
+    size.x
+}
+
+fn limited_text(
+    painter: &egui::Painter,
+    line: &str,
+    width: f32,
+    rows: usize,
+    size: f32,
+    weight: Weight,
+    colour: Color32,
+) -> Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple(line.replace(['\n', '\r'], " "), weight.font(size), colour, width);
+    job.wrap.max_rows = rows;
+    painter.layout_job(job)
 }
 
 /// One card's width in a shelf, and how tall the shelf is with its labels under the pictures.
@@ -2556,14 +2931,16 @@ fn card_width(area: f32) -> f32 {
 }
 
 fn shelf_height(area: f32) -> f32 {
-    card_width(area) * 0.75 + 84.0
+    card_width(area) * 0.75 + CARD_FOOT
 }
 
 /// The heading a kind's section carries, and the title its wall takes.
 fn section_title(kind: procraft_core::ItemKind) -> &'static str {
     match kind {
         procraft_core::ItemKind::Plugin => "Plugins",
-        procraft_core::ItemKind::BrushSet => "Brushes",
+        procraft_core::ItemKind::BrushSet | procraft_core::ItemKind::Brush | procraft_core::ItemKind::BrushLibrary => {
+            "Brushes"
+        }
         procraft_core::ItemKind::AssetPack => "Asset packs",
     }
 }
@@ -2572,7 +2949,9 @@ fn section_title(kind: procraft_core::ItemKind) -> &'static str {
 fn filter_label(kind: procraft_core::ItemKind) -> &'static str {
     match kind {
         procraft_core::ItemKind::Plugin => "Plugins",
-        procraft_core::ItemKind::BrushSet => "Brush sets",
+        procraft_core::ItemKind::BrushSet | procraft_core::ItemKind::Brush | procraft_core::ItemKind::BrushLibrary => {
+            "Brushes"
+        }
         procraft_core::ItemKind::AssetPack => "Asset packs",
     }
 }
@@ -2612,7 +2991,9 @@ fn sort_glyph(painter: &egui::Painter, centre: Pos2, size: f32, colour: Color32)
 fn kind_icon(kind: procraft_core::ItemKind) -> &'static icons::Icon {
     match kind {
         procraft_core::ItemKind::Plugin => &icons::ACTIONS,
-        procraft_core::ItemKind::BrushSet => &icons::BRUSH,
+        procraft_core::ItemKind::BrushSet | procraft_core::ItemKind::Brush | procraft_core::ItemKind::BrushLibrary => {
+            &icons::BRUSH
+        }
         procraft_core::ItemKind::AssetPack => &icons::FOLDER_FILL,
     }
 }
@@ -2646,11 +3027,6 @@ fn size_of(bytes: u64) -> String {
     } else {
         format!("{} KB", bytes.div_ceil(1024))
     }
-}
-
-/// Now, in seconds since the epoch.
-pub(crate) fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs())
 }
 
 /// A moment in local time, as a row shows it: "18 Nov", or "18 Nov 2026" on a page of its own.
@@ -2697,6 +3073,7 @@ mod tests {
             category: "Brushes".into(),
             tags: Vec::new(),
             preview: String::new(),
+            icon: String::new(),
             previews: Vec::new(),
             body: String::new(),
             file: file.into(),
@@ -2724,6 +3101,22 @@ mod tests {
         assert_eq!(second_line(&item("https://example.org/x.brushset", 1844221)), "R. Halloway - 1.8 MB");
         assert_eq!(second_line(&item("https://example.org/x.brushset", 48213)), "R. Halloway - 48 KB");
         assert_eq!(second_line(&item("", 0)), "Bundled with ProCraft");
+    }
+
+    #[test]
+    fn featured_pages_peek_at_another_cover_and_end_with_the_last_cover_flush() {
+        for (width, full_cards) in [(400.0, 1), (800.0, 2)] {
+            let (card, pages) = featured_layout(width, 5);
+            let step = card + FEATURE_SPACING;
+            let peek = width - full_cards as f32 * step;
+            assert!(peek > 0.0 && peek < card * 0.5);
+            let end = step * 5.0 - FEATURE_SPACING - width;
+            assert_eq!(pages, 6 - full_cards);
+            assert_eq!((end / step).round() as usize, pages - 1);
+            assert!(end < step * (pages - 1) as f32);
+        }
+        assert_eq!(featured_layout(800.0, 1), (800.0, 1));
+        assert_eq!(featured_layout(800.0, 2), ((800.0 - FEATURE_SPACING) / 2.0, 1));
     }
 
     #[test]

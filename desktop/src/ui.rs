@@ -579,7 +579,7 @@ impl Interface {
     /// The store's sheet is open over the work. The canvas still draws and animates under it, but
     /// takes no input: no stroke, gesture, key or panel under the sheet is heard.
     pub fn store_open(&self) -> bool {
-        self.store.open
+        self.store.open || self.library.store_package.open
     }
 
     /// The app's fonts and look, set the first time anything shows.
@@ -601,7 +601,9 @@ impl Interface {
         self.gallery_button = None;
         self.show_frame(ui, session, input);
         let ctx = ui.ctx();
-        self.follow_held(ctx, session);
+        if !self.store_open() && !self.said_alert.is_open() {
+            self.follow_held(ctx, session);
+        }
         if !typing && escape_untaken(ctx) && self.canvas_shown() && input.idle() {
             session.settle_upright();
         }
@@ -611,6 +613,15 @@ impl Interface {
         // bar, panel and popover: its scrim takes the presses that land on any of them
         if self.store.open {
             self.store.show(ctx, &mut self.look, session, &self.prefs.plugins);
+            if self.store.take_brushes_changed() {
+                self.library.library_changed();
+            }
+        }
+        if self.library.store_package.open {
+            self.library.store_package.show(ctx, &mut self.look, session);
+        }
+        if self.said_alert.is_open() {
+            self.said_alert.show(ctx, &mut self.look);
         }
     }
 
@@ -657,7 +668,7 @@ impl Interface {
         // held), where the pointer is; one set to the eyedropper picks while it is held, where the
         // pen hovers, and lets go to take it; with the canvas out of sight they do nothing, then
         // or later: the tool would change unseen (and one held to erase is let go)
-        let covered = self.studio.open || self.time_lapse.replaying() || self.store.open;
+        let covered = self.studio.open || self.time_lapse.replaying() || self.store_open();
         let presses = crate::pen::take_button_presses().map(|n| if covered { 0 } else { n });
         let held = crate::pen::buttons_held().map(|h| h && !covered);
         let purposes = [Trigger::PenDoubleTap, Trigger::PenSqueeze].map(|t| self.gestures.purpose_of(t));
@@ -795,9 +806,6 @@ impl Interface {
             if let Some(notice) = self.lighting.show(&ctx, &mut self.look, session) {
                 self.overlays.notice(notice, true);
             }
-            if self.said_alert.is_open() {
-                self.said_alert.show(ui.ctx(), &mut self.look);
-            }
             self.overlays.show(ui, &mut self.look, colour, false);
             session.set_backdrops(Vec::new());
             self.popover_open = true;
@@ -828,9 +836,6 @@ impl Interface {
             // full screen: the canvas alone (the overlays still show)
             self.canvas_rect = Rect::EVERYTHING;
             self.hover_cursor(&ctx, session, &info, input);
-            if self.said_alert.is_open() {
-                self.said_alert.show(ui.ctx(), &mut self.look);
-            }
             self.overlays.show(ui, &mut self.look, colour, false);
             self.drop.show(&ctx, session, to_hex(self.colours.rgb()), 0.0);
             self.copy_paste_panel(&ctx, session);
@@ -3045,7 +3050,7 @@ impl Interface {
             self.floating.changed = true;
             return;
         }
-        if !modal {
+        if !modal && !self.store_open() && !self.said_alert.is_open() {
             self.close_outside(ctx, space.to_window.mul_rect(shown), on_window);
         }
     }
@@ -3774,7 +3779,8 @@ impl Interface {
     /// A hex keypad, or text being edited, takes the keys (a text field's are egui's own).
     fn keys_taken(&self) -> bool {
         // the store's sheet takes the keys while it shows (its search field, its Escape)
-        self.store.open
+        self.store_open()
+            || self.said_alert.is_open()
             || self.text.editing()
             || ((self.open == Some(Popover::Colour)
                 || self.colours.floating.is_some()
@@ -3786,7 +3792,8 @@ impl Interface {
     /// Nothing covers the canvas: no full-screen page or editor is open.
     fn canvas_shown(&self) -> bool {
         !(self.studio.open
-            || self.store.open
+            || self.store_open()
+            || self.said_alert.is_open()
             || self.time_lapse.replaying()
             || self.animated_export.is_some()
             || self.lighting.open
@@ -4771,6 +4778,34 @@ mod tests {
         w.ui.store.open = false;
         w.pen_stroke(from, to, 8);
         assert!(w.session.edits() > edits, "the canvas under the sheet paints once it goes");
+    }
+
+    #[test]
+    fn store_package_takes_the_keys_and_releases_a_click_inside_its_own_sheet() {
+        let Some(mut w) = Window::open(vec2(1200.0, 800.0), false) else { return };
+        w.ui.open = Some(Popover::Brushes);
+        w.frame();
+        w.ui.library.store_package.share(crate::store_package::BrushShare::Set(0, 0), "Test Brushes".to_owned(), None);
+        for _ in 0..3 {
+            w.frame();
+        }
+        assert!(w.ui.keys_taken(), "the format chooser blocks input");
+        w.click(pos2(550.0, 386.0));
+        for _ in 0..3 {
+            w.frame();
+        }
+        assert!(w.ui.keys_taken());
+        assert!(w.ui.store_open());
+        let in_sheet = pos2(520.0, 135.0);
+        w.hover(in_sheet);
+        w.mouse_button(in_sheet, true);
+        assert!(w.ui.library.store_package.open);
+        w.mouse_button(in_sheet, false);
+        assert!(w.ui.library.store_package.open);
+        assert_eq!(w.ui.open, Some(Popover::Brushes));
+        w.click(pos2(380.0, 115.0));
+        assert!(!w.ui.library.store_package.open, "Cancel receives the click after mouse-up");
+        assert!(!w.ui.keys_taken());
     }
 
     #[test]

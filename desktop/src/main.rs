@@ -65,6 +65,8 @@ mod sound;
 mod source_editor;
 mod startup;
 mod store;
+mod store_decoder;
+mod store_gallery;
 mod store_package;
 mod stroke_sound;
 mod studio;
@@ -277,6 +279,10 @@ fn getting_ready_note(ctx: &egui::Context) {
 }
 
 fn main() {
+    if let Some(success) = store_decoder::run_if_requested() {
+        std::process::exit(if success { 0 } else { 1 });
+    }
+    store_decoder::register();
     // the log, to the app folder's file too, and a crash's message into it
     startup::init();
     // artworks being opened, noted until they show: one the app ended while opening is asked about
