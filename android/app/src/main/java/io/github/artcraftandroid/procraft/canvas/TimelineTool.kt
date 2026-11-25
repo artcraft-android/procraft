@@ -178,6 +178,11 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
             if (vm.timelineSettingsOpen) vm.closeTimelineSettings()
             if (keysCardFor != null) keysCardFor = null
             performArmed = false
+            // (off a timeline there is nothing to animate)
+            if (autokey) {
+                autokey = false
+                s.setTimelineAutokey(false, keyEasing)
+            }
             return
         }
         // a Keys card whose block has gone shuts; the keys picked on keys gone are let go

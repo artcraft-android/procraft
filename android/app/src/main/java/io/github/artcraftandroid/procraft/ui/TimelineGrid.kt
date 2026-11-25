@@ -107,8 +107,9 @@ import kotlinx.coroutines.launch
 // frames dragged sideways scrub and settle on a frame; a frame tapped slides under the playhead
 // and its track is drawn on. Play goes round the frames the grid shows.
 //
-// The grid's first wave: the lasso, Animate, Add new, the menus held open, the lengthening
-// handles, moving blocks, zoom and the rows of keys come later.
+// The rows of keys, their marks' menus, Animate and Perform are TimelineGridKeys.kt's and
+// TimelineAnimate.kt's. The lasso, Add new, the frames' menus held open, the lengthening handles,
+// moving blocks and zoom come later.
 
 /** The grid's fixed sizes (dp, the iPad's points) and colours; its cells' and rows' sizes, which will zoom, are [GridSizes]. */
 internal object Grid {

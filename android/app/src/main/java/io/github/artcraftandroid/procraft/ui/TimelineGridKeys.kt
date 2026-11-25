@@ -476,6 +476,8 @@ private val KeyEasings = listOf(
 /** A key's menu (and the other keys picked with it): how they ease into the next, copying and pasting, playing them backwards, taking them away. */
 @Composable
 private fun KeyMenu(tool: TimelineTool, key: TimelineKeyPick, beside: KeyBeside?, room: Dp, open: (KeyBeside?) -> Unit, close: () -> Unit) {
+    // (read again whenever the timeline is: an easing set shows as it now is)
+    tool.revision
     val several = tool.lanes.shown.size > 1
     val clip = (key.lane as? TimelineKeyLane.Clip)?.id
     // how it eases into the next now
