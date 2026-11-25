@@ -128,9 +128,9 @@ import kotlinx.coroutines.launch
 // bar (TimelineGridMenus.kt); a block held and dragged on goes along by frames and rows
 // (TimelineGridTouch.kt). The flap on the ruler sets the timeline's length; `+` held, Add new.
 // The rows of keys, their marks' menus, Animate and Perform are TimelineGridKeys.kt's and
-// TimelineAnimate.kt's. Zoom is not here.
+// TimelineAnimate.kt's. Two fingers zoom the grid (TimelineGridZoom.kt).
 
-/** The grid's fixed sizes (dp, the iPad's points) and colours; its cells' and rows' sizes, which will zoom, are [GridSizes]. */
+/** The grid's fixed sizes (dp, the iPad's points) and colours; its cells' and rows' sizes, which zoom, are [GridSizes]. */
 internal object Grid {
     val RulerHeight = 26.dp
     val HeaderHeight = 46.dp
@@ -175,8 +175,9 @@ internal class GridState {
     /** How far the tracks are scrolled up, where there are more of them than show. */
     var rowsOffset by mutableFloatStateOf(0f)
 
-    /** Its cells' and rows' sizes (it doesn't zoom yet). */
-    val sizes = GridSizes()
+    /** How far it is zoomed, and the pinch under way (TimelineGridZoom.kt); its cells' and rows' sizes as it is. */
+    val zoom = GridZoom()
+    val sizes: GridSizes get() = GridSizes(zoom.value)
 
     /** The key menu open, the key held, the keys being stretched (TimelineGridKeys.kt). */
     val keys = GridKeyState()
@@ -246,6 +247,7 @@ internal class GridState {
     /** The frames dragged sideways [translation] (dp) from where they were: the frame now under the playhead shows as it plays. */
     fun scrolled(translation: Float, last: Int, tool: TimelineTool) {
         if (dragged == null) {
+            zoom.playOnly = null
             scrubbed = tool.frame
             tool.picked = null
         }
@@ -268,7 +270,9 @@ internal class GridState {
 fun BoxScope.TimelineGridBar(vm: CanvasViewModel) {
     val tool = vm.timeline
     val info = tool.info ?: return
-    val grid = remember { GridState() }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val zoomScope = rememberCoroutineScope()
+    val grid = remember { GridState().also { it.zoom.attach(context, zoomScope) } }
     val view = LocalView.current
     grid.haptic = remember(view) {
         { kind ->
@@ -296,8 +300,10 @@ fun BoxScope.TimelineGridBar(vm: CanvasViewModel) {
         val rows = remember(tool.rows, sizes, tool.keys, tool.lanes.volumeKeys, keyTracks) {
             GridRows(tool.rows.reversed(), sizes) { t -> if (t.id in keyTracks) tool.keyRows(t) else emptyList() }
         }
-        val all = maxOf(rows.height, sizes.rowHeight)
-        val most = maxOf(floor(maxHeight.value * 0.5f - Grid.HeaderHeight.value - Grid.RulerHeight.value - 12f), sizes.rowHeight)
+        // as tall as its rows are before the grid is zoomed out: zoomed out, the bar stays as tall
+        // and the rows, smaller, stand in the middle of it
+        val all = maxOf(rows.startHeight, GridSizes.ROW_HEIGHT)
+        val most = maxOf(floor(maxHeight.value * 0.5f - Grid.HeaderHeight.value - Grid.RulerHeight.value - 12f), GridSizes.ROW_HEIGHT)
         val shown = minOf(all, most)
         // what is left above the bar for a menu standing on it
         val room = maxOf(maxHeight.value - shown - Grid.HeaderHeight.value - Grid.RulerHeight.value - 110f, 240f)
@@ -532,12 +538,14 @@ private fun GridBody(vm: CanvasViewModel, tool: TimelineTool, info: TimelineInfo
     val labels = Grid.labelsWidth(width).value
     val playhead = (w / 2f).roundToInt().toFloat()
     val last = maxOf(info.duration.toInt() - 1, 0) + TimelineTool.PAST_END
-    val origin = playhead - sz.cellWidth / 2f - at * sz.pitch
+    val origin = sz.origin(playhead, at)
     val duration = info.duration
-    // the frames the grid shows are the ones playing goes round
+    // the frames the grid shows are the ones playing goes round (a group the grid was fitted to plays alone)
     SideEffect {
-        tool.gridFrames = { from -> shownFrames(from.toFloat(), duration, playhead, w, labels, sz) }
+        tool.gridFrames = { from -> grid.zoom.playOnly ?: shownFrames(from.toFloat(), duration, playhead, w, labels, sz) }
     }
+    // as far out as it zooms, the whole timeline shows whichever frame the playhead is on
+    val least = GridZoom.least(duration.toInt(), playhead - labels - sz.cellWidth)
     // the frames on the bar, and some either side for the slide to a frame tapped
     val lo = (floor(-origin / sz.pitch).toInt() - 14).coerceIn(0, last)
     val hi = (ceil((w - origin) / sz.pitch).toInt() + 14).coerceIn(lo, last)
@@ -548,6 +556,7 @@ private fun GridBody(vm: CanvasViewModel, tool: TimelineTool, info: TimelineInfo
     val place = GridPlace(origin, playhead, last, minOf(grid.rowsOffset, over), over, maxOf(((h - all) / 2f).roundToInt().toFloat(), 0f))
     // the track drawn on is kept in sight where not every track shows
     LaunchedEffect(info.track, rows.size, over) {
+        if (grid.zoom.pinching) return@LaunchedEffect
         val row = rows.indexOf(info.track) ?: return@LaunchedEffect
         val top = rows[row].y
         val now = minOf(grid.rowsOffset, over)
@@ -566,7 +575,15 @@ private fun GridBody(vm: CanvasViewModel, tool: TimelineTool, info: TimelineInfo
             grid.pickedTrim = null
         }
     }
-    Column {
+    // two fingers on the frames: zoomed and carried along
+    val pinch by rememberUpdatedState(Triple(least, last, over))
+    Column(
+        Modifier.gridPinch(
+            began = { grid.pinchBegan(tool) },
+            changed = { scale, shift -> grid.pinchChanged(scale, shift, pinch.first, pinch.second, pinch.third, tool) },
+            ended = { speed, opening -> grid.pinchEnded(speed, opening, pinch.first, pinch.second, tool) },
+        ),
+    ) {
         Box(Modifier.size(width, Grid.RulerHeight).clipToBounds()) {
             GridRuler(tool, grid, info, place, lo, hi, width)
             // the flap where the timeline ends
@@ -578,7 +595,7 @@ private fun GridBody(vm: CanvasViewModel, tool: TimelineTool, info: TimelineInfo
 
 /** The timeline's frames whose cells show whole right of the tracks' names, with frame [at] under the playhead; none of them in sight, none. */
 private fun shownFrames(at: Float, frames: UInt, playhead: Float, width: Float, labels: Float, sz: GridSizes): UIntRange? {
-    val origin = playhead - sz.cellWidth / 2f - at * sz.pitch
+    val origin = sz.origin(playhead, at)
     val first = maxOf(ceil((labels - origin) / sz.pitch).toInt(), 0)
     val last = minOf(floor((width - origin - sz.cellWidth) / sz.pitch).toInt(), frames.toInt() - 1)
     if (first > last) return null
@@ -606,6 +623,8 @@ private fun Modifier.gridTouches(
         // over the tracks' names, the touch is theirs
         if (!ruler && start.x < labels - 12f) return@awaitEachGesture
         down.consume()
+        // the second of two fingers: theirs is the pinch's
+        if (grid.zoom.pinching) return@awaitEachGesture
         // a touch on the frames while they play stops them there
         if (tool.isPlaying) {
             tool.stopPlaying(stay = true)
@@ -628,6 +647,8 @@ private fun Modifier.gridTouches(
                     lifted = true
                     break
                 }
+                // two fingers down: they zoom and move the grid, and this one alone does nothing more
+                if (grid.zoom.pinching) touch = GridTouch.IGNORE
                 velocity.addPosition(change.uptimeMillis, change.position)
                 val moved = (change.position - down.position) / d
                 when (touch) {
@@ -682,6 +703,7 @@ private fun GridRuler(tool: TimelineTool, grid: GridState, info: TimelineInfo, p
     val sz = grid.sizes
     val measurer = rememberTextMeasurer()
     val current = tool.frame.toInt()
+    val fps = maxOf(info.fps.toInt(), 1)
     val dim = Grid.InkDim
     val lit = if (tool.selecting != null) Pc.Accent else Grid.InkBright
     val latest by rememberUpdatedState(place)
@@ -698,22 +720,40 @@ private fun GridRuler(tool: TimelineTool, grid: GridState, info: TimelineInfo, p
     ) {
         val d = density
         val pitch = sz.pitch
-        // every frame's number where they fit (44 apart, they always do until the grid zooms)
-        val every = listOf(1, 2, 5, 10, 25, 50, 100, 250, 500, 1000).firstOrNull { it * pitch >= 26f } ?: 10000
+        // every frame's number where they fit; zoomed out, fewer (or the seconds)
+        val steps = RulerSteps.at(pitch, fps)
         val mid = size.height / 2f + 3f * d
         fun x(f: Int) = (place.origin + f * pitch + sz.cellWidth / 2f) * d
         fun write(text: String, f: Int, here: Boolean) {
-            val style = TextStyle(color = if (here) lit else dim, fontSize = 11.sp, fontWeight = if (here) FontWeight.Bold else FontWeight.Normal)
+            val style = TextStyle(color = if (here) lit else dim, fontSize = 11.sp, fontWeight = if (here) FontWeight.Bold else FontWeight.Normal, fontFeatureSettings = "tnum")
             val laid = measurer.measure(text, style)
             drawText(laid, topLeft = Offset(x(f) - laid.size.width / 2f, mid - laid.size.height / 2f))
         }
-        for (f in lo..hi) {
-            if (f == current) continue
-            if ((f + 1) % every == 0) {
-                // (a number too near the playhead's own gives way to it)
-                if (every == 1 || abs((f - current) * pitch) >= 30f) write("${f + 1}", f, false)
-            } else if (pitch >= 5f) {
-                drawRect(dim.copy(alpha = 0.7f), Offset(x(f) - 0.5f * d, size.height - 5f * d), Size(1f * d, 3f * d))
+        fun tick(f: Int, tall: Float) = drawRect(dim.copy(alpha = 0.7f), Offset(x(f) - 0.5f * d, size.height - (tall + 2f) * d), Size(1f * d, tall * d))
+        // (a number too near the playhead's own gives way to it)
+        fun clear(f: Int) = abs((f - current) * pitch) >= 30f
+        if (steps.seconds) {
+            // a tick each second (each half where there is room), a number where they fit
+            var f = (lo / steps.tick) * steps.tick
+            while (f <= hi) {
+                if (f >= lo && f != current) {
+                    val second = if (f % fps == 0) f / fps else null
+                    if (second != null && second % steps.apart == 0) {
+                        if (clear(f)) write("${second}s", f, false)
+                    } else {
+                        tick(f, if (second != null) 5f else 3f)
+                    }
+                }
+                f += steps.tick
+            }
+        } else {
+            for (f in lo..hi) {
+                if (f == current) continue
+                if ((f + 1) % steps.every == 0) {
+                    if (steps.every == 1 || clear(f)) write("${f + 1}", f, false)
+                } else if (pitch >= 5f) {
+                    tick(f, 3f)
+                }
             }
         }
         if (current in lo..hi) write("${current + 1}", current, true)

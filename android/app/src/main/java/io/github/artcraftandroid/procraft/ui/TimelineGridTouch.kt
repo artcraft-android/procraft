@@ -58,7 +58,7 @@ internal enum class GridTouch {
     /** Dragged on from a hold on a block: the block goes with the finger. */
     MOVE,
 
-    /** Nothing more of the grid's (a second finger dropped the stroke). */
+    /** Nothing more of the grid's (a second finger came down: the two of them zoom it). */
     IGNORE,
 
     /** Held still on a key: its menu opened (TimelineGridKeys.kt). */
@@ -145,7 +145,7 @@ internal class GridRowsInput(val tool: TimelineTool, val grid: GridState) {
      * A tap at [at] (dp of the rows as they show): with a menu open, it closes; with the lasso on,
      * the frame there is picked with the others or let go; else the playhead goes to it on its
      * track, or, there already, the frame's handles come out or go. A group's chevron folds or
-     * unfolds it.
+     * unfolds it; a group tapped three times fills the grid (TimelineGridZoom.kt).
      */
     fun tapped(at: Offset) {
         val p = place.inRows(at)
@@ -161,10 +161,15 @@ internal class GridRowsInput(val tool: TimelineTool, val grid: GridState) {
         val (r, f) = cell
         val t = rows[r].track(f)
         val found = clipAt(p)?.second
-        if (tool.selecting == null && found != null && found.kind == TimelineClipKind.GROUP && p.x - (place.origin + found.start.toFloat() * sz.pitch) < 30f) {
+        if (tool.selecting == null && found != null && found.kind == TimelineClipKind.GROUP) {
             // its chevron: its own tracks' rows shown, or put away
-            tool.fold(found.id, tool.unfolded(found.id))
-            return
+            if (p.x - (place.origin + found.start.toFloat() * sz.pitch) < 30f) {
+                tool.fold(found.id, tool.unfolded(found.id))
+                return
+            }
+            if (!tool.isPlaying && grid.groupTapped(found, place.playhead - labels - 8f, tool)) return
+        } else {
+            grid.zoom.playOnly = null
         }
         tool.selecting?.let { chosen ->
             if (found != null) {
@@ -267,14 +272,6 @@ internal class GridRowsInput(val tool: TimelineTool, val grid: GridState) {
             animate(1f, 0f, animationSpec = tween(350)) { v, _ -> grid.fadeAlpha = v }
             if (grid.stroke.isEmpty()) grid.faded = emptyList()
         }
-    }
-
-    /** A second finger landed: the stroke under way and what it picked are dropped. */
-    fun dropStroke() {
-        grid.strokeBefore?.let { tool.selecting = it }
-        grid.stroke.clear()
-        grid.touched.clear()
-        grid.strokeBefore = null
     }
 
     // ---- Moving blocks ----
@@ -413,6 +410,8 @@ internal fun Modifier.gridRowTouches(input: GridRowsInput, settle: CoroutineScop
         val start = down.position / d
         if (start.x < input.labels - 12f) return@awaitEachGesture
         down.consume()
+        // the second of two fingers: theirs is the pinch's
+        if (grid.zoom.pinching) return@awaitEachGesture
         // a touch on the frames while they play stops them there
         if (tool.isPlaying) {
             tool.stopPlaying(stay = true)
@@ -443,7 +442,9 @@ internal fun Modifier.gridRowTouches(input: GridRowsInput, settle: CoroutineScop
                     val next = if (left > 0) withTimeoutOrNull(left) { awaitPointerEvent() } else null
                     if (next == null) {
                         // a key held is the keys' (its menu); else a block's, an empty frame's or the picked frames'
-                        if (input.keys?.hold(start) == true) {
+                        if (grid.zoom.pinching) {
+                            touch = GridTouch.IGNORE
+                        } else if (input.keys?.hold(start) == true) {
                             touch = GridTouch.KEY_HELD
                         } else {
                             touch = GridTouch.HELD
@@ -461,11 +462,9 @@ internal fun Modifier.gridRowTouches(input: GridRowsInput, settle: CoroutineScop
                     lifted = true
                     break
                 }
-                // a second finger landing drops the stroke under way, and what it picked
-                if (touch == GridTouch.STROKE && event.changes.count { it.pressed } > 1) {
-                    input.dropStroke()
-                    touch = GridTouch.IGNORE
-                }
+                // two fingers down: they zoom and move the grid (what this one was doing was dropped
+                // as the second came down), and this one alone does nothing more
+                if (grid.zoom.pinching) touch = GridTouch.IGNORE
                 velocity.addPosition(change.uptimeMillis, change.position)
                 val moved = (change.position - down.position) / d
                 val here = change.position / d

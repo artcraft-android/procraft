@@ -7,8 +7,10 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 // The grid timeline's sizes and rows (see TimelineGrid.kt), as the iPad's TimelineGridRows.swift
-// has them. The grid will zoom (a later wave): every size comes from [GridSizes], at a zoom, and
-// where a row stands from [GridRows]. Sizes are in dp, the iPad's points.
+// has them. The grid zooms (TimelineGridZoom.kt): a frame's cell and a row get smaller together as
+// it is pinched out, then the frames alone go on narrowing until the whole timeline fits; pinched
+// in past where it starts, the frames alone get wider. So every size comes from [GridSizes], at a
+// zoom, and where a row stands from [GridRows]. Sizes are in dp, the iPad's points.
 
 /** How big the grid's cells and rows are at a zoom (1: as it starts). */
 internal data class GridSizes(val zoom: Float = 1f) {
@@ -30,6 +32,9 @@ internal data class GridSizes(val zoom: Float = 1f) {
     /** Whether a frame is wide enough to show its drawing. */
     val pictures: Boolean get() = cellWidth >= 20f
 
+    /** Where frame 0's cell's left edge is with frame [at] under the [playhead]'s middle: zoomed, the frames grow and shrink about the playhead. */
+    fun origin(playhead: Float, at: Float): Float = playhead - cellWidth / 2f - at * pitch
+
     companion object {
         /** A frame's cell and a row as the grid starts: from one frame to the next, the cell's own size, and a row's height. */
         const val PITCH = 44f
@@ -37,7 +42,13 @@ internal data class GridSizes(val zoom: Float = 1f) {
         const val CELL_HEIGHT = 31f
         const val ROW_HEIGHT = 44f
         const val CORNER = 7f
+
+        /** The widest a frame gets, as a zoom; and how small a row gets (zoomed out further, the frames alone narrow). */
+        const val MOST = 2f
         const val LEAST_ROWS = 0.5f
+
+        /** The narrowest a frame ever is (dp). */
+        const val LEAST_PITCH = 0.75f
     }
 }
 
@@ -91,8 +102,9 @@ private const val KEYS_HEIGHT = 28f
 internal class GridRows(rows: List<TimelineRow>, sizes: GridSizes, keys: (TimelineTrackInfo) -> List<KeyLaneRow> = { emptyList() }) {
     val list: List<GridRow>
 
-    /** How tall they all are together. */
+    /** How tall they all are together; and how tall before the grid is zoomed out (the bar stays that tall, the rows standing in the middle of it). */
     val height: Float
+    val startHeight: Float
 
     init {
         var y = 0f
@@ -113,6 +125,7 @@ internal class GridRows(rows: List<TimelineRow>, sizes: GridSizes, keys: (Timeli
         }
         list = out
         height = y
+        startHeight = out.sumOf { (if (it.lanes.isEmpty()) GridSizes.ROW_HEIGHT else KEYS_HEIGHT).toDouble() }.toFloat()
     }
 
     val size: Int get() = list.size
