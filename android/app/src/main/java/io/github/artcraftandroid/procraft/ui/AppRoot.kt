@@ -152,6 +152,11 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             if (vm.transforming) TransformOverlay(vm)
             // (and the Paint or Erase tool's lasso shapes as they are drawn)
             if (vm.selecting || vm.lassoToolOn) SelectionOverlay(vm, Pc.barShown)
+            // on a timeline: the frame the transform keys; the motion path of the block under the
+            // playhead; and a move about to be performed, which takes the next touch on the canvas
+            if (vm.transforming) AutokeyBadge(vm)
+            MotionPathOverlay(vm)
+            PerformOverlay(vm)
             vm.picking?.let { pick ->
                 val pickingZ = if (pick.fromReference) 1f else 0f
                 Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))

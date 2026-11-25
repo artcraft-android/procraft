@@ -138,6 +138,8 @@ private class CellsDraw(
     /** Every frame's slot, empty; and where a repeating group plays a frame again, its ghost. */
     fun slots() = with(scope) {
         for (r in rows.list) {
+            // (a row of keys has none: see TimelineGridKeys.kt)
+            if (r.lanes.isNotEmpty()) continue
             val y = top(r)
             // (a track inside a group has slots only for the frames the group lasts)
             for (s in r.segments) {
@@ -169,6 +171,7 @@ private class CellsDraw(
         class Item(val c: TimelineClipInfo, val r: GridRow, val t: TimelineTrackInfo, val hiddenAbove: Boolean, val z: Int)
         val items = ArrayList<Item>()
         for (r in rows.list) {
+            if (r.lanes.isNotEmpty()) continue
             for (s in r.segments) {
                 val hiddenAbove = tool.place(s.track.id)?.hiddenAbove == true
                 for (c in edges.shown(s.track)) {
@@ -374,6 +377,7 @@ private class CellsDraw(
         if (sz.pitch < 9f) return@with
         val marks = Path()
         for (r in rows.list) {
+            if (r.lanes.isNotEmpty()) continue
             val y = (r.y + (r.height + sz.cellHeight) / 2f - 4.5f + place.inset - place.scroll) * d
             for (s in r.segments) {
                 for (c in s.track.clips) {

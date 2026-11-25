@@ -8577,6 +8577,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (transforming) {
             transformBox = session?.transformApply(TransformAction.UNDO) ?: transformBox
+            autokeyFollow()
             return
         }
         // recoloring, the core takes the fill under the reticle back first (after the fills queued)
@@ -9959,11 +9960,49 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun transformAction(action: TransformAction) {
         transformPopup = TransformPopup.NONE
         transformBox = session?.transformApply(action) ?: transformBox
+        autokeyFollow()
     }
 
     /** The box after a drag step on the canvas. */
     fun transformMoved(box: TransformBox?) {
         if (box != null) transformBox = box
+        autokeyFollow()
+    }
+
+    // ---- Animate (autokey; the timeline's header turns it on: ui/TimelineGrid.kt) ----
+
+    /**
+     * Animate on or off. On, a transform moving pixels is kept and the transform opens again to
+     * key the pose of what is under the playhead (the core's `timeline::autokey`); off, a
+     * transform keying a pose ends, its keys kept.
+     */
+    fun setAutokey(on: Boolean) {
+        val s = session ?: return
+        val posing = s.timelineAutokeyPosing()
+        timeline.autokey = on
+        timeline.performArmed = false
+        timeline.stopPlaying()
+        s.setTimelineAutokeyClip(null)
+        s.setTimelineAutokey(on, timeline.keyEasing)
+        if (on) {
+            if (transforming && !posing) endTransform(true)
+            if (!transforming) toggleTransform()
+        } else if (transforming && posing) {
+            // (the core has ended it already)
+            endTransform(true)
+        }
+        refresh()
+    }
+
+    /** After the transform's box changed: a key it made is read again (the timeline's marks, undo). */
+    private fun autokeyFollow() {
+        if (transforming && timeline.on && session?.timelineAutokeyKeyed() == true) refresh()
+    }
+
+    /** The transform keying a pose follows the playhead: its box laid again over what is there, as its keys show it. */
+    private fun followAutokeyBox() {
+        if (!transforming || !timeline.on) return
+        session?.timelineAutokeyBox()?.let { transformBox = it }
     }
 
     /**
@@ -10883,6 +10922,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (comicPanels.open) comicPanels.read(s)
         refreshAnimation()
         timeline.refresh()
+        followAutokeyBox()
         refreshTimelineSettings()
     }
 

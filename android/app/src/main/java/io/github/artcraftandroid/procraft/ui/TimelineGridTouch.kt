@@ -60,6 +60,15 @@ internal enum class GridTouch {
 
     /** Nothing more of the grid's (a second finger dropped the stroke). */
     IGNORE,
+
+    /** Held still on a key: its menu opened (TimelineGridKeys.kt). */
+    KEY_HELD,
+
+    /** Dragged on from a hold on a key: it and the keys picked go along its row. */
+    KEYS,
+
+    /** Down on a grip beside the keys picked: they spread out or close up in time. */
+    STRETCH,
 }
 
 /** A buzz for what a touch does: a tick, a limit reached, a light knock, a hold, a refusal. */
@@ -107,6 +116,8 @@ internal class GridRowsInput(val tool: TimelineTool, val grid: GridState) {
     lateinit var info: TimelineInfo
     var width = 0f
     var labels = 0f
+    /** The keys' own touches, asked before the frames' (their rows, marks and grips). */
+    var keys: GridKeyTouch? = null
 
     private val sz: GridSizes get() = grid.sizes
 
@@ -411,7 +422,11 @@ internal fun Modifier.gridRowTouches(input: GridRowsInput, settle: CoroutineScop
         val inRows = p0.inRows(start)
         // down on a handle: its edge follows the finger
         val handle = input.edges().handle(Offset(inRows.x - p0.origin, inRows.y))
-        var touch = if (handle != null) GridTouch.HANDLE else GridTouch.UNDECIDED
+        var touch = when {
+            input.keys?.grip(start) == true -> GridTouch.STRETCH
+            handle != null -> GridTouch.HANDLE
+            else -> GridTouch.UNDECIDED
+        }
         grid.scrollFrom = grid.dragged ?: tool.frame.toFloat()
         val panFrom = p0.scroll
         val velocity = VelocityTracker()
@@ -427,8 +442,13 @@ internal fun Modifier.gridRowTouches(input: GridRowsInput, settle: CoroutineScop
                     val left = HOLD_MS - (System.currentTimeMillis() - downAt)
                     val next = if (left > 0) withTimeoutOrNull(left) { awaitPointerEvent() } else null
                     if (next == null) {
-                        touch = GridTouch.HELD
-                        input.held(start)
+                        // a key held is the keys' (its menu); else a block's, an empty frame's or the picked frames'
+                        if (input.keys?.hold(start) == true) {
+                            touch = GridTouch.KEY_HELD
+                        } else {
+                            touch = GridTouch.HELD
+                            input.held(start)
+                        }
                         continue
                     }
                     event = next
@@ -478,13 +498,20 @@ internal fun Modifier.gridRowTouches(input: GridRowsInput, settle: CoroutineScop
                     }
                     GridTouch.MOVE -> input.moved(here, moved.x, settle)
                     GridTouch.IGNORE -> {}
+                    GridTouch.KEY_HELD -> if (hypot(moved.x, moved.y) > 8f) {
+                        touch = GridTouch.KEYS
+                        input.keys?.dragged(moved.x)
+                    }
+                    GridTouch.KEYS -> input.keys?.dragged(moved.x)
+                    GridTouch.STRETCH -> input.keys?.stretched(moved.x)
                 }
                 change.consume()
             }
         } finally {
             // (taken away part way, a drag settles where it is, and an edge or a block stays as it was)
             when (touch) {
-                GridTouch.UNDECIDED -> if (lifted) input.tapped(start)
+                // (a tap on a row of keys is the keys')
+                GridTouch.UNDECIDED -> if (lifted && input.keys?.tapped(start) != true) input.tapped(start)
                 GridTouch.SCROLL -> {
                     grid.scrolling = false
                     val vx = if (lifted) velocity.calculateVelocity().x / d else 0f
@@ -501,6 +528,8 @@ internal fun Modifier.gridRowTouches(input: GridRowsInput, settle: CoroutineScop
                 GridTouch.STROKE -> input.endStroke(settle)
                 GridTouch.HANDLE -> if (lifted) input.edges().ended() else input.edges().cancel()
                 GridTouch.MOVE -> if (lifted) input.moveEnded() else input.moveCancelled()
+                GridTouch.KEY_HELD -> input.keys?.letGo()
+                GridTouch.KEYS, GridTouch.STRETCH -> input.keys?.ended(lifted)
                 else -> {}
             }
             grid.heldClip = null

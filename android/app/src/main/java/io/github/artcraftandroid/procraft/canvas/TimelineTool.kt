@@ -74,7 +74,7 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
     var clipboard by mutableStateOf(TimelineClipboardInfo(0u, false))
         private set
 
-    /** Counts the panel's readings: what is read through the session rather than kept here (an empty run's length) is read again with it. */
+    /** Counts the panel's readings: what is read through the session rather than kept here (an empty run's length, a block's pose, its motion path) is read again with it. */
     var revision by mutableStateOf(0)
         private set
 
@@ -92,6 +92,33 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
 
     /** The frames the grid shows with frame `at` under its playhead (the grid sets it as it is laid out; none of the timeline's in sight, none): playing goes round them. */
     var gridFrames: ((UInt) -> UIntRange?)? = null
+
+    // ---- keys (see TimelineKeyLanes.kt and ui/TimelineGridKeys.kt; the Keys card's block is keysCardFor) ----
+
+    /** Animate (autokey): the transform tool keys the pose of what is under the playhead. Off as a canvas opens. */
+    var autokey by mutableStateOf(false)
+
+    /** The tracks whose rows of keys are put out under them. */
+    var gridKeyTracks by mutableStateOf<Set<ULong>>(emptySet())
+
+    /** With Animate on, a take armed: the next touch on the canvas performs a move; and a take under way. */
+    var performArmed by mutableStateOf(false)
+    var performing by mutableStateOf(false)
+
+    /** How new keys ease into the next (autokey's too). */
+    var keyEasing by mutableStateOf(io.github.artcraftandroid.procraft.core.TimelineEasing.SMOOTH)
+        private set
+
+    /** Whether the timeline clipboard holds keys, to paste. */
+    var keysCopied by mutableStateOf(false)
+        private set
+
+    /** The keys picked on the rows of keys, and a drag on them. */
+    val lanes = TimelineKeyLanes(vm)
+
+
+    /** Perform's take (TimelinePerform.kt). */
+    val perform = TimelinePerform(vm)
 
     /** The tracks, bottom first. */
     val tracks: List<TimelineTrackInfo> get() = rows.map { it.track }
@@ -129,6 +156,7 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
     private var readFrom: CanvasSession? = null
     private var panelRead = 0uL
     private var pictures: List<TimelinePicture> = emptyList()
+    private var volumes: Map<ULong, List<io.github.artcraftandroid.procraft.core.TimelineLaneKey>> = emptyMap()
     private val pictureVersions = HashMap<ULong, ULong>()
     private var reading: Job? = null
     private var playing: Job? = null
@@ -150,6 +178,11 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
             thumbnails.clear()
             stopPlaying()
             take(null)
+            lanes.clear()
+            autokey = false
+            performArmed = false
+            performing = false
+            keysCardFor = null
         }
         if (s == null) return
         s.timelinePanel(panelRead)?.let {
@@ -162,15 +195,23 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
             if (picked != null) picked = null
             if (selecting != null) selecting = null
             if (keysCardFor != null) keysCardFor = null
+            performArmed = false
+            // (off a timeline there is nothing to animate)
+            if (autokey) {
+                autokey = false
+                s.setTimelineAutokey(false, keyEasing)
+            }
             return
         }
-        // clips that have gone are no longer picked
+        // clips that have gone are no longer picked; a Keys card whose block has gone shuts; the
+        // keys picked on keys gone are let go
         picked?.let { if (clip(it) == null) picked = null }
         selecting?.let { chosen ->
             val kept = chosen.filterTo(HashSet()) { clip(it) != null }
             if (kept != chosen) selecting = kept
         }
         keysCardFor?.let { if (clip(it) == null) keysCardFor = null }
+        lanes.refreshed(keys, volumes)
         revision++
         readThumbnails(s)
     }
@@ -194,6 +235,9 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
         if (onion != p?.onion) onion = p?.onion
         val held = p?.clipboard ?: TimelineClipboardInfo(0u, false)
         if (clipboard != held) clipboard = held
+        val copied = p?.clipboard?.keys == true
+        if (keysCopied != copied) keysCopied = copied
+        volumes = p?.volumes.orEmpty().associate { it.id to it.keys }
         pictures = p?.pictures.orEmpty()
     }
 
