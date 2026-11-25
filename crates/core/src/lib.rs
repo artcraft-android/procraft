@@ -1556,9 +1556,8 @@ fn draw_samples(
     if ahead_later {
         return true;
     }
-    show_ahead(canvas, builder, &[], guide);
-    // (holding its start, what it holds back shows in the tip)
-    !stamps.is_empty() || builder.holds_start()
+    let tip_shown = show_ahead(canvas, builder, &[], guide);
+    !stamps.is_empty() || builder.holds_start() || tip_shown
 }
 
 /// Whether the open stroke is a smudge whose end taper reaches back over what it lays as it goes
@@ -1590,20 +1589,22 @@ fn lift_samples(
 /// Shows what is ahead of the open stroke (`samples` being predicted input) until the next input:
 /// as its tip where the canvas takes one, on to the input itself, so it looks as the stroke will
 /// (its grain, build-up and colour, under the layers above it and in its layer's blend); else
-/// drawn over the canvas, and only as far as the path has got.
+/// drawn over the canvas, and only as far as the path has got. Returns whether the tip was drawn.
 fn show_ahead(
     canvas: &mut Canvas,
     builder: &mut StrokeBuilder,
     samples: &[Sample],
     guide: &procraft_engine::guide::Guide,
-) {
+) -> bool {
     if canvas.shows_tip() {
         // (with the stamps it holds back until they no longer change, see `hold_start`)
         let mut tip = builder.held_back();
         tip.extend(builder.preview_to_input(samples));
         canvas.set_tip(&guide::mirrored(guide, &tip));
+        !tip.is_empty()
     } else {
         canvas.set_prediction(&guide::mirrored(guide, &builder.preview(samples)));
+        false
     }
 }
 

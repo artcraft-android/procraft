@@ -409,10 +409,8 @@ fn by_speed(amount: f32, speed: f32) -> f32 {
     if amount >= 0.0 { 1.0 - amount * speed } else { 1.0 + amount * (1.0 - speed) }
 }
 
-/// Stabilisation averages each point with those either side of it: at full strength this many
-/// samples' worth each way (at the rate above), fewer as the strength to this power falls.
-const MOST_AVERAGED: f32 = 120.0;
-const STABILIZATION_POWER: f32 = 2.2;
+/// At full strength stabilisation averages up to 100 ms of input on either side of each point.
+const STABILIZATION_HALF_WINDOW_MS: f64 = 100.0;
 /// Motion filtering lets through what moves slower than its cut and takes out what shakes faster:
 /// at full strength the cut is this, in hertz. Below that it rises to the input's own rate with
 /// the strength to this power, so a little is strong already.
@@ -2529,15 +2527,15 @@ impl StrokeBuilder {
         motion_weights(amount, expression, rate)
     }
 
-    /// How many samples each way stabilisation averages: the stronger of the app's and the
-    /// brush's (see [`StrokeBuilder::with_input`]), the app's alone where the brush's own smoothing
-    /// doesn't count.
+    /// How many samples each way cover the stabilisation window at this pointer's tuned rate.
+    /// Uses the stronger of the app's and the brush's settings (see [`StrokeBuilder::with_input`]),
+    /// or the app's alone for an outside brush engine.
     fn stabilised(&self) -> usize {
         if self.exact || self.steady {
             return 0;
         }
         let amount = if self.own_smoothing() { self.extras.stabilization } else { self.input.stabilization };
-        (amount.clamp(0.0, 1.0).powf(STABILIZATION_POWER) * MOST_AVERAGED) as usize
+        (f64::from(amount.clamp(0.0, 1.0)) * STABILIZATION_HALF_WINDOW_MS / self.tuned_interval()).round() as usize
     }
 
     /// Takes the path on to `to`: input read in whole pixels evened out first (see
@@ -6517,6 +6515,40 @@ mod tests {
     }
 
     #[test]
+    fn stabilisation_uses_the_same_time_window_for_pen_and_touch() {
+        for (pointer, rate) in [(Pointer::Stylus, PEN_RATE), (Pointer::Finger, FINGER_RATE)] {
+            let samples: Vec<Sample> = (0..=(rate * 0.8) as usize)
+                .map(|i| {
+                    let ms = i as f64 * 1000.0 / rate;
+                    Sample::at(Vec2::new(ms as f32, 50.0), 1.0, ms)
+                })
+                .collect();
+            let end = samples.last().unwrap().pos.x;
+            for amount in [0.5, 1.0] {
+                for global in [false, true] {
+                    let mut brush = plain();
+                    let mut input = InputSettings::default();
+                    if global {
+                        input.stabilization = amount;
+                    } else {
+                        brush.set_setting("stabilization", amount);
+                    }
+                    let mut stroke = StrokeBuilder::new(brush, 4.0, pointer).with_input(input);
+                    stroke.add(&samples);
+                    // The line advances one pixel per millisecond. Measure settled stamps, which
+                    // are all a brush that paints in place can show while the stroke is open.
+                    let lag = end - stroke.newest_stamp().unwrap().center.x;
+                    let expected = 100.0 * amount;
+                    assert!(
+                        (expected - 5.0..expected + 20.0).contains(&lag),
+                        "{pointer:?}, amount {amount}, global {global}: trails {lag} ms"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn smoothing_takes_the_same_time_at_any_input_rate() {
         // a pen moving 1 px a millisecond for 800 ms, pressure rising from 0.2 to 1, sampled at
         // the tuned rate and at three times it
@@ -6537,7 +6569,7 @@ mod tests {
             (800.0 - last.center.x, last.radius)
         };
         let close = |a: f32, b: f32, share: f32| (a - b).abs() <= share * a.abs().max(b.abs());
-        for (setting, amount, behind) in [("stabilization", 1.0, 200.0), ("motion_filtering", 0.25, 15.0)] {
+        for (setting, amount, behind) in [("stabilization", 1.0, 60.0), ("motion_filtering", 0.25, 15.0)] {
             let mut b = plain();
             b.set_setting(setting, amount);
             let (slow, fast) = (end(&b, PEN_RATE).0, end(&b, PEN_RATE * 3.0).0);

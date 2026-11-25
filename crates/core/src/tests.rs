@@ -4656,6 +4656,31 @@ fn stroke_end_cost() {
 }
 
 #[test]
+fn a_stabilised_stock_brush_requests_a_frame_while_only_its_tip_moves() {
+    let Some(s) = session(140, 140) else { return };
+    let (set, index) = library_brush(&s, |b| b.name == "Hard Brush").expect("stock Hard Brush");
+    assert!(s.select_brush(set, index));
+    s.set_brush_size(0.15);
+    s.set_color(0.0, 0.0, 0.0);
+    s.set_input_settings(1.0, 0.0, 0.0, 0.0, true, vec![]);
+
+    s.stroke_begin(PointerKind::Stylus, vec![sample(20.5, 70.5, 0.0)]);
+    assert_eq!(pixel(&s, 95, 70), [255, 255, 255, 255]);
+    {
+        let mut st = s.shared.lock();
+        assert!(st.canvas.as_ref().unwrap().shows_tip());
+        assert!(!st.stroke.as_ref().unwrap().shows_tip());
+        // The first frame has been requested. Further input must request another one.
+        st.needs_frame = false;
+    }
+    s.stroke_add(vec![sample(60.5, 70.5, 25.0), sample(100.5, 70.5, 50.0)]);
+    assert_eq!(s.shared.lock().stroke.as_ref().unwrap().stamp_count(), 0);
+    assert!(s.wants_frame());
+    assert!(pixel(&s, 95, 70)[0] < 240, "the preview follows the pen while the stroke settles");
+    s.stroke_end(vec![]);
+}
+
+#[test]
 fn a_finger_strokes_head_is_drawn_in_its_layer_under_those_above() {
     let Some(s) = session(100, 100) else { return };
     let below = s.layers()[0].id;
