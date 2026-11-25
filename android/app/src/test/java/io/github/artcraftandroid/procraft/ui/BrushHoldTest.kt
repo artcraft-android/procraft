@@ -5,7 +5,6 @@ import androidx.compose.ui.geometry.Rect
 import io.github.artcraftandroid.procraft.core.BrushDropOver
 import io.github.artcraftandroid.procraft.core.BrushInfo
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -19,21 +18,10 @@ class BrushHoldTest {
 
     private fun over(x: Float, y: Float) = brushDropOver(Offset(x, y), sets, 1, 5, list, rows)
 
+    // (what a held brush's move does, a drag or the list's, and when its menu shows, is the core's:
+    // brush_hold.rs tests it)
     @Test
-    fun aStillHoldShowsTheMenuAndLettingGoKeepsIt() {
-        val hold = BrushHold(slop = 8f, movable = true)
-        // a finger never quite still: nothing past the slop drags
-        for (jitter in listOf(Offset(1f, 0f), Offset(0f, -2f), Offset(-3f, 4f), Offset(5.6f, 5.6f))) assertFalse(hold.move(jitter))
-        assertFalse(hold.dragging)
-    }
-
-    @Test
-    fun aHoldMovedOnDragsTheBrushAndLetGoIsOverTheHalfOfTheBrushUnderIt() {
-        val hold = BrushHold(slop = 8f, movable = true)
-        // held on the second brush, moved down: the drag starts once (the menu goes then)
-        assertTrue(hold.move(Offset(0f, 9f)))
-        assertTrue(hold.dragging)
-        assertFalse(hold.move(Offset(0f, 200f)))
+    fun aDraggedBrushLetGoIsOverTheHalfOfTheBrushUnderIt() {
         // over the fourth brush (300 to 390): its upper half, its lower half (the core puts it just
         // above or just below)
         assertEquals(BrushDropOver.OnBrush(1u, 3u, false), over(400f, 330f))
@@ -83,13 +71,6 @@ class BrushHoldTest {
     }
 
     @Test
-    fun theRecentSetsBrushesKeepTheirMenuAndStay() {
-        val hold = BrushHold(slop = 8f, movable = false)
-        assertFalse(hold.move(Offset(0f, 300f)))
-        assertFalse(hold.dragging)
-    }
-
-    @Test
     fun brushesHeldOverAnotherSetUntilItOpensAreOverItsBrushes() {
         // set 2 opened under brushes of set 1: over one of its brushes, that brush of set 2 (the core
         // copies them there, a different set from theirs)
@@ -97,6 +78,34 @@ class BrushHoldTest {
         assertEquals(BrushDropOver.OnBrush(2u, 1u, false), brushDropOver(Offset(400f, 125f), sets, 2, 3, list, opened))
         // it opens only after a hold as long as the original's (1.76 s measured)
         assertTrue(SPRING_LOAD_MS in 1600L..2000L)
+    }
+
+    /**
+     * A row whose brush was held to its menu doesn't slide open: a sideways move late in the hold is
+     * the list's (the core's hold rule), so let go it is as it was, its buttons shut and nothing
+     * picked; a press that never showed the menu slides it as ever.
+     */
+    @Test
+    fun aRowHeldToItsMenuLetGoSlidSidewaysStaysAsItWas() {
+        // buttons 400 wide, the pick 60 to the right: slid 200 left (past a third, 133), let go
+        assertEquals(false to true, brushSlideEnd(-200f, 400f, 60f, open = false, slides = true))
+        assertEquals(false to false, brushSlideEnd(-200f, 400f, 60f, open = false, slides = false))
+        // slid 40 right (past half the reach, 30): picked, unless held to the menu
+        assertEquals(true to false, brushSlideEnd(40f, 400f, 60f, open = false, slides = true))
+        assertEquals(false to false, brushSlideEnd(40f, 400f, 60f, open = false, slides = false))
+        // open already and held: still open
+        assertEquals(false to true, brushSlideEnd(-400f, 400f, 60f, open = true, slides = false))
+        // a short slide (under a third) shuts again
+        assertEquals(false to false, brushSlideEnd(-100f, 400f, 60f, open = false, slides = true))
+    }
+
+    @Test
+    fun aRowSlidesNoFurtherThanItsButtonsOrThePick() {
+        assertEquals(-400f, brushSlide(-390f, -30f, 400f, 60f, open = false), 0f)
+        assertEquals(60f, brushSlide(50f, 30f, 400f, 60f, open = false), 0f)
+        assertEquals(-150f, brushSlide(-120f, -30f, 400f, 60f, open = false), 0f)
+        // open, it goes no further right than shut
+        assertEquals(0f, brushSlide(-10f, 30f, 400f, 60f, open = true), 0f)
     }
 
     @Test

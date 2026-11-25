@@ -391,29 +391,6 @@ pub fn keep_gestures(kept: &KeptGestures) {
     keep_text("gestures", &(lines.join("\n") + "\n"));
 }
 
-/// The brush colour and the one masks paint with as they were last left (hue, saturation and
-/// brightness, 0..1), if they were kept.
-pub fn kept_colours() -> Option<([f32; 3], [f32; 3])> {
-    let text = std::fs::read_to_string(app_dir().join("colour")).ok()?;
-    let v: Vec<f32> = text
-        .split_whitespace()
-        .filter_map(|t| t.parse::<f32>().ok())
-        .filter(|x| x.is_finite())
-        .map(|x| x.clamp(0.0, 1.0))
-        .collect();
-    match v[..] {
-        [h, s, b, mh, ms, mb] => Some(([h, s, b], [mh, ms, mb])),
-        [h, s, b] => Some(([h, s, b], [0.0; 3])),
-        _ => None,
-    }
-}
-
-pub fn keep_colours(brush: [f32; 3], mask: [f32; 3]) {
-    let [h, s, b] = brush;
-    let [mh, ms, mb] = mask;
-    keep_text("colour", &format!("{h} {s} {b} {mh} {ms} {mb}"));
-}
-
 /// The QuickMenu's buttons kept, as the core writes them.
 pub fn kept_quick_menu() -> Option<String> {
     std::fs::read_to_string(app_dir().join("quick_menu")).ok().map(|s| s.trim().to_owned())

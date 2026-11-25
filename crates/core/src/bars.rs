@@ -444,7 +444,9 @@ impl BarLayout {
 
     /// Where `bar`'s collapse button goes (a disc [`COLLAPSE_BUTTON`] across): just past its end
     /// along the edge it would go into, the far end (its bottom standing, its right lying), or the
-    /// near one where that runs out of the window; none while it can't collapse or is collapsed.
+    /// near one where that runs out of the window or lies on another bar (the Tool Belt in the
+    /// corner under it); with both ends taken, beside its far end, on its side away from the edge.
+    /// None while it can't collapse or is collapsed.
     pub fn collapse_button(&self, bar: LayoutBar) -> Option<LayoutRect> {
         let b = self.lock();
         let edge = b.collapsing.then(|| b.edge_of(bar)).flatten()?;
@@ -456,16 +458,27 @@ impl BarLayout {
         let d = COLLAPSE_BUTTON;
         let gap = COLLAPSE_BUTTON_GAP;
         let rect = |x: f32, y: f32| LayoutRect { x, y, width: d, height: d };
-        Some(match edge {
+        // past its far end, past its near end, and beside its far end
+        let ways = match edge {
             WindowEdge::Left | WindowEdge::Right => {
                 let x = r.x + (r.width - d) / 2.0;
-                if r.bottom() + gap + d <= h { rect(x, r.bottom() + gap) } else { rect(x, r.y - gap - d) }
+                let beside = if edge == WindowEdge::Left { r.right() + gap } else { r.x - gap - d };
+                [rect(x, r.bottom() + gap), rect(x, r.y - gap - d), rect(beside, r.bottom() - gap - d)]
             }
             WindowEdge::Top | WindowEdge::Bottom => {
                 let y = r.y + (r.height - d) / 2.0;
-                if r.right() + gap + d <= w { rect(r.right() + gap, y) } else { rect(r.x - gap - d, y) }
+                let beside = if edge == WindowEdge::Top { r.bottom() + gap } else { r.y - gap - d };
+                [rect(r.right() + gap, y), rect(r.x - gap - d, y), rect(r.right() - gap - d, beside)]
             }
-        })
+        };
+        let inside = |c: &LayoutRect| c.x >= 0.0 && c.y >= 0.0 && c.right() <= w && c.bottom() <= h;
+        let others: Vec<LayoutRect> =
+            BARS.into_iter().filter(|&o| o != bar && !b.gone(o)).filter_map(|o| b.shown_rect(o)).collect();
+        let clear = |c: &LayoutRect| !others.iter().any(|o| overlaps(c, o));
+        let [far, near, _] = ways;
+        let fits = ways.into_iter().find(|c| inside(c) && clear(c));
+        // (nowhere clear: past an end that is in the window, as it was)
+        Some(fits.unwrap_or(if inside(&far) { far } else { near }))
     }
 
     /// `bar` collapsed into its edge (see [`BarLayout::collapse_edge`]), or brought back out, in this
@@ -747,11 +760,14 @@ impl Bars {
     }
 }
 
+/// Whether `a` and `b` overlap (more than touch).
+fn overlaps(a: &LayoutRect, b: &LayoutRect) -> bool {
+    a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
+}
+
 /// `rect` moved out of each of `others` it overlaps, the least way out that stays inside `room` (a
 /// few times over, for one it is pushed into); as it was where it can't be got out.
 fn apart(rect: LayoutRect, others: &[LayoutRect], room: FloatingRoom) -> LayoutRect {
-    let overlaps =
-        |a: &LayoutRect, b: &LayoutRect| a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom();
     let fits = |r: &LayoutRect| {
         r.x >= room.left - 0.5
             && r.right() <= room.right + 0.5
@@ -1033,6 +1049,57 @@ mod tests {
         assert!(bars.set_collapsed(LayoutBar::TopRight, true));
         let down = bars.collapsed(LayoutBar::TopRight).unwrap();
         assert_eq!((down.tab.y, down.tab.height, down.slide_x, down.slide_y), (1000.0 - 14.0, 14.0, 0.0, 48.0));
+    }
+
+    #[test]
+    fn a_collapse_button_keeps_off_the_tool_belt_and_the_other_bars() {
+        // the side bar moved down the left side onto the Tool Belt in the corner under it (12..132 by
+        // 952..988): its foot on the belt's top, 433..952
+        let bars = bars();
+        bars.set_bar(LayoutBar::Belt, at(12.0, 952.0, false), 120.0, 36.0);
+        bars.set_collapsing(true);
+        bars.hold(LayoutBar::SideBar, 20.0, 300.0);
+        bars.drag(20.0, 700.0);
+        bars.let_go();
+        let side = bars.rect(LayoutBar::SideBar).unwrap();
+        assert_eq!((side.x, side.y, side.bottom()), (0.0, 433.0, 952.0));
+        // its button would lie on the belt under its foot: over its top instead, 6 above it
+        let button = bars.collapse_button(LayoutBar::SideBar).unwrap();
+        assert_eq!((button.x, button.y), (13.5, 433.0 - 6.0 - 24.0));
+
+        // a tablet's window, 1024 by 640, as measured: the top bar 44 thick, the side bar 518.4 long
+        // and 51 thick, the belt in the corner; the side bar brought down onto the belt (73.6..592)
+        // has no room past either end (its top comes 0.4 short of the top bar's foot), so its button
+        // goes beside its foot, 6 out from it and 6 up from its end
+        let tablet = BarLayout::new();
+        tablet.set_window(1024.0, 640.0, 16.0);
+        tablet.set_bar(LayoutBar::TopLeft, at(10.0, 0.0, false), 400.0, 44.0);
+        tablet.set_bar(LayoutBar::TopRight, at(700.0, 0.0, false), 314.0, 44.0);
+        tablet.set_bar(LayoutBar::SideBar, at(0.0, 61.0, true), 518.4, 51.0);
+        tablet.set_bar(LayoutBar::Belt, at(12.0, 592.0, false), 120.0, 36.0);
+        tablet.set_editing(true);
+        tablet.set_collapsing(true);
+        tablet.hold(LayoutBar::SideBar, 25.0, 300.0);
+        tablet.drag(25.0, 560.0);
+        tablet.let_go();
+        let side = tablet.rect(LayoutBar::SideBar).unwrap();
+        assert_eq!((side.x, side.bottom()), (0.0, 592.0), "{side:?}");
+        assert!(side.y < 44.0 + 30.0, "{side:?}");
+        let button = tablet.collapse_button(LayoutBar::SideBar).unwrap();
+        assert_eq!((button.x, button.y), (51.0 + 6.0, 592.0 - 6.0 - 24.0));
+        // and wherever it stands down the left side, its button is on no other bar, in the window
+        let others = [LayoutBar::TopLeft, LayoutBar::TopRight, LayoutBar::Belt];
+        for y in (0..=14).map(|i| 300.0 + i as f32 * 20.0) {
+            tablet.hold(LayoutBar::SideBar, 25.0, 300.0);
+            tablet.drag(25.0, y);
+            tablet.let_go();
+            let Some(button) = tablet.collapse_button(LayoutBar::SideBar) else { continue };
+            for o in others {
+                let r = tablet.rect(o).unwrap();
+                assert!(!overlaps(&button, &r), "{y}: {button:?} on {o:?} {r:?}");
+            }
+            assert!(button.x >= 0.0 && button.y >= 0.0 && button.right() <= 1024.0 && button.bottom() <= 640.0);
+        }
     }
 
     #[test]

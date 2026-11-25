@@ -2024,7 +2024,10 @@ procraft_brush_under(stroke: i32, len: i32) -> i32   // optional: the colours un
   canvas).
 - `procraft_brush_add` is handed samples, at most four at a time, 32 bytes each as layers' items
   hold them: x, y (canvas pixels), pressure (through the app's pressure curve), tilt, azimuth and
-  roll (radians), then the milliseconds since the stroke's first sample as a 64-bit float.
+  roll (radians), then the milliseconds since the stroke's first sample as a 64-bit float. They are
+  the path as the app's Pressure and Smoothing settles it (its stabilisation, motion filtering and
+  pressure smoothing; none of the brush's own, whose studio is the engine's), each timed as the
+  sample it came of, the last where the pen lifted.
 - Dabs come back 96 bytes each, twenty-four 32-bit numbers: x, y, its diameter (the longer side of its
   tip, canvas pixels), its angle (radians, clockwise), its squash (0..1 across its angle, laid at
   0.05 at the least), its opacity and flow (0..1), its tip (u32), flags (u32: 1 mirrored across, 2

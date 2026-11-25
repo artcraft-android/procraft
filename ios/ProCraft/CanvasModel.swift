@@ -190,7 +190,7 @@ final class CanvasModel {
     @ObservationIgnored private var onMask = false
     /// The colour not in use (hue, saturation, brightness): masks' while a layer of another kind is
     /// current, the brush's while a mask is.
-    @ObservationIgnored private var otherColour: [Float] = AppSettings.shared.maskColor
+    @ObservationIgnored private var otherColour: [Float] = CanvasModel.keptColours.mask()
     /// What is drawn over the canvas follows the view while it moves into place.
     @ObservationIgnored private var settling: Timer?
     /// A save failed and was told of: the next isn't, until one succeeds again.
@@ -204,6 +204,20 @@ final class CanvasModel {
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         return ColourHistory.open(path: support.appendingPathComponent("colour-history.json").path)
+    }()
+
+    /// The brush colour and the masks', kept by the shared core in their file as each changes, so
+    /// the next start finds them however this run ends (killed, nothing runs on the way out).
+    static let keptColours: KeptColours = {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        let kept = KeptColours.open(path: support.appendingPathComponent("colour").path)
+        // the colours earlier versions kept in the app's settings, once
+        if !kept.wasKept() {
+            kept.keep(brush: AppSettings.shared.brushColor, mask: AppSettings.shared.maskColor)
+        }
+        return kept
     }()
 
     /// The modify button was pressed: the next touch on the canvas picks a colour (the touches
@@ -550,9 +564,10 @@ final class CanvasModel {
         history = Self.colourHistory.colours()
         refreshPalettes()
         // the colour as it was last left
-        hue = settings.brushColor[0]
-        saturation = settings.brushColor[1]
-        brightness = settings.brushColor[2]
+        let brush = Self.keptColours.brush()
+        hue = brush.first ?? AppSettings.defaultHue
+        saturation = brush.dropFirst().first ?? 1
+        brightness = brush.dropFirst(2).first ?? 1
         applyColor()
         tool = session.info().tool
         // the light tool is an HDR canvas's: a standard one left on it opens on the brush
@@ -577,6 +592,8 @@ final class CanvasModel {
 
     deinit {
         CanvasLife.gone(.model)
+        // (one left: the log says how long after)
+        CanvasLife.modelGone(ObjectIdentifier(self))
     }
 
     /// Where the brush library and the brushes in use are kept.
@@ -1424,6 +1441,14 @@ final class CanvasModel {
                 self?.keepPreview(key, image, shaded: under)
             }
         }
+    }
+
+    /// The library closed: the core lets go of the canvas its sample strokes are drawn on (100 MB
+    /// and more of the GPU's memory after a heavy set), made again for the next. The pictures stay,
+    /// so it opens again at once.
+    func libraryClosed() {
+        let session = session
+        DispatchQueue.global(qos: .utility).async { session.letGoOfPreviews() }
     }
 
     /// `image` kept as brush `key`'s sample stroke, the oldest let go past the most kept.
@@ -2624,11 +2649,11 @@ final class CanvasModel {
         keepColour()
     }
 
-    /// Keeps the brush colour and the masks' for the next session.
+    /// Keeps the brush colour and the masks' for the next start (the core writes them soon, off
+    /// this thread).
     private func keepColour() {
         let now = [hue, saturation, brightness]
-        AppSettings.shared.brushColor = onMask ? otherColour : now
-        AppSettings.shared.maskColor = onMask ? now : otherColour
+        Self.keptColours.keep(brush: onMask ? otherColour : now, mask: onMask ? now : otherColour)
     }
 
     /// A mask became current, or stopped being: the colour trades places with the other kind's, as

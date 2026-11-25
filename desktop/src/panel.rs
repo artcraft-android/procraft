@@ -304,6 +304,30 @@ pub fn panels_fold(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("panels fold"))).unwrap_or(false)
 }
 
+/// Whether every panel is drawn solid this frame: while a plugin lays the panels out, a window lies
+/// over the bars and the other windows and a panel over a window, and only the canvas blurs behind
+/// the frost (what else is under it would show through sharp).
+pub fn set_panels_solid(ctx: &egui::Context, solid: bool) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("panels solid"), solid));
+}
+
+/// Whether every panel is drawn solid this frame.
+fn panels_solid(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("panels solid"))).unwrap_or(false)
+}
+
+/// A panel's frost: the interface's (what is behind showing through, blurred), or wholly `solid`.
+fn frost_colour(solid: bool) -> Color32 {
+    solid_if(argb(POPOVER_FROST), solid)
+}
+
+/// `frost`, or its tint wholly opaque while `solid`.
+fn solid_if(frost: Color32, solid: bool) -> Color32 {
+    // (its tint as written, not as it is kept, multiplied by how much of it shows)
+    let [r, g, b, _] = frost.to_srgba_unmultiplied();
+    if solid { Color32::from_rgb(r, g, b) } else { frost }
+}
+
 /// Fold: a disc of white with a bar across it, at `rect`'s middle; whether it was tapped.
 pub fn fold_button(ui: &Ui, rect: Rect) -> bool {
     let c = rect.center();
@@ -700,14 +724,15 @@ pub fn frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: 
     };
     ui.painter().add(shadow.as_shape(body, POPOVER_CORNER));
     let size = rect.size();
-    let key = ((arrow_x * 100.0).round() as i32, side.map(|s| s as i32));
+    let solid = panels_solid(ui.ctx());
+    let key = ((arrow_x * 100.0).round() as i32, side.map(|s| s as i32), solid);
     look.shape(ui, slot, key, rect, |pixmap, t| {
         let (half, tip) = (ARROW_HEIGHT, 2.0);
         let near = |from: f32| (from - half - tip).clamp(0.0, POPOVER_CORNER);
         match side {
             Some(HangSide::Left | HangSide::Right) => {
                 let left = side == Some(HangSide::Right);
-                frost(pixmap, side_outline(size, arrow_x, left, POPOVER_CORNER), t);
+                frost(pixmap, side_outline(size, arrow_x, left, POPOVER_CORNER), t, solid);
                 return;
             }
             // its arrow down at the button, under it
@@ -721,7 +746,7 @@ pub fn frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: 
                 pb.quad_to(arrow_x, size.y, arrow_x + tip, size.y - tip);
                 pb.line_to(arrow_x + half + tip, bottom - 0.5);
                 pb.close();
-                frost(pixmap, pb, t);
+                frost(pixmap, pb, t, solid);
                 return;
             }
             Some(HangSide::Below) | None => {}
@@ -737,7 +762,7 @@ pub fn frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: 
         pb.quad_to(arrow_x, 0.0, arrow_x + tip, tip);
         pb.line_to(arrow_x + half + tip, ARROW_HEIGHT + 0.5);
         pb.close();
-        frost(pixmap, pb, t);
+        frost(pixmap, pb, t, solid);
     });
 }
 
@@ -762,10 +787,11 @@ pub fn floating_frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, 
     };
     ui.painter().add(shadow.as_shape(rect, corner));
     let size = rect.size();
-    look.shape(ui, slot, (size.y * 10.0).round() as i32, rect, |pixmap, t| {
+    let solid = panels_solid(ui.ctx());
+    look.shape(ui, slot, ((size.y * 10.0).round() as i32, solid), rect, |pixmap, t| {
         let mut pb = tiny_skia::PathBuilder::new();
         round_rect(&mut pb, Rect::from_min_size(pos2(0.0, 0.0), size), [corner; 4]);
-        frost(pixmap, pb, t);
+        frost(pixmap, pb, t, solid);
     });
 }
 
@@ -800,8 +826,9 @@ pub fn side_frame(
     };
     ui.painter().add(shadow.as_shape(body, corner));
     let size = rect.size();
-    let key = ((arrow_y * 100.0).round() as i32, left, (corner * 10.0) as i32);
-    look.shape(ui, slot, key, rect, |pixmap, t| frost(pixmap, side_outline(size, arrow_y, left, corner), t));
+    let solid = panels_solid(ui.ctx());
+    let key = ((arrow_y * 100.0).round() as i32, left, (corner * 10.0) as i32, solid);
+    look.shape(ui, slot, key, rect, |pixmap, t| frost(pixmap, side_outline(size, arrow_y, left, corner), t, solid));
     body
 }
 
@@ -922,11 +949,11 @@ pub fn solid_frame(
     body
 }
 
-/// A panel's outline filled with its frosted material: the arrow and the body are one shape,
-/// filled as one, without an even-odd seam.
-fn frost(pixmap: &mut tiny_skia::Pixmap, pb: tiny_skia::PathBuilder, t: tiny_skia::Transform) {
+/// A panel's outline filled with its frosted material (wholly `solid`, see [`frost_colour`]): the
+/// arrow and the body are one shape, filled as one, without an even-odd seam.
+fn frost(pixmap: &mut tiny_skia::Pixmap, pb: tiny_skia::PathBuilder, t: tiny_skia::Transform, solid: bool) {
     let mut paint = tiny_skia::Paint::default();
-    let [r, g, b, a] = argb(POPOVER_FROST).to_srgba_unmultiplied();
+    let [r, g, b, a] = frost_colour(solid).to_srgba_unmultiplied();
     paint.set_color_rgba8(r, g, b, a);
     paint.anti_alias = true;
     if let Some(path) = pb.finish() {
@@ -984,8 +1011,27 @@ mod tests {
     use egui::emath::TSTransform;
     use egui::{Pos2, Rect, pos2, vec2};
 
-    use super::{ARROW_SHIFT, POPOVER_GAP, PanelSpace, drawing_panel, place, put_part_scales, side_bar_at, tab_cells};
+    use super::{
+        ARROW_SHIFT, POPOVER_GAP, PanelSpace, drawing_panel, place, put_part_scales, side_bar_at, solid_if, tab_cells,
+    };
     use crate::look::pc;
+
+    /// While a plugin lays the panels out, a panel over a floating window (or a window over another)
+    /// hides it whole: the dark frost (0xDE1E1E1E) let 13% of it through, its text readable, as only
+    /// the canvas blurs behind the frost.
+    #[test]
+    fn a_panel_that_may_lie_over_a_window_hides_it_whole() {
+        let frost = egui::Color32::from_rgba_unmultiplied(0x1E, 0x1E, 0x1E, 0xDE);
+        assert_eq!(solid_if(frost, false), frost);
+        let solid = solid_if(frost, true);
+        // its tint as it is, wholly opaque (not the kept, darker, premultiplied one)
+        assert_eq!(solid.to_array(), [0x1E, 0x1E, 0x1E, 0xFF]);
+        // a window's white text (255) on its ground (30) under it: no level of it shows
+        let through = |c: egui::Color32| f32::from(255 - c.a()) / 255.0 * (255.0 - 30.0);
+        println!("through the frost: {:.1} levels, solid: {:.1}", through(frost), through(solid));
+        assert!(through(frost) > 25.0);
+        assert!(through(solid) < 0.5);
+    }
 
     /// A window's tabs across its strip keep clear of its menu button, Close and Fold, however many
     /// it holds: four on the Actions window (389 wide) are 54 wide each, not 86 running under the

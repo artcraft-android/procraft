@@ -11,6 +11,7 @@
 //! apart for Pansy). Nor kept on a device of little memory, nor where laying whole is asked for.
 //! Nothing it keeps changes how the stroke is drawn meanwhile.
 
+use crate::Gpu;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::rewind::{GIVEN_MOST, MARK_EVERY_MS, MARKS_MOST, MARKS_REACH_MS, same};
@@ -91,7 +92,7 @@ impl SecondMarks {
 
     /// A tile picture to keep a mark's in: one let go of, else a new one if the most allows,
     /// letting go of the oldest marks (not the newest) for room.
-    fn take(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) -> Option<wgpu::Texture> {
+    fn take(&mut self, gpu: &Gpu, format: wgpu::TextureFormat) -> Option<wgpu::Texture> {
         loop {
             if let Some(t) = self.free.pop() {
                 return Some(t);
@@ -99,7 +100,7 @@ impl SecondMarks {
             let tile_bytes = u64::from(SIDE * SIDE) * u64::from(format.block_copy_size(None).unwrap_or(8));
             if self.bytes + tile_bytes <= self.most {
                 self.bytes += tile_bytes;
-                return Some(texture(device, "second mark", SIDE, SIDE, format));
+                return Some(texture(gpu, "second mark", SIDE, SIDE, format));
             }
             if self.marks.len() < 2 {
                 return None;
@@ -134,7 +135,7 @@ impl Canvas {
     /// the stamps noted as laid.
     pub(super) fn mark_second(
         &mut self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         into: &wgpu::Texture,
         (instances, wet, times): (&[StampInstance], &[[f32; 8]], &[Paced]),
@@ -181,12 +182,13 @@ impl Canvas {
         };
         for at in kept {
             // past the most it keeps: this mark can't be gone back to
-            let Some(picture) = marks.take(device, format) else {
+            let Some(picture) = marks.take(gpu, format) else {
                 marks.drop_newest();
                 break;
             };
             let r = tile_rect(at, SIDE).intersect(full);
-            encoder.copy_texture_to_texture(
+            gpu.copy_texture_to_texture(
+                encoder,
                 copy_at(into, r.x0, r.y0),
                 copy_at(&picture, 0, 0),
                 extent(r.width(), r.height()),
@@ -274,10 +276,10 @@ impl Canvas {
     /// Goes back to the open stroke's second's mark before its `at`th stamp (see
     /// [`Canvas::second_rewound`]): the tiles written since as they were then (those nothing had
     /// written, cleared).
-    pub(super) fn rewind_second(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, at: usize) {
+    pub(super) fn rewind_second(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, at: usize) {
         let full = self.full();
         let format = self.pipelines.stroke_format;
-        let second = self.second_stroke.get(device).0.clone();
+        let second = self.second_stroke.get(gpu).0.clone();
         let Some(marks) = self.second_marks.as_mut() else { return };
         let Some(k) = marks.marks.iter().position(|m| m.at == at) else {
             log::error!("a second's mark at {at} went before it was gone back to");
@@ -297,10 +299,11 @@ impl Canvas {
         let mut changed = IRect::EMPTY;
         if !blank.is_empty() {
             // (a texture of its own read before it is written is as cleared)
-            let cleared = marks.blank.get_or_insert_with(|| texture(device, "second mark blank", SIDE, SIDE, format));
+            let cleared = marks.blank.get_or_insert_with(|| texture(gpu, "second mark blank", SIDE, SIDE, format));
             for tile in &blank {
                 let r = tile_rect(*tile, SIDE).intersect(full);
-                encoder.copy_texture_to_texture(
+                gpu.copy_texture_to_texture(
+                    encoder,
                     copy_at(cleared, 0, 0),
                     copy_at(&second, r.x0, r.y0),
                     extent(r.width(), r.height()),
@@ -310,7 +313,8 @@ impl Canvas {
         }
         for (tile, saved) in first {
             let r = tile_rect(tile, SIDE).intersect(full);
-            encoder.copy_texture_to_texture(
+            gpu.copy_texture_to_texture(
+                encoder,
                 copy_at(saved, 0, 0),
                 copy_at(&second, r.x0, r.y0),
                 extent(r.width(), r.height()),

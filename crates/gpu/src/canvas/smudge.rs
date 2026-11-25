@@ -502,7 +502,7 @@ impl Canvas {
         pieces: &[Piece],
         (brush, second): (&wgpu::BindGroup, Option<&wgpu::TextureView>),
     ) {
-        self.ready_asides(&gpu.device, pieces);
+        self.ready_asides(gpu, pieces);
         let together = self.smudge_most.min(TOGETHER_MOST);
         let area = |r: IRect| u64::from(r.width()) * u64::from(r.height());
         let mut from = 0;
@@ -691,7 +691,8 @@ impl Canvas {
     /// Makes room to put aside the carries of the copies of the stroke that `pieces` work in (and of
     /// the one whose carry the stroke's holds), where more than one copy is among them. A copy whose
     /// carry can't be put aside (past the GPU's memory) works in the carry as the others leave it.
-    fn ready_asides(&mut self, device: &wgpu::Device, pieces: &[Piece]) {
+    fn ready_asides(&mut self, gpu: &Gpu, pieces: &[Piece]) {
+        let device = &gpu.device;
         let in_fragments = self.pipelines.compute.is_none();
         let Some(smudge) = self.smudge.as_mut() else { return };
         let mut copies: Vec<usize> = pieces.iter().filter(|p| p.carry_use().is_some()).map(|p| p.carry).collect();
@@ -712,7 +713,7 @@ impl Canvas {
             let aside = if in_fragments {
                 let side = if wet { super::WET_PLOT_MOST } else { super::SMUDGE_GRID };
                 super::Aside::Texture(super::fragments::Tex::new(
-                    device,
+                    gpu,
                     "smudge carry aside",
                     side,
                     side,
@@ -764,7 +765,7 @@ impl Canvas {
     ) -> bool {
         let device = &gpu.device;
         // what the passes write, as it is before them, for the stroke's mark to go back to
-        self.keep_for_mark(device, encoder, writes);
+        self.keep_for_mark(gpu, encoder, writes);
         let full = self.full();
         let also = self.smudge_also();
         let room = self.smudge_room;
@@ -798,11 +799,11 @@ impl Canvas {
                 let bytes = bytes.next_multiple_of(1 << 20).min(most).max(bytes);
                 let side = |n: u32, of: u32| n.next_multiple_of(256).min(of).max(n);
                 let before =
-                    texture(device, "smudge window", side(width, self.width), side(height, self.height), format);
+                    texture(gpu, "smudge window", side(width, self.width), side(height, self.height), format);
                 let layer_bytes = bytes * u64::from(wide);
                 let amounts = (format != LAYER_FORMAT && (keeps.amount || keeps.shown)).then(|| {
                     let t = texture(
-                        device,
+                        gpu,
                         "smudge window amounts",
                         side(width, self.width),
                         side(height, self.height),
@@ -823,8 +824,8 @@ impl Canvas {
                 }
             });
             // (the layer's pixels as they are; the amounts' bits as bytes)
-            let tile = |label| texture(device, label, side, side, format);
-            let amount_tile = |label| texture(device, label, side, side, LAYER_FORMAT);
+            let tile = |label| texture(gpu, label, side, side, format);
+            let amount_tile = |label| texture(gpu, label, side, side, LAYER_FORMAT);
             let made: Vec<((u32, u32), Tile)> = missing
                 .iter()
                 .map(|&at| {
@@ -857,14 +858,16 @@ impl Canvas {
                 // the layer there as it was: the stroke hasn't written to it yet
                 let r = tile_rect(at, side).intersect(full);
                 for into in std::iter::once(&tile.before).chain(&tile.grained) {
-                    encoder.copy_texture_to_texture(
+                    gpu.copy_texture_to_texture(
+                        encoder,
                         copy_at(&layer.texture, r.x0, r.y0),
                         copy_at(into, 0, 0),
                         extent(r.width(), r.height()),
                     );
                 }
                 for (from, into) in also.iter().zip(&tile.more) {
-                    encoder.copy_texture_to_texture(
+                    gpu.copy_texture_to_texture(
+                        encoder,
                         copy_at(from, r.x0, r.y0),
                         copy_at(into, 0, 0),
                         extent(r.width(), r.height()),
@@ -931,7 +934,7 @@ impl Canvas {
             // (under what the tiles' parts don't cover)
             if theirs.iter().map(|t| area(t.1)).sum::<u64>() < whole {
                 if from_the_layer {
-                    encoder.copy_texture_to_texture(from_layer, copy_at(into, 0, 0), size);
+                    gpu.copy_texture_to_texture(encoder, from_layer, copy_at(into, 0, 0), size);
                 } else {
                     drop(super::render_pass(
                         encoder,
@@ -942,7 +945,7 @@ impl Canvas {
                 }
             }
             for (kept, r, (x, y)) in theirs {
-                encoder.copy_texture_to_texture(copy_at(kept, x, y), at_window(into, r, reach), extent(r.width(), r.height()));
+                gpu.copy_texture_to_texture(encoder, copy_at(kept, x, y), at_window(into, r, reach), extent(r.width(), r.height()));
             }
             gpu.copy_texture_to_buffer(
                 encoder,
@@ -953,10 +956,11 @@ impl Canvas {
         }
         if before {
             if parts.iter().map(|p| area(p.1)).sum::<u64>() < whole {
-                encoder.copy_texture_to_texture(from_layer, copy_at(&window.before, 0, 0), size);
+                gpu.copy_texture_to_texture(encoder, from_layer, copy_at(&window.before, 0, 0), size);
             }
             for &(tile, r, (x, y)) in &parts {
-                encoder.copy_texture_to_texture(
+                gpu.copy_texture_to_texture(
+                    encoder,
                     copy_at(&tile.before, x, y),
                     at_window(&window.before, r, reach),
                     extent(r.width(), r.height()),
@@ -1027,7 +1031,7 @@ impl Canvas {
 
     /// Puts the open smudge stroke's layer back as it was wherever the stroke has written (and what
     /// it changes besides, as they were).
-    pub(super) fn smudge_put_back(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub(super) fn smudge_put_back(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder) {
         let full = self.full();
         let also = self.smudge_also();
         let Some(smudge) = self.smudge.as_ref() else { return };
@@ -1039,7 +1043,8 @@ impl Canvas {
                 std::iter::once((&tile.before, Some(&layer.texture))).chain(tile.more.iter().zip(also.iter().copied()));
             for (kept, to) in back {
                 let Some(to) = to else { continue };
-                encoder.copy_texture_to_texture(
+                gpu.copy_texture_to_texture(
+                    encoder,
                     copy_at(kept, 0, 0),
                     copy_at(to, r.x0, r.y0),
                     extent(r.width(), r.height()),
@@ -1049,14 +1054,21 @@ impl Canvas {
     }
 
     /// The open smudge stroke's layer as it was over `rect` (within the canvas), into `into`.
-    pub(super) fn smudge_before(&self, encoder: &mut wgpu::CommandEncoder, rect: IRect, into: &wgpu::Texture) {
-        self.smudge_before_of(encoder, rect, into, None);
+    pub(super) fn smudge_before(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        rect: IRect,
+        into: &wgpu::Texture,
+    ) {
+        self.smudge_before_of(gpu, encoder, rect, into, None);
     }
 
     /// What the open smudge stroke works in as it was over `rect` (within the canvas), into `into`;
     /// or (`also`) the one of the textures it changes besides (see [`Canvas::smudge_also`]).
     pub(super) fn smudge_before_of(
         &self,
+        gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         rect: IRect,
         into: &wgpu::Texture,
@@ -1069,7 +1081,8 @@ impl Canvas {
         };
         let Some(layer) = id.and_then(|id| self.layers.get(&id)) else { return };
         // as it is where the stroke hasn't written, then its tiles
-        encoder.copy_texture_to_texture(
+        gpu.copy_texture_to_texture(
+            encoder,
             copy_at(&layer.texture, rect.x0, rect.y0),
             copy_at(into, 0, 0),
             extent(rect.width(), rect.height()),
@@ -1086,7 +1099,8 @@ impl Canvas {
             if r.is_empty() {
                 continue;
             }
-            encoder.copy_texture_to_texture(
+            gpu.copy_texture_to_texture(
+                encoder,
                 copy_at(kept, r.x0 - t.x0, r.y0 - t.y0),
                 copy_at(into, r.x0 - rect.x0, r.y0 - rect.y0),
                 extent(r.width(), r.height()),
@@ -1104,12 +1118,8 @@ impl Canvas {
     /// Makes the open smudge stroke's tiles under `rects` that it hasn't made yet (keeping what is
     /// under them as it was), before it writes there other than through a window; false if they
     /// couldn't be made (the stroke then lays nothing more).
-    pub(super) fn smudge_keep(
-        &mut self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        rects: &[IRect],
-    ) -> bool {
+    pub(super) fn smudge_keep(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, rects: &[IRect]) -> bool {
+        let device = &gpu.device;
         let full = self.full();
         let also = self.smudge_also();
         let in_fragments = self.pipelines.compute.is_none();
@@ -1133,10 +1143,10 @@ impl Canvas {
         let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
         // (the layer's pixels as they are)
-        let tile = |label| texture(device, label, side, side, layer.texture.format());
+        let tile = |label| texture(gpu, label, side, side, layer.texture.format());
         // (the amounts' bits as words in fragment passes, as their bytes elsewhere)
         let amounts = if in_fragments { super::fragments::AMOUNT_FORMAT } else { LAYER_FORMAT };
-        let amount_tile = |label| texture(device, label, side, side, amounts);
+        let amount_tile = |label| texture(gpu, label, side, side, amounts);
         let made: Vec<((u32, u32), Tile)> = missing
             .iter()
             .map(|&at| {
@@ -1163,7 +1173,8 @@ impl Canvas {
                 .chain(tile.grained.iter().map(|g| (&layer.texture, g)))
                 .chain(also.iter().copied().zip(&tile.more));
             for (from, into) in from {
-                encoder.copy_texture_to_texture(
+                gpu.copy_texture_to_texture(
+                    encoder,
                     copy_at(from, r.x0, r.y0),
                     copy_at(into, 0, 0),
                     extent(r.width(), r.height()),

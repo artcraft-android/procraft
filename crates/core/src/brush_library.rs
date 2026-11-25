@@ -183,6 +183,10 @@ pub(crate) struct SavedBrush {
     /// Its own pressure curves for other controls, by their keys in brush files, if they differ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pressure_curves: Option<BTreeMap<String, Vec<[f32; 2]>>>,
+    /// Its round tip's hardness, if it differs from its origin's: a brush file's tip stood in for by
+    /// our round tip, or another app's round brush (no control of the studio sets it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hardness: Option<f32>,
     /// The brush's own shape and grain images, as text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shape_source: Option<String>,
@@ -831,6 +835,7 @@ impl State {
                     .map(|(k, c)| (brushfile::pressure_curve_key(k).to_owned(), points(c)))
                     .collect()
             }),
+            hardness: (brush.hardness != base.hardness).then_some(brush.hardness),
             // a stock shape's is made again from its name when the brush comes back (so it isn't
             // drawn, nor written out, to be kept)
             shape_source: brush.stock.shape.is_none().then(|| own(&brush.shape.source, &base.shape.source)).flatten(),
@@ -986,9 +991,18 @@ impl State {
             let data = picture(text)?;
             Some(procraft_engine::brush::OutsideBrush { engine: engine.clone(), data })
         });
+        if let Some(h) = b.hardness.filter(|h| h.is_finite()) {
+            brush.hardness = h.clamp(0.0, 1.0);
+        }
+        // (a stock tip our round tip stands in for brings its hardness again, as it did when the
+        // brush was brought in: a library kept before the hardness was has it back)
         if let Some(s) = &brush.stock.shape {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
-            (brush.shape.image, brush.shape.source, _) = crate::brush_files::shape_for(&texture);
+            let hardness;
+            (brush.shape.image, brush.shape.source, hardness) = crate::brush_files::shape_for(&texture);
+            if let Some(h) = hardness {
+                brush.hardness = h;
+            }
         }
         if let Some(s) = &brush.stock.grain {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
@@ -2753,6 +2767,79 @@ mod keeping {
         assert_eq!(s.import_any_brushes(file, None, 0), Some(0), "no name: told by its contents");
         assert_eq!(s.import_any_brushes(vec![1, 2, 3], Some("junk.abr".into()), 0), None);
         assert_eq!(s.import_any_brushes(vec![1, 2, 3], None, 0), None);
+    }
+
+    /// The ink a round tip of `hardness` lays across its disc, as a share of a hard disc's: the
+    /// stamp's edge fades from `hardness` of its radius out (as the stamp shader draws it).
+    fn round_tip_ink(hardness: f32) -> f32 {
+        let n = 4000;
+        let (mut ink, mut disc) = (0.0, 0.0);
+        for i in 0..n {
+            let r = (i as f32 + 0.5) / n as f32;
+            let h = hardness.min(0.999);
+            let t = ((r - h) / (1.0 - h)).clamp(0.0, 1.0);
+            ink += (1.0 - t * t * (3.0 - 2.0 * t)) * r;
+            disc += r;
+        }
+        ink / disc
+    }
+
+    /// A brush file of another app's kind holding `strings` beside its name, and no pictures.
+    fn other_apps_brush(name: &str, strings: &[(&str, &str)]) -> Vec<u8> {
+        let mut b = procraft_engine::keyed::Builder::new();
+        let root = b.reserve();
+        let mut all = vec![("name", b.string(name))];
+        for &(key, value) in strings {
+            all.push((key, b.string(value)));
+        }
+        b.fill(&root, &["SilicaBrush", "ValkyrieBrush", "NSObject"], all);
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        zip.add("Brush.archive", &b.finish(root));
+        zip.finish()
+    }
+
+    #[test]
+    fn an_imported_round_tip_is_as_soft_once_the_library_is_read_back() {
+        // a brush whose file names the stock medium tips (as the airbrushes and blending brushes
+        // made from them do): drawn as our round tip at their softness
+        let s = CanvasSession::new(32, 32);
+        let mut wanted = Vec::new();
+        for (tip, hardness) in [("Brush-Preset-Medium.png", 0.5), ("Brush-Preset-Medium-Hard.png", 0.75)] {
+            let file = other_apps_brush(&format!("Blend {tip}"), &[("bundledShapePath", tip)]);
+            let set = s.import_any_brushes(file, Some("Blend.brush".into()), 0).unwrap() as usize;
+            let st = s.shared.lock();
+            let b = st.library[set].brushes.iter().find(|b| b.name == format!("Blend {tip}")).unwrap();
+            assert!(b.round_tip() && (b.hardness - hardness).abs() < 1e-6, "{tip}: {}", b.hardness);
+            wanted.push((b.name.clone(), hardness));
+        }
+        // another app's soft round brush (no stock tip named, as from a Krita or Photoshop file):
+        // its own softness
+        let set = s.import_any_brushes(other_apps_brush("Soft round", &[]), Some("Round.brush".into()), 0).unwrap();
+        {
+            let mut st = s.shared.lock();
+            let b = st.library[set as usize].brushes.iter_mut().find(|b| b.name == "Soft round").unwrap();
+            assert!(b.round_tip() && b.stock.shape.is_none());
+            b.hardness = 0.2;
+            wanted.push((b.name.clone(), 0.2));
+        }
+        // kept, and read back as the app does when it starts again
+        let t = CanvasSession::new(32, 32);
+        assert!(t.load_brush_library(s.saved_brush_library()));
+        let st = t.shared.lock();
+        for (name, hardness) in wanted {
+            let b = st.library.iter().flat_map(|set| &set.brushes).find(|b| b.name == name).unwrap();
+            println!(
+                "{name}: hardness {:.2} (imported {hardness:.2}); a stamp's ink {:.3} of a hard disc's (imported {:.3})",
+                b.hardness,
+                round_tip_ink(b.hardness),
+                round_tip_ink(hardness)
+            );
+            assert!(
+                b.round_tip() && (b.hardness - hardness).abs() < 1e-6,
+                "{name}: {} after, {hardness} before",
+                b.hardness
+            );
+        }
     }
 
     #[test]

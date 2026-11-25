@@ -6792,3 +6792,132 @@ fn a_veil_drawn_a_cell_at_a_time_shows_its_hole_as_testing_every_pixel_does() {
         assert!(worst <= 3, "zoom {zoom}: a pixel {worst} levels from testing every pixel");
     }
 }
+
+/// A GPU whose shader compiler lays the carried rule pass wrong (emulated here: its half floats a
+/// quarter of the paint, as the Adreno 750's came out next to nothing of a dual brush cut by its
+/// second) is found out by a check made before its first dual stroke that would carry a part (not
+/// as a canvas is made, nor for another stroke), and lays such strokes by the plain rule pass: the
+/// same pixels as a device made to lay them so, where carried as it is the stroke came out
+/// thousands of pixels apart and fainter. This GPU, laying it right, keeps the carry. A check that
+/// can't be made turns the carry off as well.
+#[test]
+fn a_gpu_laying_the_carried_rule_pass_wrong_lays_dual_brushes_by_the_plain_pass() {
+    use procraft_gpu::{CarryFault, SecondStroke};
+    let side = 128u32;
+    // a wavy stroke of stamps of all sizes, turns, squashes, alphas and transfers
+    let stamps = |n: usize, second: bool| -> Vec<Stamp> {
+        (0..n)
+            .map(|i| {
+                let t = i as f32 + if second { 0.5 } else { 0.0 };
+                let x = 12.0 + (t * 0.35) % 104.0;
+                let y = 64.0 + (t * 0.05).sin() * 40.0 + if second { (t * 0.31).cos() * 8.0 } else { 0.0 };
+                let radius = 3.0 + 14.0 * (t * 0.023).sin().abs() + if second { 3.0 } else { 0.0 };
+                Stamp {
+                    angle: t * 0.37,
+                    roundness: 0.35 + 0.65 * (t * 0.11).sin().abs(),
+                    transfer: 0.3 + 0.7 * (t * 0.07).cos().abs(),
+                    grain_offset: Vec2::new(t * 1.7, t * 0.9),
+                    time_ms: f64::from(t) * 4.0,
+                    ..Stamp::round(Vec2::new(x, y), radius, 0.15 + 0.8 * (t * 0.061).cos().abs())
+                }
+            })
+            .collect()
+    };
+    let first = StrokeStyle {
+        rendering: Rendering::Gradual,
+        shape: Some(0),
+        grain: Some(0),
+        grain_mode: procraft_engine::brush::GrainMode::Moving,
+        grain_depth: 0.8,
+        grain_scale: 40.0,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.7, 0.25, 0.1], 1.0)
+    };
+    let second = StrokeStyle {
+        rendering: Rendering::Capped,
+        hardness: 0.6,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.1, 0.3, 0.8], 1.0)
+    };
+    // on a device of its own made as `make` says: the layer once the stroke, drawn a few stamps a
+    // frame, ends; what the check found; and how long it took, where it was made before the stroke
+    let laid = |make: &dyn Fn(&Gpu), timed: bool| -> Option<(Vec<u8>, Option<bool>, Option<f64>)> {
+        let gpu = gpu()?;
+        let _check = NoErrors(&gpu);
+        make(&gpu);
+        let mut doc = Document::new(side, side);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        // (neither a canvas made nor a stroke of one part asks for the check)
+        canvas.begin_stroke(doc.current(), first);
+        canvas.add_stamps(&stamps(20, false));
+        canvas.render(&gpu, &mut doc, None);
+        canvas.cancel_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let settled = gpu.carry_checked();
+        let mut ms = None;
+        if timed {
+            assert_eq!(settled, None, "checked before a dual stroke");
+            let started = std::time::Instant::now();
+            gpu.check_carry();
+            ms = Some(started.elapsed().as_secs_f64() * 1e3);
+        }
+        canvas.begin_dual_stroke(
+            doc.current(),
+            first,
+            SecondStroke { style: second, mode: 1, threshold: -1.0, classic: false },
+        );
+        for (f, s) in stamps(300, false).chunks(6).zip(stamps(300, true).chunks(6)) {
+            canvas.add_second_stamps(s);
+            canvas.add_stamps(f);
+            canvas.render(&gpu, &mut doc, None);
+        }
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        Some((canvas.read_layer(&gpu, doc.current()).unwrap(), gpu.carry_checked(), ms))
+    };
+    let Some((plain, found, _)) = laid(&|g| g.settle_carry(false), false) else { return };
+    assert_eq!(found, Some(false));
+    let apart = |a: &[u8], b: &[u8]| a.chunks(4).zip(b.chunks(4)).filter(|(x, y)| x != y).count();
+    let most = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
+    let ink = |a: &[u8]| a.iter().skip(3).step_by(4).map(|&v| u64::from(v)).sum::<u64>();
+    assert!(plain.chunks(4).filter(|p| p[3] > 0).count() > 3000, "little laid");
+    let (carried, found, _) = laid(&|g| g.settle_carry(true), false).unwrap();
+    assert_eq!(found, Some(true));
+    let (wrong, found, _) = laid(
+        &|g| {
+            g.emulate_carry_fault(CarryFault::Miscompiled);
+            g.settle_carry(true);
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(found, Some(true));
+    let (checked, found_here, ms_here) = laid(&|_| {}, true).unwrap();
+    let (wrong_checked, found_wrong, ms_wrong) =
+        laid(&|g| g.emulate_carry_fault(CarryFault::Miscompiled), true).unwrap();
+    let (unchecked, found_failing, _) = laid(&|g| g.emulate_carry_fault(CarryFault::CheckFails), true).unwrap();
+    println!(
+        "plain pass: ink {}; carried here: {} px apart (by {} at most); carried as the miscompiled GPU lays it: {} px apart, ink {}; \
+         checked here: {found_here:?} in {ms_here:.1?} ms, {} px apart; checked on the miscompiled GPU: \
+         {found_wrong:?} in {ms_wrong:.1?} ms, {} px apart; check failing: {found_failing:?}, {} px apart",
+        ink(&plain),
+        apart(&carried, &plain),
+        most(&carried, &plain),
+        apart(&wrong, &plain),
+        ink(&wrong),
+        apart(&checked, &plain),
+        apart(&wrong_checked, &plain),
+        apart(&unchecked, &plain),
+    );
+    // carried as it is, the miscompiled pass lays the stroke wrong (what the check keeps from happening)
+    assert!(apart(&wrong, &plain) > 1000 && ink(&wrong) * 10 < ink(&plain) * 9, "the emulated fault shows");
+    // this GPU lays the carried pass as the plain pass does, and keeps the carry: the stroke as it
+    // was carried (within the level here and there that a stroke laid whole again as it ends
+    // comes to, its lots' sums rounded where its frames cut them)
+    assert!(most(&carried, &plain) <= 1, "carried unlike the plain pass here");
+    assert_eq!((found_here, apart(&checked, &carried)), (Some(true), 0));
+    // the miscompiled GPU, and one that can't be checked, lay it by the plain pass
+    assert_eq!((found_wrong, apart(&wrong_checked, &plain)), (Some(false), 0));
+    assert_eq!((found_failing, apart(&unchecked, &plain)), (Some(false), 0));
+    // made once on each device, before its first such stroke: 45 to 115 ms on an RTX 5060 left to
+    // itself (up to 580 ms beside other builds and tests), 83 to 112 ms on the Adreno 750
+    assert!(ms_here.unwrap() < 1500.0 && ms_wrong.unwrap() < 1500.0, "the check took {ms_here:?} and {ms_wrong:?} ms");
+}

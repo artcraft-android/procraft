@@ -247,14 +247,14 @@ impl Canvas {
         let (tex, view) = match reuse {
             Some(h) => (h.texture, h.view),
             None => {
-                let t = texture(&gpu.device, "video picture", p.width, p.height, LAYER_FORMAT);
+                let t = texture(gpu, "video picture", p.width, p.height, LAYER_FORMAT);
                 let v = t.create_view(&wgpu::TextureViewDescriptor::default());
                 (t, v)
             }
         };
         // a picture with see-through parts is premultiplied as the layers are
         let rgba = if p.rgba.as_chunks::<4>().0.iter().all(|&[.., a]| a == 255) { p.rgba } else { premultiplied(&p.rgba) };
-        gpu.queue.write_texture(
+        gpu.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &tex,
                 mip_level: 0,
@@ -274,7 +274,7 @@ impl Canvas {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn composite_video(
         &self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
         rect: IRect,
@@ -284,6 +284,7 @@ impl Canvas {
         stack: &Stack<'_>,
         current: &mut usize,
     ) {
+        let device = &gpu.device;
         let Some(held) = self.videos.held.get(&media) else { return };
         let [left, top, w, h] = into;
         // the picture's pixels onto the canvas, then as the clip is posed
@@ -291,7 +292,7 @@ impl Canvas {
             .then(Affine::translate(Vec2::new(left, top)));
         let to_canvas = look.pose.map_or(placed, |p| placed.then(p));
         let Some(back) = to_canvas.inverse() else { return };
-        let (_, posed) = self.posed.get(device);
+        let (_, posed) = self.posed.get(gpu);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("video"),
             layout: &self.pipelines.transform_layout,
@@ -318,7 +319,7 @@ impl Canvas {
         }
         let blend = look.blend.unwrap_or(procraft_engine::document::BlendMode::Normal);
         let uniform = LayerUniform { opacity: look.opacity, blend: blend.id(), tint: look.tint, ..Default::default() };
-        self.draw_onto(device, encoder, uniforms, rect, posed, None, &self.stroke_view, uniform, blend, stack, current);
+        self.draw_onto(gpu, encoder, uniforms, rect, posed, None, &self.stroke_view, uniform, blend, stack, current);
     }
 }
 

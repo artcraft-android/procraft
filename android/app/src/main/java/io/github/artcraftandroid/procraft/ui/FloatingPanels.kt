@@ -499,18 +499,17 @@ fun FloatingPanels(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
     // place among them, stacked by its order (raised, none moves, so a drag on one goes on)
     // (in a box of their own, stacked among themselves: under the panels hanging from the bar)
     val order = vm.pieceOrder()
-    val drawn = LayoutPiece.entries.filter {
-        it in order && it in listOf(LayoutPiece.LAYERS, LayoutPiece.BRUSHES, LayoutPiece.ACTIONS, LayoutPiece.ADJUSTMENTS)
-    }
     Box(Modifier.size(maxWidth, maxHeight)) {
-        for (piece in drawn) {
+        // (each in its slot whether it shows or not: one coming to show before it, as a tab torn out of
+        // its window does, never moves it or composes it anew, which would end the drag on its strip)
+        for ((piece, showing) in floatingWindowSlots(order)) key(piece) {
             val panel = when (piece) {
                 LayoutPiece.LAYERS -> FloatingPanel.LAYERS
                 LayoutPiece.BRUSHES -> FloatingPanel.BRUSHES
                 else -> null
             }
-            val window = vm.shownPiece(piece)
-            if (window != null) key(piece) {
+            val window = vm.shownPiece(piece)?.takeIf { showing }
+            if (window != null) {
                 // collapsed into its side (Collapse to edge): sliding there, then gone, its tab there instead
                 val collapsed = vm.pieceCollapsed(piece) != null
                 val slide = collapseSlide(collapsed)
@@ -531,6 +530,16 @@ fun FloatingPanels(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
         }
     }
 }
+
+/** The pieces drawn in windows by [FloatingPanels]: the Layers panel, the library, the Actions panel and the Adjustments menu. */
+private val FloatingWindowPieces = listOf(LayoutPiece.LAYERS, LayoutPiece.BRUSHES, LayoutPiece.ACTIONS, LayoutPiece.ADJUSTMENTS)
+
+/**
+ * Each piece drawn in a window, always in the same slot (the same place among the others, whichever of them show), and
+ * whether it shows now (it is in [order], the windows showing).
+ */
+internal fun floatingWindowSlots(order: List<LayoutPiece>): List<Pair<LayoutPiece, Boolean>> =
+    FloatingWindowPieces.map { it to (it in order) }
 
 /** A floating piece's name, on its tab. */
 internal fun pieceTitle(piece: LayoutPiece): String = when (piece) {

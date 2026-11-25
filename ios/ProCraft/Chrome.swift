@@ -63,7 +63,10 @@ private struct ActionButtons: View {
             .rotationEffect(.degrees(upright ? -90 : 0))
             .frame(width: upright ? Pc.barButtonHeight : Pc.galleryWidth, height: upright ? Pc.galleryWidth : Pc.barButtonHeight)
             .contentShape(Rectangle())
-            .onTapGesture { model.onClose() }
+            // (the model held weakly: the touch that leaves the artwork, with what its gesture's
+            // action holds, may be kept by the system until the next touch, and with the model the
+            // artwork's whole session would stay)
+            .onTapGesture { [weak model] in model?.onClose() }
         ActionButton(icon: PcIcons.actions, selected: model.panel == .actions, upright: upright) { model.toggle(.actions) }
         ActionButton(icon: PcIcons.adjustments, selected: model.panel == .adjustments || model.adjusting || model.recoloring, upright: upright) {
             model.toggle(.adjustments)

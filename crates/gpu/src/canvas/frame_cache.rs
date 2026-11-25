@@ -20,6 +20,7 @@ use procraft_engine::document::{Document, LayerId};
 use procraft_engine::timeline::{PlanItem, Shows, Timeline};
 
 use super::{copy_at, extent, item_layers, items_key};
+use crate::Gpu;
 
 /// What a canvas's kept frames may take unless it is told otherwise, bytes (see
 /// [`set_frame_cache_budget`]).
@@ -163,7 +164,13 @@ impl FrameCache {
 
     /// Copies the kept frame `wanted` into `composite`, if it is kept and still holds; false
     /// (and the stale one let go) if it has to be composited.
-    pub fn restore(&mut self, encoder: &mut wgpu::CommandEncoder, wanted: &Wanted, composite: &wgpu::Texture) -> bool {
+    pub fn restore(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        wanted: &Wanted,
+        composite: &wgpu::Texture,
+    ) -> bool {
         self.clock += 1;
         if self.shape != Some(shape_of(composite)) {
             self.forget();
@@ -171,7 +178,8 @@ impl FrameCache {
         match self.kept.get_mut(&wanted.key) {
             Some(k) if k.fingerprint == wanted.fingerprint => {
                 k.used = self.clock;
-                encoder.copy_texture_to_texture(
+                gpu.copy_texture_to_texture(
+                    encoder,
                     copy_at(&k.texture, 0, 0),
                     copy_at(composite, 0, 0),
                     extent_of(composite),
@@ -191,7 +199,7 @@ impl FrameCache {
     /// budget has room, else in the one of the frame used least lately.
     pub fn keep(
         &mut self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         wanted: Wanted,
         composite: &wgpu::Texture,
@@ -212,7 +220,7 @@ impl FrameCache {
             spare = self.kept.remove(&oldest).map(|k| k.texture);
         }
         let texture = spare.unwrap_or_else(|| {
-            device.create_texture(&wgpu::TextureDescriptor {
+            gpu.texture(&wgpu::TextureDescriptor {
                 label: Some("kept frame"),
                 size: extent(width, height),
                 mip_level_count: 1,
@@ -223,7 +231,7 @@ impl FrameCache {
                 view_formats: &[],
             })
         });
-        encoder.copy_texture_to_texture(copy_at(composite, 0, 0), copy_at(&texture, 0, 0), extent(width, height));
+        gpu.copy_texture_to_texture(encoder, copy_at(composite, 0, 0), copy_at(&texture, 0, 0), extent(width, height));
         self.kept.insert(
             wanted.key,
             Kept { texture, fingerprint: wanted.fingerprint, layers: wanted.layers, used: self.clock },

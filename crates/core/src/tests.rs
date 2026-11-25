@@ -3765,7 +3765,7 @@ fn a_dual_brush_built_up_by_its_rule_ends_a_long_stroke_laying_only_the_rest_as_
     let samples = 900;
     let names = ["Ironwood", "Beluga", "Frost Birch"];
     for (name, lot) in names.iter().flat_map(|n| [(*n, None), (*n, Some(60_000))]) {
-        let ended = |whole: bool| -> Option<(Vec<u8>, u64, Duration, Duration, bool)> {
+        let ended = |whole: bool| -> Option<(Vec<u8>, u64, Duration, Duration, bool, bool)> {
             let s = session(side, side)?;
             let (set, index) = library_brush(&s, |b| b.name == name)?;
             let carried = {
@@ -3810,11 +3810,13 @@ fn a_dual_brush_built_up_by_its_rule_ends_a_long_stroke_laying_only_the_rest_as_
             let laid = lifted.elapsed();
             let sent = s.shared.lock().canvas.as_ref()?.stamps_queued() - before;
             let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
-            Some((layer_rgba(&s, current), sent, lift, laid, carried))
+            // (where the GPU lays the carried pass wrong, the check finds it and nothing is carried)
+            let here = s.shared.lock().gpu.as_ref()?.carry_checked() != Some(false);
+            Some((layer_rgba(&s, current), sent, lift, laid, carried, here))
         };
         let (
-            Some((whole, sent_whole, lift_whole, laid_whole, carried)),
-            Some((rest, sent_rest, lift_rest, laid_rest, _)),
+            Some((whole, sent_whole, lift_whole, laid_whole, carried, _)),
+            Some((rest, sent_rest, lift_rest, laid_rest, _, here)),
         ) = (ended(true), ended(false))
         else {
             continue;
@@ -3832,7 +3834,11 @@ fn a_dual_brush_built_up_by_its_rule_ends_a_long_stroke_laying_only_the_rest_as_
         );
         assert!(whole.iter().skip(3).step_by(4).any(|&a| a > 0), "{name} drew nothing");
         assert_eq!((most, count), (0, 0), "{name} (lots of {lot:?}): ended unlike laid whole");
-        // the end lays a few stamps, not the stroke again
+        // the end lays a few stamps, not the stroke again (where this GPU carries its parts)
+        if !here {
+            println!("{name}: not carried on this GPU (its check found the carried pass wrong): laid whole again");
+            continue;
+        }
         assert!(sent_rest * 10 < sent_whole, "{name}: {sent_rest} stamps laid at its end, against {sent_whole} whole");
     }
 }
@@ -3925,11 +3931,15 @@ fn a_dual_brush_built_up_by_its_rule_keeps_what_its_parts_are_carried_in_from_st
             "{name}: {kept} kept, {made} made over {strokes} strokes; first frames {} ms",
             starts.iter().map(ms).collect::<Vec<_>>().join(", ")
         );
+        assert!(whole.iter().skip(3).step_by(4).any(|&a| a > 0), "{name} drew nothing");
+        assert_eq!(differ(&whole, &rest), (0, 0), "{name}: crossing strokes ended unlike laid whole");
+        if s.shared.lock().gpu.as_ref().unwrap().carry_checked() == Some(false) {
+            println!("{name}: not carried on this GPU (its check found the carried pass wrong)");
+            continue;
+        }
         assert!(kept > 0, "{name}: its parts carried in nothing");
         // made at the first stroke only
         assert_eq!(made, kept, "{name}: {made} made over {strokes} strokes, {kept} kept");
-        assert!(whole.iter().skip(3).step_by(4).any(|&a| a > 0), "{name} drew nothing");
-        assert_eq!(differ(&whole, &rest), (0, 0), "{name}: crossing strokes ended unlike laid whole");
         // a stroke of a brush that carries nothing lets them go, and so does trimming memory
         let (set, index) =
             library_brush(&s, |b| b.secondary.is_none() && !b.mixes_wet() && !b.laid_in_place()).unwrap();
@@ -3947,6 +3957,61 @@ fn a_dual_brush_built_up_by_its_rule_keeps_what_its_parts_are_carried_in_from_st
         stroke(&s, strokes + 2);
         assert_eq!(carried_in(&s).len(), 0, "{name}: kept on a device of little memory");
     }
+}
+
+/// A dual brush built up by its rule draws on a GPU whose compiler lays the carried rule pass wrong
+/// (emulated: see `procraft_gpu::CarryFault`) as on one laying such brushes by the plain pass: the
+/// check made before its first stroke would carry a part turns the carry off there. Carried as it
+/// is, the stroke came out fainter (on the Adreno 750 a dual brush cut by its second's strength drew
+/// next to nothing).
+#[test]
+fn a_dual_brush_built_up_by_its_rule_draws_whole_on_a_gpu_that_carries_it_wrong() {
+    use procraft_gpu::CarryFault;
+    let side = 256;
+    let point = |k: usize| PenSample {
+        pressure: 0.4 + 0.5 * (k as f32 * 0.05).sin().abs(),
+        ..sample(24.0 + k as f32 * 1.4, 128.0 + (k as f32 * 0.04).sin() * 60.0, k as f64 * 4.17)
+    };
+    // on a device of its own made as `make` says: the layer once a stroke drawn over frames ends,
+    // its ink, and what the check found
+    let drawn = |make: &dyn Fn(&Gpu)| -> Option<(Vec<u8>, u64, Option<bool>)> {
+        let gpu = Gpu::headless().ok()?;
+        make(&gpu);
+        let s = session_on(gpu.clone(), side, side);
+        let (set, index) = library_brush(&s, |b| b.name == "Ironwood")?;
+        assert!(s.select_brush(set, index));
+        s.set_brush_size(0.4);
+        s.set_color(0.2, 0.2, 0.25);
+        s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+        for e in 1..75 {
+            s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+            if e % 2 == 0 {
+                picture(&s);
+            }
+        }
+        s.stroke_end(vec![point(150)]);
+        picture(&s);
+        let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+        let layer = layer_rgba(&s, current);
+        let ink = layer.iter().skip(3).step_by(4).map(|&a| u64::from(a)).sum();
+        Some((layer, ink, gpu.carry_checked()))
+    };
+    let Some((plain, plain_ink, _)) = drawn(&|g| g.settle_carry(false)) else { return };
+    let (wrong, wrong_ink, _) = drawn(&|g| {
+        g.emulate_carry_fault(CarryFault::Miscompiled);
+        g.settle_carry(true);
+    })
+    .unwrap();
+    let (checked, checked_ink, found) = drawn(&|g| g.emulate_carry_fault(CarryFault::Miscompiled)).unwrap();
+    println!(
+        "Ironwood: ink {plain_ink} by the plain pass; carried wrong {wrong_ink}, {} channels apart; checked first {checked_ink} ({found:?}), {:?} apart",
+        differ(&wrong, &plain).1,
+        differ(&checked, &plain)
+    );
+    assert!(plain_ink > 0, "Ironwood drew nothing");
+    assert!(wrong_ink * 10 < plain_ink * 9, "the emulated fault shows");
+    assert_eq!(found, Some(false), "the check found nothing wrong");
+    assert_eq!(differ(&checked, &plain), (0, 0), "unlike the plain pass");
 }
 
 /// A dual brush whose second turns its stamps the way the stroke goes (57 of the library's 140) ends
@@ -12960,7 +13025,9 @@ fn a_size_saved_from_the_panel_is_gone_back_to_from_its_mark_and_taken_away_on_i
 }
 
 /// A set opened in the library brings back the brush last chosen in it as the one in use, so the
-/// brush it shows highlighted is the one that paints; a set never chosen in brings back none.
+/// brush it shows highlighted is the one that paints; a set never chosen in brings back its first
+/// brush (the original keeps one brush per set, the first until one is chosen), and a set with no
+/// brushes none.
 #[test]
 fn a_set_opened_takes_the_brush_last_chosen_in_it_and_follows_it_when_moved() {
     let s = CanvasSession::new(64, 64);
@@ -12971,7 +13038,13 @@ fn a_set_opened_takes_the_brush_last_chosen_in_it_and_follows_it_when_moved() {
     assert_eq!(at(s.brush_set_choice(1)), Some((1, 2)));
     assert_eq!(at(s.brush_set_choice(0)), Some((0, 3)));
     let untouched = (2..s.brush_library().len() as u32).find(|&i| i != start).unwrap();
-    assert_eq!(s.brush_set_choice(untouched), None);
+    assert_eq!(at(s.brush_set_choice(untouched)), Some((untouched, 0)));
+    // opened (tapped, or rested on by a dragged brush), its first brush is the brush and stays its
+    // choice
+    let b = s.brush_set_choice(untouched).unwrap();
+    assert!(s.select_brush(b.set, b.index));
+    assert_eq!((s.current_brush().set, s.current_brush().index), (untouched, 0));
+    assert_eq!(at(s.brush_set_choice(untouched)), Some((untouched, 0)));
     // opened, set 1's choice is the brush; back in set 0, set 0's
     let b = s.brush_set_choice(1).unwrap();
     assert!(s.select_brush(b.set, b.index));
@@ -12982,10 +13055,33 @@ fn a_set_opened_takes_the_brush_last_chosen_in_it_and_follows_it_when_moved() {
     // the choice moved to the top of its set is still that set's choice
     assert!(s.move_brush(1, 2, 1, 0));
     assert_eq!(at(s.brush_set_choice(1)), Some((1, 0)));
-    // moved into another set, its old set has none and the other keeps its later choice
+    // moved into another set, its old set falls back on its first brush and the other keeps its
+    // later choice
+    let left = s.brush_library()[1].brushes.len();
     assert!(s.move_brush(1, 0, 0, 0));
-    assert_eq!(s.brush_set_choice(1), None);
+    assert_eq!(s.brush_library()[1].brushes.len(), left - 1);
+    assert_eq!(at(s.brush_set_choice(1)), Some((1, 0)));
     assert_eq!(at(s.brush_set_choice(0)), Some((0, 4)));
+    // a set with no brushes has none to bring back
+    let empty = s.new_brush_set();
+    assert!(s.brush_library()[empty as usize].brushes.is_empty());
+    assert_eq!(s.brush_set_choice(empty), None);
+}
+
+/// A brush picked from a search, wherever the library stood, is the brush and its set's choice: so
+/// its own set, shown with it, lights it (the original ends the search on the pick and shows the
+/// brush's set, the brush lit), and showing that set again keeps it.
+#[test]
+fn a_brush_picked_from_a_search_is_its_sets_choice() {
+    let s = CanvasSession::new(64, 64);
+    let at = |b: Option<crate::BrushInfo>| b.map(|b| (b.set, b.index));
+    // set 1 shown with its brush 2 the brush; brush 4 of set 3 picked from the search
+    assert!(s.select_brush(1, 2));
+    assert!(s.select_brush(3, 4));
+    assert_eq!((s.current_brush().set, s.current_brush().index), (3, 4));
+    assert_eq!(at(s.brush_set_choice(3)), Some((3, 4)));
+    // set 1 keeps its own choice for when it is shown again
+    assert_eq!(at(s.brush_set_choice(1)), Some((1, 2)));
 }
 
 #[test]
@@ -21699,6 +21795,120 @@ fn wet_paint_comes_out_alike_where_copies_write_their_rows_whole() {
     eprintln!("pictures differing (most, channels, allowed): {differing:?}");
     let unlike: Vec<_> = differing.iter().filter(|(_, most, count, allowed)| *most > 2 || count > allowed).collect();
     assert!(unlike.is_empty(), "pictures that came out otherwise (most, channels, allowed): {unlike:?}");
+}
+
+/// A picture with clear parts, wet paint over it, a stroke undone on a layer of its own, and the
+/// brushes' and the layer's pictures come out the same on a GPU whose new textures start stale
+/// (Iris Xe on Direct3D 12, see `procraft_gpu::StaleTextures`), each texture cleared as it is
+/// made, as on any other. Left stale, as the app had them, the blocks of 4 by 4 a copy into a new
+/// texture writes all zero kept what the memory held: the picture's clear parts, the tiles wet
+/// paint keeps and the undo steps came out in boxes of another texture's colour, and the layer's
+/// and the brushes' pictures with them (#386). Alike but for a level or two at a few channels, as
+/// the GPU can lay the same work a level apart from run to run.
+#[test]
+fn strokes_undo_and_pictures_come_out_alike_where_new_textures_start_stale() {
+    use procraft_engine::brush::Brush;
+    use procraft_gpu::StaleTextures;
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
+    let side = 700u32;
+    let n = side as usize;
+    // every other square of 64 pixels clear
+    let mut rgba = vec![0u8; n * n * 4];
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (i % n, i / n);
+        if (x / 64 + y / 64) % 2 == 0 {
+            *px = [(x / 3 % 256) as u8, (y / 3 % 256) as u8, 120, 255];
+        }
+    }
+    let runs = [StaleTextures::Fresh, StaleTextures::Left, StaleTextures::Cleared].map(|how| {
+        // (what the last run kept let go of first)
+        gpu.emulate_stale_textures(StaleTextures::Fresh);
+        gpu.emulate_stale_textures(how);
+        let s = session_on(gpu.clone(), side, 600);
+        let find = |want: &dyn Fn(&Brush) -> bool| {
+            let st = s.shared.lock();
+            let found =
+                st.library.iter().enumerate().find_map(|(i, set)| set.brushes.iter().position(want).map(|j| (i, j)));
+            found.map(|(i, j)| (i as u32, j as u32)).unwrap()
+        };
+        let wet = find(&|b: &Brush| b.mixes_wet());
+        let dry = find(&|b: &Brush| !b.mixes_wet());
+        let mut pictures: Vec<(String, Vec<u8>)> = [wet, dry]
+            .iter()
+            .map(|&(set, index)| {
+                let preview = s.brush_preview(set, index, 530, 162).unwrap();
+                (format!("brush {set}/{index}'s picture"), preview.rgba)
+            })
+            .collect();
+        let layer = s
+            .insert_image(crate::layers::ThumbnailImage { width: side, height: side, rgba: rgba.clone() }, false)
+            .unwrap();
+        // wet paint across the picture
+        assert!(s.select_brush(wet.0, wet.1));
+        s.set_brush_size(1.0);
+        s.set_color(0.2, 0.5, 0.8);
+        let at = |e: usize, y: f32| {
+            let t = e as f32 / 60.0;
+            PenSample { pressure: 0.7, ..sample(40.0 + t * 620.0, y + (t * 9.0).sin() * 120.0, e as f64 * 6.0) }
+        };
+        s.stroke_begin(PointerKind::Stylus, vec![at(0, 300.0)]);
+        for e in 1..=60 {
+            s.stroke_add(vec![at(e, 300.0)]);
+            if e % 3 == 0 {
+                let _ = picture(&s);
+            }
+        }
+        s.stroke_end(vec![]);
+        let _ = picture(&s);
+        // a dry stroke on a layer of its own, undone
+        let top = s.add_layer();
+        assert!(s.select_brush(dry.0, dry.1));
+        s.set_brush_size(0.6);
+        s.stroke_begin(PointerKind::Stylus, vec![at(0, 500.0)]);
+        for e in 1..=60 {
+            s.stroke_add(vec![at(e, 500.0)]);
+        }
+        s.stroke_end(vec![]);
+        let _ = picture(&s);
+        assert!(s.undo().is_some());
+        pictures.push(("the picture wet paint went over".into(), s.copy_layer_contents(layer).unwrap().rgba));
+        pictures.push(("the layer the stroke was undone on".into(), s.copy_layer_contents(top).unwrap().rgba));
+        pictures.push(("the layer's picture".into(), s.layer_thumbnail(layer, 120).unwrap().rgba));
+        pictures.push(("the canvas".into(), picture(&s)));
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        pictures
+    });
+    gpu.emulate_stale_textures(StaleTextures::Fresh);
+    let [fresh, left, cleared] = runs;
+    // (each picture: how far it differs most, how many channels differ, how many differ by more
+    // than a few levels)
+    let compare = |other: &[(String, Vec<u8>)]| -> Vec<(String, u8, usize, usize)> {
+        fresh
+            .iter()
+            .zip(other)
+            .map(|((name, a), (_, b))| {
+                assert_eq!(a.len(), b.len(), "{name}");
+                let (most, count) = differ(a, b);
+                let far = a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 16).count();
+                (name.clone(), most, count, far)
+            })
+            .collect()
+    };
+    let as_cleared = compare(&cleared);
+    let as_left = compare(&left);
+    eprintln!("cleared as made, against this GPU's (most, channels, channels far off): {as_cleared:?}");
+    eprintln!("left stale, against this GPU's (most, channels, channels far off): {as_left:?}");
+    let unlike: Vec<_> = as_cleared
+        .iter()
+        .zip(&fresh)
+        .filter(|((_, most, count, _), (_, a))| *most > 2 || *count > (a.len() / 10_000).max(16))
+        .collect();
+    assert!(unlike.is_empty(), "pictures that came out otherwise with textures cleared as made: {unlike:?}");
+    // left stale, the picture's clear squares and the undone stroke's box held another colour
+    let far = |name: &str| as_left.iter().find(|d| d.0 == name).map_or(0, |d| d.3);
+    assert!(far("the picture wet paint went over") > 10_000, "the picture's clear squares left stale");
+    assert!(far("the layer the stroke was undone on") > 1_000, "the undone stroke's box left stale");
+    assert!(far("the layer's picture") > 1_000, "the layer's picture left stale");
 }
 
 /// Each stock brush laid by its rule (gradually, or towards its transfer) under a grain fixed to

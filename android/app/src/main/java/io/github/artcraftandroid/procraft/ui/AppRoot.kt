@@ -311,8 +311,7 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
                         SideBar(
                             vm,
                             // (a press on its glass never the canvas's, wherever it is and however it is turned)
-                            Modifier.collapseSlid(vm.barCollapsePlace(io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR), sideSlide, rootDensity)
-                                .then(lying).then(aside).then(fade).keepsItsTouches()
+                            Modifier.then(aside).then(fade).keepsItsTouches()
                                 .onGloballyPositioned {
                                     val b = it.boundsInRoot().translate(-keptClear.corner)
                                     vm.sideBarBounds = b
@@ -322,6 +321,10 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
                                         vm.tellBar(maxWidth.value, maxHeight.value, io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR, io.github.artcraftandroid.procraft.core.BarPlace(b.left / d, b.top / d, true), b.height / d, b.width / d)
                                     }
                                 },
+                            // (sliding into its side, or lying down: its glass with it, where it is drawn, not standing
+                            // where it is laid out with its foot off the screen's bottom)
+                            turn = Modifier.collapseSlid(vm.barCollapsePlace(io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR), sideSlide, rootDensity)
+                                .then(lying),
                             // standing against a side Edit layout took it to: mirrored to that side
                             right = sideMoved?.takeIf { it.vertical }?.let { vm.barTouching(io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR)?.right } ?: vm.rightHanded,
                             trackHeight = sideBar.track.dp,

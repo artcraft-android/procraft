@@ -2,9 +2,10 @@
 //! brushes with a sample stroke on the right. Tapping a set shows it, the shown one for its menu
 //! (rename, duplicate, share, delete); tapping a brush chooses it; sliding one left shows Share,
 //! Duplicate and Delete; holding one shows its menu (Rename, Duplicate, Share, Delete; in the Recent
-//! set Find, Pin or Unpin, Share, Clear), and moving on from there drags it to another place or
-//! set. The plus makes a brush or a set, or brings brushes in from a file. Two fingers pinched in
-//! on a library go to every library's card, and pinched out on a card open it.
+//! set Find, Pin or Unpin, Share, Clear), and moving straight on from there drags it to another
+//! place or set (the core says how long the hold is, and how soon the move must come). The plus
+//! makes a brush or a set, or brings brushes in from a file. Two fingers pinched in on a library go
+//! to every library's card, and pinched out on a card open it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,7 +16,8 @@ use egui::{
     Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use procraft_core::{
-    BrushDrop, BrushDropOver, BrushFileReading, BrushInfo, BrushSetInfo, CanvasSession, ReadBrushes, read_brushes_from,
+    BRUSH_MENU_HOLD, BrushDrop, BrushDropOver, BrushFileReading, BrushHoldMove, BrushInfo, BrushSetInfo, CanvasSession,
+    ReadBrushes, brush_hold_move, read_brushes_from,
 };
 
 use crate::alert::{Alert, Answer};
@@ -89,10 +91,15 @@ const PICKER_GLASS: menu::Glass = menu::Glass {
     corner: 26.0,
     shadow: false,
 };
-/// A press moved this far (points) has gone somewhere; held still this long, it shows the brush's
-/// menu (and moved on from there, drags the brush).
+/// A press moved this far (points) has gone somewhere; held still this long, a set lifts to be
+/// dragged (a brush's menu shows sooner: [`brush_hold`]).
 pub(crate) const SLOP: f32 = 8.0;
 pub(crate) const HOLD: Duration = Duration::from_millis(400);
+
+/// How long a brush is held still before its menu shows (the core's, as measured).
+fn brush_hold() -> Duration {
+    Duration::try_from_secs_f64(BRUSH_MENU_HOLD).unwrap_or(HOLD)
+}
 /// A dragged brush held this long over another set opens it, to be let go among its brushes
 /// (measured on the original: 1.76 s).
 const SPRING_LOAD: Duration = Duration::from_millis(1800);
@@ -225,8 +232,9 @@ fn way_moved(d: Vec2) -> Option<Way> {
 }
 
 /// A press on a brush, followed until let go: which (set and place), where and when it went down,
-/// what it became, how far the brush was slid, where on it the press took hold, how far the
-/// pointer has moved since the last frame, and how far the list was scrolled.
+/// what it became (and when its menu showed, held), how far the brush was slid, where on it the
+/// press took hold, how far the pointer has moved since the last frame, and how far the list was
+/// scrolled.
 #[derive(Clone, Copy)]
 struct Press {
     list: f32,
@@ -234,6 +242,7 @@ struct Press {
     origin: Pos2,
     since: Instant,
     way: Way,
+    menu_at: Option<Instant>,
     start: f32,
     grab: Vec2,
     last: Pos2,
@@ -354,6 +363,8 @@ pub struct Library {
     set_rects: Vec<(usize, Rect)>,
     brush_rects: Vec<((u32, u32), Rect)>,
     brush_list: Option<(u32, u32, Rect)>,
+    /// Where the search's results were last drawn (none while it isn't in use).
+    result_rects: Vec<((u32, u32), Rect)>,
     /// The brush shown highlighted last frame: the one in use, where it is listed.
     highlighted: Option<(u32, u32)>,
     /// The library changed: the app keeps it; its sample strokes are drawn again next frame (not
@@ -378,6 +389,9 @@ pub struct Library {
     /// What the sample strokes are tinted with as a plugin colours them (each brush's, then the
     /// brush in use's), as this frame began; none, as the interface draws them.
     tints: [Option<Color32>; 2],
+    /// Whether it was shown this frame and the last (see [`Library::after_frame`]).
+    shown_now: bool,
+    shown_last: bool,
 }
 
 /// A colour (0xRRGGBB) to draw.
@@ -410,6 +424,17 @@ impl Library {
         if !self.recent {
             self.shown_set = None;
         }
+    }
+
+    /// A frame ends: the library shown last frame and not in this one has closed (hanging from its
+    /// button or floating alike), and the core lets go of the canvas its sample strokes are drawn
+    /// on. Its strokes stay, so it opens again at once.
+    pub fn after_frame(&mut self, session: &CanvasSession) {
+        let shown = std::mem::take(&mut self.shown_now);
+        if self.shown_last && !shown {
+            session.let_go_of_previews();
+        }
+        self.shown_last = shown;
     }
 
     /// A menu or question of the library's is up: a press elsewhere only closes it.
@@ -628,6 +653,7 @@ impl Library {
                 panel::floating_area(ctx, egui::Id::unique("floating brush library"), window),
             ),
         };
+        self.shown_now = true;
         // the cards' strokes forgotten last frame are drawn no more
         self.card_retired.clear();
         // nor the sample strokes out of sight past those kept (before any is drawn this frame)
@@ -668,7 +694,8 @@ impl Library {
             .or(lifted.map(|p| p.last))
             .and_then(|at| self.set_rects.iter().find(|(_, r)| r.contains(at)).map(|(i, _)| *i))
             .filter(|i| lifted.is_none_or(|p| p.set != *i));
-        // a dragged brush held over another set a moment opens it
+        // a dragged brush held over another set a moment opens it, as a tap on it would: the
+        // brush last chosen in it (its first, if none) becomes the one in use
         match (dragging, over_set) {
             (Some(_), Some(i)) if i != shown || recent => match self.spring {
                 Some((j, since)) if j == i => {
@@ -676,6 +703,10 @@ impl Library {
                         self.spring = None;
                         self.shown_set = Some(i);
                         self.recent = false;
+                        if let Some(b) = session.brush_set_choice(i as u32) {
+                            session.select_brush(b.set, b.index);
+                            self.changed = true;
+                        }
                     } else {
                         ctx.request_repaint_after(SPRING_LOAD.saturating_sub(since.elapsed()));
                     }
@@ -694,6 +725,8 @@ impl Library {
         let mut plus = Rect::NOTHING;
         let mut lists = Rect::NOTHING;
         let mut set_tapped = None;
+        // a brush tapped among the search's results
+        let mut found_tapped = None;
         let mut recent_row = None;
         let mut recent_tapped = false;
         let mut brush_tapped = None;
@@ -781,9 +814,10 @@ impl Library {
             lists.min.y += down;
             if in_use {
                 if let Some(key) = self.search_results(ui, &library, (current.set, current.index), lists) {
-                    brush_tapped = Some((key, false));
+                    found_tapped = Some(key);
                 }
             } else {
+                self.result_rects.clear();
                 let sets = Rect::from_min_size(lists.min, vec2(SETS_WIDTH, lists.height()));
                 let brushes = Rect::from_min_max(pos2(lists.left() + SETS_WIDTH, lists.top()), lists.max);
                 if !recent && let (Ok(set), Some(held)) = (u32::try_from(shown), library.get(shown)) {
@@ -825,6 +859,10 @@ impl Library {
                                     })
                                     .inner;
                                 set_rects.push((i, at));
+                                // a brush found (from a search, or the Recent set) shows its set
+                                if self.found.is_some_and(|f| f.0 as usize == i) {
+                                    ui.scroll_to_rect(at, None);
+                                }
                                 if self.set_press.is_none()
                                     && self.press.is_none()
                                     && response.is_pointer_button_down_on()
@@ -1002,6 +1040,19 @@ impl Library {
                     self.studio = Some(None);
                 }
             }
+        }
+        // picked from the search, a brush ends it and shows in its own set, chosen there and
+        // scrolled to (as the original)
+        if let Some(key) = found_tapped {
+            self.query.clear();
+            self.searching = false;
+            self.search_down = false;
+            ctx.memory_mut(|m| m.stop_text_input());
+            self.recent = false;
+            self.shown_set = Some(key.0 as usize);
+            self.found = Some(key);
+            session.select_brush(key.0, key.1);
+            self.changed = true;
         }
         if let Some((key, name, chose)) = swipe_chose {
             self.swiped = None;
@@ -1392,8 +1443,10 @@ impl Library {
     }
 
     /// Follows the press on a brush: moved sideways it slides the brush (let go past a third of
-    /// the way, it stays open); moved up or down, the list scrolls; held still, the brush is dragged
-    /// and, let go, goes to the top of the set it is over, or to the place of the brush it is over.
+    /// the way, it stays open); moved up or down, the list scrolls; held still, its menu shows, and
+    /// moved straight on from there the brush is dragged and, let go, goes to the top of the set it
+    /// is over, or to the place of the brush it is over (moved on later, the list scrolls under the
+    /// menu, which stays).
     fn follow_press(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let Some(mut p) = self.press else { return };
         let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
@@ -1407,19 +1460,25 @@ impl Library {
                         p.way = way;
                     } else if d.length() > SLOP {
                         // going somewhere, not yet plain which way: it is no hold
-                    } else if p.since.elapsed() >= HOLD {
+                    } else if p.since.elapsed() >= brush_hold() {
                         // held still: its menu shows
                         p.way = Way::Held;
+                        p.menu_at = Some(Instant::now());
                         self.swiped = None;
                         self.open_brush_menu(session, p.key);
                     } else {
-                        ctx.request_repaint_after(HOLD.saturating_sub(p.since.elapsed()));
+                        ctx.request_repaint_after(brush_hold().saturating_sub(p.since.elapsed()));
                     }
                 }
-                // moved on from there, the menu goes and the brush is dragged (the Recent set's
-                // brushes stay where they are)
+                // moved straight on from there, the menu goes and the brush is dragged (the Recent
+                // set's brushes stay where they are); moved on later, the list has the press and
+                // scrolls, the menu staying
                 Way::Held => {
-                    if d.length() > SLOP && !self.recent {
+                    let since_menu = p.menu_at.map_or(0.0, |shown| shown.elapsed().as_secs_f64());
+                    let what = brush_hold_move(d.length(), SLOP, since_menu, !self.recent);
+                    if what == BrushHoldMove::Leaves {
+                        p.way = Way::Scroll;
+                    } else if what == BrushHoldMove::Drags {
                         p.way = Way::Drag;
                         self.brush_menu.close();
                         let current = session.current_brush();
@@ -1724,6 +1783,7 @@ impl Library {
                 origin,
                 since,
                 way: Way::Undecided,
+                menu_at: None,
                 start: slide,
                 grab: origin - cell.min,
                 last: origin,
@@ -1985,6 +2045,7 @@ impl Library {
             return None;
         }
         let mut tapped = None;
+        self.result_rects.clear();
         ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
             ScrollArea::vertical()
                 .id_salt("library results")
@@ -2001,6 +2062,7 @@ impl Library {
                             );
                             let key = (b.set, b.index);
                             let selected = key == current;
+                            self.result_rects.push((key, tile));
                             self.want_preview(ui, b, tile);
                             let painter = ui.painter_at(tile);
                             painter.rect_filled(tile, 12, if selected { argb(pc::ACCENT) } else { argb(RESULT_FILL) });
@@ -2579,6 +2641,40 @@ mod tests {
         assert!(!f.library.brush_menu.is_open());
     }
 
+    /// A brush held past its menu showing and moved on only after the core's drag window isn't
+    /// lifted (as measured: presses of 0.7 s and 1 s moved on scrolled the list): the list has the
+    /// press and scrolls under the menu, which stays open; let go, nothing is chosen or moved.
+    #[test]
+    fn a_brush_held_and_moved_on_too_late_scrolls_the_list_under_its_menu() {
+        let mut f = Finger::new();
+        let names = |f: &Finger| -> Vec<Vec<String>> {
+            f.session.brush_library().iter().map(|s| s.brushes.iter().map(|b| b.name.clone()).collect()).collect()
+        };
+        let (before, chosen) = (names(&f), f.session.current_brush());
+        let from = f.on_a_brush();
+        f.down(from);
+        std::thread::sleep(brush_hold() + Duration::from_millis(50));
+        f.frame(Vec::new());
+        assert!(f.library.brush_menu.is_open());
+        let top = f.top();
+        std::thread::sleep(Duration::from_secs_f64(procraft_core::BRUSH_DRAG_WINDOW) + Duration::from_millis(100));
+        let mut at = from;
+        for _ in 0..10 {
+            at.y -= 8.0;
+            f.to(at);
+        }
+        assert!(f.library.press.is_some_and(|p| p.way == Way::Scroll), "not left to the list");
+        assert!(f.library.dragged_with.is_empty(), "lifted");
+        assert!(f.library.brush_menu.is_open(), "the menu went");
+        assert!(f.top() < top - 20.0, "the list stayed: {top} to {}", f.top());
+        f.up(at);
+        f.frame(Vec::new());
+        assert!(f.library.brush_menu.is_open());
+        assert_eq!(names(&f), before);
+        let now = f.session.current_brush();
+        assert_eq!((now.set, now.index), (chosen.set, chosen.index));
+    }
+
     /// What a dragged brush is over: a set's row; in the shown set's list, the brush nearest up or
     /// down and which half of it (a gap or the room below the last going to the nearest); an empty
     /// list itself; nothing elsewhere or over the Recent set's list.
@@ -2892,25 +2988,36 @@ mod tests {
         assert_eq!(f.library.highlighted, Some((0, 3)));
     }
 
-    /// A set never chosen in, opened, leaves the brush as it is and shows none highlighted; a tap
-    /// on one of its brushes makes it the brush.
-    #[test]
-    fn a_set_with_no_brush_chosen_shows_none_highlighted_and_a_tap_takes_one() {
-        let mut f = Finger::new();
-        let start = f.session.current_brush();
-        let set = f
-            .library
+    /// A set on screen other than set `but`, with brushes, that nothing was chosen in: its choice
+    /// is its first brush.
+    fn never_chosen(f: &Finger, but: u32) -> usize {
+        f.library
             .set_rects
             .iter()
+            .filter(|(_, r)| (0.0..650.0).contains(&r.center().y))
             .map(|(s, _)| *s)
-            .find(|&s| s as u32 != start.set && f.session.brush_set_choice(s as u32).is_none())
-            .expect("a set never chosen in");
+            .find(|&s| {
+                s as u32 != but
+                    && f.session.brush_library()[s].brushes.len() > 1
+                    && f.session.brush_set_choice(s as u32).map(|b| b.index) == Some(0)
+            })
+            .expect("a set never chosen in")
+    }
+
+    /// A set never chosen in, opened, takes its first brush as the one in use, lit (the original
+    /// keeps one brush per set, the first until one is chosen); a tap on another of its brushes
+    /// makes that the brush.
+    #[test]
+    fn a_set_never_chosen_in_opened_takes_its_first_brush_and_a_tap_takes_another() {
+        let mut f = Finger::new();
+        let start = f.session.current_brush();
+        let set = never_chosen(&f, start.set);
         let row = f.library.set_rects.iter().find(|(s, _)| *s == set).map(|(_, r)| r.center()).unwrap();
         f.down(row);
         f.up(row);
         f.frame(Vec::new());
-        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (start.set, start.index));
-        assert_eq!(f.library.highlighted, None);
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (set as u32, 0));
+        assert_eq!(f.library.highlighted, Some((set as u32, 0)));
         let cell = f.library.brush_rects.iter().find(|(k, _)| k.1 == 1).map(|(_, r)| r.center()).unwrap();
         f.down(cell);
         f.up(cell);
@@ -2919,29 +3026,110 @@ mod tests {
         assert!(f.library.studio.is_none());
     }
 
-    /// The library opens on the current brush's set: a set never chosen in, looked at last time
+    /// The library opens on the current brush's set: a set with no brushes, looked at last time
     /// (the brush staying in another), isn't the one it opens on again.
     #[test]
     fn the_library_opens_on_the_current_brush_s_set() {
         let mut f = Finger::new();
+        let empty = f.session.new_brush_set() as usize;
+        f.library.library_changed();
+        f.frame(Vec::new());
+        f.frame(Vec::new());
         let start = f.session.current_brush();
-        let set = f
-            .library
-            .set_rects
-            .iter()
-            .map(|(s, _)| *s)
-            .find(|&s| s as u32 != start.set && f.session.brush_set_choice(s as u32).is_none())
-            .expect("a set never chosen in");
-        let row = f.library.set_rects.iter().find(|(s, _)| *s == set).map(|(_, r)| r.center()).unwrap();
+        assert_ne!(start.set as usize, empty);
+        let row = f.library.set_rects.iter().find(|(s, _)| *s == empty).map(|(_, r)| r.center()).unwrap();
         f.down(row);
         f.up(row);
         f.frame(Vec::new());
-        assert!(f.library.brush_rects.iter().all(|(k, _)| k.0 == set as u32));
+        assert_eq!(f.library.shown_set, Some(empty));
+        assert!(f.library.brush_rects.is_empty());
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (start.set, start.index));
         // shut, and opened again
         f.library.opens();
         f.frame(Vec::new());
         assert!(f.library.brush_rects.iter().all(|(k, _)| k.0 == start.set));
         assert_eq!(f.library.highlighted, Some((start.set, start.index)));
+    }
+
+    /// A brush dragged and held over another set opens it as a tap on it would (the original's
+    /// set rows take a resting drag as their tap): the brush last chosen there becomes the one in
+    /// use, lit; let go away from the library, nothing lands and that stays the brush.
+    #[test]
+    fn a_set_a_dragged_brush_opens_brings_back_its_brush_as_a_tap_does() {
+        let mut f = Finger::new();
+        let start = f.session.current_brush();
+        let from = f.on_a_brush();
+        let key = f.library.brush_rects.iter().find(|(_, r)| r.contains(from)).map(|(k, _)| *k).unwrap();
+        // a set other than this one, on screen, its brush 2 chosen there before
+        let (to, over) = f
+            .library
+            .set_rects
+            .iter()
+            .find(|(s, r)| *s != key.0 as usize && (0.0..650.0).contains(&r.center().y))
+            .map(|(s, r)| (*s, r.center()))
+            .unwrap();
+        assert!(f.session.select_brush(to as u32, 2));
+        assert!(f.session.select_brush(start.set, start.index));
+        f.library.tool_changed();
+        f.frame(Vec::new());
+        let sizes: Vec<usize> = f.session.brush_library().iter().map(|s| s.brushes.len()).collect();
+        f.down(from);
+        std::thread::sleep(HOLD + Duration::from_millis(50));
+        f.frame(Vec::new());
+        for i in 1..=6 {
+            f.to(from + (over - from) * (i as f32 / 6.0));
+        }
+        // not yet open: the brush as it was
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (start.set, start.index));
+        std::thread::sleep(SPRING_LOAD + Duration::from_millis(50));
+        f.frame(Vec::new());
+        f.frame(Vec::new());
+        assert_eq!(f.library.shown_set, Some(to));
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (to as u32, 2));
+        assert_eq!(f.library.highlighted, Some((to as u32, 2)));
+        // carried off the library and let go: nothing lands anywhere
+        let away = pos2(40.0, 650.0);
+        for i in 1..=4 {
+            f.to(over + (away - over) * (i as f32 / 4.0));
+        }
+        f.up(away);
+        f.frame(Vec::new());
+        assert_eq!(f.session.brush_library().iter().map(|s| s.brushes.len()).collect::<Vec<_>>(), sizes);
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (to as u32, 2));
+    }
+
+    /// A brush picked from the search ends it and shows in its own set, chosen there and lit (as
+    /// the original), wherever the library stood.
+    #[test]
+    fn a_brush_picked_from_the_search_shows_in_its_own_set() {
+        let mut f = Finger::new();
+        let start = f.session.current_brush();
+        let library = f.session.brush_library();
+        let named = |name: &str| library.iter().flat_map(|s| &s.brushes).filter(|o| o.name == name).count();
+        // a brush of another set, not its first, with a name no other brush holds
+        let picked = library
+            .iter()
+            .flat_map(|s| &s.brushes)
+            .find(|b| b.set != start.set && b.index > 0 && named(&b.name) == 1)
+            .cloned()
+            .expect("a brush of its own name");
+        f.library.query = picked.name.clone();
+        f.frame(Vec::new());
+        f.frame(Vec::new());
+        // the results in place of the lists: the one found, first
+        assert!(f.library.brush_rects.is_empty());
+        let (key, at) = f.library.result_rects.first().map(|(k, r)| (*k, r.center())).expect("a result");
+        assert_eq!(key, (picked.set, picked.index));
+        f.down(at);
+        f.up(at);
+        f.frame(Vec::new());
+        f.frame(Vec::new());
+        assert!(f.library.query.is_empty() && !f.library.searching);
+        assert_eq!((f.session.current_brush().set, f.session.current_brush().index), (picked.set, picked.index));
+        assert_eq!(f.library.shown_set, Some(picked.set as usize));
+        assert_eq!(f.library.highlighted, Some((picked.set, picked.index)));
+        assert!(f.library.brush_rects.iter().all(|(k, _)| k.0 == picked.set));
+        assert!(f.library.studio.is_none());
     }
 
     #[test]

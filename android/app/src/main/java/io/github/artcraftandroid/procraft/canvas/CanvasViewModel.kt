@@ -360,22 +360,32 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var otherColour = floatArrayOf(0f, 0f, 0f)
 
+    /**
+     * The brush colour and the masks', kept by the shared core in their file as each changes, so the
+     * next start finds them however this run ends (a force-stop or a kill runs no onStop).
+     */
+    private val keptColours = io.github.artcraftandroid.procraft.core.KeptColours.open(File(app.filesDir, "colour").path)
+
     init {
+        // the colours earlier versions kept in the preferences (as the app went into the background), once
+        if (!keptColours.wasKept() && interfacePrefs.contains(KEPT_HUE)) {
+            val brush = listOf(KEPT_HUE, KEPT_SATURATION, KEPT_BRIGHTNESS).zip(listOf(DEFAULT_HUE, 1f, 1f)).map { (key, first) -> interfacePrefs.getFloat(key, first) }
+            val mask = listOf(KEPT_MASK_HUE, KEPT_MASK_SATURATION, KEPT_MASK_BRIGHTNESS).map { interfacePrefs.getFloat(it, 0f) }
+            keptColours.keep(brush, mask)
+        }
         // the colours as they were last left
-        hue = interfacePrefs.getFloat(KEPT_HUE, DEFAULT_HUE).coerceIn(0f, 1f)
-        saturation = interfacePrefs.getFloat(KEPT_SATURATION, 1f).coerceIn(0f, 1f)
-        brightness = interfacePrefs.getFloat(KEPT_BRIGHTNESS, 1f).coerceIn(0f, 1f)
-        otherColour = listOf(KEPT_MASK_HUE, KEPT_MASK_SATURATION, KEPT_MASK_BRIGHTNESS).map { interfacePrefs.getFloat(it, 0f).coerceIn(0f, 1f) }.toFloatArray()
+        val (h, s, v) = keptColours.brush()
+        hue = h
+        saturation = s
+        brightness = v
+        otherColour = keptColours.mask().toFloatArray()
     }
 
-    /** Keeps the brush colour and the masks' for the next session. */
+    /** Keeps the brush colour and the masks' for the next start (the core writes them soon, off this thread). */
     private fun keepColour() {
-        val now = floatArrayOf(hue, saturation, brightness)
-        val (brush, mask) = if (onMask) otherColour to now else now to otherColour
-        interfacePrefs.edit()
-            .putFloat(KEPT_HUE, brush[0]).putFloat(KEPT_SATURATION, brush[1]).putFloat(KEPT_BRIGHTNESS, brush[2])
-            .putFloat(KEPT_MASK_HUE, mask[0]).putFloat(KEPT_MASK_SATURATION, mask[1]).putFloat(KEPT_MASK_BRIGHTNESS, mask[2])
-            .apply()
+        val now = listOf(hue, saturation, brightness)
+        val other = otherColour.toList()
+        if (onMask) keptColours.keep(other, now) else keptColours.keep(now, other)
     }
 
     /**
@@ -387,8 +397,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (mask == onMask) return
         onMask = mask
         val now = floatArrayOf(hue, saturation, brightness)
-        setColor(otherColour[0], otherColour[1], otherColour[2])
+        val next = otherColour
+        // set aside first: the colour kept as it changes pairs the right two
         otherColour = now
+        setColor(next[0], next[1], next[2])
     }
 
     /** The colour panel's mode, kept from one session to the next. */
@@ -2255,14 +2267,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * The sample strokes in [previews], the last drawn last: past [previewsMost] (by the device's
-     * memory, the core's brushPreviewsKept) the first go, a row showing one drawing it again from
-     * the core's packed copy. Kept all, every set looked through held some 100 MB of pictures.
+     * memory and what it has available as each is kept, see [previewBitmapsKept]) the first go, a row
+     * showing one drawing it again from the core's packed copy. Kept all, every set looked through
+     * held some 100 MB of pictures.
      */
     private val previewOrder = ArrayDeque<String>()
-    private val previewsMost by lazy {
+
+    private fun previewsMost(): Int {
         val memory = android.app.ActivityManager.MemoryInfo()
         getApplication<Application>().getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(memory)
-        io.github.artcraftandroid.procraft.core.brushPreviewsKept(memory.totalMem.coerceAtLeast(0).toULong(), 530u, 162u).toInt()
+        return previewBitmapsKept(memory.totalMem, memory.availMem)
     }
 
     /** [bitmap] kept as brush [key]'s sample stroke, the oldest let go past the most kept. */
@@ -2271,7 +2285,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         previews[key] = bitmap
         previewOrder.remove(key)
         previewOrder.addLast(key)
-        while (previewOrder.size > previewsMost) {
+        val most = previewsMost()
+        while (previewOrder.size > most) {
             val old = previewOrder.removeFirst()
             previews.remove(old)
             shadedNames.remove(old)
@@ -2283,6 +2298,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         previews.clear()
         shadedNames.clear()
         previewOrder.clear()
+    }
+
+    /**
+     * The library closed: the core lets go of the canvas its sample strokes are drawn on (100 MB and
+     * more of the GPU's memory after a heavy set), made again for the next. The pictures stay, so it
+     * opens again at once.
+     */
+    fun libraryClosed() {
+        val s = session ?: return
+        viewModelScope.launch(Dispatchers.Default) { s.letGoOfPreviews() }
     }
 
     /** Counts the library's changes: a sample stroke asked for before the last one isn't kept. */
@@ -4111,7 +4136,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             }
             GalleryZoom(c, canvasPlace(s, s.viewMatrix()), opening = false, picture = picture, turns = turns)
         }
-        keepColour()
         // a plugin's panel goes with the artwork it was open over
         closePluginPanel()
         val lapse = timeLapse
@@ -4399,7 +4423,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Saves the open artwork where it is (the app going into the background). */
     fun saveNow() {
-        keepColour()
         val s = session ?: return
         val dir = artworkDir ?: return
         noteTime()
@@ -8592,6 +8615,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // recoloring, the area under the reticle takes the new colour
         val s = session
         if (recoloring && s != null) pourLater("colour") { s.recolorColour(r, g, b) }
+        keepColour()
     }
 
     private var naming: kotlinx.coroutines.Job? = null
@@ -11389,6 +11413,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val STUDIO_PREVIEW_DELAY_MS = 60L
         /** The first colour: a saturated blue. */
         const val DEFAULT_HUE = 0.59f
+        /** Where earlier versions kept the colours (now in the core's file): read once, to carry them over. */
         const val KEPT_HUE = "colour.hue"
         const val KEPT_SATURATION = "colour.saturation"
         const val KEPT_BRIGHTNESS = "colour.brightness"

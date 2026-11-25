@@ -91,14 +91,14 @@ impl Canvas {
         }
         // the stroke's tiles there made first (the layer under them as it was before it): what it
         // keeps in them is kept from them, and put back into them
-        if !self.smudge_keep(&gpu.device, encoder, &[changed]) || !self.ahead_room(&gpu.device, changed, &style) {
+        if !self.smudge_keep(gpu, encoder, &[changed]) || !self.ahead_room(gpu, changed, &style) {
             return;
         }
         let Some(smudge) = self.smudge.as_mut() else { return };
         let Some(layer) = self.layers.get(&smudge.into) else { return };
         let size = extent(changed.width(), changed.height());
         if let Some(keep) = &smudge.keep.layer {
-            encoder.copy_texture_to_texture(copy_at(&layer.texture, changed.x0, changed.y0), copy_at(keep, 0, 0), size);
+            gpu.copy_texture_to_texture(encoder, copy_at(&layer.texture, changed.x0, changed.y0), copy_at(keep, 0, 0), size);
         }
         for at in tiles_of(changed, smudge.tile) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
@@ -114,7 +114,8 @@ impl Canvas {
             ];
             for (from, into) in parts {
                 if let (Some(from), Some(into)) = (from, into) {
-                    encoder.copy_texture_to_texture(
+                    gpu.copy_texture_to_texture(
+                        encoder,
                         copy_at(from, r.x0 - t.x0, r.y0 - t.y0),
                         copy_at(into, r.x0 - changed.x0, r.y0 - changed.y0),
                         extent(r.width(), r.height()),
@@ -136,13 +137,14 @@ impl Canvas {
 
     /// Takes off what is laid ahead of the stroke (see [`Canvas::lay_ahead`]): what it went over
     /// comes back, and the stroke goes on from where it was.
-    pub(super) fn take_back_ahead(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub(super) fn take_back_ahead(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder) {
         let Some(smudge) = self.smudge.as_mut() else { return };
         let Some(laid) = smudge.laid_ahead.take() else { return };
         let Some(layer) = self.layers.get(&smudge.into) else { return };
         let changed = laid.changed;
         if let Some(keep) = &smudge.keep.layer {
-            encoder.copy_texture_to_texture(
+            gpu.copy_texture_to_texture(
+                encoder,
                 copy_at(keep, 0, 0),
                 copy_at(&layer.texture, changed.x0, changed.y0),
                 extent(changed.width(), changed.height()),
@@ -162,7 +164,8 @@ impl Canvas {
             ];
             for (from, into) in parts {
                 if let (Some(from), Some(into)) = (from, into) {
-                    encoder.copy_texture_to_texture(
+                    gpu.copy_texture_to_texture(
+                        encoder,
                         copy_at(from, r.x0 - changed.x0, r.y0 - changed.y0),
                         copy_at(into, r.x0 - t.x0, r.y0 - t.y0),
                         extent(r.width(), r.height()),
@@ -184,7 +187,8 @@ impl Canvas {
 
     /// Room to keep what paint laid ahead over `changed` goes over; false if it couldn't be made
     /// (nothing is laid ahead of this stroke from then on).
-    fn ahead_room(&mut self, device: &wgpu::Device, changed: IRect, style: &super::StrokeStyle) -> bool {
+    fn ahead_room(&mut self, gpu: &Gpu, changed: IRect, style: &super::StrokeStyle) -> bool {
+        let device = &gpu.device;
         let (most_w, most_h) = (self.width, self.height);
         let Some(smudge) = self.smudge.as_mut() else { return false };
         let Some(layer) = self.layers.get(&smudge.into) else { return false };
@@ -210,7 +214,7 @@ impl Canvas {
         let grow = |kept: &mut Option<wgpu::Texture>, label: &str, format: wgpu::TextureFormat| {
             if !roomy(kept) {
                 let (w, h) = (kept.as_ref().map(wgpu::Texture::width), kept.as_ref().map(wgpu::Texture::height));
-                *kept = Some(texture(device, label, side(width, w, most_w), side(height, h, most_h), format));
+                *kept = Some(texture(gpu, label, side(width, w, most_w), side(height, h, most_h), format));
             }
         };
         grow(&mut keep.layer, "ahead layer", format);

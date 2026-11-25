@@ -2566,6 +2566,42 @@ mod tests {
     }
 
     #[test]
+    fn either_tab_tears_out_and_follows_the_pointer_while_the_brush_library_shows() {
+        for torn in [LayoutPiece::Brushes, LayoutPiece::Layers] {
+            // the library let go on the Layers panel's strip: a tab of its window, showing, the only
+            // window drawn (the Layers panel waits)
+            let layout = laid_out(SNAPPING);
+            opened(&layout, LayoutPiece::Layers);
+            dropped(&layout, LayoutPiece::Brushes, 1408.0, 53.0);
+            let two = [LayoutPiece::Layers, LayoutPiece::Brushes];
+            assert_eq!(layout.tabs_of(LayoutPiece::Brushes), two);
+            assert_eq!(layout.order(), [LayoutPiece::Brushes]);
+            // the tab pulled down out of the strip, then on 430 down and 400 left, step by step: its
+            // window under the pointer all the way (its strip 12 over it; across, its middle at the
+            // pointer but for snapping, within 16, to the other window's side), both strips as they were
+            layout.tear_tab(torn, 1300.0, 80.0, 12.0).unwrap();
+            for step in 1..=10 {
+                let (x, y) = (1300.0 - step as f32 * 40.0, 80.0 + step as f32 * 43.0);
+                let shown = layout.drag(x, y).unwrap();
+                assert_eq!(shown.y, y - 12.0, "{torn:?} {step}");
+                assert!((shown.x + shown.width / 2.0 - x).abs() <= SNAPPING.snap, "{torn:?} {step}: {shown:?}");
+                assert_eq!(layout.tabs_of(LayoutPiece::Layers), two, "{torn:?} {step}");
+                assert_eq!(layout.tabs_of(LayoutPiece::Brushes), two, "{torn:?} {step}");
+            }
+            // both drawn now, the torn one over the other
+            assert_eq!(layout.order().last(), Some(&torn));
+            assert_eq!(layout.order().len(), 2);
+            // let go there: a window of its own where it was let go, the other alone where the two were
+            let held = layout.shown(torn).unwrap();
+            assert!(layout.let_go());
+            assert_eq!(layout.shown(torn), Some(held), "{torn:?}");
+            assert!(layout.tabs_of(LayoutPiece::Layers).is_empty() && layout.tabs_of(LayoutPiece::Brushes).is_empty());
+            let other = if torn == LayoutPiece::Layers { LayoutPiece::Brushes } else { LayoutPiece::Layers };
+            assert_eq!(layout.shown(other).map(|s| (s.x, s.y)), Some((1216.0, 48.0)), "{torn:?}");
+        }
+    }
+
+    #[test]
     fn a_window_holds_four_tabs_at_most_and_windows_side_by_side_stay_apart() {
         let layout = laid_out(SNAPPING);
         opened(&layout, LayoutPiece::Layers);

@@ -7,6 +7,7 @@
 //! before the first stamp that changed where a display frame's stamps begin, and lays only what
 //! follows: that leaves what laying it all again from its start would.
 
+use crate::Gpu;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use procraft_engine::geom::IRect;
@@ -161,7 +162,7 @@ impl Rewind {
 
     /// A tile picture to keep a mark's in: one let go of, else a new one if the most allows,
     /// letting go of the oldest marks (not the newest) for room.
-    fn take(&mut self, device: &wgpu::Device) -> Option<wgpu::Texture> {
+    fn take(&mut self, gpu: &Gpu) -> Option<wgpu::Texture> {
         loop {
             if let Some(t) = self.free.pop() {
                 return Some(t);
@@ -170,7 +171,7 @@ impl Rewind {
             let tile_bytes = u64::from(self.side) * u64::from(self.side) * 4;
             if self.bytes + tile_bytes <= self.most {
                 self.bytes += tile_bytes;
-                return Some(texture(device, "stroke mark", self.side, self.side, LAYER_FORMAT));
+                return Some(texture(gpu, "stroke mark", self.side, self.side, LAYER_FORMAT));
             }
             if self.marks.len() < 2 {
                 return None;
@@ -271,12 +272,7 @@ impl Canvas {
     /// The tiles `writes` reach, about to be written by the open stroke painting in place, kept as
     /// they are for its newest mark if this is their first write since (those not made yet noted as
     /// made since: as they were before the stroke).
-    pub(super) fn keep_for_mark(
-        &mut self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        writes: &[IRect],
-    ) {
+    pub(super) fn keep_for_mark(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, writes: &[IRect]) {
         let full = self.full();
         let Some(smudge) = self.smudge.as_mut() else { return };
         let Some(layer) = self.layers.get(&smudge.into) else { return };
@@ -294,7 +290,7 @@ impl Canvas {
             let wanted = 1 + kept.iter().filter(|k| k.is_some()).count();
             let mut taken = Vec::with_capacity(wanted);
             for _ in 0..wanted {
-                match rewind.take(device) {
+                match rewind.take(gpu) {
                     Some(t) => taken.push(t),
                     None => break,
                 }
@@ -308,7 +304,8 @@ impl Canvas {
             let r = tile_rect(at, side).intersect(full);
             let mut taken = taken.into_iter();
             let Some(picture) = taken.next() else { return };
-            encoder.copy_texture_to_texture(
+            gpu.copy_texture_to_texture(
+                encoder,
                 copy_at(&layer.texture, r.x0, r.y0),
                 copy_at(&picture, 0, 0),
                 extent(r.width(), r.height()),
@@ -317,7 +314,7 @@ impl Canvas {
             for (from, into) in kept.into_iter().zip(saved.kept.iter_mut()) {
                 if let Some(from) = from {
                     let Some(t) = taken.next() else { break };
-                    encoder.copy_texture_to_texture(copy_at(from, 0, 0), copy_at(&t, 0, 0), extent(side, side));
+                    gpu.copy_texture_to_texture(encoder, copy_at(from, 0, 0), copy_at(&t, 0, 0), extent(side, side));
                     *into = Some(t);
                 }
             }
@@ -399,7 +396,7 @@ impl Canvas {
     /// Goes back to the open stroke's mark before its `at`th stamp (see [`Canvas::rewound`]): the
     /// tiles written since as they were then (those made since as they were before the stroke, and
     /// no longer kept), and what it carried; the stamps waiting for the rest of their frame dropped.
-    pub(super) fn rewind_in_place(&mut self, encoder: &mut wgpu::CommandEncoder, at: usize) {
+    pub(super) fn rewind_in_place(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, at: usize) {
         let full = self.full();
         let Some(smudge) = self.smudge.as_mut() else { return };
         let Some(layer) = self.layers.get(&smudge.into) else { return };
@@ -424,7 +421,8 @@ impl Canvas {
         for at in &made {
             let Some(tile) = smudge.tiles.remove(at) else { continue };
             let r = tile_rect(*at, side).intersect(full);
-            encoder.copy_texture_to_texture(
+            gpu.copy_texture_to_texture(
+                encoder,
                 copy_at(&tile.before, 0, 0),
                 copy_at(&layer.texture, r.x0, r.y0),
                 extent(r.width(), r.height()),
@@ -434,14 +432,15 @@ impl Canvas {
         for (at, saved) in first {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
             let r = tile_rect(at, side).intersect(full);
-            encoder.copy_texture_to_texture(
+            gpu.copy_texture_to_texture(
+                encoder,
                 copy_at(&saved.layer, 0, 0),
                 copy_at(&layer.texture, r.x0, r.y0),
                 extent(r.width(), r.height()),
             );
             for (from, into) in saved.kept.iter().zip([&tile.grained, &tile.amount, &tile.shown]) {
                 if let (Some(from), Some(into)) = (from, into) {
-                    encoder.copy_texture_to_texture(copy_at(from, 0, 0), copy_at(into, 0, 0), extent(side, side));
+                    gpu.copy_texture_to_texture(encoder, copy_at(from, 0, 0), copy_at(into, 0, 0), extent(side, side));
                 }
             }
             changed = changed.union(r);
