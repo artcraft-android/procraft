@@ -5,6 +5,8 @@ use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind, Place, 
 
 use crate::CanvasSession;
 
+pub(crate) const BLEND_MODE_STEP: &str = "blend mode";
+
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct LayerInfo {
     pub id: u64,
@@ -41,6 +43,9 @@ pub struct LayerInfo {
     /// draws none or its plugin is off or gone.
     #[uniffi(default = None)]
     pub plugin_badge: Option<crate::PluginBadge>,
+    /// The colour (0xRRGGBB) its row shows, as a plugin labels it by the mark it keeps with it.
+    #[uniffi(default = None)]
+    pub label: Option<u32>,
     /// How many groups it is inside.
     pub depth: u32,
     /// Left out of the picture while another layer is shown alone (solo visibility): its box
@@ -56,6 +61,10 @@ pub struct LayerInfo {
     /// Its styles (outline, drop shadow, glows) show.
     #[uniffi(default = false)]
     pub styled: bool,
+    /// A filter layer's filter, by the name its plugin gives it (its id while no plugin on offers
+    /// it): it has no paint, and shows what is below it through the filter (interface 17).
+    #[uniffi(default = None)]
+    pub filter: Option<String>,
 }
 
 /// A layer's pixels' version: new whenever they may have changed.
@@ -113,6 +122,8 @@ pub enum LayerOption {
     Reference,
     EditText,
     Rasterize,
+    /// A filter layer: its filter's values, in its panel.
+    FilterSettings,
     /// A plugin's layer: the strokes the selection takes (every one with nothing selected) given
     /// the paint colour.
     Recolour,
@@ -285,6 +296,18 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
         LayerType::Paint if l.adjustment.is_some() => {
             if unlocked {
                 row(O::AdjustmentSettings, "Adjustment Settings", None);
+            }
+            if !masked {
+                row(O::Mask, "Mask", None);
+            }
+            if l.can_clip {
+                row(O::ClippingMask, "Clipping Mask", Some(l.clipped));
+            }
+        }
+        // a filter layer: its settings; it has no paint to select, copy, fill or invert
+        LayerType::Paint if l.filter.is_some() => {
+            if unlocked {
+                row(O::FilterSettings, "Filter Settings", None);
             }
             if !masked {
                 row(O::Mask, "Mask", None);
@@ -494,17 +517,20 @@ pub fn grain_blend_modes() -> Vec<BlendModeInfo> {
 #[uniffi::export]
 impl CanvasSession {
     /// Lets go of the GPU memory kept only to make later work quicker (spare textures, upload and
-    /// readback buffers): for when the system is short of memory or the app is put away. Nothing
-    /// shown changes; what is let go is made again when next wanted.
+    /// readback buffers, the canvas the brushes' sample strokes are drawn on): for when the system
+    /// is short of memory or the app is put away. Nothing shown changes; what is let go is made
+    /// again when next wanted.
     pub fn trim_memory(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.let_go_of_spares();
         }
+        st.preview = None;
         if let Some(gpu) = st.gpu.as_ref() {
             gpu.let_go_of_kept_buffers();
         }
+        crate::big_pictures::let_go();
     }
 
     /// The visible paint layers with something drawn under window point (`x`, `y`), top first.
@@ -598,10 +624,16 @@ impl CanvasSession {
                 text: l.text.is_some(),
                 vector: l.vector.is_some(),
                 plugin_kind: l.plugin.as_ref().map(|p| p.kind.clone()),
-                plugin_badge: l.plugin.as_ref().map(|p| {
-                    let badge = st.hooks.as_ref().and_then(|hooks| hooks.layer_kind_badge(&p.kind));
-                    badge.unwrap_or_else(crate::PluginBadge::plug)
-                }),
+                // a filter layer's shows it is one
+                plugin_badge: l
+                    .plugin
+                    .as_ref()
+                    .map(|p| {
+                        let badge = st.hooks.as_ref().and_then(|hooks| hooks.layer_kind_badge(&p.kind));
+                        badge.unwrap_or_else(crate::PluginBadge::plug)
+                    })
+                    .or_else(|| l.filter.as_ref().map(|_| crate::PluginBadge::filter())),
+                label: st.hooks.as_ref().and_then(|hooks| hooks.layer_label(&l.marks)),
                 depth: u32::try_from(st.doc.depth(l.id)).unwrap_or(u32::MAX),
                 soloed_out: st.doc.soloed_out(l.id),
                 // as measured, not onto a locked layer: both left out of its menu then
@@ -610,6 +642,7 @@ impl CanvasSession {
                 can_clip: st.doc.can_clip(l.id),
                 adjustment: l.adjustment.as_ref().and_then(|a| crate::adjusting::adjustment_of(&a.settings)),
                 styled: l.shown_style().is_some(),
+                filter: l.filter.as_ref().map(|f| st.filter_label(f)),
             })
             .collect()
     }
@@ -688,6 +721,9 @@ impl CanvasSession {
             && let Some(c) = st.canvas.as_mut()
         {
             c.invalidate();
+            self.shared.frame(st);
+        } else if ok && st.plugin_dim > 0.0 {
+            // the layers but this one dimmed now
             self.shared.frame(st);
         }
         ok
@@ -1050,8 +1086,10 @@ impl CanvasSession {
             return true;
         }
         // a layer changes the one below only where it is painted: only that much is kept for undo
-        // (none at all for an empty one), not a copy of the whole of it
-        let within = st.painted_box(upper).unwrap_or(procraft_engine::geom::IRect::new(0, 0, 0, 0));
+        // (none at all for an empty one), not a copy of the whole of it; a filter layer, painted
+        // nowhere, changes it wherever it is, all of it kept
+        let filter = st.doc.layer(upper).is_some_and(|l| l.filter.is_some());
+        let within = (!filter).then(|| st.painted_box(upper).unwrap_or(procraft_engine::geom::IRect::new(0, 0, 0, 0)));
         if let Some(canvas) = st.canvas.as_mut() {
             // each mask applied to its layer first, as one step; a hidden layer below gives up
             // what it holds (the merge keeps what showed)
@@ -1062,7 +1100,7 @@ impl CanvasSession {
                 .collect();
             let drop_lower = st.doc.layer(lower).is_some_and(|l| !l.visible);
             canvas.name_next_step("merge down");
-            canvas.merge_down_with_masks(upper, lower, masks, drop_lower, before, Some(within));
+            canvas.merge_down_with_masks(upper, lower, masks, drop_lower, before, within);
         }
         st.doc.finish_merge_down(id);
         st.revision += 1;
@@ -1137,10 +1175,29 @@ impl CanvasSession {
     /// `blend` is a blend mode id (see [`blend_modes`]).
     pub fn set_layer_blend(&self, id: u64, blend: u32) -> bool {
         let Some(mode) = BlendMode::from_id(blend) else { return false };
-        self.change("blend mode", |d| {
+        self.change(BLEND_MODE_STEP, |d| {
             changed(d, id, |l| l.blend != mode).then(|| d.set_blend(LayerId(id), mode)).filter(|ok| *ok).map(|_| ())
         })
         .is_some()
+    }
+
+    /// Apply a centered mode immediately, keeping the picker movement as one undo step.
+    pub fn preview_layer_blend(&self, id: u64, blend: u32) -> bool {
+        let Some(mode) = BlendMode::from_id(blend) else { return false };
+        self.change_live(BLEND_MODE_STEP, false, |d| {
+            changed(d, id, |l| l.blend != mode) && d.set_blend(LayerId(id), mode)
+        })
+    }
+
+    /// Finish the current blend picker movement, if it changed a mode.
+    pub fn finish_layer_blend(&self) -> bool {
+        let mut st = self.shared.lock();
+        if st.pending_name.as_deref() != Some(BLEND_MODE_STEP) {
+            return false;
+        }
+        st.settle();
+        self.shared.frame(&mut st);
+        true
     }
 
     /// Turns layer `id`'s alpha lock on or off: one step, named as measured ("Undo Alpha Lock on").
@@ -1183,6 +1240,17 @@ impl CanvasSession {
         .is_some()
     }
 
+    /// The number plugin `owner` keeps with layer `id`: 0 for none, or no such layer.
+    pub(crate) fn layer_mark(&self, owner: &str, id: u64) -> i64 {
+        self.shared.lock().doc.layer(LayerId(id)).map_or(0, |l| l.mark(owner))
+    }
+
+    /// `mark` kept with layer `id` for plugin `owner` (0 takes it off), one step undo takes back;
+    /// false if that changed nothing.
+    pub(crate) fn set_layer_mark(&self, owner: &str, id: u64, mark: i64) -> bool {
+        self.change("label layer", |d| d.set_mark(LayerId(id), owner, mark).then_some(())).is_some()
+    }
+
     pub fn rename_layer(&self, id: u64, name: String) -> bool {
         self.change("rename layer", |d| {
             changed(d, id, |l| l.name != name.trim()).then(|| d.rename(LayerId(id), &name)).filter(|ok| *ok).map(|_| ())
@@ -1212,19 +1280,33 @@ impl CanvasSession {
     }
 
     /// The whole picture scaled to fit `max_side` pixels (premultiplied), for the reference
-    /// window; none before the canvas exists.
+    /// window; none before the canvas exists. The copy is started under the lock and waited for
+    /// once it is let go: frames and touches go on while the GPU gets through the work before it
+    /// (read after each stroke, with a heavy brush's end before it that held them for most of a
+    /// second).
     pub fn canvas_thumbnail(&self, max_side: u32) -> Option<ThumbnailImage> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
-        let t = canvas.composite_thumbnail(gpu, &mut st.doc, max_side).ok()?;
+        let pending = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
+            canvas.start_composite_thumbnail_without(gpu, &mut st.doc, max_side, &[])
+        };
+        let t = pending.pixels().ok()?;
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
     /// The picture a time-lapse frame keeps, scaled to fit `max_side` pixels (premultiplied): as
     /// [`Self::canvas_thumbnail`], but without the private layers, so a private insert or paste
-    /// never shows in the replay or its video. None before the canvas exists.
+    /// never shows in the replay or its video. None before the canvas exists, or while the frames
+    /// are still laying a stroke's end after waiting for them a while.
     pub fn time_lapse_frame(&self, max_side: u32) -> Option<ThumbnailImage> {
+        // read once the frames have laid what they lay a share at a time (a stroke's end), which
+        // the read would otherwise lay at once, touches and frames waiting on it; strokes ending
+        // one after another, each with its end still being laid, none is read (the frame after
+        // the next stroke has it)
+        if !self.shared.await_frames_laid() {
+            return None;
+        }
         // the copy started under the lock, waited for once it is let go: touches and frames go
         // on while the GPU copies it
         let pending = {
@@ -1238,16 +1320,62 @@ impl CanvasSession {
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
-    /// Records the canvas as `lapse`'s next frame, read back at the size frames are kept (not the
-    /// video's): the picture stays in the core, never crossing to the app and back, so a frame
-    /// after each stroke moves a few MB, not dozens. Whether one was kept (none before the canvas
-    /// exists, while it doesn't record, or when nothing changed since the last).
+    /// Records the canvas as `lapse`'s next frame (unless it is the same as the last), read back
+    /// at the size frames are kept (not the video's): the picture stays in the core, never
+    /// crossing to the app and back. It is taken from the composite in a frame that has laid the
+    /// change: while frames are being drawn, the first frame that has laid what the frames lay a
+    /// share at a time (a stroke's end) takes the picture, its copy started on the GPU after that
+    /// frame's work and made into the frame on a thread of its own, in order; the call returns at
+    /// once (true). Nothing waits for the frames or lays their work at once,
+    /// and a stroke right after another doesn't leave the first one's frame out. With no frames
+    /// drawn (the app away, an artwork never shown) it is taken now and kept before this returns:
+    /// whether it was. False before the canvas exists, while it doesn't record, or while it waits for
+    /// room on a full storage.
     pub fn record_time_lapse(&self, lapse: std::sync::Arc<crate::timelapse::TimeLapse>) -> bool {
         if !lapse.recording() {
             return false;
         }
-        let Some(t) = self.time_lapse_frame(crate::timelapse::FRAME_SIDE) else { return false };
-        lapse.record(t.rgba, t.width, t.height)
+        // the storage full: nothing read back or encoded only to be refused, until a save of the
+        // artwork works again (which then says there is room)
+        if lapse.waits_for_room() {
+            self.shared.found_full.store(true, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
+        let keeper = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            if st.canvas.is_none() || st.gpu.is_none() {
+                return false;
+            }
+            if st.frames_drawn() {
+                st.lapse_wanted = Some(lapse);
+                self.shared.frame(st);
+                return true;
+            }
+            st.lapse_keeper.clone()
+        };
+        // none drawn: taken now, those taken before kept first, so the count tells of this one
+        keeper.settle(crate::timelapse::KEEP_MOST);
+        let before = lapse.count();
+        {
+            let mut st = self.shared.lock();
+            st.lapse_wanted = Some(std::sync::Arc::clone(&lapse));
+            st.take_lapse_picture(true);
+        }
+        keeper.settle(crate::timelapse::KEEP_MOST);
+        lapse.count() > before
+    }
+
+    /// Takes a time-lapse frame asked for and not taken yet (the frames stopped before laying what
+    /// it waited for), laying that at once, and waits until every frame taken is kept (at most
+    /// [`crate::timelapse::KEEP_MOST`]): the app may make a video of them next.
+    pub(crate) fn keep_time_lapse(&self) {
+        let keeper = {
+            let mut st = self.shared.lock();
+            st.take_lapse_picture(true);
+            st.lapse_keeper.clone()
+        };
+        keeper.settle(crate::timelapse::KEEP_MOST);
     }
 
     /// Each paint layer's and mask's pixels' version, the queued work done first: a thumbnail
@@ -1423,7 +1551,10 @@ impl CanvasSession {
                 if st.doc.layer(u).is_some_and(|l| l.kind == LayerKind::Group) { st.doc.contents(u) } else { vec![u] }
             })
             .collect();
+        // (a filter layer among them changes it wherever it is: all of it kept)
+        let filters = painted.iter().any(|&l| st.doc.layer(l).is_some_and(|l| l.filter.is_some()));
         let within = match (st.canvas.as_ref(), st.gpu.as_ref()) {
+            _ if filters => None,
             (Some(canvas), Some(gpu)) => canvas
                 .painted_boxes_or_why(gpu, &painted)
                 .into_iter()
@@ -1477,6 +1608,9 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.finish_stroke();
+        if st.pending_name.as_deref() != Some(name) && (st.pending_doc.is_some() || name == BLEND_MODE_STEP) {
+            st.settle();
+        }
         let before = st.doc.clone();
         if !f(&mut st.doc) {
             return false;
@@ -1615,6 +1749,33 @@ impl CanvasSession {
     /// layer, a plugin's own).
     pub(crate) fn add_layer_quietly(&self) -> u64 {
         self.change("new layer", |d| d.has_room(1).then(|| d.add_layer().0)).unwrap_or(0)
+    }
+}
+
+impl crate::State {
+    /// Takes the time-lapse frame asked for (see [`CanvasSession::record_time_lapse`]), if there
+    /// is one: in a frame (`at_once` false) once the frames have laid what they lay a share at a
+    /// time and the caches are whole (else a frame after this one does, more asked for until
+    /// then); otherwise now, laying that at once. Its picture (private layers left out, so a
+    /// private insert never shows in the replay or its video) is only started on the GPU here and
+    /// handed to the keeper, never waited for.
+    pub(crate) fn take_lapse_picture(&mut self, at_once: bool) {
+        if self.lapse_wanted.is_none() {
+            return;
+        }
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return };
+        if !at_once && (canvas.busy() || canvas.lays_over_frames()) {
+            self.needs_frame = true;
+            return;
+        }
+        let Some(lapse) = self.lapse_wanted.take() else { return };
+        if !lapse.recording() {
+            return;
+        }
+        let private = self.doc.private_layers();
+        let picture =
+            canvas.start_composite_thumbnail_without(gpu, &mut self.doc, crate::timelapse::FRAME_SIDE, &private);
+        self.lapse_keeper.keep(lapse, picture);
     }
 }
 

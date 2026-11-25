@@ -5,6 +5,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -26,7 +29,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -76,7 +81,7 @@ fun rememberFrost(corner: Dp): Modifier = rememberFrost(corner, BarGlass())
 
 /**
  * How a bar's glass differs from a panel's: it shows as much as [shown], [moved] (window pixels) as
- * the bar slides out of its place, its box goes [pastLeft], [pastRight] and [pastBottom] further (to
+ * the bar slides out of its place, its box goes [pastLeft], [pastRight], [pastBottom] and [pastTop] further (to
  * take the corners of a bar's or a sheet's screen edge off the screen), and as a [window] what is
  * behind only softens.
  */
@@ -87,6 +92,7 @@ data class BarGlass(
     val pastRight: Dp = 0.dp,
     val window: Boolean = false,
     val pastBottom: Dp = 0.dp,
+    val pastTop: Dp = 0.dp,
 )
 
 /** [rememberFrost] for a bar, as [glass] says. */
@@ -113,11 +119,14 @@ fun rememberFrost(corner: Dp, glass: BarGlass): Modifier {
         }
     }
     return Modifier.onGloballyPositioned { c ->
-        // by the screen, so that it works from popups too, then on the canvas
-        val at = backdrops.onCanvas(c.positionOnScreen())
+        // by the screen, so that it works from popups too, then on the canvas; by its bounds as drawn
+        // (turned, a bar lying down has them across)
+        val drawn = c.boundsInWindow()
+        val at = backdrops.onCanvas(c.positionOnScreen() - c.positionInWindow() + drawn.topLeft)
         val (left, right) = with(density) { glass.pastLeft.toPx() to glass.pastRight.toPx() }
-        val below = with(density) { glass.pastBottom.toPx() }
-        box = frostBox(at, c.size.width, c.size.height, left, right, below, with(density) { corner.toPx() })
+        val (below, above) = with(density) { glass.pastBottom.toPx() to glass.pastTop.toPx() }
+        val (w, h) = drawn.width.toInt() to drawn.height.toInt()
+        box = frostBox(at, w, h, left, right, below, with(density) { corner.toPx() }, above)
     }
 }
 
@@ -131,20 +140,50 @@ internal fun canvasCorner(contentOnScreen: Offset, clear: Clearance): Offset = c
 
 /**
  * The frosted box (x0, y0, x1, y1 and its corners' radius, canvas pixels) of a node [width] by
- * [height] at [onCanvas], [left], [right] and [below] further out than it.
+ * [height] at [onCanvas], [left], [right], [below] and [above] further out than it.
  */
-internal fun frostBox(onCanvas: Offset, width: Int, height: Int, left: Float, right: Float, below: Float, corner: Float): FloatArray =
-    floatArrayOf(onCanvas.x - left, onCanvas.y, onCanvas.x + width + right, onCanvas.y + height + below, corner)
+internal fun frostBox(onCanvas: Offset, width: Int, height: Int, left: Float, right: Float, below: Float, corner: Float, above: Float = 0f): FloatArray =
+    floatArrayOf(onCanvas.x - left, onCanvas.y - above, onCanvas.x + width + right, onCanvas.y + height + below, corner)
 
+
+/** How solid a floating window's frost is: what is under it (a bar, another window) doesn't show. */
+private const val WindowFrostAlpha = 0.98f
+
+/**
+ * Whether every panel is drawn nearly solid: while the panels float (a plugin lays them out), a window lies over the
+ * bars and other windows and a panel over a window, and only the canvas blurs behind the frost.
+ */
+val LocalSolidPanels = androidx.compose.runtime.staticCompositionLocalOf { false }
 
 /** The side of a popover its arrow sticks out of, pointing at its button; or none. */
 enum class ArrowSide { TOP, BOTTOM, LEFT, RIGHT, NONE }
 
 /**
+ * Where the panel opening now hangs from a button Edit layout moved: the side its arrow is on, and how
+ * far along that side its tip is (the panel's own dp). The panel's own popover takes it in place of
+ * an arrow up from under the top bar; nothing that opens inside it does.
+ */
+class Hang(val side: ArrowSide, val arrow: Dp)
+
+/** The hang of the panel opening now, while Edit layout moved its button. */
+val LocalHang = staticCompositionLocalOf<Hang?> { null }
+
+/**
+ * A panel floating in a window of its own (every panel may, while a plugin lets it): how wide and tall the window lays it
+ * out (its own dp), and what its strip and corner do. The panel's own popover draws as that window, with no arrow and a
+ * strip over it; nothing that opens inside it does.
+ */
+class FloatWindow(val width: Dp, val height: Dp, val frame: FloatingFrame, val sizable: Boolean)
+
+/** The window the panel showing now floats in, if it does. */
+val LocalFloat = staticCompositionLocalOf<FloatWindow?> { null }
+
+/**
  * A panel hanging from the top bar, with an arrow pointing up at its button: [arrowX] is the tip's
  * distance from the panel's left edge (from its top, for an arrow on the [side]). [popoverPlace]
  * finds where it goes. Without a [fill] of its own it is frosted over the canvas: translucent,
- * with what is behind it blurred. [width] is the body's: a side arrow adds to it.
+ * with what is behind it blurred. [width] is the body's: a side arrow adds to it. Hanging from a
+ * button Edit layout moved ([LocalHang]), an arrow that would point up points at it instead.
  */
 @Composable
 fun Popover(
@@ -156,8 +195,41 @@ fun Popover(
     side: ArrowSide = ArrowSide.TOP,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val hang = LocalHang.current?.takeIf { side == ArrowSide.TOP }
+    val float = LocalFloat.current?.takeIf { side == ArrowSide.TOP }
+    androidx.compose.runtime.CompositionLocalProvider(LocalHang provides null, LocalFloat provides null) {
+        if (float != null) {
+            // floating: as big as its window, its strip over it and the room for its corner under it
+            PopoverBody(float.width, 0.dp, modifier.height(float.height), fill, corner, ArrowSide.NONE, window = true) {
+                FloatingTop(float.frame)
+                androidx.compose.foundation.layout.Box(Modifier.weight(1f).fillMaxWidth()) {
+                    Column(Modifier.fillMaxSize(), content = content)
+                }
+                if (float.sizable) FloatingBottom(float.frame)
+            }
+        } else {
+            PopoverBody(width, hang?.arrow ?: arrowX, modifier, fill, corner, hang?.side ?: side, content = content)
+        }
+    }
+}
+
+@Composable
+private fun PopoverBody(
+    width: Dp,
+    arrowX: Dp,
+    modifier: Modifier,
+    fill: Color?,
+    corner: Dp,
+    side: ArrowSide,
+    window: Boolean = false,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     val backdrops = LocalBackdrops.current.takeIf { fill == null && Pc.PopoverFrost.alpha < 1f }
-    val paint = fill ?: if (backdrops != null) Pc.PopoverFrost else Pc.PopoverFill
+    // frosted; a floating window, which may lie over the bars and other windows (only the canvas
+    // blurs behind the frost), nearly solid so what is under it doesn't read through
+    val solid = window || LocalSolidPanels.current
+    val frosted = if (solid) Pc.PopoverFrost.copy(alpha = maxOf(Pc.PopoverFrost.alpha, WindowFrostAlpha)) else Pc.PopoverFrost
+    val paint = fill ?: if (backdrops != null) frosted else Pc.PopoverFill
     val key = remember { Any() }
     val density = LocalDensity.current
     // the blur grows and fades with the panel: its body as drawn (already grown), and how much

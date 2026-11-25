@@ -232,8 +232,7 @@ impl Library {
             }
             if let Some(Some(stroke)) = self.card_previews.get(&key) {
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                let tint = if crate::look::light() { Color32::BLACK } else { Color32::WHITE };
-                painter.image(stroke.id(), row, uv, tint);
+                painter.image(stroke.id(), row, uv, self.tint(false));
             }
             let name = one_line(ui, &b.name, 8.0, Weight::Regular, argb(PANEL_TITLE), width - 4.0);
             painter.galley(row.min + vec2(3.0, 1.0), name, argb(PANEL_TITLE));

@@ -59,8 +59,6 @@
 			<string>PSGroupSpecifier</string>
 			<key>Title</key>
 			<string>Maximum Speed Distance</string>
-			<key>FooterText</key>
-			<string>How far the pen moves before a brush's speed dynamics count it as fast.</string>
 		</dict>
 		<dict>
 			<key>Type</key>
@@ -161,6 +159,16 @@
 			<string>Feedback Sounds</string>
 			<key>Key</key>
 			<string>feedbackSounds</string>
+			<key>DefaultValue</key>
+			<false/>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Tap Assistance - Initial Touch Location Support</string>
+			<key>Key</key>
+			<string>tapAssistance</string>
 			<key>DefaultValue</key>
 			<false/>
 		</dict>

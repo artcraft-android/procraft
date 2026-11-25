@@ -8,8 +8,9 @@ let draggedAlpha = 0.3
 /// The blue over an artwork (or stack) a dragged artwork would be stacked with.
 let dropWash = Color(argb: 0x8000_64DC)
 
-/// How long a dragged artwork rests on a stack (or a stack's way back) before it opens (the gallery).
-private let restSeconds = 0.6
+/// How long a dragged artwork rests on a stack (or a stack's way back) before it opens (the shared
+/// core's, as every app's gallery).
+private let restSeconds = Double(gallerySpringMs()) / 1000
 /// How near the grid's top or bottom a drag scrolls it, and how far each frame.
 private let dragScrollEdge: CGFloat = 60
 private let dragScrollStep: CGFloat = 12
@@ -60,50 +61,6 @@ private extension GalleryEntry {
         }
     }
 }
-
-/// The thumbnail's box in a cell at `cell` on the window.
-private func thumbnailBox(_ cell: CGRect) -> CGRect {
-    let inset = GalleryGrid(Interface.shared.screen(Interface.shared.window).size).inset
-    return CGRect(x: cell.minX + inset / 2, y: cell.minY + 39, width: cell.width - inset, height: cell.height - 82)
-}
-
-/// An artwork's picture as it sits in its thumbnail's `box`: fitted, in the box's middle.
-private func fitted(_ box: CGRect, _ artwork: GalleryArtwork) -> CGRect {
-    let ratio: CGFloat = artwork.width > 0 && artwork.height > 0 ? CGFloat(artwork.width) / CGFloat(artwork.height) : 0.75
-    let width = ratio <= box.width / box.height ? box.height * ratio : box.width
-    let height = width / ratio
-    return CGRect(x: box.midX - width / 2, y: box.midY - height / 2, width: width, height: height)
-}
-
-/// What a dragged item can come as. Another app's item often comes in several forms at once (an
-/// artwork as its own file and as a picture of it): which is taken goes by where it is dropped.
-enum DroppedForm {
-    case brushes, palette, artwork, picture, other
-
-    /// The form a type's files are, by the extensions its files have (and, for an app's own types
-    /// that say none, by its name).
-    init(type identifier: String) {
-        let type = UTType(identifier)
-        let extensions = Set((type?.tags[.filenameExtension] ?? []).map { $0.lowercased() })
-        let named = identifier.lowercased()
-        if !extensions.isDisjoint(with: droppedBrushExtensions) || named.contains("brush") {
-            self = .brushes
-        } else if !extensions.isDisjoint(with: droppedPaletteExtensions) || named.contains("swatches") {
-            self = .palette
-        } else if !extensions.isDisjoint(with: droppedArtworkExtensions) || named.contains("procreate") || type?.conforms(to: .pdf) == true {
-            self = .artwork
-        } else if type?.conforms(to: .image) == true {
-            self = .picture
-        } else {
-            self = .other
-        }
-    }
-}
-
-let droppedBrushExtensions: Set<String> = ["brush", "brushset", "abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut"]
-let droppedPaletteExtensions: Set<String> = ["swatches", "aco", "ase"]
-/// Artworks with their layers: ours, other apps', and what is brought in as one.
-let droppedArtworkExtensions: Set<String> = ["procraft", "procreate", "psd", "psb"]
 
 /// A copy of a dropped file, which goes when its reader returns: in a folder of its own, as two may
 /// have one name. A name without an extension takes its `type`'s, as what reads it goes by it.
@@ -177,7 +134,8 @@ func loadDropped(_ session: any UIDropSession, taking: [DroppedForm], done: @esc
 /// stacked with it, anywhere else on the grid it goes where it is let go. A stack moves within the
 /// gallery only. Near the grid's top or bottom the grid scrolls. Resting on a stack opens it and, in
 /// a stack, resting on the way back opens the gallery, the drag going on, so an artwork can be put
-/// in a stack where it is let go, or taken out of one. Files dragged in are imported, as Import's.
+/// in a stack where it is let go, or taken out of one; let go on the way back at once, it goes to the
+/// gallery's front. Files dragged in are imported, as Import's.
 final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteractionDelegate {
     private let model: GalleryModel
     private let shown: GalleryDragShown
@@ -185,6 +143,8 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
     var canStart: () -> Bool = { false }
 
     private var at: DropAt?
+    /// It is over a stack's way back, which hasn't opened the gallery yet.
+    private var onBack = false
     private var rest: DispatchWorkItem?
     /// What it rests on: "" the way back, else a stack (by folder).
     private var restingOn: String?
@@ -235,7 +195,7 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
         guard let window = interaction.view, let entry = item.localObject as? GalleryEntry,
               let cell = model.cellAt[entry.dir], let top = entry.shownArtwork
         else { return nil }
-        let place = fitted(thumbnailBox(cell), top)
+        let place = galleryPicture(in: cell, ratio: top.shownRatio)
         let view = UIImageView(image: UIImage(contentsOfFile: (top.dir as NSString).appendingPathComponent("thumbnail.png")))
         let lifted = artworkLifted * Interface.shared.scale
         view.frame = CGRect(x: 0, y: 0, width: place.width * lifted, height: place.height * lifted)
@@ -290,9 +250,10 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
         let entries = model.entries
         for (i, entry) in entries.enumerated() {
             guard let cell = model.cellAt[entry.dir], cell.contains(point) else { continue }
-            var picture = thumbnailBox(cell)
+            // a stack's whole square
+            var picture = galleryPicture(in: cell, ratio: 1)
             if case let .artwork(artwork) = entry {
-                picture = fitted(picture, artwork)
+                picture = galleryPicture(in: cell, ratio: artwork.shownRatio)
             }
             if stacking, entry.dir != dragged, picture.contains(point) {
                 return DropAt(onto: entry.dir, slot: i)
@@ -368,7 +329,8 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
     }
 
     private func track(_ entry: GalleryEntry, at point: CGPoint, on window: UIView?) {
-        if model.openStack != nil, model.backAt.contains(point) {
+        onBack = model.openStack != nil && model.backAt.contains(point)
+        if onBack {
             at = nil
             scroll(0, on: window)
             showOnto(nil)
@@ -392,6 +354,7 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
 
     private func settle() {
         at = nil
+        onBack = false
         scroll(0, on: nil)
         stopResting()
         showOnto(nil)
@@ -424,6 +387,11 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
     func dropInteraction(_: UIDropInteraction, performDrop session: any UIDropSession) {
         guard let entry = ownEntry(session) else {
             bringIn(session)
+            return
+        }
+        // let go on the way back before it opened the gallery: out to the gallery's front
+        if onBack, model.openStack != nil {
+            model.takeOutOfStack(entry)
             return
         }
         guard let drop = at else { return }

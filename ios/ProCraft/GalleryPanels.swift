@@ -2,6 +2,8 @@ import SwiftUI
 import UIKit
 
 private let newCanvasWidth: CGFloat = 347
+/// In a window too narrow for it (Slide Over, 320 wide), New canvas keeps this far from either edge.
+private let narrowMargin: CGFloat = 12
 private let formatsWidth: CGFloat = 260
 private let formatsTitleHeight: CGFloat = 55
 private let formatsRow: CGFloat = 40
@@ -21,9 +23,13 @@ private let renameFrameHeight: CGFloat = 280
 private let renameTop: CGFloat = 20
 private let renameArtMargin: CGFloat = 12
 private let renameFieldGap: CGFloat = 20
-private let renameFieldWidth: CGFloat = 262
+private let renameFieldWidth: CGFloat = 300
 private let renameFieldHeight: CGFloat = 38
-private let renameFieldFill = Color(argb: 0x14FF_FFFF)
+// as measured: 41 over the blur's 30, a 5% white
+private let renameFieldFill = Color(argb: 0x0CFF_FFFF)
+/// The name being edited: grey, a little larger than the gallery's names, as measured.
+private let renameFieldText: CGFloat = 18
+private var renameFieldInk: Color { Look.shared.light ? Color(argb: 0xFF22_2222) : Color(argb: 0xFFC1_C1C1) }
 
 /// The new-canvas list hanging from the + button, 2 from the screen's edge: the screen's size
 /// first, then the presets, each with its colour profile and size; a preset row swiped left shows
@@ -77,8 +83,13 @@ struct NewCanvasPanel: View {
         // the screen as it is turned now
         let width = UInt32(max((screen.width * scale).rounded(), 1))
         let height = UInt32(max((screen.height * scale).rounded(), 1))
-        let left = screen.width - 2 - newCanvasWidth
-        Popover(width: newCanvasWidth, arrowX: screen.width - 49 - left, fill: Pc.lightPanel, corner: 32) {
+        // 2 from the window's edge, as measured; in a narrower window as wide as it leaves
+        let fits = screen.width >= newCanvasWidth + 2 + narrowMargin
+        let panelWidth = fits ? newCanvasWidth : max(screen.width - narrowMargin * 2, 1)
+        let left = fits ? screen.width - 2 - newCanvasWidth : narrowMargin
+        // the kinds of artwork plugins on add, each the screen's size, under the presets
+        let kinds = PluginsModel.shared.store.kinds()
+        Popover(width: panelWidth, arrowX: screen.width - 49 - left, fill: Pc.lightPanel, corner: 32) {
             VStack(spacing: 0) {
                 header
                 PresetRow(name: "Screen Size", label: "\(width) × \(height)px", profile: "Display P3") {
@@ -134,7 +145,7 @@ struct NewCanvasPanel: View {
                     let kind = kinds[k]
                     PresetRow(name: kind.label, label: "\(width) × \(height)px", profile: "Display P3") {
                         onDone()
-                        model.newCanvas(kind: kind.key, width: width, height: height)
+                        model.newCanvas(width: width, height: height, kind: kind.key)
                     }
                     .frame(height: 38)
                     .background(Capsule().fill(Pc.lightRowStrong))
@@ -241,17 +252,17 @@ private struct SwipeRow: View {
     }
 }
 
-/// Share's formats: beside a swiped artwork's Share, or under Select's. A tap on one shares in it.
+/// Share's formats: beside a swiped artwork's Share, or under Select's (at `centre`, More's when
+/// Share is in its list). A tap on one shares in it.
 struct ImageFormats: View {
     let share: GalleryShare
     let screen: CGSize
+    let centre: CGFloat
     let onPick: (String) -> Void
 
     /// Where they go: their top left, the arrow's side and place.
     private var place: (left: CGFloat, top: CGFloat, side: ArrowSide, arrowAt: CGFloat) {
         guard let from = share.from else {
-            // Select's Share button's centre: left of Delete and More
-            let centre = screen.width - 20 - 44 - 13 - 61 - 70 - 65 / 2
             let left = min(max(centre - formatsWidth / 2, 4), max(screen.width - 4 - formatsWidth, 4))
             return (left, 69, .none, 0)
         }
@@ -395,33 +406,38 @@ struct AboutApp: View {
     }
 }
 
-/// More options for the picked artworks: Preview, Stack (two or more) and Duplicate, under More.
+/// A row of More's list: its name, whether it can act now, what it does.
+struct MoreRow {
+    let label: String
+    let enabled: Bool
+    let action: () -> Void
+}
+
+/// More options, under More: what the title row has no room for (selecting, Preview, Stack and
+/// Duplicate; in a narrow window, more of them), each greyed while it can't act.
 struct MoreOptions: View {
     let screen: CGSize
-    let count: Int
-    let canStack: Bool
-    let onStack: () -> Void
-    let onPreview: () -> Void
-    let onDuplicate: () -> Void
+    /// The middle of More in the title row, for the list to hang from.
+    let centre: CGFloat
+    let rows: [MoreRow]
 
-    private func row(_ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Text(verbatim: label)
+    private func row(_ row: MoreRow) -> some View {
+        Text(verbatim: row.label)
             .font(.system(size: 17))
-            .foregroundStyle(enabled ? Pc.panelTitle : Pc.actionsDisabled)
+            .foregroundStyle(row.enabled ? Pc.panelTitle : Pc.actionsDisabled)
             .padding(.leading, 16)
             .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
             .contentShape(Rectangle())
             .onTapGesture {
-                if enabled {
-                    action()
+                if row.enabled {
+                    row.action()
                 }
             }
     }
 
     var body: some View {
-        // under More, kept 4 from the screen's edge
-        let centre = screen.width - 20 - 44 - 13 - 61 / 2
-        let left = min(centre - 125, screen.width - 4 - 250)
+        // under More, kept 4 from the screen's edges
+        let left = max(min(centre - 125, screen.width - 4 - 250), 4)
         let shape = RoundedRectangle(cornerRadius: 18, style: .circular)
         Popover(width: 250, arrowX: centre - left, fill: Pc.galleryPopover) {
             VStack(alignment: .leading, spacing: 0) {
@@ -431,11 +447,12 @@ struct MoreOptions: View {
                     .padding(.leading, 24)
                     .padding(.vertical, 14)
                 VStack(spacing: 0) {
-                    row("Preview", enabled: count > 0, action: onPreview)
-                    Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
-                    row("Stack", enabled: canStack && count >= 2, action: onStack)
-                    Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
-                    row("Duplicate", enabled: count > 0, action: onDuplicate)
+                    ForEach(rows.indices, id: \.self) { i in
+                        if i > 0 {
+                            Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
+                        }
+                        row(rows[i])
+                    }
                 }
                 .background(shape.fill(Pc.actionsGroup))
                 .clipShape(shape)
@@ -451,7 +468,7 @@ struct MoreOptions: View {
 
 /// Renaming an artwork: it rises from its cell (`from`, on the screen) to the top middle, enlarged,
 /// with its name in a field under it and the keyboard up. Done, or tapped away, it calls `onDone`
-/// with the name.
+/// with the name; so does the keyboard put away.
 struct RenameArtwork: View {
     let renaming: Renaming
     let from: CGRect?
@@ -482,7 +499,7 @@ struct RenameArtwork: View {
     /// The art fitted in its frame, centred across the screen.
     private var target: CGRect {
         let a = renaming.shown
-        let ratio = a.width > 0 && a.height > 0 ? CGFloat(a.width) / CGFloat(a.height) : 0.75
+        let ratio = a.shownRatio
         let fw = renameFrameWidth - renameArtMargin * 2
         let fh = renameFrameHeight - renameArtMargin * 2
         let wide = ratio > fw / fh
@@ -511,13 +528,19 @@ struct RenameArtwork: View {
             .offset(x: at.minX, y: at.minY)
             .allowsHitTesting(false)
             TextField("", text: $text)
-                .font(.system(size: 17))
-                .foregroundStyle(Pc.text)
+                .font(.system(size: renameFieldText))
+                .foregroundStyle(renameFieldInk)
                 .multilineTextAlignment(.center)
                 .tint(Pc.accent)
                 .submitLabel(.done)
                 .focused($focused)
                 .onSubmit(finish)
+                // the keyboard put away ends the rename, as a tap away does
+                .onChange(of: focused) { was, now in
+                    if was, !now {
+                        finish()
+                    }
+                }
                 .padding(.horizontal, 12)
                 .frame(width: renameFieldWidth, height: renameFieldHeight)
                 .background(RoundedRectangle(cornerRadius: 10, style: .circular).fill(renameFieldFill))

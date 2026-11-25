@@ -1,15 +1,21 @@
 import SwiftUI
 
-// buttons at least this wide, the panel growing with them or with a longer message; as measured,
-// the panel is this much wider each side than its message's widest line (or its title's)
+// buttons at least this wide (48 tall), the panel growing with them or with a longer message (428
+// wide for two, 16 at its sides and 15 below); as measured, the panel is this much wider each side
+// than its message's widest line (or its title's)
 private let buttonWidth: CGFloat = 192
+private let buttonHeight: CGFloat = 48
 private let buttonGap: CGFloat = 12
-private let side: CGFloat = 15
+private let side: CGFloat = 16
 private let textSide: CGFloat = 27.5
 private let mostWidth = buttonWidth * 3 + buttonGap * 2 + side * 2
 private let dim = 0.7
 private let startScale: CGFloat = 1.1
-private var fill: Color { Look.shared.light ? Color(argb: 0xF2E3_E3E3) : Color(argb: 0xF21E_1E1E) }
+/// A progress card's, as measured: #222222.
+private var fill: Color { Look.shared.light ? Color(argb: 0xF2E3_E3E3) : Color(argb: 0xFF22_2222) }
+/// An alert's panel, as measured: darker than a progress card's (21 over the dimmed gallery,
+/// over its dark and its pictures alike).
+private var alertFill: Color { Look.shared.light ? Color(argb: 0xF2E3_E3E3) : Color(argb: 0xFF15_1515) }
 private var ink: Color { Look.shared.light ? Color(argb: 0xFF22_2222) : Color(argb: 0xFFC5_C5C5) }
 private var cancelFill: Color { Look.shared.light ? Color(argb: 0xFFD9_D9D9) : Color(argb: 0xFF2D_2D2D) }
 private var cancelInk: Color { Look.shared.light ? .black : .white }
@@ -41,6 +47,8 @@ struct AlertView: View {
     var onExtra: () -> Void = {}
     /// The left button is a choice of its own (blue), not Cancel.
     var onFirst: (() -> Void)?
+    /// A field for a name under the title (a layout saved or renamed), when there is one.
+    var field: Binding<String>?
 
     /// The last one shown, kept while it goes.
     @State private var shown: AlertContent?
@@ -77,21 +85,31 @@ struct AlertView: View {
                 if let icon = c.icon {
                     PcIconView(icon, size: 24, color: Pc.accent)
                 }
+                // as measured: bold 24, its message 16 on 19 point lines, 24 under its baseline
                 Text(verbatim: c.title)
-                    .font(.system(size: 26, weight: .bold))
+                    .font(.system(size: 24, weight: .bold))
                     .foregroundStyle(ink)
                     .lineLimit(1)
             }
             .frame(height: 31)
-            if c.message.isEmpty {
+            if let field {
+                // the name, in a rounded field as the panels' fields are
+                TextField("", text: field)
+                    .font(.system(size: 17))
+                    .foregroundStyle(ink)
+                    .padding(.horizontal, 12)
+                    .frame(height: 40)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .circular).fill(cancelFill))
+                    .padding(.top, 14)
+                    .padding(.horizontal, textSide - side)
+            } else if c.message.isEmpty {
                 Spacer().frame(height: 13)
             } else {
                 Text(verbatim: c.message)
                     .font(.system(size: 16))
                     .foregroundStyle(ink)
                     .multilineTextAlignment(.center)
-                    .lineSpacing(1)
-                    .padding(.top, 13)
+                    .padding(.top, 14)
                     .padding(.horizontal, textSide - side)
             }
             HStack(spacing: buttonGap) {
@@ -111,10 +129,10 @@ struct AlertView: View {
         }
         .padding(.horizontal, side)
         .padding(.top, 21)
-        .padding(.bottom, 16)
+        .padding(.bottom, 15)
         .frame(minWidth: need, maxWidth: max(mostWidth, need))
         .fixedSize(horizontal: true, vertical: true)
-        .background(shape.fill(fill))
+        .background(shape.fill(alertFill))
         .overlay(shape.strokeBorder(Pc.glassMenuEdge, lineWidth: 1))
         .clipShape(shape)
         // a tap on the panel itself is not one beside it
@@ -180,7 +198,7 @@ struct ProgressCard: View {
                     .frame(width: c.detail != nil ? 16.5 : 22, height: 31)
                     .offset(y: c.detail != nil ? 3.5 : 0)
                 Text(verbatim: title)
-                    .font(.system(size: 26, weight: .bold))
+                    .font(.system(size: 24, weight: .bold))
                     .foregroundStyle(ink)
                     .lineLimit(1)
             }
@@ -347,13 +365,14 @@ private struct AlertButton: View {
     let action: () -> Void
     @State private var held = false
 
+    /// As measured: a pill 48 tall, its name semibold 15.
     var body: some View {
         Text(verbatim: label)
-            .font(.system(size: 17, weight: .semibold))
+            .font(.system(size: 15, weight: .semibold))
             .foregroundStyle(ink)
             .lineLimit(1)
-            .frame(maxWidth: .infinity, minHeight: 50, maxHeight: 50)
-            .background(RoundedRectangle(cornerRadius: 14, style: .circular).fill(fill))
+            .frame(maxWidth: .infinity, minHeight: buttonHeight, maxHeight: buttonHeight)
+            .background(Capsule().fill(fill))
             .opacity(held ? 0.7 : 1)
             .contentShape(Rectangle())
             .modifier(PressGesture(held: $held, perform: action))

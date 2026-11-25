@@ -191,7 +191,7 @@ final class TransformTool {
     func toggleAdvancedMesh() {
         advancedMesh.toggle()
         UserDefaults.standard.set(advancedMesh, forKey: Self.meshKey)
-        model.showNotice("Advanced mesh " + (advancedMesh ? "on" : "off"))
+        model.showDone("Advanced mesh " + (advancedMesh ? "on" : "off"))
     }
 
     /// How a puppet's mesh is laid and its pins turn from now on (an open one's laid again).
@@ -220,9 +220,9 @@ final class TransformTool {
 
     func changeGuides(_ g: GuideSettings) {
         if g.snapping != guides.snapping {
-            model.showNotice("Snapping " + (g.snapping ? "on" : "off"))
+            model.showDone("Snapping " + (g.snapping ? "on" : "off"))
         } else if g.magnetics != guides.magnetics {
-            model.showNotice("Magnetics " + (g.magnetics ? "on" : "off"))
+            model.showDone("Magnetics " + (g.magnetics ? "on" : "off"))
         }
         guides = g
         model.session.transformSetGuides(guides: g)
@@ -570,10 +570,8 @@ struct TransformToolbar: View {
             ToolbarSegment(icon: PcIcons.warp, label: "Warp", selected: tool.kind == .warp, iconSize: 43) { tool.choose(.warp) }
             ToolbarSegment(icon: PcIcons.puppet, label: "Puppet", selected: tool.kind == .puppet, iconSize: 43) { tool.choose(.puppet) }
         } buttons: { w in
-            // a long name smaller only where the buttons are narrow
-            let long: CGFloat = w < buttonRoomy ? 11 : 12.5
             if tool.kind == .warp {
-                ToolbarButton(icon: PcIcons.advancedMesh, label: "Advanced Mesh", active: tool.advancedMesh, width: w, iconSize: 28.8, labelSize: long) {
+                ToolbarButton(icon: PcIcons.advancedMesh, label: "Advanced Mesh", active: tool.advancedMesh, width: w, iconSize: 28.8) {
                     tool.toggleAdvancedMesh()
                 }
             } else if tool.kind == .puppet {

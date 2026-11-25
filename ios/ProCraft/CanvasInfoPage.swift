@@ -384,12 +384,18 @@ struct CanvasInfoPage: View {
             }
         case 2:
             let l = session.layerStats()
+            // a model's layers are held by its texture sets, each up to the maximum
+            let sets = session.textureSetStats()
+            let used: [(String, String)] = sets.isEmpty
+                ? [("Layers used", "\(l.used)"), ("Layers available", "\(l.maximum > l.used ? l.maximum - l.used : 0)")]
+                : sets.map { ($0.name, "\($0.used) of \($0.maximum)") }
+            // a model has no drawing guide to assist with
+            let assisted: [(String, String)] = sets.isEmpty ? [("Assisted layers", "\(l.assisted)")] : []
             VStack(spacing: 21) {
                 Rows(rows: [("Maximum layers", "\(l.maximum)")])
-                Rows(rows: [("Layers used", "\(l.used)"), ("Layers available", "\(l.maximum > l.used ? l.maximum - l.used : 0)")])
-                Rows(rows: [
-                    ("Assisted layers", "\(l.assisted)"), ("Clipping layers", "\(l.clipping)"),
-                    ("Layer masks", "\(l.masks)"), ("Layer groups", "\(l.groups)"),
+                Rows(rows: used)
+                Rows(rows: assisted + [
+                    ("Clipping layers", "\(l.clipping)"), ("Layer masks", "\(l.masks)"), ("Layer groups", "\(l.groups)"),
                 ])
             }
         case 3:

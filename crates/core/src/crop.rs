@@ -53,8 +53,8 @@ fn cropped(
     budget: u64,
     across: Across,
     pixelated: bool,
-) -> Result<Canvas, procraft_gpu::GpuError> {
-    let mut canvas = Canvas::unfilled(gpu, doc)?;
+) -> Result<Box<Canvas>, procraft_gpu::GpuError> {
+    let mut canvas = Box::new(Canvas::unfilled(gpu, doc)?);
     canvas.set_resident_budget(budget);
     for &id in ids {
         let m = c.to_old;
@@ -144,7 +144,7 @@ impl CanvasSession {
         }
         let (sw, sh) = (st.doc.width(), st.doc.height());
         let c = crop([x, y, width, height], angle, resample_to.then_some((new_width, new_height)));
-        let mut doc = st.doc.resized(c.width, c.height);
+        let mut doc = st.doc.cropped(&c);
         // plugins' layers' items moved with their pixels (those whose plugin can't move them become
         // ordinary layers); undoing the crop brings back the document as it was
         if let Some(to_new) = c.to_old.inverse() {
@@ -213,6 +213,8 @@ impl CanvasSession {
         if let Some(mut old_canvas) = old_canvas {
             // the crop is a new step: what was undone before it can't be redone
             old_canvas.forget_redo();
+            // (kept only for the next stroke, as big as a layer four times over)
+            old_canvas.let_go_of_carried();
             st.crop_undo = Some((old_canvas, old_doc));
         }
         st.crop_redo = None;
@@ -247,7 +249,7 @@ impl CanvasSession {
             st.crop_edit.failure = None;
             return Some(LOST_SAID.to_owned());
         }
-        let refused = st.canvas.as_mut().is_some_and(Canvas::take_smudge_refused);
+        let refused = st.canvas.as_deref_mut().is_some_and(Canvas::take_smudge_refused);
         let failed = st.crop_edit.failure.take().or_else(|| refused.then(|| SMUDGE_SAID.to_owned()));
         let failed = failed.or_else(|| st.filters.take_said());
         if failed.is_some() {
@@ -257,7 +259,12 @@ impl CanvasSession {
         // poll (every few seconds) never holds up a touch meanwhile
         let hooks = st.hooks.clone();
         drop(guard);
-        hooks.and_then(|hooks| hooks.take_said())
+        let said = hooks.and_then(|hooks| hooks.take_said());
+        // a plugin's folder that can't be reached, once (interface 22)
+        said.or_else(|| {
+            let folders = self.shared.folders.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            folders.and_then(|f| f.take_notice())
+        })
     }
 
     /// The canvas's colour profile, by name.
@@ -350,13 +357,13 @@ impl CanvasSession {
         st.settle();
         st.flush();
         if undo {
-            if st.canvas.as_ref().is_none_or(Canvas::can_undo) {
+            if st.canvas.as_deref().is_none_or(Canvas::can_undo) {
                 return false;
             }
             let Some((canvas, doc)) = st.crop_undo.take() else { return false };
             let cropped = st.canvas.replace(canvas);
             let cropped_doc = std::mem::replace(&mut st.doc, doc);
-            let steps = st.canvas.as_ref().map_or(0, Canvas::steps_made);
+            let steps = st.canvas.as_deref().map_or(0, Canvas::steps_made);
             st.crop_redo = cropped.map(|c| (c, cropped_doc, steps));
         } else {
             if !st.crop_redo_ready() {
@@ -603,7 +610,7 @@ mod tests {
             }
             assert!(fits.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
             assert!(parks.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
-            assert_eq!(parks.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(2));
+            assert_eq!(parks.shared.lock().canvas.as_deref().map(procraft_gpu::Canvas::parked_layers), Some(2));
             let ((parked, size), (resident, resident_size)) = (contents(&parks), contents(&fits));
             assert_eq!((parked.len(), size), (resident.len(), resident_size));
             for (a, b) in parked.iter().zip(&resident) {
@@ -638,7 +645,7 @@ mod tests {
             assert!(FAILING.with(|f| f.borrow().is_empty()), "the GPU's way was tried first");
             assert!(gpu_way.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
             assert_eq!(cpu_way.take_failure(), None);
-            assert_eq!(cpu_way.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(3));
+            assert_eq!(cpu_way.shared.lock().canvas.as_deref().map(procraft_gpu::Canvas::parked_layers), Some(3));
             alike(&cpu_way, &gpu_way, most);
             assert!(cpu_way.undo().is_some() && gpu_way.undo().is_some());
             assert_eq!(contents(&cpu_way), contents(&gpu_way));
@@ -657,12 +664,67 @@ mod tests {
         crate::device::MEMORY_FREE.with(|f| f.set(None));
         assert!(roomy.crop_canvas(10.0, 10.0, 60.0, 50.0, 0.0, true, 2000, 2000));
         assert_eq!(short.take_failure(), None);
-        assert_eq!(short.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(3));
+        assert_eq!(short.shared.lock().canvas.as_deref().map(procraft_gpu::Canvas::parked_layers), Some(3));
         alike(&short, &roomy, 1);
     }
 
     /// A fault drawing the canvas as it is (one a weak GPU makes, and the app lives with) doesn't
     /// stop a crop: only the crop's own work is checked.
+    /// Crop & Resize takes the drawing guide with the picture: the perspective guide's vanishing
+    /// points go where their picture pixels went (within a thousandth of a pixel; they were
+    /// dropped, so the guide drew nothing), and the grids' and symmetry's centre, turn and size
+    /// with them. Undone, the guide is as it was; redone, moved again.
+    #[test]
+    fn a_crop_takes_the_drawing_guide_with_the_picture() {
+        use procraft_engine::geom::Vec2;
+        use procraft_engine::guide::GuideKind;
+        let Some(s) = painted(120) else { return };
+        {
+            let mut st = s.shared.lock();
+            let g = &mut st.doc.guide;
+            g.on = true;
+            g.kind = GuideKind::Perspective;
+            g.centre = [60.0, 50.0];
+            g.angle = 0.2;
+            g.vanishing = vec![[-40.0, 30.0], [150.0, 25.0], [70.0, 300.0]];
+        }
+        let before = s.shared.lock().doc.guide.clone();
+        // the middle 80 x 60, turned 0.25 and resampled to twice its size
+        let (rect, turn, size) = ([20.0, 30.0, 80.0, 60.0], 0.25, (160, 120));
+        assert!(s.crop_canvas(rect[0], rect[1], rect[2], rect[3], turn, true, size.0, size.1));
+        assert_eq!(contents(&s).1, size);
+        let c = procraft_engine::crop::crop(rect, turn, Some(size));
+        let after = s.shared.lock().doc.guide.clone();
+        let back = |[x, y]: [f32; 2]| {
+            let p = c.to_old.apply(Vec2::new(x, y));
+            [p.x, p.y]
+        };
+        let far = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+        assert_eq!(after.vanishing.len(), 3, "the vanishing points kept");
+        let worst = after
+            .vanishing
+            .iter()
+            .zip(&before.vanishing)
+            .map(|(new, old)| far(back(*new), *old))
+            .fold(far(back(after.centre), before.centre), f32::max);
+        assert!(worst < 1e-3, "{worst} px off");
+        assert!((after.angle - (before.angle - turn)).abs() < 1e-5, "turned {}", after.angle);
+        for (new, old) in after.looks.iter().zip(&before.looks) {
+            assert!((new.size - old.size * 2.0).abs() < 1e-3, "grid {} from {}", new.size, old.size);
+        }
+        // shown: three points and their rays over the new canvas
+        let shown = s.guide();
+        assert!(shown.on);
+        assert_eq!(shown.vanishing.len(), 6);
+        assert!(shown.lines.len() / 4 > 24, "{} lines", shown.lines.len() / 4);
+        // undone, as it was; redone, moved again
+        s.undo();
+        assert_eq!(contents(&s).1, (120, 120));
+        assert_eq!(s.shared.lock().doc.guide, before);
+        s.redo();
+        assert_eq!(s.shared.lock().doc.guide, after);
+    }
+
     #[test]
     fn a_fault_drawing_the_canvas_doesnt_stop_a_crop() {
         let Some(s) = painted(120) else { return };
@@ -693,7 +755,7 @@ mod tests {
             assert!(s.crop_canvas(x, 10.0, 80.0, 70.0, angle, size.is_some(), w, h));
             assert_eq!(s.take_failure(), None);
             // made on the GPU, every layer there: not the way through the CPU kept for when that fails
-            assert_eq!(s.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(0));
+            assert_eq!(s.shared.lock().canvas.as_deref().map(procraft_gpu::Canvas::parked_layers), Some(0));
             let (after, made) = contents(&s);
             assert_eq!(made, (c.width, c.height));
             for (was, is) in before.0.iter().zip(&after) {

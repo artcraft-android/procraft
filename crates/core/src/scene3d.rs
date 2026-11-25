@@ -116,7 +116,7 @@ impl CanvasSession {
             c.record_outside_change(name);
         }
         st.flush();
-        let step = st.canvas.as_ref().and_then(Canvas::undo_step);
+        let step = st.canvas.as_deref().and_then(Canvas::undo_step);
         if let (Some(step), Some(scene)) = (step, st.scene.as_mut()) {
             if scene.look_steps.len() >= MOST_JOINT_STEPS {
                 scene.look_steps.remove(0);
@@ -132,7 +132,7 @@ impl CanvasSession {
 /// has been drawn, and until then the pixels it was opened with.
 pub(crate) struct TextureSet {
     doc: Document,
-    canvas: Option<Canvas>,
+    canvas: Option<Box<Canvas>>,
     pending: Pixels,
     /// A layer to fill with one colour (premultiplied RGBA8) when its canvas is made, unless
     /// pixels wait for it: a new set's Base Layer, with what the model's material gives.
@@ -396,7 +396,7 @@ pub(crate) fn zip_artwork_folder(dir: &Path, path: &Path, done: impl Fn(f32)) ->
         done(packed as f32 / total as f32);
     }
     let bytes = zip.finish();
-    write_atomically(path, |p| fs::write(p, &bytes).map_err(|e| file_error("saving", e)))
+    write_atomically(path, |p| crate::storage::write(p, &bytes).map_err(|e| file_error("saving", e)))
 }
 
 /// Whether a file named `name` is of a kind already compressed, which deflating wouldn't shrink.
@@ -442,7 +442,7 @@ pub fn unpack_model_artwork(path: String, dir: String) -> bool {
         let bytes = zip.read(name).ok_or(())?;
         let to = root.join(name);
         to.parent().map_or(Ok(()), fs::create_dir_all).map_err(|_| ())?;
-        fs::write(to, bytes).map_err(|_| ())
+        crate::storage::write(to, bytes).map_err(|_| ())
     });
     if wrote.is_err() {
         let _ = fs::remove_dir_all(root);
@@ -498,7 +498,7 @@ pub(crate) struct Scene {
     /// Each texture set's side (pixels).
     texture_size: u32,
     /// The stroke as drawn on the screen: a canvas the window's size, and what it covers.
-    screen: Option<(Document, Canvas)>,
+    screen: Option<(Document, Box<Canvas>)>,
     bounds: IRect,
     /// Each set's picture as last shown on the model: its canvas's composite count, and whether
     /// it was the session's canvas then (its levels are made again when either changes).
@@ -1072,13 +1072,13 @@ impl CanvasSession {
             }
         }
         let session = CanvasSession::with_document(empty_texture(side), name, own);
-        session.shared.lock().scene = Some(scene);
+        session.shared.lock().scene = Some(Box::new(scene));
         Ok(session)
     }
 
     /// The model painted on, if this is one.
     pub fn model_info(&self) -> Option<ModelInfo> {
-        self.shared.lock().scene.as_ref().map(ModelInfo::of)
+        self.shared.lock().scene.as_deref().map(ModelInfo::of)
     }
 
     /// Each texture set's layers, in order, whichever is painted on; none unless a model is open.
@@ -1909,7 +1909,9 @@ impl CanvasSession {
             zip.add(file, png);
         }
         let bytes = zip.finish();
-        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
+        write_atomically(Path::new(&path), |p| {
+            crate::storage::write(p, &bytes).map_err(|e| file_error("exporting the model", e))
+        })
     }
 
     /// The artwork, saved to `dir` first, as one file at `path` that comes back whole in another
@@ -1954,7 +1956,9 @@ impl CanvasSession {
             })
             .collect();
         let bytes = procraft_engine::gltf::write_glb(&mesh, &parts);
-        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
+        write_atomically(Path::new(&path), |p| {
+            crate::storage::write(p, &bytes).map_err(|e| file_error("exporting the model", e))
+        })
     }
 
     /// Writes the model as a USDZ package at `path`: the mesh with a preview-surface material
@@ -1962,7 +1966,9 @@ impl CanvasSession {
     pub fn export_model_usdz(&self, path: String) -> Result<(), MobileError> {
         let files = self.model_files()?;
         let bytes = procraft_engine::usd::write_usdz(&files.mesh, &files.images);
-        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
+        write_atomically(Path::new(&path), |p| {
+            crate::storage::write(p, &bytes).map_err(|e| file_error("exporting the model", e))
+        })
     }
 }
 
@@ -1984,7 +1990,9 @@ impl CanvasSession {
                 .chain(images.occlusion.iter().map(|(_, png)| ("AmbientOcclusion", png)));
             for (channel, png) in named {
                 let path = dir.join(format!("{name}-{channel}.png"));
-                write_atomically(&path, |p| fs::write(p, png).map_err(|e| file_error("exporting the textures", e)))?;
+                write_atomically(&path, |p| {
+                    crate::storage::write(p, png).map_err(|e| file_error("exporting the textures", e))
+                })?;
                 out.push(path.to_string_lossy().into_owned());
             }
         }
@@ -1996,22 +2004,28 @@ impl CanvasSession {
     pub fn export_model_render(&self, path: String, transparent: bool) -> Result<(), MobileError> {
         let (w, h, rgba) = self.model_picture(transparent)?;
         let png = crate::project::rgba_png(w, h, &rgba);
-        write_atomically(Path::new(&path), |p| fs::write(p, &png).map_err(|e| file_error("rendering the model", e)))
+        write_atomically(Path::new(&path), |p| {
+            crate::storage::write(p, &png).map_err(|e| file_error("rendering the model", e))
+        })
     }
 
     /// The model as the window shows it, on the canvas's surround, as a JPEG at `path`.
     pub fn export_model_jpeg(&self, path: String) -> Result<(), MobileError> {
         let (w, h, rgba) = self.model_picture(false)?;
-        let rgb = crate::project::onto_white(&crate::project::straight_alpha(&rgba));
+        let rgb = crate::project::onto_white(&crate::project::straight_alpha(&rgba))?;
         let bytes = procraft_engine::jpeg::encode(&rgb, w, h, crate::project::JPEG_QUALITY);
-        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("rendering the model", e)))
+        write_atomically(Path::new(&path), |p| {
+            crate::storage::write(p, &bytes).map_err(|e| file_error("rendering the model", e))
+        })
     }
 
     /// The model as the window shows it, on the canvas's surround, as a TIFF at `path`.
     pub fn export_model_tiff(&self, path: String) -> Result<(), MobileError> {
         let (w, h, rgba) = self.model_picture(false)?;
         let bytes = procraft_engine::formats::tiff(w, h, 72.0, &[], &rgba);
-        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("rendering the model", e)))
+        write_atomically(Path::new(&path), |p| {
+            crate::storage::write(p, &bytes).map_err(|e| file_error("rendering the model", e))
+        })
     }
 }
 
@@ -2136,7 +2150,7 @@ impl CanvasSession {
             self.exported(0.95 * (i + 1) as f32 / count as f32);
         }
         let bytes = gif.ok_or_else(|| file_error("saving", "there are no frames"))?.finish();
-        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
+        write_atomically(Path::new(&path), |f| crate::storage::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
         self.exported(1.0);
         Ok(())
     }
@@ -2358,7 +2372,7 @@ fn waiting_picture(gpu: &Gpu, set: &mut TextureSet, stroke: &SharedStroke) -> Re
 /// strokes carried onto the model, drawing them in `stroke`, and goes without brush images.
 fn set_canvas(gpu: &Gpu, set: &mut TextureSet, stroke: &SharedStroke) -> Result<(), String> {
     if set.canvas.is_none() {
-        let mut c = Canvas::for_drawn_strokes(gpu, &set.doc, stroke).map_err(|e| e.to_string())?;
+        let mut c = Box::new(Canvas::for_drawn_strokes(gpu, &set.doc, stroke).map_err(|e| e.to_string())?);
         for (id, pixels) in set.take_pending() {
             if let Err(e) = c.upload_layer(gpu, id, &pixels) {
                 log::error!("opening a texture set's layer: {e}");
@@ -2577,13 +2591,15 @@ impl State {
 pub(crate) fn write_model(saved: &mut SavedSets, dir: &Path, model: &ModelSnapshot) -> Result<(), MobileError> {
     let file = dir.join(format!("model.{}", model.source.extension));
     if !file.exists() {
-        write_atomically(&file, |p| fs::write(p, &model.source.bytes).map_err(|e| file_error("saving the model", e)))?;
+        write_atomically(&file, |p| {
+            crate::storage::write(p, &model.source.bytes).map_err(|e| file_error("saving the model", e))
+        })?;
     }
     let mtl = dir.join("model.mtl");
     if let Some(text) = model.source.mtl.as_ref()
         && !mtl.exists()
     {
-        write_atomically(&mtl, |p| fs::write(p, text).map_err(|e| file_error("saving the model", e)))?;
+        write_atomically(&mtl, |p| crate::storage::write(p, text).map_err(|e| file_error("saving the model", e)))?;
     }
     let side = model.saved.texture_size;
     // the maps, written once: they don't change
@@ -2877,7 +2893,7 @@ impl State {
             c.record_outside_change(name);
             self.flush();
             if let Some(s) = steps.get_mut(to.0) {
-                *s = self.canvas.as_ref().and_then(Canvas::undo_step);
+                *s = self.canvas.as_deref().and_then(Canvas::undo_step);
             }
         }
         let Some(scene) = self.scene.as_mut() else { return };
@@ -3054,7 +3070,7 @@ impl State {
     /// The selection as fills take it: on a model, kept to the meshes picked.
     pub(crate) fn reach_selection(&mut self) -> Option<procraft_engine::selection::Mask> {
         let selection = self.selection.clone();
-        let Some(reach) = self.scene.as_mut().and_then(Scene::reach) else { return selection };
+        let Some(reach) = self.scene.as_deref_mut().and_then(Scene::reach) else { return selection };
         let Some(mut within) = selection else { return Some(reach) };
         for (c, r) in within.data.iter_mut().zip(&reach.data) {
             *c = ((u16::from(*c) * u16::from(*r) + 127) / 255) as u8;
@@ -3065,7 +3081,7 @@ impl State {
     /// An adjustment opens: on a model with meshes picked, it keeps to them, as it does to a
     /// selection, until [`State::scene_selection_back`].
     pub(crate) fn scene_selection_for_adjustment(&mut self) {
-        if self.scene.as_mut().and_then(Scene::reach).is_none() {
+        if self.scene.as_deref_mut().and_then(Scene::reach).is_none() {
             return;
         }
         let narrowed = self.reach_selection();
@@ -3090,7 +3106,7 @@ impl State {
 
     /// How the selection shows on the model from now on, if there is one.
     pub(crate) fn scene_selection_look(&mut self, look: Option<procraft_gpu::SelectionLook>) {
-        let mask = self.canvas.as_ref().and_then(Canvas::selection_view).cloned();
+        let mask = self.canvas.as_deref().and_then(Canvas::selection_view).cloned();
         let Some(scene) = self.scene.as_mut() else { return };
         let part = scene.current;
         let Some(view) = scene.view.as_mut() else { return };
@@ -3122,7 +3138,7 @@ impl State {
 
     /// Why a stroke on the model can't land, if it can't.
     pub(crate) fn scene_blocked(&self) -> Option<crate::layers::Blocked> {
-        self.scene.as_ref().filter(|_| self.scene_shown()).and_then(Scene::why_blocked)
+        self.scene.as_deref().filter(|_| self.scene_shown()).and_then(Scene::why_blocked)
     }
 
     /// The texel of the texture set painted on under window point (`x`, `y`), on a shown model:
@@ -3208,10 +3224,10 @@ impl State {
         self.strokes = self.strokes.wrapping_add(1);
         self.info.strokes = self.info.strokes.saturating_add(1);
         let seed = self.strokes.wrapping_mul(0x9e37_79b9);
-        let mut builder = StrokeBuilder::with_seed(brush.clone(), diameter, pointer.into(), seed)
-            .with_input(self.input.clone())
-            .scaled(zoom)
-            .seen_at(1.0);
+        let builder =
+            StrokeBuilder::with_seed(brush.clone(), diameter, pointer.into(), seed).with_input(self.input.clone());
+        // (its samples in window pixels)
+        let mut builder = self.pressing.applied(builder.scaled(zoom).seen_at(1.0), self.display_scale);
         // a brush engine's, drawn by it (on the screen's canvas, where it gets its tips)
         let engine = self.hooks.clone().filter(|_| brush.engine.is_some()).map(|hooks| {
             let starting = crate::plugin_brushes::Starting {
@@ -3242,7 +3258,7 @@ impl State {
         if stale {
             let doc = Document::new(size.0.max(1), size.1.max(1));
             match Canvas::new(gpu, &doc) {
-                Ok(c) => scene.screen = Some((doc, c)),
+                Ok(c) => scene.screen = Some((doc, Box::new(c))),
                 Err(e) => return log::error!("3D stroke canvas: {e}"),
             }
         }
@@ -3271,8 +3287,16 @@ impl State {
         // the screen's canvas holds its own copies of the brush's shape and grain
         screen.use_sources(gpu, &mut style, &brush);
         if let Some((hooks, starting)) = engine
-            && let Some(o) =
-                crate::plugin_brushes::engine_stroke(&hooks, &brush, style.tool, starting, (false, false), screen, gpu)
+            && let Some(o) = crate::plugin_brushes::engine_stroke(
+                &hooks,
+                &brush,
+                style.tool,
+                starting,
+                (false, false),
+                screen,
+                gpu,
+                false,
+            )
         {
             style = o.style;
             builder = builder.with_engine(Box::new(o.first));
@@ -3289,7 +3313,7 @@ impl State {
                 canvas.set_stroke_grain(&gpu.device, grain);
             }
         }
-        self.stroke = Some(builder);
+        self.stroke = Some(Box::new(builder));
         if !laid {
             self.begin_material_strokes(&brush, canvas_style, current);
         }
@@ -3666,14 +3690,14 @@ impl State {
             for k in 1..=2usize {
                 let session_own = part == scene.current && scene.channel == k;
                 let canvas = if session_own {
-                    self.canvas.as_ref()
+                    self.canvas.as_deref()
                 } else {
                     scene
                         .channels
                         .get(part)
                         .and_then(|c| c.get(k - 1))
                         .and_then(|s| s.as_ref())
-                        .and_then(|s| s.canvas.as_ref())
+                        .and_then(|s| s.canvas.as_deref())
                 };
                 let key = canvas.map(|c| (c.composites(), session_own));
                 let Some(shown) = scene.channel_shown.get_mut(part).and_then(|c| c.get_mut(k - 1)) else { continue };

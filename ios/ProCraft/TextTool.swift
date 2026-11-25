@@ -6,6 +6,11 @@ import UIKit.UIGestureRecognizerSubclass
 /// further than this.
 private let editTapSeconds = 0.3
 private let editTapSlop: CGFloat = 10
+/// Taps on the text count on from the last when they come this soon after it and this near it; one
+/// held longer than `longestTap` is no tap.
+private let tapsApart = 0.3
+private let tapsReach: CGFloat = 100
+private let longestTap = 0.5
 import UniformTypeIdentifiers
 
 private func themed(_ dark: UInt32, _ light: UInt32) -> Color {
@@ -97,6 +102,9 @@ final class TextTool {
     /// The typefaces and styles on offer.
     private(set) var families: [TextTypeface] = []
     private(set) var styles: [String] = []
+    /// The look the style sheet shows for the letters chosen (the first one's; underline and outline
+    /// on only when all of them have it), or for what is typed next at the caret.
+    private(set) var look: TextRunInfo?
 
     /// The text as it was when the style sheet opened, for its Cancel.
     @ObservationIgnored private var beforeStyle: TextInfo?
@@ -117,6 +125,7 @@ final class TextTool {
         TextFonts.wait()
         families = textTypefaces()
         styles = textStyles()
+        refreshLook()
         render()
         model.refresh()
         // its box is drawn through the view
@@ -162,23 +171,82 @@ final class TextTool {
 
     /// The keyboard changed what the field holds.
     func fieldChanged(_ text: String, selection next: NSRange) {
+        let before = (field, selection)
         field = text
         selection = next
+        // what was typed is found against where the letters chosen were; then where they now are
         if text != info?.text {
             change { $0.text = text }
+        }
+        if text != before.0 || next != before.1 {
+            chooseInCore()
         }
     }
 
     func selectionChanged(_ next: NSRange) {
+        guard next != selection else { return }
         selection = next
+        chooseInCore()
+    }
+
+    /// The letters chosen in the field as the core counts them (not UTF-16): first and last.
+    private var chosen: (start: UInt32, end: UInt32) {
+        let start = max(selection.location, 0)
+        let end = start + max(selection.length, 0)
+        return (
+            textIndexFromUtf16(text: field, utf16: UInt32(start)),
+            textIndexFromUtf16(text: field, utf16: UInt32(end))
+        )
+    }
+
+    /// The core told where the letters chosen are: what is typed next goes there, in the look there.
+    private func chooseInCore() {
+        let (start, end) = chosen
+        model.session.textSelect(start: start, end: end)
+        refreshLook()
+    }
+
+    private func refreshLook() {
+        let (start, end) = chosen
+        look = model.session.textLook(start: start, end: end)
+    }
+
+    /// The look the style sheet shows: the letters chosen's, else the text's own.
+    func shownLook(_ info: TextInfo) -> TextRunInfo {
+        look ?? TextRunInfo(
+            len: 0, font: info.font, style: info.style, size: info.size, kerning: info.kerning, tracking: info.tracking,
+            baseline: info.baseline, opacity: info.opacity, underline: info.underline, outline: info.outline,
+            r: info.r, g: info.g, b: info.b
+        )
+    }
+
+    /// The look of the letters chosen changed by `change` (theirs alone); with only a caret, the
+    /// look of what is typed there next.
+    func restyle(_ change: TextStyleChange) {
+        let (start, end) = chosen
+        guard let now = model.session.textRestyle(start: start, end: end, change: change) else { return }
+        info = now
+        render()
+        refreshLook()
+    }
+
+    /// The colour chosen while editing: the core gave it to the letters chosen (and what is typed
+    /// next), so the text is read and drawn again.
+    func colourChosen() {
+        guard info != nil, let id = model.session.editingText(), let now = model.session.layerText(id: id) else { return }
+        if now != info {
+            info = now
+            render()
+        }
+        refreshLook()
     }
 
     func change(_ apply: (inout TextInfo) -> Void) {
         guard var next = info else { return }
         apply(&next)
-        info = next
-        _ = model.session.setText(info: next)
+        info = model.session.setText(info: next) ?? next
         render()
+        refreshLook()
     }
 
     /// Draws the text into its layer off the main thread (only where it was and now reaches), those
@@ -263,8 +331,37 @@ final class TextTool {
     func importFont(_ url: URL) {
         guard let bytes = url.readPicked(), let typeface = importTextFont(bytes: bytes, fileName: url.lastPathComponent) else { return }
         families = textTypefaces()
-        change { $0.font = typeface.family }
-        model.showNotice("Font imported")
+        restyle(.font(family: typeface.family))
+        model.showDone("Font imported")
+    }
+
+    /// Letters chosen by `taps` quick taps in a row at window point `p` on the text: one puts the
+    /// caret at the place nearest it, two choose the word there, three all of it; the field's too, so
+    /// what is typed goes there.
+    func tap(at p: CGPoint, taps: Int) {
+        let pixels = model.pixels
+        guard let at = model.windowToCanvas(CGPoint(x: p.x * pixels, y: p.y * pixels)),
+              let chosen = model.session.textTap(x: Float(at.x), y: Float(at.y), taps: UInt32(max(taps, 1))),
+              chosen.count == 2 else { return }
+        let start = Int(textIndexToUtf16(text: field, index: chosen[0]))
+        let end = Int(textIndexToUtf16(text: field, index: chosen[1]))
+        selection = NSRange(location: min(start, end), length: abs(end - start))
+        refreshLook()
+    }
+
+    /// The text's box on the window in UIKit's own points, the smallest upright rectangle around it:
+    /// what the Pencil writes into.
+    func boxOnWindow() -> CGRect? {
+        guard let info else { return nil }
+        let b = bounds(info)
+        let corners = [
+            CGPoint(x: b.minX, y: b.minY), CGPoint(x: b.maxX, y: b.minY),
+            CGPoint(x: b.maxX, y: b.maxY), CGPoint(x: b.minX, y: b.maxY),
+        ].map { model.canvasToWindow($0) }
+        let xs = corners.map(\.x)
+        let ys = corners.map(\.y)
+        guard let left = xs.min(), let right = xs.max(), let top = ys.min(), let bottom = ys.max() else { return nil }
+        return Interface.shared.onWindow(CGRect(x: left, y: top, width: right - left, height: bottom - top))
     }
 
     /// Moves the text by a drag between two window points.
@@ -311,7 +408,7 @@ final class TextTool {
         }
         render()
         if let notice = session.stepNotice(undo: undo, name: name) {
-            model.showNotice(notice)
+            model.showNotice(notice, kind: .step)
         }
         model.refresh()
         return true
@@ -355,9 +452,19 @@ private struct TextInputHost: UIViewRepresentable {
     let onRedo: () -> Void
 
     /// Undo and redo are the app's, not the field's (a width change goes back a step at a time).
+    /// Handwriting with the Pencil over the text's box comes here too: the interaction for it is on
+    /// the window, where the box is drawn.
     final class Field: UITextView {
         var onUndo: () -> Void = {}
         var onRedo: () -> Void = {}
+        var scribble: UIInteraction?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let scribble else { return }
+            scribble.view?.removeInteraction(scribble)
+            window?.addInteraction(scribble)
+        }
 
         override var keyCommands: [UIKeyCommand]? {
             let commands = [
@@ -381,9 +488,12 @@ private struct TextInputHost: UIViewRepresentable {
         let tool: TextTool
         /// The field is being told what the tool holds: what it says back is its own doing.
         var updating = false
+        /// What the Pencil's handwriting asks of the text (its interaction keeps it weakly).
+        let scribble: TextScribble
 
         init(tool: TextTool) {
             self.tool = tool
+            scribble = TextScribble(tool: tool)
         }
 
         func textViewDidChange(_ view: UITextView) {
@@ -430,7 +540,16 @@ private struct TextInputHost: UIViewRepresentable {
         view.autocorrectionType = .no
         view.delegate = context.coordinator
         view.inputAccessoryView = bar(context.coordinator)
+        context.coordinator.scribble.field = view
+        view.scribble = UIIndirectScribbleInteraction(delegate: context.coordinator.scribble)
         return view
+    }
+
+    static func dismantleUIView(_ view: UITextView, coordinator _: Coordinator) {
+        if let field = view as? Field, let scribble = field.scribble {
+            scribble.view?.removeInteraction(scribble)
+            field.scribble = nil
+        }
     }
 
     func updateUIView(_ view: UITextView, context: Context) {
@@ -469,6 +588,14 @@ struct TextEditing: View {
     @State private var outside = false
     @State private var dragging = false
     @State private var last = CGPoint.zero
+    /// Where and when the touch began, and whether the text has followed it (past the slop).
+    @State private var start = CGPoint.zero
+    @State private var downAt = Date()
+    @State private var moving = false
+    /// Quick taps on the text one after another: how many, and when and where the last was let go.
+    @State private var taps = 0
+    @State private var lastUp = Date.distantPast
+    @State private var lastAt = CGPoint.zero
 
     /// The text's box in the window, as the smallest upright rectangle around it.
     private func windowBox(_ tool: TextTool, _ info: TextInfo) -> CGRect {
@@ -488,9 +615,13 @@ struct TextEditing: View {
     }
 
     private func touched(_ drag: DragGesture.Value, _ tool: TextTool, _ info: TextInfo) {
-        if !touching {
+        // (a touch taken away, as the Pencil's handwriting does, never ends: the next one begins anew)
+        if !touching || drag.startLocation != start {
             touching = true
             dragging = false
+            moving = false
+            start = drag.startLocation
+            downAt = Date()
             last = drag.startLocation
             side = tool.side(at: drag.startLocation)
             outside = side == nil && !windowBox(tool, info).contains(drag.startLocation)
@@ -503,11 +634,30 @@ struct TextEditing: View {
                 tool.dragSide(to: drag.location)
             }
         } else if !outside {
-            // a touch on the text brings the keyboard back if it was put away
+            // a touch on the text brings the keyboard back if it was put away; dragged past the
+            // slop the text follows, let go before that it is a tap that chooses letters
             tool.keyboard = true
-            tool.move(from: last, to: drag.location)
-            last = drag.location
+            if !moving, hypot(drag.translation.width, drag.translation.height) > editTapSlop {
+                moving = true
+            }
+            if moving {
+                tool.move(from: last, to: drag.location)
+                last = drag.location
+            }
         }
+    }
+
+    /// A tap on the text, counted on from the last: one puts the caret there, two choose the word,
+    /// three all of it.
+    private func tappedText(_ tool: TextTool) {
+        let now = Date()
+        guard now.timeIntervalSince(downAt) <= longestTap else { return }
+        let again = (1 ... 2).contains(taps) && downAt.timeIntervalSince(lastUp) <= tapsApart
+            && hypot(start.x - lastAt.x, start.y - lastAt.y) <= tapsReach
+        taps = again ? taps + 1 : 1
+        lastUp = now
+        lastAt = start
+        tool.tap(at: start, taps: taps)
     }
 
     private func letGo(_ tool: TextTool) {
@@ -518,10 +668,13 @@ struct TextEditing: View {
             } else {
                 // a tap on the dot is a tap on the text
                 tool.keyboard = true
+                tappedText(tool)
             }
         } else if outside, fingers.most <= 1 {
             // one finger there ends the edit, keeping it
             tool.end(keep: true)
+        } else if !outside, !moving, fingers.most <= 1 {
+            tappedText(tool)
         }
         side = nil
     }
@@ -824,22 +977,24 @@ private struct TextStyleSheet: View {
     }
 
     private var fontCard: some View {
-        SheetCard(title: "Font", shape: UnevenRoundedRectangle(topLeadingRadius: cardCorner, bottomLeadingRadius: cardCorner, style: .circular)) {
+        let look = tool.shownLook(info)
+        return SheetCard(title: "Font", shape: UnevenRoundedRectangle(topLeadingRadius: cardCorner, bottomLeadingRadius: cardCorner, style: .circular)) {
             rows(tool.families.count) { i in
                 let f = tool.families[i]
-                return Cell(name: f.name, selected: f.family == info.font, font: .custom(f.name, size: 15)) {
-                    tool.change { $0.font = f.family }
+                return Cell(name: f.name, selected: f.family == look.font, font: .custom(f.name, size: 15)) {
+                    tool.restyle(.font(family: f.family))
                 }
             }
         }
     }
 
     private var styleCard: some View {
-        SheetCard(title: "Style", shape: UnevenRoundedRectangle(bottomTrailingRadius: cardCorner, topTrailingRadius: cardCorner, style: .circular)) {
+        let look = tool.shownLook(info)
+        return SheetCard(title: "Style", shape: UnevenRoundedRectangle(bottomTrailingRadius: cardCorner, topTrailingRadius: cardCorner, style: .circular)) {
             rows(tool.styles.count) { i in
                 let s = tool.styles[i]
-                return Cell(name: s, selected: s == info.style, font: .system(size: 15)) {
-                    tool.change { $0.style = s }
+                return Cell(name: s, selected: s == look.style, font: .system(size: 15)) {
+                    tool.restyle(.style(name: s))
                 }
             }
         }
@@ -850,25 +1005,27 @@ private struct TextStyleSheet: View {
     }
 
     private var designCard: some View {
-        SheetCard(title: "Design", shape: RoundedRectangle(cornerRadius: cardCorner, style: .circular)) {
+        // the letters chosen's, but the leading the whole text's
+        let look = tool.shownLook(info)
+        return SheetCard(title: "Design", shape: RoundedRectangle(cornerRadius: cardCorner, style: .circular)) {
             VStack(spacing: 0) {
-                DesignRow(label: "Size", value: sizeToSlider(info.size), shown: String(format: "%.1fpt", pt(info.size)), fromMiddle: false) { v in
-                    tool.change { $0.size = sliderToSize(v) }
+                DesignRow(label: "Size", value: sizeToSlider(look.size), shown: String(format: "%.1fpt", pt(look.size)), fromMiddle: false) { v in
+                    tool.restyle(.size(size: sliderToSize(v)))
                 }
-                DesignRow(label: "Kerning", value: info.kerning / 2 + 0.5, shown: String(format: "%.1f%%", info.kerning * 100)) { v in
-                    tool.change { $0.kerning = v * 2 - 1 }
+                DesignRow(label: "Kerning", value: look.kerning / 2 + 0.5, shown: String(format: "%.1f%%", look.kerning * 100)) { v in
+                    tool.restyle(.kerning(value: v * 2 - 1))
                 }
-                DesignRow(label: "Tracking", value: info.tracking / 2 + 0.5, shown: String(format: "%.1f%%", info.tracking * 100)) { v in
-                    tool.change { $0.tracking = v * 2 - 1 }
+                DesignRow(label: "Tracking", value: look.tracking / 2 + 0.5, shown: String(format: "%.1f%%", look.tracking * 100)) { v in
+                    tool.restyle(.tracking(value: v * 2 - 1))
                 }
                 DesignRow(label: "Leading", value: info.leading / 2 + 0.5, shown: "\(wholeNumber(pt(info.leading * info.size)))pt") { v in
                     tool.change { $0.leading = v * 2 - 1 }
                 }
-                DesignRow(label: "Baseline", value: info.baseline / 2 + 0.5, shown: "\(wholeNumber(pt(info.baseline * info.size)))pt") { v in
-                    tool.change { $0.baseline = v * 2 - 1 }
+                DesignRow(label: "Baseline", value: look.baseline / 2 + 0.5, shown: "\(wholeNumber(pt(look.baseline * look.size)))pt") { v in
+                    tool.restyle(.baseline(value: v * 2 - 1))
                 }
-                DesignRow(label: "Opacity", value: info.opacity, shown: String(format: "%.1f%%", info.opacity * 100), fromMiddle: false) { v in
-                    tool.change { $0.opacity = v }
+                DesignRow(label: "Opacity", value: look.opacity, shown: String(format: "%.1f%%", look.opacity * 100), fromMiddle: false) { v in
+                    tool.restyle(.opacity(value: v))
                 }
             }
             .padding(.horizontal, 4)
@@ -890,6 +1047,8 @@ private struct TextStyleSheet: View {
         ]
         let gridTall: CGFloat = wide ? 36 : 35
         let perRow = wide ? 4 : 2
+        // underline and outline the letters chosen's (on for all of them unless all have it already)
+        let look = tool.shownLook(info)
         return SheetCard(title: "Attributes", shape: RoundedRectangle(cornerRadius: cardCorner, style: .circular)) {
             VStack(spacing: wide ? 20 : 4) {
                 ForEach(Array(stride(from: 0, to: aligns.count, by: perRow)), id: \.self) { first in
@@ -902,8 +1061,8 @@ private struct TextStyleSheet: View {
                     }
                 }
                 let looks = HStackOrStack(wide: wide) {
-                    attribute(PcIcons.textUnderline, on: info.underline, size: 38, tall: 36) { tool.change { $0.underline.toggle() } }
-                    attribute(PcIcons.textOutline, on: info.outline, size: 38, tall: 36) { tool.change { $0.outline.toggle() } }
+                    attribute(PcIcons.textUnderline, on: look.underline, size: 38, tall: 36) { tool.restyle(.underline(on: !look.underline)) }
+                    attribute(PcIcons.textOutline, on: look.outline, size: 38, tall: 36) { tool.restyle(.outline(on: !look.outline)) }
                     attribute(PcIcons.textVertical, on: info.vertical, size: 41, tall: 36) { tool.change { $0.vertical.toggle() } }
                 }
                 looks
@@ -1079,4 +1238,60 @@ private struct DesignRow: View {
         .padding(.horizontal, 16)
         .frame(height: 58.5)
     }
+}
+
+/// Handwriting with the Pencil over the text being edited (Scribble): the box on the canvas is what
+/// is written into, and the hidden field takes the letters, as it takes the keyboard's.
+final class TextScribble: NSObject, UIIndirectScribbleInteractionDelegate {
+    typealias ElementIdentifier = String
+
+    private static let element = "text"
+    let tool: TextTool
+    weak var field: UITextView?
+
+    init(tool: TextTool) {
+        self.tool = tool
+    }
+
+    func indirectScribbleInteraction(
+        _: UIInteraction, requestElementsIn rect: CGRect, completion: @escaping ([String]) -> Void
+    ) {
+        // not while the style sheet has the keyboard's place
+        guard !tool.styleOpen, let box = tool.boxOnWindow(), box.intersects(rect) else {
+            completion([])
+            return
+        }
+        completion([Self.element])
+    }
+
+    func indirectScribbleInteraction(_: UIInteraction, isElementFocused _: String) -> Bool {
+        field?.isFirstResponder == true
+    }
+
+    func indirectScribbleInteraction(_: UIInteraction, frameForElement _: String) -> CGRect {
+        tool.boxOnWindow() ?? .zero
+    }
+
+    func indirectScribbleInteraction(
+        _: UIInteraction, focusElementIfNeeded _: String, referencePoint _: CGPoint,
+        completion: @escaping ((UIResponder & UITextInput)?) -> Void
+    ) {
+        guard let field else {
+            completion(nil)
+            return
+        }
+        tool.keyboard = true
+        if !field.isFirstResponder {
+            field.becomeFirstResponder()
+        }
+        completion(field)
+    }
+
+    func indirectScribbleInteraction(_: UIInteraction, shouldDelayFocusForElement _: String) -> Bool {
+        false
+    }
+
+    func indirectScribbleInteraction(_: UIInteraction, willBeginWritingInElement _: String) {}
+
+    func indirectScribbleInteraction(_: UIInteraction, didFinishWritingInElement _: String) {}
 }

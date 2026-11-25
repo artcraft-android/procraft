@@ -184,8 +184,7 @@ final class AnimationAssist {
         }
     }
 
-    /// A plugin's In-between: a frame drawn between this frame and the next by the plugin (off the
-    /// main thread: it takes a moment), made current.
+    /// A plugin's in-between: a frame drawn between this one and the next, made off the main thread.
     func addInbetween() {
         frameOptionsOpen = false
         guard let layer = currentLayer else { return }
@@ -193,7 +192,7 @@ final class AnimationAssist {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let made = session.addInbetween(id: layer.id)
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.model.session === session else { return }
                 if made == nil {
                     self.model.showNotice("An in-between goes between two frames of one layer each, with something drawn.", warning: true)
                 }
@@ -253,8 +252,10 @@ final class AnimationAssist {
     private func play() {
         guard let first = settings else { return }
         let session = model.session
-        // the frames in playing order, each as often as it is held (the core's)
-        let order = session.animationSequence().map { Int($0) }
+        // the timeline's places that play, in order, each frame as often as it is held (the core's):
+        // a background or foreground frame shows with each, never on its own
+        let places = session.animationSequence().map { Int($0) }
+        let order = session.animationPlayedPlaces().map { Int($0) }.filter { places.indices.contains($0) }
         guard !order.isEmpty else { return }
         settingsOpen = false
         frameOptionsOpen = false
@@ -264,9 +265,9 @@ final class AnimationAssist {
             var step: Int32 = 1
             while !Task.isCancelled {
                 guard let self else { return }
-                let frame = order[at]
+                let frame = places[order[at]]
                 self.playingFrame = frame
-                self.playingSlot = at
+                self.playingSlot = order[at]
                 session.setPlayFrame(frame: UInt32(frame))
                 let fps = max(Int(self.settings?.fps ?? first.fps), 1)
                 try? await Task.sleep(for: .milliseconds(1000 / fps))
@@ -813,17 +814,20 @@ private struct FrameOptionsPage: View {
                     }
                     .padding(.bottom, 10)
                 }
+                let plugins = PluginsModel.shared
+                // asked again as the plugins change
+                let _ = plugins.changes
                 group {
                     ActLine(label: "Duplicate") { tool.duplicateFrame() }
                     RowLine()
                     ActLine(label: "Delete") { tool.deleteFrame() }
                     // a plugin's in-betweens: a frame drawn between this one and the next
-                    if PluginsModel.shared.tweens, !settings.pages, tool.heldPlace == 0, index < tool.frames.count - 1 {
+                    if plugins.store.tweens(), !settings.pages, tool.heldPlace == 0, index < tool.frames.count - 1 {
                         RowLine()
                         ActLine(label: "In-between") { tool.addInbetween() }
                     }
                     // a plugin's actions for the frame, after the app's own
-                    ForEach(PluginsModel.shared.store.actionsIn(place: .frame), id: \.key) { action in
+                    ForEach(plugins.store.actionsIn(place: .frame), id: \.key) { action in
                         RowLine()
                         ActLine(label: action.label) { tool.runFrameAction(action.key) }
                     }

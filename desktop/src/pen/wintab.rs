@@ -379,6 +379,8 @@ struct Tablet {
     reader: Reader,
     pressures: Pressures,
     leans: bool,
+    /// Its device gives the pen's barrel turned (twist), as an Art Pen's does.
+    twists: bool,
     area: Option<Area>,
     cursors_told: Vec<u32>,
     press_told: bool,
@@ -492,8 +494,9 @@ fn start(hwnd: HWND) {
         .then_some((pressure.min, pressure.max));
     let mut orientation = [Axis::default(); 3];
     // SAFETY: room for the three axes it gives
-    let leans = unsafe { info(device, DVC_ORIENTATION, orientation.as_mut_ptr().cast()) } != 0
-        && orientation[1].max > orientation[1].min;
+    let oriented = unsafe { info(device, DVC_ORIENTATION, orientation.as_mut_ptr().cast()) } != 0;
+    let leans = oriented && orientation[1].max > orientation[1].min;
+    let twists = oriented && orientation[2].max > orientation[2].min;
     // SAFETY: the window is the app's own; the description filled above, with room past it for a
     // driver that writes back what it made
     let opened = unsafe { open(hwnd, (&raw mut roomy).cast(), 1) };
@@ -520,8 +523,9 @@ fn start(hwnd: HWND) {
     let name = name(info, device, DVC_NAME);
     let range = pressure.map_or_else(|| "none".to_owned(), |(min, max)| format!("{min}..{max}"));
     log::info!(
-        "WinTab: {name}, pressure {range}, {}, queue {}, {kind} context, packets {:#x}, changes {:#x}",
+        "WinTab: {name}, pressure {range}, {}{}, queue {}, {kind} context, packets {:#x}, changes {:#x}",
         if leans { "with lean" } else { "no lean" },
+        if twists { ", barrel turn" } else { "" },
         queue.map_or_else(|| "as the driver's".to_owned(), |n| n.to_string()),
         layout.data,
         layout.relative
@@ -553,6 +557,7 @@ fn start(hwnd: HWND) {
             reader: Reader::new(layout),
             pressures,
             leans,
+            twists,
             area,
             cursors_told: Vec::new(),
             press_told: false,
@@ -894,6 +899,7 @@ pub fn message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
             // SAFETY: a point to fill, then made the window's own
             let placed = unsafe { GetCursorPos(&mut at).is_ok() && ScreenToClient(hwnd, &mut at).as_bool() };
             super::set_mouse_pen(Some(pen));
+            super::set_mouse_pen_roll(twist(&p, t.twists));
             PACKET_AT.store((started().elapsed().as_millis() as u64).max(1), Ordering::Relaxed);
             if let Ok(mut p) = PACKET_POINTER.lock() {
                 *p = placed.then_some((at.x, at.y));
@@ -1005,6 +1011,12 @@ fn reading(p: &Packet, pressure: f32, leans: bool) -> (super::MousePen, Option<(
         }
     });
     (super::MousePen { pressure, eraser }, lean)
+}
+
+/// How far a packet says the pen's barrel is turned (radians clockwise), if its device `twists`
+/// (an Art Pen's turn, in tenths of a degree) and the packet carries it.
+fn twist(p: &Packet, twists: bool) -> Option<f32> {
+    p.orientation.filter(|_| twists).map(|[_, _, twist]| (twist.rem_euclid(3600) as f32 / 10.0).to_radians())
 }
 
 #[cfg(test)]
@@ -1247,6 +1259,20 @@ mod tests {
         assert!(!reading(&Packet::default(), 1.0, true).0.eraser);
     }
 
+    #[test]
+    fn an_art_pens_barrel_turn_reads_where_the_device_gives_one() {
+        // turned half round, a quarter, and past a whole turn
+        for (tenths, degrees) in [(1800, 180.0f32), (900, 90.0), (3650, 5.0), (-900, 270.0)] {
+            let p = Packet { cursor: Some(1), orientation: Some([0, 900, tenths]), ..Packet::default() };
+            let roll = twist(&p, true).unwrap_or(-1.0);
+            assert!((roll - degrees.to_radians()).abs() < 1e-4, "{tenths}: {roll}");
+        }
+        // a device that gives no twist (most pens): none, so the brush keeps its own angle
+        let p = Packet { cursor: Some(1), orientation: Some([0, 900, 1800]), ..Packet::default() };
+        assert_eq!(twist(&p, false), None);
+        assert_eq!(twist(&Packet { cursor: Some(1), ..Packet::default() }, true), None);
+    }
+
     /// A stand-in driver: the next packet's numbers, and how many packets were taken off its queue.
     static STAND_IN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
     static TAKEN: AtomicU32 = AtomicU32::new(0);
@@ -1306,6 +1332,7 @@ mod tests {
             reader: Reader::new(layout),
             pressures: Pressures::of(None),
             leans: false,
+            twists: false,
             area: None,
             cursors_told: Vec::new(),
             press_told: false,

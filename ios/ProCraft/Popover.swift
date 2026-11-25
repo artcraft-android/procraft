@@ -59,10 +59,51 @@ struct PopoverShape: Shape {
     }
 }
 
+/// Where the panel opening now hangs from a button Edit layout moved: the side its arrow is on, and
+/// how far along that side its tip is. The panel's own popover takes it in place of an arrow up from
+/// under the top bar; nothing that opens inside it does.
+struct Hang {
+    let side: ArrowSide
+    let arrow: CGFloat
+}
+
+private struct HangKey: EnvironmentKey {
+    static let defaultValue: Hang? = nil
+}
+
+extension EnvironmentValues {
+    /// The hang of the panel opening now, while Edit layout moved its button.
+    var hang: Hang? {
+        get { self[HangKey.self] }
+        set { self[HangKey.self] = newValue }
+    }
+}
+
+/// A panel floating in a window of its own (every panel may, while a plugin lets it): what its
+/// strip and corner do, and whether it has a corner. The panel's own popover draws as that window,
+/// with no arrow and a strip over it; nothing that opens inside it does.
+struct FloatWindow {
+    let frame: FloatingFrame
+    let sizable: Bool
+}
+
+private struct FloatWindowKey: EnvironmentKey {
+    static let defaultValue: FloatWindow? = nil
+}
+
+extension EnvironmentValues {
+    /// The window the panel showing now floats in, if it does.
+    var floatWindow: FloatWindow? {
+        get { self[FloatWindowKey.self] }
+        set { self[FloatWindowKey.self] = newValue }
+    }
+}
+
 /// A panel hanging from the top bar, with an arrow pointing up at its button: `arrowX` is the
 /// tip's distance from the panel's left edge (from its top, for an arrow on the `side`).
 /// `popoverPlace` finds where it goes. Without a `fill` of its own it is frosted over the canvas:
 /// translucent, with what is behind it blurred. `width` is the body's: a side arrow adds to it.
+/// Hanging from a button Edit layout moved (`hang`), an arrow that would point up points at it.
 struct Popover<Content: View>: View {
     let width: CGFloat
     let arrowX: CGFloat
@@ -70,14 +111,60 @@ struct Popover<Content: View>: View {
     var corner: CGFloat = Pc.popoverCorner
     var side: ArrowSide = .top
     @ViewBuilder let content: () -> Content
+    @Environment(\.hang) private var hang
+    @Environment(\.floatWindow) private var floatWindow
 
     var body: some View {
+        if side == .top, let window = floatWindow {
+            floating(window)
+        } else {
+            hanging
+        }
+    }
+
+    /// Floating: as big as its window, its strip over it and the room for its corner under it.
+    private func floating(_ window: FloatWindow) -> some View {
+        let shape = RoundedRectangle(cornerRadius: corner, style: .circular)
+        return VStack(spacing: 0) {
+            FloatingTopStrip(frame: window.frame)
+            VStack(spacing: 0) {
+                content()
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
+            if window.sizable {
+                FloatingBottomStrip()
+            }
+        }
+        .environment(\.floatWindow, nil)
+        .environment(\.hang, nil)
+        .frame(width: window.frame.width, height: window.frame.height)
+        .clipShape(shape)
+        .background {
+            ZStack {
+                shape.fill(Color.black)
+                    .shadow(color: Pc.popoverShadow, radius: Pc.popoverShadowRadius / 2)
+                if let fill {
+                    shape.fill(fill)
+                } else {
+                    shape.fill(.ultraThinMaterial)
+                        .environment(\.colorScheme, Look.shared.light ? .light : .dark)
+                    shape.fill(Pc.popoverFrost)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var hanging: some View {
+        let moved = side == .top ? hang : nil
+        let side = moved?.side ?? self.side
+        let arrowX = moved?.arrow ?? self.arrowX
         let shape = PopoverShape(side: side, arrowX: arrowX, corner: corner)
         let sideways = side == .left || side == .right
         let shadow = Pc.popoverShadow
         VStack(spacing: 0) {
             content()
         }
+        .environment(\.hang, nil)
         .clipShape(RoundedRectangle(cornerRadius: corner, style: .circular))
         .padding(.top, side == .top ? Pc.arrowHeight : 0)
         .padding(.bottom, side == .bottom ? Pc.arrowHeight : 0)
@@ -98,7 +185,10 @@ struct Popover<Content: View>: View {
                 if let fill {
                     shape.fill(fill)
                 } else {
+                    // the dark frost whatever the system's appearance: a light one shows through
+                    // the tint lighter than measured
                     shape.fill(.ultraThinMaterial)
+                        .environment(\.colorScheme, Look.shared.light ? .light : .dark)
                     shape.fill(Pc.popoverFrost)
                 }
             }

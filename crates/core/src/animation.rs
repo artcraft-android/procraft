@@ -206,7 +206,7 @@ impl CanvasSession {
             self.exported(start + (0.95 - start) * next as f32 / units.len() as f32);
         }
         let bytes = gif.ok_or_else(|| file_error("saving", "there are no frames"))?.finish();
-        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
+        write_atomically(Path::new(&path), |f| crate::storage::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
         self.exported(1.0);
         Ok(())
     }

@@ -18,6 +18,15 @@ class BrushCursorTest {
     }
 
     @Test
+    fun theHoverFillShowsAsStrongAsTheBrushPaintsAtItsEstimatedPressure() {
+        // a brush whose opacity follows the pressure: faint at the estimate, the picture showing through
+        assertEquals(0.44f, hoverFillStrength(1f, 0.44f), 1e-6f)
+        // one that doesn't: as strong as it paints
+        assertEquals(0.8f, hoverFillStrength(0.8f, 1f), 1e-6f)
+        assertEquals(0f, hoverFillStrength(1.5f, -1f), 1e-6f)
+    }
+
+    @Test
     fun theStyleChosenForEveryBrushGoesOverTheBrushsOwn() {
         for (outline in 0..2) for (filled in listOf(false, true)) {
             assertEquals(CursorLines.CONTRAST, cursorLines(CursorStyle.CONTRAST, outline, filled))

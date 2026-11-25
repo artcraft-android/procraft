@@ -29,6 +29,7 @@ enum SystemSettings {
     static var singleTouchCompanion: Bool { flag("singleTouchCompanion", false) }
     static var colorNames: Bool { flag("colorNames", false) }
     static var feedbackSounds: Bool { flag("feedbackSounds", false) }
+    static var tapAssistance: Bool { flag("tapAssistance", false) }
 
     static var speedDistance: Float {
         (UserDefaults.standard.object(forKey: "speedDistance") as? NSNumber)?.floatValue ?? 1
@@ -54,6 +55,7 @@ extension CanvasModel {
         if !singleTouchCompanion {
             companionMode = nil
         }
+        session.setOrientationMemory(on: SystemSettings.orientationMemory)
         session.setSimplifiedUndos(on: SystemSettings.simplifiedUndos)
         session.setSpeedDistance(part: SystemSettings.speedDistance)
         applyFitInsets()
@@ -67,8 +69,9 @@ extension CanvasModel {
             return
         }
         let right = AppSettings.shared.rightHanded
-        let side = showSideBar ? Float((Pc.sideBarWidth + Pc.popoverGap) * pixels) : 0
-        session.setFitInsets(left: right ? 0 : side, top: Float(Pc.barHeight * pixels), right: right ? side : 0, bottom: 0)
+        // (moved off its edge by Edit layout, the side bar leaves the canvas the whole width)
+        let side = showSideBar && barMoved(.sideBar) == nil ? Float((Pc.sideBarShown + Pc.popoverGap) * pixels) : 0
+        session.setFitInsets(left: right ? 0 : side, top: Float(Pc.barShown * pixels), right: right ? side : 0, bottom: 0)
     }
 
     /// A new artwork just started: without time-lapse if it is turned off.
@@ -92,7 +95,7 @@ extension CanvasModel {
     }
 
     /// A hardware keyboard's key as the shared shortcuts name it.
-    private static func name(of key: UIKey) -> String? {
+    static func name(of key: UIKey) -> String? {
         switch key.keyCode {
         case .keyboardSpacebar: return "space"
         case .keyboardDeleteOrBackspace: return "backspace"
@@ -107,6 +110,12 @@ extension CanvasModel {
         return typed.count == 1 && "abcdefghijklmnopqrstuvwxyz0123456789[];".contains(typed) ? typed : nil
     }
 
+    /// A press written out with its modifiers ("command+shift+z"), to tell one press from another.
+    static func pressText(_ name: String, _ flags: UIKeyModifierFlags) -> String {
+        let held: [(UIKeyModifierFlags, String)] = [(.command, "command+"), (.control, "control+"), (.shift, "shift+"), (.alternate, "alt+")]
+        return held.filter { flags.contains($0.0) }.map(\.1).joined() + name
+    }
+
     /// A key went down; whether it did anything.
     func keyPressed(_ key: UIKey) -> Bool {
         guard let name = Self.name(of: key) else { return false }
@@ -117,11 +126,22 @@ extension CanvasModel {
         )
     }
 
-    /// The key `name`'s shortcut, the shared shortcuts saying what it does; whether it has one.
+    /// The key `name`'s shortcut, the shared shortcuts saying what it does (as a plugin rebinding
+    /// keys takes the press), or a plugin's switch or action it is given to, or the key a plugin's
+    /// panel asked for; whether it did anything.
     func runShortcut(_ name: String, command: Bool, shift: Bool, alt: Bool) -> Bool {
+        let press = KeyCombo(key: name, command: command, shift: shift, alt: alt)
+        let plugins = PluginsModel.shared
+        // a plugin's panel asked for the next key: it is told it, and nothing else is done
+        if plugins.panel?.keyPress == true {
+            pluginPanelKey(press)
+            return true
+        }
         // the arrows move what is transformed, or the strokes the selection takes
         let nudges = transforming || !selection.takenBox.isEmpty
-        guard let shortcut = keyShortcut(key: name, command: command, shift: shift, alt: alt, transforming: nudges) else { return false }
+        guard let shortcut = plugins.store.keyShortcut(key: name, command: command, shift: shift, alt: alt, transforming: nudges) else {
+            return pluginPress(press)
+        }
         switch shortcut {
         case .undo: undo()
         case .redo: redo()
@@ -167,9 +187,27 @@ extension CanvasModel {
         return true
     }
 
+    /// A press none of the app's shortcuts take, as a plugin gives it one of its switches (flipped,
+    /// kept as its card keeps it) or actions (run as its row runs it); false if no plugin's.
+    private func pluginPress(_ press: KeyCombo) -> Bool {
+        let plugins = PluginsModel.shared
+        // as a plugin rebinding keys takes it (it may make it no press at all)
+        guard let taken = plugins.store.keyPress(press: press), let pressed = plugins.store.pluginPress(press: taken) else { return false }
+        switch pressed {
+        case let .switched(control):
+            if case let .switch(one) = control {
+                plugins.setSwitch(one.key, one.on)
+            }
+        case let .action(key):
+            runPluginAction(key)
+        }
+        return true
+    }
+
     /// Files dropped on the canvas's screen, each brought in as what it is: pictures on layers of
-    /// their own (a picture alone ready to transform), brushes into the library, a palette among
-    /// the palettes, a font among the fonts, a colour profile among the profiles, a plugin offered.
+    /// their own (a picture alone ready to transform), a video's frames on the timeline, brushes
+    /// into the library, a palette among the palettes, a font among the fonts, a colour profile
+    /// among the profiles, a plugin offered.
     /// An artwork with layers of its own can't join this one: it goes to the gallery as one opened
     /// with the app does, this artwork kept and closed first. The copies in `folder` go after them.
     func dropOnCanvas(_ urls: [URL], from folder: URL) {
@@ -201,15 +239,15 @@ extension CanvasModel {
             guard (try? FileManager.default.copyItem(at: file, to: kept)) != nil else { continue }
             PluginsModel.shared.offer(kept) { [weak self] in self?.showNotice($0, warning: true) }
         }
-        let pictures = sorted[.picture] ?? []
-        if !pictures.isEmpty {
+        // pictures on layers, a video's frames on the timeline
+        let inserted = (sorted[.picture] ?? []) + (sorted[.movie] ?? [])
+        if !inserted.isEmpty {
             if transforming {
                 endTransform(commit: true)
             }
             closePanels()
-            for file in pictures {
-                insertPicture(try? Data(contentsOf: file), name: file.lastPathComponent, isPrivate: false, transform: pictures.count == 1)
-            }
+            gone.enter()
+            insertDropped(inserted[...], transform: inserted.count == 1) { gone.leave() }
         }
         let artworks = sorted[.artwork] ?? []
         // the brushes read first, the folder there until they are
@@ -228,9 +266,14 @@ extension CanvasModel {
 
 /// What a file dropped on the canvas's screen is: by what is in it where that tells, else its name.
 enum DroppedKind {
-    case picture, brushes, palette, artwork, font, profile, plugin
+    case picture, movie, brushes, palette, artwork, font, profile, plugin
 
     init(of file: URL) {
+        // a video's frames go on the timeline
+        if file.isMovie {
+            self = .movie
+            return
+        }
         let ending = file.pathExtension.lowercased()
         let handle = try? FileHandle(forReadingFrom: file)
         let head = (try? handle?.read(upToCount: 4)) ?? Data()
@@ -261,6 +304,96 @@ enum DroppedKind {
             // whatever else it is, the brushes' reader says so
             self = .brushes
         }
+    }
+
+    /// Dropped pictures and videos in, one after another (a video's frames read before the next),
+    /// until one can't come in; then `done`.
+    private func insertDropped(_ files: ArraySlice<URL>, transform: Bool, done: @escaping () -> Void) {
+        guard let file = files.first else {
+            done()
+            return
+        }
+        let rest = files.dropFirst()
+        guard file.isMovie else {
+            if insertPicture(try? Data(contentsOf: file), name: file.lastPathComponent, isPrivate: false, transform: transform) {
+                insertDropped(rest, transform: transform, done: done)
+            } else {
+                done()
+            }
+            return
+        }
+        insertVideo(file, isPrivate: false) { [weak self] came in
+            if came, let self {
+                self.insertDropped(rest, transform: transform, done: done)
+            } else {
+                done()
+            }
+        }
+    }
+}
+
+/// The canvas's keyboard shortcuts as the system lists them while ⌘ is held: the shared shortcuts
+/// with an Apple keyboard's keys (as a plugin rebinding keys has them, and the presses plugins give
+/// their switches and actions), each press a command that sends `action` (the key's name in its
+/// property list), under the name of what it does (a brush size's with its group's). The modify
+/// button's key (⌥ held by itself) and ⌦ aren't listed: they come as presses, as before.
+func shortcutKeyCommands(action: Selector) -> [UIKeyCommand] {
+    PluginsModel.shared.store.keyShortcutList(desktop: false, mac: true).flatMap { group in
+        group.rows.flatMap { row in
+            listedPresses(row.combos).compactMap { combo -> UIKeyCommand? in
+                guard let input = keyCommandInput(combo.key) else { return nil }
+                var flags: UIKeyModifierFlags = []
+                if combo.command {
+                    flags.insert(.command)
+                }
+                if combo.shift {
+                    flags.insert(.shift)
+                }
+                if combo.alt {
+                    flags.insert(.alternate)
+                }
+                let title = group.heading == "Brush size" ? "Brush size: \(row.does)" : row.does
+                let command = UIKeyCommand(
+                    title: title, action: action, input: input, modifierFlags: flags, propertyList: combo.key, discoverabilityTitle: title
+                )
+                // the canvas's own keys before what the system would do with them
+                command.wantsPriorityOverSystemBehavior = true
+                return command
+            }
+        }
+    }
+}
+
+/// The presses the system lists for a row of shortcuts: a key alone that does with ⌘ what it does
+/// by itself is listed with ⌘, as the measured command table has it (⌘0, ⌘K, ⌘J, ⌘D, ⌘U); alone
+/// it still works, as a press.
+private func listedPresses(_ combos: [KeyCombo]) -> [KeyCombo] {
+    var listed: [KeyCombo] = []
+    for combo in combos {
+        var shown = combo
+        if !combo.command, !combo.shift, !combo.alt,
+           let does = keyShortcut(key: combo.key, command: false, shift: false, alt: false, transforming: false),
+           keyShortcut(key: combo.key, command: true, shift: false, alt: false, transforming: false) == does
+        {
+            shown = KeyCombo(key: combo.key, command: true, shift: false, alt: false)
+        }
+        if !listed.contains(shown) {
+            listed.append(shown)
+        }
+    }
+    return listed
+}
+
+/// The input a key command takes for a key the shared shortcuts name; none for one it can't.
+private func keyCommandInput(_ name: String) -> String? {
+    switch name {
+    case "space": return " "
+    case "backspace": return "\u{8}"
+    case "left": return UIKeyCommand.inputLeftArrow
+    case "right": return UIKeyCommand.inputRightArrow
+    case "up": return UIKeyCommand.inputUpArrow
+    case "down": return UIKeyCommand.inputDownArrow
+    default: return name.count == 1 ? name : nil
     }
 }
 

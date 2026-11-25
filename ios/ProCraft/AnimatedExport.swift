@@ -85,7 +85,9 @@ extension CanvasModel {
                 let (width, height) = VideoWriter.fit(
                     width: Int(info.width), height: Int(info.height), maxSide: choices.webReady ? webReadySide : mostVideoSide
                 )
-                let order = session.animationSequence()
+                // the played frames in order, each as often as it is held: a background or foreground
+                // frame is drawn with each, not as one of its own
+                let order = session.animationPlayOrder()
                 // an HDR artwork's HEVC keeps its light above white (10-bit HLG)
                 if format == .hevc, session.isHdr() {
                     let made = VideoWriter.writeHlg(to: url, width: width, height: height, count: order.count, fps: choices.fps) { n in
@@ -690,5 +692,292 @@ private struct CountLine: View {
             .frame(width: 44, height: 32)
             .contentShape(Rectangle())
             .onTapGesture { if enabled { action() } }
+private var choiceFill: Color { Look.shared.light ? Color(argb: 0xFFE3_E3E3) : Color(argb: 0xFF2E_2E2E) }
+private var sliderTrack: Color { Look.shared.light ? Color(argb: 0xFFDD_DDDD) : Color(argb: 0xFF3E_3E3E) }
+
+/// Sharing a model on a turntable: it turning as it will, the settings (the size, once round or
+/// swinging, how long a turn takes, how far the camera pulls back, the easing, and whether the
+/// environment shows), Cancel, and the round Done that exports and shares.
+struct ModelAnimatedExport: View {
+    let model: CanvasModel
+    let format: AnimatedFormat
+
+    @State private var exporting = false
+    @State private var settingsOpen = false
+    @State private var frames: [UIImage] = []
+    @State private var shown = 0
+
+    private var scene: ModelScene { model.scene }
+
+    private var title: String {
+        let name = model.session.name().trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? "Untitled Artwork" : name
+    }
+
+    private func close() {
+        withAnimation(Motion.studioOut) { scene.animatedExport = nil }
+    }
+
+    /// The turntable with one setting changed.
+    private func turntable(
+        swing: Bool? = nil, seconds: Float? = nil, zoom: Float? = nil, ease: Float? = nil, environment: Bool? = nil
+    ) -> Turntable {
+        let t = scene.turntable
+        return Turntable(
+            swing: swing ?? t.swing, seconds: seconds ?? t.seconds, zoom: zoom ?? t.zoom, ease: ease ?? t.ease,
+            environment: environment ?? t.environment
+        )
+    }
+
+    private var panel: some View {
+        let t = scene.turntable
+        let seconds = t.seconds < 1 ? String(format: "%.1f", t.seconds) : "\(Int(t.seconds.rounded()))"
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(verbatim: format.title)
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(titleInk)
+                .lineLimit(1)
+                .frame(height: 36)
+                .padding(.leading, 24)
+                .padding(.top, 19)
+                .padding(.bottom, 11.5)
+            ExportSegments(labels: ["720p", "1080p", "4K", "Square"], chosen: scene.turntableSize) { scene.turntableSize = $0 }
+            VStack(spacing: 0) {
+                ChoiceLine(label: "Animated rotate", chosen: !t.swing) { scene.turntable = turntable(swing: false) }
+                ChoiceLine(label: "Animated swing", chosen: t.swing) { scene.turntable = turntable(swing: true) }
+            }
+            .background(choiceFill)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .circular))
+            .padding(.horizontal, 16)
+            .padding(.top, 14.5)
+            TurntableSlider(label: "Animation duration", value: seconds, share: (t.seconds - 0.5) / 4.5) {
+                scene.turntable = turntable(seconds: 0.5 + $0 * 4.5)
+            }
+            .padding(.top, 26)
+            TurntableSlider(label: "Zoom distance", value: "\(Int((t.zoom * 100).rounded()))%", share: t.zoom) {
+                scene.turntable = turntable(zoom: $0)
+            }
+            TurntableSlider(label: "Ease", value: "\(Int((t.ease * 100).rounded()))%", share: t.ease) {
+                scene.turntable = turntable(ease: $0)
+            }
+            SettingLine(label: "Show environment", on: t.environment) {
+                scene.turntable = turntable(environment: !t.environment)
+            }
+            .padding(.top, 10)
+            Spacer(minLength: 0)
+        }
+        .frame(width: panelWidth)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(RoundedRectangle(cornerRadius: 20, style: .circular).fill(panelFill))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .circular).strokeBorder(panelEdge, lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture {}
+        .padding(10)
+    }
+
+    private var buttons: some View {
+        HStack(spacing: 13) {
+            Text(verbatim: "Cancel")
+                .font(.system(size: 17))
+                .foregroundStyle(Color(argb: 0xFFA5_A5A5))
+                .padding(.horizontal, 13)
+                .frame(height: 43)
+                .background(Capsule().fill(capsuleFill))
+                .overlay(Capsule().strokeBorder(capsuleEdge, lineWidth: 1))
+                .contentShape(Capsule())
+                .onTapGesture(perform: close)
+            PcIconView(PcIcons.doneTick, size: 40, color: .white)
+                .frame(width: 44, height: 45)
+                .background(Capsule().fill(doneBlue))
+                .contentShape(Capsule())
+                .onTapGesture {
+                    guard !exporting else { return }
+                    exporting = true
+                    model.shareTurntable(format) { close() }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exporting = false }
+                }
+        }
+        .padding(.top, 16)
+        .padding(.trailing, 16)
+    }
+
+    var body: some View {
+        GeometryReader { place in
+            let screen = place.size
+            let wide = screen.width > screen.height
+            let left: CGFloat = wide ? panelWidth + 10 : 0
+            let inset: CGFloat = wide ? 41 : 24
+            let boxWidth = screen.width - left - inset * 2
+            let boxHeight = wide ? min(boxWidth, screen.height - 104) : boxWidth
+            let side = UInt32(max(min(boxWidth, boxHeight), 1))
+            let t = scene.turntable
+            ZStack(alignment: .topLeading) {
+                screenFill
+                    .contentShape(Rectangle())
+                    .onTapGesture { settingsOpen = false }
+                // the turntable's frames, fitted to the box, played over and over
+                ZStack {
+                    if frames.indices.contains(shown) {
+                        Image(uiImage: frames[shown]).resizable().scaledToFit()
+                    }
+                }
+                .frame(width: boxWidth, height: boxHeight)
+                .offset(x: left + inset, y: 110)
+                .allowsHitTesting(false)
+                if wide {
+                    Text(verbatim: title)
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(titleInk)
+                        .lineLimit(1)
+                        .frame(height: 30)
+                        .frame(width: max(screen.width - left - 24 - 224, 0))
+                        .offset(x: left + 24, y: 33)
+                } else {
+                    HStack(spacing: 0) {
+                        PcIconView(PcIcons.chevronLeft, size: 28, color: titleInk)
+                            .frame(width: 60)
+                        // on two lines, as there
+                        Text(verbatim: "Export\nSettings")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundStyle(titleInk)
+                    }
+                    .padding(.trailing, 12)
+                    .contentShape(Rectangle())
+                    .onTapGesture { settingsOpen.toggle() }
+                    .offset(x: 14, y: 20)
+                }
+                buttons
+                    .frame(width: screen.width, alignment: .trailing)
+                if wide || settingsOpen {
+                    panel
+                }
+            }
+            // the frames made again whenever the turntable's settings change
+            .task(id: "\(t.swing)-\(t.seconds)-\(t.zoom)-\(t.ease)-\(t.environment)-\(side)") {
+                let session = model.session
+                let count = max(Int((t.seconds * Float(previewFps)).rounded()), 1)
+                let read = await Task.detached(priority: .userInitiated) { () -> [UIImage] in
+                    (0 ..< count).compactMap { i in
+                        session.modelTurntablePicture(
+                            index: UInt32(i), count: UInt32(count), turntable: t, width: side, height: side, bgra: false
+                        ).flatMap { CanvasModel.image($0) }
+                    }
+                }.value
+                frames = read
+                shown = 0
+            }
+        }
+        .ignoresSafeArea()
+        .task(id: frames.count) {
+            while frames.count > 1, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(1000 / previewFps))
+                shown = (shown + 1) % max(frames.count, 1)
+            }
+        }
+    }
+}
+
+/// Two or more choices side by side in a grey track 384 wide, 12 apart, the chosen one blue.
+private struct ExportSegments: View {
+    let labels: [String]
+    let chosen: Int
+    let onChoose: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ForEach(labels.indices, id: \.self) { i in
+                let on = i == chosen
+                Text(verbatim: labels[i])
+                    .font(.system(size: 15))
+                    .foregroundStyle(on ? Color.white : rowInk)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Capsule().fill(on ? Pc.accent : Color.clear))
+                    .contentShape(Capsule())
+                    .onTapGesture { onChoose(i) }
+            }
+        }
+        .padding(2)
+        .frame(width: 384, height: 34)
+        .background(Capsule().fill(segmentTrack))
+        .padding(.leading, 7.5)
+    }
+}
+
+/// One of two choices in a group, 40 tall: the chosen one blue with a tick.
+private struct ChoiceLine: View {
+    let label: String
+    let chosen: Bool
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(verbatim: label)
+                .font(.system(size: 17))
+                .foregroundStyle(chosen ? Color.white : rowInk)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if chosen {
+                PcIconView(PcIcons.tick, size: 14, color: Pc.accent)
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(Color.white))
+            }
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
+        .frame(height: 40)
+        .background(chosen ? Pc.accent : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
+    }
+}
+
+/// A setting from 0 to 1, 66 tall: its name and value over a track filled blue up to its white
+/// knob. Dragged by as far as the finger goes.
+private struct TurntableSlider: View {
+    let label: String
+    let value: String
+    let share: Float
+    let onChange: (Float) -> Void
+
+    @State private var from: Float?
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            HStack(spacing: 0) {
+                Text(verbatim: label)
+                Spacer(minLength: 0)
+                Text(verbatim: value)
+            }
+            .font(.system(size: 17))
+            .foregroundStyle(rowInk)
+            .lineLimit(1)
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+            GeometryReader { place in
+                let w = place.size.width
+                let x = 16 + (w - 32) * CGFloat(min(max(share, 0), 1))
+                ZStack(alignment: .leading) {
+                    Capsule().fill(sliderTrack).frame(width: max(w - 32, 0), height: 3).offset(x: 16)
+                    Capsule().fill(Pc.accent).frame(width: max(x - 16, 0), height: 3).offset(x: 16)
+                    Capsule().fill(Color.white).frame(width: 26, height: 16).offset(x: x - 13)
+                }
+                .frame(width: w, height: 28)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { drag in
+                            let start = from ?? share
+                            from = start
+                            onChange(min(max(start + Float(drag.translation.width / max(w - 32, 1)), 0), 1))
+                        }
+                        .onEnded { _ in from = nil }
+                )
+            }
+            .frame(height: 28)
+            .offset(y: 66 - 8 - 28)
+        }
+        .frame(height: 66, alignment: .topLeading)
+        .padding(.horizontal, 8)
     }
 }

@@ -55,6 +55,12 @@ pub struct PictureCode {
 }
 
 impl PictureCode {
+    /// The module as read, for a test to translate.
+    #[cfg(test)]
+    pub(crate) fn module(&self) -> &wgpu::naga::Module {
+        self.code.module()
+    }
+
     /// The most a pixel can cost.
     pub fn worst(&self) -> u64 {
         self.code.worst()

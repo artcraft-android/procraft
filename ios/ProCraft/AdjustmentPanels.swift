@@ -145,8 +145,8 @@ private struct PluginFilterPanel: View {
             .padding(.leading, 10)
             .padding(.trailing, 15)
             .frame(width: 500, height: 54)
-        case .file:
-            // a file is picked on the plugin's card, not on its filter's panel
+        case .file, .texture, .folder:
+            // a file, a texture or a folder is picked on the plugin's card, not on its filter's panel
             EmptyView()
         }
     }
@@ -352,8 +352,16 @@ private struct CurvesPanel: View {
     @State private var moved = false
 
     /// The channels listed: Exposure and Limit an HDR canvas's only.
+    /// The curves listed (a filter layer's have alpha too), then Exposure and Limit: an HDR canvas's
+    /// plain Curves' only.
     private var channels: [String] {
-        ["Gamma", "Red", "Green", "Blue"] + (model.isHdr ? ["Exposure", "Limit"] : [])
+        let curves = Array(["Gamma", "Red", "Green", "Blue", "Alpha"].prefix(max(1, min(5, Int(shown.curveChannels)))))
+        return curves + (model.isHdr && plainCurves ? ["Exposure", "Limit"] : [])
+    }
+
+    /// Plain Curves (four curves), not a filter layer's.
+    private var plainCurves: Bool {
+        shown.curveChannels == 4
     }
 
     private var channel: Int {
@@ -361,11 +369,11 @@ private struct CurvesPanel: View {
     }
 
     private var exposing: Bool {
-        channel == 4
+        plainCurves && channel == 4
     }
 
     private var limiting: Bool {
-        channel == 5
+        plainCurves && channel == 5
     }
 
     /// The limit's peak (stops above white) at which, and past it, there is none.

@@ -59,8 +59,8 @@ enum PcIcons {
     ])
 
     static let plusMedium = PcIcon(name: "plus-medium", width: 41.0, height: 40.0, parts: [
-        PcIconPart(d: "M20.5 8.6v22.8", stroke: 2.3, fill: false, evenOdd: false),
-        PcIconPart(d: "M9.1 20h22.8", stroke: 2.3, fill: false, evenOdd: false),
+        PcIconPart(d: "M20.5 10v20", stroke: 3.0, fill: false, evenOdd: false),
+        PcIconPart(d: "M10.5 20h20", stroke: 3.0, fill: false, evenOdd: false),
     ])
 
     static let studioShape = PcIcon(name: "studioshape", width: 50.0, height: 50.0, parts: [

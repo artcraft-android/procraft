@@ -17,10 +17,19 @@ private let copyShare: Float = 0.6
 private let creepTo: Float = 0.95
 private let creepStep: Float = 0.03
 private let modelExtensions = ["obj", "usdz", "usdc", "usda", "usd"]
-private let otherBrushExtensions = ["abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut"]
+private let otherBrushExtensions = ["abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut", "sutg"]
 
 private let srgbName = "sRGB IEC61966-2.1"
 private let p3Name = "Display P3"
+
+extension GalleryArtwork {
+    /// Its width over its height as the gallery shows it: turned as its canvas was left (its
+    /// thumbnail is kept so), on its side the other way.
+    var shownRatio: CGFloat {
+        let upright: CGFloat = width > 0 && height > 0 ? CGFloat(width) / CGFloat(height) : 0.75
+        return turns % 2 == 1 ? 1 / upright : upright
+    }
+}
 
 extension GalleryEntry {
     /// Its folder, which names it in the gallery.
@@ -50,7 +59,7 @@ struct ProgressShown: Equatable {
 private enum Imported {
     /// An artwork in this folder.
     case made(String)
-    /// A picture as a new canvas, not yet kept.
+    /// A picture as a new canvas, or a model to paint on, not yet kept.
     case picture(CanvasSession)
     /// Something that isn't an artwork, or the reason it can't be read.
     case said(String)
@@ -65,8 +74,15 @@ final class GalleryModel {
     /// The gallery kept while an artwork is open, a stack open staying so.
     static let shared = GalleryModel()
 
+    /// The animated formats Share offers, after the others: the artwork opens into its animated
+    /// export, and closes back to the gallery after.
+    static let animatedFormats: [AnimatedFormat] = [.gif, .png, .mp4, .hevc]
+
     /// What Share offers, in order.
-    static let shareFormats = ["ProCraft", "Procreate", "PSD", "PDF", "JPEG", "PNG", "TIFF"]
+    static let shareFormats = ["ProCraft", "Procreate", "PSD", "PDF", "JPEG", "PNG", "TIFF"] + animatedFormats.map(\.title)
+
+    /// Several artworks shared as one PDF are named this, unless they are a stack's.
+    static let groupName = "Artworks"
 
     private static let presetsKey = "canvasPresets"
 
@@ -88,6 +104,11 @@ final class GalleryModel {
     private(set) var editingPreset: Int?
     private(set) var exportShown: ProgressShown?
     private(set) var importShown: ProgressShown?
+    /// An artwork whose opening closed the app last time, asked about before it opens again, and the
+    /// animated export it was being opened for.
+    private(set) var endedOpening: (artwork: GalleryArtwork, animated: AnimatedFormat?)?
+    /// An artwork is being read to open, off the main thread.
+    private(set) var loadingArtwork = false
 
     /// Where each thumbnail is on the screen, for what rises from it.
     @ObservationIgnored var thumbAt: [String: CGRect] = [:]
@@ -106,10 +127,15 @@ final class GalleryModel {
     var pressed: String?
     var lifted: String?
     @ObservationIgnored var gridAt = CGRect.zero
+    /// The first artwork or stack the grid shows, kept while an artwork is open: back from it the
+    /// gallery is where it was.
+    @ObservationIgnored var scrolledTo: String?
     @ObservationIgnored var backAt = CGRect.zero
     @ObservationIgnored var onOpen: (OpenArtwork) -> Void = { _ in }
 
     @ObservationIgnored private let work = DispatchQueue(label: "gallery", qos: .userInitiated)
+    /// Where an artwork is read to open: not behind an export or import under way.
+    @ObservationIgnored private let opener = DispatchQueue(label: "gallery open", qos: .userInitiated)
     @ObservationIgnored private var cancelled = false
     @ObservationIgnored private var creep: Timer?
 
@@ -133,11 +159,37 @@ final class GalleryModel {
 
     func reload() {
         entries = Gallery.store.list(folder: folder)
+        // an emptied stack closes by itself
+        if openStack != nil, entries.isEmpty {
+            openStack = nil
+            entries = Gallery.store.list(folder: nil)
+        }
+        // the home screen's widget shows the artwork worked on last
+        RecentArtwork.refresh()
     }
 
     func artworkSaved() {
         reload()
         version += 1
+    }
+
+    /// The gallery shows: what a plugin brings in from its folder comes in, off the main thread, and
+    /// the gallery is read again if anything came; a folder out of reach is told once. With no plugin
+    /// bringing anything in, nothing happens.
+    func bringIn() {
+        work.async { [weak self] in
+            // (bringing an artwork in goes deep into the core)
+            let brought = onBigStack { PluginsModel.shared.store.galleryOpened(store: Gallery.store) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if brought.added + brought.updated + brought.copies > 0 {
+                    self.artworkSaved()
+                }
+                if let notice = brought.notice {
+                    self.message = notice
+                }
+            }
+        }
     }
 
     /// Runs `change` on the store off the main thread, the gallery read again after it. The store
@@ -234,6 +286,13 @@ final class GalleryModel {
         changing { $0.moveEntry(dir: entry.dir, to: Int64(to), into: into) }
     }
 
+    /// `entry` taken out of the stack open to the gallery's front (let go on the way back).
+    func takeOutOfStack(_ entry: GalleryEntry) {
+        guard openStack != nil else { return }
+        let root = Gallery.store.root()
+        changing { Gallery.store.moveEntry(dir: entry.dir, to: 0, into: root) }
+    }
+
     /// An artwork dropped onto `onto` in the gallery: with an artwork it makes a stack, this one
     /// first; a stack takes it in first.
     func put(_ a: GalleryArtwork, onto: GalleryEntry) {
@@ -263,6 +322,29 @@ final class GalleryModel {
         changing { _ = $0.stack(dirs: list.map(\.dir)) }
     }
 
+    /// What Select's actions act on of the entries `picked` (by folder): a stack picked whole.
+    func pick(_ picked: Set<String>) -> GalleryPick {
+        galleryPick(entries: entries, picked: Array(picked), inStack: openStack != nil)
+    }
+
+    /// Select's picked entries (by folder) put together in one stack where the first was: the first
+    /// stack picked takes in the rest, keeping its name; with none picked, a new stack.
+    func stackPicked(_ dirs: [String]) {
+        guard dirs.count >= 2, openStack == nil else { return }
+        changing { _ = Gallery.store.stackPicked(dirs: dirs) }
+    }
+
+    /// The entries in `dirs` deleted, a stack with every artwork in it.
+    func delete(dirs: [String]) {
+        changing { dirs.forEach { Gallery.store.delete(dir: $0) } }
+    }
+
+    /// Each of the entries in `dirs` duplicated right after itself, a stack with a copy of each of
+    /// its artworks.
+    func duplicate(dirs: [String]) {
+        changing { dirs.forEach { _ = Gallery.store.duplicate(dir: $0) } }
+    }
+
     func renameStack(_ dir: String, _ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         if openStack?.dir == dir {
@@ -284,12 +366,52 @@ final class GalleryModel {
         changing { $0.rename(dir: a.dir, name: name) }
     }
 
-    func open(_ a: GalleryArtwork) {
-        do {
-            onOpen(OpenArtwork(session: try CanvasSession.open(dir: a.dir), dir: a.dir))
-        } catch {
-            message = "This artwork can't be opened."
+    /// Opens artwork `a`; for `animated`, into that animated export alone, closing back to the
+    /// gallery after. One whose opening ended the app last time (stopped for memory, or crashed) is
+    /// asked about first (`endedOpening`) unless opened `anyway`, so it can't take the app down each
+    /// time it is picked.
+    func open(_ a: GalleryArtwork, animated: AnimatedFormat? = nil, anyway: Bool = false) {
+        // one at a time: a second session on it would leave the screen on the first
+        guard !loadingArtwork else { return }
+        loadingArtwork = true
+        // off the main thread: a large artwork takes a while to read, and the gallery says so
+        opener.async { [weak self] in
+            let ended = !anyway && openingEndedApp(dir: a.dir)
+            var session: CanvasSession?
+            if !ended {
+                session = onBigStack {
+                    let session = try? CanvasSession.open(dir: a.dir)
+                    // a plugin's own artwork goes to its plugin (on); else it shows what it last drew
+                    if let session, session.pluginKind() != nil {
+                        _ = session.openPluginArtwork(plugins: PluginsModel.shared.store)
+                    }
+                    return session
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.loadingArtwork = false
+                if ended {
+                    self.endedOpening = (a, animated)
+                } else if let session {
+                    self.onOpen(OpenArtwork(session: session, dir: a.dir, animated: animated))
+                } else {
+                    self.message = "This artwork can't be opened."
+                }
+            }
         }
+    }
+
+    /// The artwork asked about opened after all.
+    func openAnyway() {
+        guard let ended = endedOpening else { return }
+        endedOpening = nil
+        open(ended.artwork, animated: ended.animated, anyway: true)
+    }
+
+    /// The artwork asked about left closed; it can be shared, duplicated or deleted meanwhile.
+    func keepClosed() {
+        endedOpening = nil
     }
 
     // MARK: new canvases
@@ -297,23 +419,35 @@ final class GalleryModel {
     /// A new artwork of `width` x `height` pixels (the screen's size), in Display P3.
     func newCanvas(width: UInt32, height: UInt32) {
         let session = CanvasSession(width: max(width, 1), height: max(height, 1))
+        session.madeWithScreenTurned(turns: Self.screenTurns())
         _ = session.setNewProfile(name: p3Name)
         onOpen(OpenArtwork(session: session, dir: Gallery.store.newFolder(folder: folder)))
     }
 
-    /// A new artwork of a plugin's kind (`<id>.<key>`), `width` x `height` pixels (the screen's
-    /// size), in Display P3, its plugin keeping it.
-    func newCanvas(kind: String, width: UInt32, height: UInt32) {
-        let (w, h) = (max(width, 1), max(height, 1))
-        let session = CanvasSession(width: w, height: h)
-        _ = session.setNewProfile(name: p3Name)
-        guard let canvas = PluginsModel.shared.store.openCanvas(kind: kind, width: w, height: h, data: nil),
-              session.attachPluginCanvas(kind: kind, canvas: canvas)
-        else {
-            message = "The plugin couldn't make this artwork."
-            return
+    /// A new artwork of a plugin's `kind` (`<id>.<key>`), `width` x `height` pixels (the screen's
+    /// size), in Display P3, its plugin keeping it: made off the main thread, as the plugin's code
+    /// runs to make it.
+    func newCanvas(width: UInt32, height: UInt32, kind: String) {
+        let folder = folder
+        let turns = Self.screenTurns()
+        let plugins = PluginsModel.shared.store
+        work.async { [weak self] in
+            let (session, made) = onBigStack {
+                let session = CanvasSession(width: max(width, 1), height: max(height, 1))
+                session.madeWithScreenTurned(turns: turns)
+                _ = session.setNewProfile(name: p3Name)
+                let canvas = plugins.openCanvas(kind: kind, width: max(width, 1), height: max(height, 1), data: nil)
+                return (session, canvas.map { session.attachPluginCanvas(kind: kind, canvas: $0) } == true)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if made {
+                    self.onOpen(OpenArtwork(session: session, dir: Gallery.store.newFolder(folder: folder)))
+                } else {
+                    self.message = "The plugin couldn't make this artwork."
+                }
+            }
         }
-        onOpen(OpenArtwork(session: session, dir: Gallery.store.newFolder(folder: folder)))
     }
 
     /// A new artwork made as preset `p` says.
@@ -323,6 +457,7 @@ final class GalleryModel {
             width: presetWidth(preset: p), height: presetHeight(preset: p), dpi: p.dpi, background: rgb,
             backgroundVisible: !p.backgroundHidden, name: "Untitled Artwork"
         )
+        session.madeWithScreenTurned(turns: Self.screenTurns())
         _ = session.setNewProfile(name: p.profile)
         session.setNewHdr(hdr: p.hdr)
         let dir = Gallery.store.newFolder(folder: folder)
@@ -330,6 +465,18 @@ final class GalleryModel {
             resolution: p.timeLapseResolution, quality: p.timeLapseQuality, hevc: p.timeLapseHevc
         )
         onOpen(OpenArtwork(session: session, dir: dir))
+    }
+
+    /// How far (quarter turns clockwise) the screen is turned from upright now: a new canvas is
+    /// made so (its brushes' shapes lie as the upright screen has them).
+    private static func screenTurns() -> UInt32 {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        switch scene?.interfaceOrientation {
+        case .landscapeRight: return 3
+        case .landscapeLeft: return 1
+        case .portraitUpsideDown: return 2
+        default: return 0
+        }
     }
 
     private func savePresets(_ list: [CanvasPreset]) {
@@ -426,7 +573,7 @@ final class GalleryModel {
         }
         let dir = Gallery.store.newFolder(folder: folder)
         work.async { [weak self] in
-            let session = Self.session(of: data, title: "Untitled Artwork")
+            let session = onBigStack { Self.session(of: data, title: "Untitled Artwork") }
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let session {
@@ -441,16 +588,22 @@ final class GalleryModel {
 
     // MARK: bringing files in
 
-    /// Files from elsewhere into the gallery, one after another; one artwork alone is opened.
+    /// Files from elsewhere into the gallery, one after another; one artwork alone is opened. A
+    /// model among them takes the rest as the files picked with it (an OBJ's material file and the
+    /// images it maps).
     func importFiles(_ urls: [URL]) {
         guard importShown == nil, exportShown == nil, !urls.isEmpty else { return }
         cancelled = false
         let folder = folder
-        let only = urls.count == 1
+        let models = urls.filter { Self.isModel($0.lastPathComponent) }
+        let only = models.isEmpty ? urls.count == 1 : models.count == 1
         work.async { [weak self] in
-            for url in urls {
+            let companions: [ModelFile] = models.isEmpty ? [] : urls.filter { !models.contains($0) }.compactMap { url in
+                url.readPicked().map { ModelFile(name: url.lastPathComponent, bytes: $0) }
+            }
+            for url in models.isEmpty ? urls : models {
                 guard let self, !self.cancelled else { break }
-                self.importOne(url, folder: folder, open: only)
+                onBigStack { self.importOne(url, folder: folder, open: only, companions: companions) }
             }
             DispatchQueue.main.async {
                 self?.creep?.invalidate()
@@ -492,7 +645,13 @@ final class GalleryModel {
         }
     }
 
-    private func importOne(_ url: URL, folder: String?, open: Bool) {
+    /// Whether a file named `name` is a model the gallery's Import opens to paint on.
+    private static func isModel(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return modelExtensions.contains { lower.hasSuffix(".\($0)") }
+    }
+
+    private func importOne(_ url: URL, folder: String?, open: Bool, companions: [ModelFile] = []) {
         let name = url.lastPathComponent
         showCard(name, from: 0)
         let scoped = url.startAccessingSecurityScopedResource()
@@ -507,11 +666,14 @@ final class GalleryModel {
         do {
             try FileManager.default.copyItem(at: url, to: copy)
         } catch {
-            finishImport(.said("This file can't be opened."), name: name, folder: folder, open: open)
+            // the device full says so, rather than that the file is wrong
+            let full = (error as? CocoaError)?.code == .fileWriteOutOfSpace
+            let said = full ? "There isn't enough room on this device to import this file." : "This file can't be opened."
+            finishImport(.said(said), name: name, folder: folder, open: open)
             return
         }
         showCard(name, from: copyShare)
-        let outcome = read(copy, name: name, folder: folder)
+        let outcome = read(copy, name: name, folder: folder, companions: companions)
         finishImport(outcome, name: name, folder: folder, open: open)
     }
 
@@ -522,7 +684,8 @@ final class GalleryModel {
         var quiet = false
         switch outcome {
         case let .said(text):
-            said = text
+            // an import cancelled says nothing
+            said = cancelled ? nil : text
         case .offered:
             quiet = true
         case let .made(dir):
@@ -570,7 +733,7 @@ final class GalleryModel {
 
     /// Reads the file at `copy`, called `name`: what it is is told by its first bytes, and a zip by
     /// the names it holds.
-    private func read(_ copy: URL, name: String, folder: String?) -> Imported {
+    private func read(_ copy: URL, name: String, folder: String?, companions: [ModelFile] = []) -> Imported {
         let handle = try? FileHandle(forReadingFrom: copy)
         let head = (try? handle?.read(upToCount: 4)) ?? Data()
         try? handle?.close()
@@ -603,7 +766,7 @@ final class GalleryModel {
         let zip = head.starts(with: [0x50, 0x4B])
         let kind = zip ? zipFileKind(path: copy.path) : nil
         if kind == .brushes || otherBrushExtensions.contains(where: { lower.hasSuffix(".\($0)") }) {
-            return addBrushes(copy, name: name)
+            return addBrushes(copy, name: name, ours: kind == .brushes)
         }
         if foreign || kind == .swatches {
             guard let bytes = try? Data(contentsOf: copy),
@@ -612,14 +775,10 @@ final class GalleryModel {
             }
             return .said("Palette added.")
         }
-        // a model to paint on: its file, or a zip holding it with the files it needs
-        if modelExtensions.contains(where: { lower.hasSuffix(".\($0)") }) {
-            return bringModel(copy, name: name, title: title)
+        if Self.isModel(name) {
+            return bringModel(copy, name: name, files: companions)
         }
-        if case .model = kind {
-            return bringModel(copy, name: name, title: title)
-        }
-        // a model's artwork of ours, whole: its folder as it was saved
+        // a model's artwork, whole
         if kind == .modelArtwork {
             let dir = Gallery.store.newFolder(folder: folder)
             guard unpackModelArtwork(path: copy.path, dir: dir) else {
@@ -628,6 +787,11 @@ final class GalleryModel {
             }
             return .made(dir)
         }
+        // a model zipped with its material file and images (as a folder of them)
+        if case let .model(inside) = kind {
+            let named = ((inside as NSString).lastPathComponent as NSString).deletingPathExtension
+            return bringModel(copy, name: lower.hasSuffix(".zip") ? name : name + ".zip", title: named)
+        }
         if tag == "8BPS" {
             return bringPsd(copy, title: title, folder: folder)
         }
@@ -635,6 +799,12 @@ final class GalleryModel {
             return bringPdf(copy, title: title, folder: folder)
         }
         if zip {
+            // an artwork as early versions shared it, one file of its folder; else a package
+            let dir = Gallery.store.newFolder(folder: folder)
+            if unpackArtworkFile(path: copy.path, dir: dir) {
+                return .made(dir)
+            }
+            Gallery.store.delete(dir: dir)
             return bringPackage(copy, folder: folder)
         }
         guard let data = try? Data(contentsOf: copy),
@@ -644,37 +814,57 @@ final class GalleryModel {
         return .picture(session)
     }
 
-    /// A model (an OBJ, a USD, or a zip holding one with its files) as a new
-    /// artwork that paints on it, the images its file brings in its texture sets.
-    private func bringModel(_ copy: URL, name: String, title: String) -> Imported {
-        guard let bytes = try? Data(contentsOf: copy) else {
-            return .said("This file can't be opened.")
-        }
+    /// A new artwork painting on the model in `copy` (named `name`: OBJ, USDZ or USDC, or a zip
+    /// holding one with its files), with the `files` picked along with it; named `title`, else
+    /// after the file. The images it brings go into its texture sets.
+    private func bringModel(_ copy: URL, name: String, files: [ModelFile] = [], title: String? = nil) -> Imported {
+        guard let bytes = try? Data(contentsOf: copy) else { return .said("This model can't be opened.") }
+        let artwork = (title ?? (name as NSString).deletingPathExtension).trimmingCharacters(in: .whitespaces)
         do {
             let session = try CanvasSession.openModel(
-                file: bytes, fileName: name, files: [], name: title.isEmpty ? "Untitled Artwork" : title, textureSize: 0
+                file: bytes, fileName: name, files: files, name: artwork.isEmpty ? "Untitled Artwork" : artwork, textureSize: 0
             )
             _ = session.loadModelTextures()
             return .picture(session)
-        } catch let MobileError.File(reason) {
-            // the core says what it was doing, then why it couldn't
-            let why = reason.range(of: ": ").map { String(reason[$0.upperBound...]) } ?? ""
-            return .said(why.isEmpty ? "This model can't be opened." : "This model can't be opened: \(why).")
         } catch {
-            return .said("This model can't be opened.")
+            return .said(mobileErrorReason(error).map { "This model can't be opened: \($0)." } ?? "This model can't be opened.")
         }
     }
 
-    /// Brushes wait as files for the next artwork opened, which has the library.
-    private func addBrushes(_ copy: URL, name: String) -> Imported {
-        guard let bytes = try? Data(contentsOf: copy), readBrushes(bytes: bytes, fileName: name) != nil else {
-            return .said("This file has no brushes in it.")
+    /// Brushes wait as files for the next artwork opened, which has the library. Ours (a zip of
+    /// them) are told by the names in it; another app's file is read to see that it holds any, a
+    /// brush at a time (a set of gigabytes is never held whole), the card following and its Cancel
+    /// stopping it. The file is moved, not read again, to wait.
+    private func addBrushes(_ copy: URL, name: String, ours: Bool) -> Imported {
+        if !ours {
+            let reading = BrushFileReading()
+            follow(reading, name: name)
+            guard readBrushesFile(path: copy.path, fileName: name, reading: reading) != nil else {
+                return .said("This file has no brushes in it.")
+            }
         }
         let to = Gallery.pendingBrushes.appendingPathComponent("\(UUID().uuidString)-\(name)")
-        guard (try? bytes.write(to: to)) != nil else {
+        guard !cancelled, (try? FileManager.default.moveItem(at: copy, to: to)) != nil else {
             return .said("This file can't be opened.")
         }
         return .said("Brushes added to the library.")
+    }
+
+    /// The card's pie following `reading` from where the copy left it, its Cancel stopping it,
+    /// until the card is put away.
+    private func follow(_ reading: BrushFileReading, name: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.creep?.invalidate()
+            self.creep = Timer.scheduledTimer(withTimeInterval: cardPoll, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                if self.cancelled {
+                    reading.cancel()
+                    return
+                }
+                self.importShown = ProgressShown(progress: copyShare + (1 - copyShare) * reading.progress(), detail: name)
+            }
+        }
     }
 
     private func bringPsd(_ copy: URL, title: String, folder: String?) -> Imported {
@@ -686,6 +876,9 @@ final class GalleryModel {
         case let .tooManyLayers(most):
             Gallery.store.delete(dir: dir)
             return .said("This file has more layers than a canvas its size can hold (\(most)).")
+        case .tooLarge:
+            Gallery.store.delete(dir: dir)
+            return .said("This file's canvas is larger than this device can hold.")
         case .unsupported:
             Gallery.store.delete(dir: dir)
             return .said("This kind of PSD can't be opened.")
@@ -711,6 +904,8 @@ final class GalleryModel {
         if let lapse = try? packageTimeLapse(path: copy.path, dir: segments.path) {
             ArtworkTimeLapse(dir: dir).take(lapse)
         }
+        // its own preview, as the gallery's thumbnail until it is opened
+        _ = keepPackageThumbnail(path: copy.path, dir: dir)
         return .made(dir)
     }
 
@@ -815,17 +1010,40 @@ final class GalleryModel {
         }
     }
 
-    /// `list` written as `format` for the share sheet, hanging from `from`.
     /// The artwork as a file for a drag out of the gallery, made when the other app asks for it.
     func fileForDrag(_ a: GalleryArtwork, format: String, done: @escaping (URL?) -> Void) {
         let name = exportFileName(name: a.name, package: false) + Self.fileExtension(format)
         let url = Sharing.exportsDir.appendingPathComponent(name)
         work.async {
-            done(Self.write(a, format: format, to: url, quality: PdfQuality.best) ? url : nil)
+            done(onBigStack { Self.write(a, format: format, to: url, quality: PdfQuality.best) } ? url : nil)
         }
     }
 
-    func share(_ list: [GalleryArtwork], format: String, quality: UInt8 = PdfQuality.best, from: CGRect?) {
+    /// `list` as one PDF at `url`, a page each in their order (each its picture at its own size,
+    /// kept at `quality`); one that can't be read is left out. False if cancelled or none could be
+    /// written. Slow: off the main thread.
+    private func book(_ list: [GalleryArtwork], to url: URL, quality: UInt8) -> Bool {
+        guard let book = try? PdfBook.create(path: url.path, quality: max(quality, 1)) else { return false }
+        for (i, a) in list.enumerated() {
+            // left unfinished, the book leaves nothing
+            if cancelled {
+                return false
+            }
+            if let session = try? CanvasSession.open(dir: a.dir), session.prepareOffscreen() {
+                try? book.add(session: session)
+            }
+            let progress = Float(i + 1) / Float(list.count)
+            DispatchQueue.main.async { [weak self] in self?.exportShown = ProgressShown(progress: progress) }
+        }
+        return book.pages() > 0 && (try? book.finish()) != nil
+    }
+
+    /// `list` written as `format` for the share sheet, hanging from `from`; several as a PDF are one
+    /// file named `group`, a page each.
+    func share(
+        _ list: [GalleryArtwork], format: String, quality: UInt8 = PdfQuality.best, group: String = GalleryModel.groupName,
+        from: CGRect?
+    ) {
         guard exportShown == nil, importShown == nil else { return }
         cancelled = false
         exportShown = ProgressShown(progress: 0)
@@ -834,6 +1052,14 @@ final class GalleryModel {
         work.async { [weak self] in
             var used = Set<String>()
             var files: [URL] = []
+            if format == "PDF", list.count >= 2 {
+                let url = dir.appendingPathComponent(exportFileName(name: group, package: false) + suffix)
+                if onBigStack({ self?.book(list, to: url, quality: quality) }) == true {
+                    files.append(url)
+                }
+                DispatchQueue.main.async { self?.exported(files, from: from) }
+                return
+            }
             for (i, a) in list.enumerated() {
                 guard let self, !self.cancelled else { break }
                 let base = exportFileName(name: a.name, package: false)
@@ -844,7 +1070,7 @@ final class GalleryModel {
                     n += 1
                 }
                 let url = dir.appendingPathComponent(name + suffix)
-                if Self.write(a, format: format, to: url, quality: quality) {
+                if onBigStack({ Self.write(a, format: format, to: url, quality: quality) }) {
                     files.append(url)
                 }
                 let progress = Float(i + 1) / Float(max(list.count, 1))

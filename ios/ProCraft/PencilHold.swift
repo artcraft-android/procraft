@@ -162,13 +162,23 @@ final class PencilHold {
 /// The feel Apple Pencil Pro gives under the hand. Only that Pencil, on the iPads that support it,
 /// feels anything: for the rest of them the system does nothing.
 final class PencilFeedback {
+    /// The open canvas's, for what lies over it (a side slider snapping onto a notch).
+    static weak var canvas: PencilFeedback?
     /// The system's generator, from iPadOS 17.5.
     private var generator: AnyObject?
+    private weak var view: UIView?
 
     init(view: UIView) {
+        self.view = view
         if #available(iOS 17.5, *) {
             generator = UICanvasFeedbackGenerator(view: view)
         }
+    }
+
+    /// Something lined up at `point` on the window (points): felt there.
+    func aligned(onWindow point: CGPoint) {
+        guard let view else { return }
+        aligned(at: view.convert(point, from: nil))
     }
 
     /// Something is about to give feedback: the system gets ready.

@@ -701,7 +701,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                 opening = null
             }
         }
-        previewing?.let { list -> ArtworkPreview(list, vm.galleryVersion, previewFrom) { previewing = null } }
+        previewing?.let { list -> ArtworkPreview(list, vm.galleryVersion, previewFrom, playing = vm.inFront) { previewing = null } }
         // a sheet sliding up over the gallery, and back down
         androidx.compose.animation.AnimatedVisibility(
             vm.customCanvasOpen,
@@ -776,6 +776,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                         }
                     }
                 },
+                onShareLog = { shareLog(context, vm.viewModelScope) { vm.message = LOG_NOT_READY } },
             ) { about = false }
         }
         RecoveryProgress(recovery, recovered)
@@ -817,6 +818,25 @@ fun GalleryScreen(vm: CanvasViewModel) {
         onAction = { a ->
             vm.deleteArtwork(a)
             deleting = null
+        },
+    )
+    // an artwork whose opening closed the app last time: opened again only when asked to (it can
+    // be shared, duplicated or deleted from the gallery meanwhile); its log (that run's, kept for
+    // it) shared from here, with no canvas to open for Help's
+    Alert(
+        vm.openingEndedApp,
+        title = { io.github.artcraftandroid.procraft.core.openingEndedAppTitle() },
+        // how that run ended, where Android kept it: short of memory, a crash (the log asked for), or
+        // not known (the log asked for too)
+        message = { o -> io.github.artcraftandroid.procraft.core.openingEndedAppSaidAfter(o.end) },
+        action = "Open Anyway",
+        destructive = false,
+        extra = "Share Log",
+        onExtra = { shareLog(context, vm.viewModelScope) { vm.message = LOG_NOT_READY } },
+        onCancel = { vm.openingEndedApp = null },
+        onAction = { o ->
+            vm.openingEndedApp = null
+            vm.openArtwork(o.artwork, anyway = true, then = o.then)
         },
     )
 }
@@ -1598,14 +1618,16 @@ private fun PinchOpeningOverlay(o: PinchOpening, version: Int, done: (Boolean) -
  * close it, as measured).
  */
 @Composable
-private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClose: () -> Unit) {
+private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, playing: Boolean, onClose: () -> Unit) {
     var index by remember(list, start) { mutableIntStateOf(start) }
     // a tap shows (or hides) the close button and the arrows to the other picked artworks
     var controls by remember { mutableStateOf(false) }
     val a = list.getOrNull(index) ?: return onClose()
     BackHandler(onBack = onClose)
+    // the screen's pixels Preview fills
+    var box by remember { mutableStateOf(IntSize.Zero) }
     Box(
-        Modifier.fillMaxSize().background(Color.Black).pointerInput(list) {
+        Modifier.fillMaxSize().background(Color.Black).onSizeChanged { box = it }.pointerInput(list) {
             var moved = 0f
             detectHorizontalDragGestures(
                 onDragStart = { moved = 0f },
@@ -1622,6 +1644,12 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClos
         val image by produceState<ImageBitmap?>(null, a.dir.path, version) {
             value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
         }
+        // the artwork itself, as large as it shows: drawn whole on a thread of its own (the
+        // thumbnail, 512 pixels, enlarged till then)
+        val sharp by produceState<ImageBitmap?>(null, a.dir.path, version, box) {
+            value = null
+            if (box.width > 0 && box.height > 0) value = withContext(Dispatchers.Default) { previewPicture(a, box) }
+        }
         // an animated artwork plays as its settings say, its thumbnail showing until its frames are read
         val side = androidx.compose.ui.platform.LocalConfiguration.current.let { with(androidx.compose.ui.platform.LocalDensity.current) { maxOf(it.screenWidthDp, it.screenHeightDp).dp.roundToPx() } }
         val played by produceState<PlayedFrames?>(null, a.dir.path, version) {
@@ -1629,11 +1657,12 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClos
             value = withContext(Dispatchers.Default) { readFrames(a.dir.path, side) }
         }
         var frame by remember(played) { mutableStateOf<ImageBitmap?>(null) }
-        androidx.compose.runtime.LaunchedEffect(played) {
+        // (held while the app is away)
+        androidx.compose.runtime.LaunchedEffect(played, playing) {
             val p = played ?: return@LaunchedEffect
             var at = 0u
             var step = 1
-            while (true) {
+            while (playing) {
                 frame = p.pictures.getOrNull(p.order.getOrElse(at.toInt()) { 0 })
                 kotlinx.coroutines.delay(1000L / p.fps.coerceAtLeast(1))
                 // round again, turned back, or (a single pass) staying on its last frame
@@ -1642,7 +1671,8 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClos
                 step = next.step
             }
         }
-        (frame ?: image)?.let { ThumbnailImage(it, a.name, ContentScale.Fit) }
+        // (the thumbnail enlarged smoothly while the artwork is drawn, not in squares)
+        (frame ?: sharp ?: image)?.let { ThumbnailImage(it, a.name, ContentScale.Fit, smooth = it === image && previewLoads(a, box)) }
         androidx.compose.animation.AnimatedVisibility(controls, Modifier.fillMaxSize(), enter = androidx.compose.animation.fadeIn(), exit = androidx.compose.animation.fadeOut()) {
             Box(Modifier.fillMaxSize()) {
                 // a light disc with a black cross, 41 in from the top right
@@ -1659,6 +1689,32 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClos
             }
         }
     }
+}
+
+/** The gallery thumbnail's longest side (the shared core's project.rs): an artwork shown no larger has its thumbnail to show. */
+private const val THUMBNAIL_SIDE = 512u
+
+/** The longest side [a] is drawn at for Preview filling [box] (pixels), turned as it shows. */
+private fun previewSide(a: Artwork, box: IntSize): UInt {
+    val (w, h) = if (a.turns % 2 != 0) a.height to a.width else a.width to a.height
+    return io.github.artcraftandroid.procraft.core.previewSide(w.coerceAtLeast(1).toUInt(), h.coerceAtLeast(1).toUInt(), box.width.toUInt(), box.height.toUInt())
+}
+
+/** Whether Preview would draw [a] whole for [box]: it shows larger than its thumbnail. */
+private fun previewLoads(a: Artwork, box: IntSize): Boolean = box.width > 0 && box.height > 0 && previewSide(a, box) > THUMBNAIL_SIDE
+
+/**
+ * [a] as Preview shows it filling [box] (pixels): the whole picture at a pixel of its own a screen
+ * pixel, as its thumbnail is made (the shared core's `artwork_preview_png`), never larger than the
+ * screen. None where its thumbnail shows as much, it plays, opening it ended the app before (it
+ * isn't opened again unasked), or it can't be drawn. Slow: the artwork is opened whole, then let go.
+ */
+private fun previewPicture(a: Artwork, box: IntSize): ImageBitmap? {
+    val dir = a.dir.path
+    if (!previewLoads(a, box)) return null
+    if (io.github.artcraftandroid.procraft.core.artworkPlays(dir) || io.github.artcraftandroid.procraft.core.openingEndedApp(dir)) return null
+    val png = io.github.artcraftandroid.procraft.core.artworkPreviewPng(dir, previewSide(a, box)) ?: return null
+    return BitmapFactory.decodeByteArray(png, 0, png.size)?.asImageBitmap()
 }
 
 /** An artwork's frames as read for Preview, and how they play. */
@@ -1740,13 +1796,13 @@ private fun PreviewArrow(left: Boolean, modifier: Modifier, onClick: () -> Unit)
 private fun thumbnailFilter(image: ImageBitmap, shown: Float, density: Float) =
     if (shown >= image.width * density * 0.999f) FilterQuality.None else FilterQuality.Low
 
-/** An artwork's thumbnail fitted in its box (or filling it, by [scale]), filtered by [thumbnailFilter]. */
+/** An artwork's thumbnail fitted in its box (or filling it, by [scale]), filtered by [thumbnailFilter] (or [smooth]ly). */
 @Composable
-private fun ThumbnailImage(image: ImageBitmap, name: String, scale: ContentScale) {
+private fun ThumbnailImage(image: ImageBitmap, name: String, scale: ContentScale, smooth: Boolean = false) {
     val density = LocalDensity.current.density
     var shown by remember { mutableFloatStateOf(0f) }
     // made again when the filter changes (Image(bitmap) keeps its first)
-    val filter = thumbnailFilter(image, shown, density)
+    val filter = if (smooth) FilterQuality.Low else thumbnailFilter(image, shown, density)
     val painter = remember(image, filter) { androidx.compose.ui.graphics.painter.BitmapPainter(image, filterQuality = filter) }
     Image(
         painter,
@@ -1976,10 +2032,11 @@ private fun Chip(text: String, modifier: Modifier = Modifier) {
 
 /**
  * What the app is, over the gallery (blurred and dimmed under it): its icon 300 across, its name,
- * its version; a round button at the top right closes it, as back does.
+ * its version; a round button at the top right closes it, as back does. The version held shares the
+ * app's log ([onShareLog]): the gallery's way to it with no canvas open, and nothing added to see.
  */
 @Composable
-private fun AboutApp(onRecover: () -> Unit, onClose: () -> Unit) {
+private fun AboutApp(onRecover: () -> Unit, onShareLog: () -> Unit, onClose: () -> Unit) {
     BackHandler(onBack = onClose)
     val context = androidx.compose.ui.platform.LocalContext.current
     val version = remember {
@@ -1999,7 +2056,13 @@ private fun AboutApp(onRecover: () -> Unit, onClose: () -> Unit) {
                 )
             }
             Text("ProCraft", color = Color.White, fontSize = 64.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(top = 12.dp))
-            Text(version, color = AboutInk, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(top = 14.dp))
+            Text(
+                version,
+                color = AboutInk,
+                fontSize = 13.sp,
+                maxLines = 1,
+                modifier = Modifier.padding(top = 14.dp).pointerInput(Unit) { detectTapGestures(onLongPress = { onShareLog() }) },
+            )
         }
         Box(
             Modifier.align(Alignment.TopCenter).padding(top = AboutButtonTop).size(220.dp, 38.dp).clip(RoundedCornerShape(8.dp))

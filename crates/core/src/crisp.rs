@@ -61,7 +61,7 @@ pub(crate) struct CrispPicture {
 /// The part of the artwork the window shows, at the window's pixels.
 pub(crate) struct Crisp {
     pub(crate) doc: Document,
-    pub(crate) canvas: Canvas,
+    pub(crate) canvas: Box<Canvas>,
     /// Its pixels to the window's, for the view it was made of.
     pub(crate) to_screen: Affine,
     /// The artwork's pixels to its own.
@@ -316,7 +316,7 @@ impl State {
         };
         let crisp = Crisp {
             doc,
-            canvas,
+            canvas: Box::new(canvas),
             to_screen: Affine::translate(Vec2::new(x0, y0)),
             to_crisp,
             at: view,
@@ -438,7 +438,7 @@ impl State {
     /// when what the artwork shows has changed since.
     pub(crate) fn crisp_lasso(&mut self) {
         let Some(crisp) = self.crisp.as_mut() else { return };
-        let shown = self.canvas.as_ref().and_then(Canvas::lasso_preview);
+        let shown = self.canvas.as_ref().and_then(|c| c.lasso_preview());
         if crisp.lasso.as_ref() == shown {
             return;
         }
@@ -514,7 +514,7 @@ impl State {
     /// ends there it ends here: kept, a layer of pixels is magnified again at once (the stroke's
     /// true pixels), a vector layer left as drawn until things rest.
     pub(crate) fn crisp_echo(&mut self) {
-        let told = self.canvas.as_mut().map(Canvas::take_echo).unwrap_or_default();
+        let told = self.canvas.as_mut().map(|c| c.take_echo()).unwrap_or_default();
         let Some(layer) = self.crisp_stroke.filter(|_| !told.is_empty()) else { return };
         let Some(mut crisp) = self.crisp.take() else {
             self.crisp_stroke = None;

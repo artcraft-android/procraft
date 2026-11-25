@@ -1,4 +1,6 @@
 import Foundation
+import os
+import QuickLook
 import UIKit
 
 /// Handing files to other apps through the system's share sheet.
@@ -31,6 +33,20 @@ enum Sharing {
         top.present(sheet, animated: true)
     }
 
+    /// The model in `usdz` shown by the system's viewer, which puts it in the room around the iPad.
+    static func viewInRoom(_ usdz: URL) {
+        guard let top = topController() else { return }
+        let viewer = QLPreviewController()
+        let shown = OneFile(usdz)
+        // the viewer holds its data source weakly: it is kept here while it shows
+        viewing = shown
+        viewer.dataSource = shown
+        top.present(viewer, animated: true)
+    }
+
+    /// The file the system's viewer is showing.
+    private static var viewing: OneFile?
+
     /// What is shown on top now, for something to be presented over it.
     private static func topController() -> UIViewController? {
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
@@ -39,6 +55,23 @@ enum Sharing {
             top = shown
         }
         return top
+    }
+}
+
+/// One file for the system's viewer.
+private final class OneFile: NSObject, QLPreviewControllerDataSource {
+    let url: URL
+
+    init(_ url: URL) {
+        self.url = url
+    }
+
+    func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+        1
+    }
+
+    func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+        url as NSURL
     }
 }
 
@@ -52,5 +85,30 @@ extension URL {
             }
         }
         return try? Data(contentsOf: self)
+    }
+
+    /// A copy of a file the system's picker gave, in the app's temporary folder, made with the
+    /// access it gave: the system copies it, so a file of gigabytes is never held in memory. None if
+    /// it couldn't be copied.
+    func copyPicked() -> URL? {
+        let scoped = startAccessingSecurityScopedResource()
+        defer {
+            if scoped {
+                stopAccessingSecurityScopedResource()
+            }
+        }
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent("picked-\(UUID().uuidString)-\(lastPathComponent)")
+        return (try? FileManager.default.copyItem(at: self, to: copy)) != nil ? copy : nil
+    }
+}
+
+/// The memory the app may still take before the system ends it.
+enum DeviceMemory {
+    /// Told to the core before a plugin's brush engine imports a file, for what that may take.
+    static func tell() {
+        let available = os_proc_available_memory()
+        if available > 0 {
+            setMemoryAvailable(bytes: UInt64(available))
+        }
     }
 }

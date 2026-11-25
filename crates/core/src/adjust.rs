@@ -220,10 +220,12 @@ impl State {
         };
         self.strokes = self.strokes.wrapping_add(1);
         let seed = self.strokes.wrapping_mul(0x9e37_79b9);
-        let mut builder = StrokeBuilder::with_seed(brush.clone(), brush.diameter(sliders.size), pointer.into(), seed)
+        let builder = StrokeBuilder::with_seed(brush.clone(), brush.diameter(sliders.size), pointer.into(), seed)
             .with_input(self.input.clone())
             .on_view_turned(self.view.map_or(0.0, |v| v.rotation()))
+            .on_canvas_made_turned(self.doc.made_turns)
             .seen_at(self.view.map_or(1.0, |v| v.zoom()) / self.display_scale);
+        let mut builder = self.pressing.applied(builder, self.canvas_per_point());
         if let Some(zoom) = self.whole_pixels(samples) {
             builder = builder.read_in_whole_pixels(zoom);
         }
@@ -242,7 +244,7 @@ impl State {
         }
         canvas.begin_pencil_stroke(current, style);
         canvas.add_stamps(&stamps);
-        self.stroke = Some(builder);
+        self.stroke = Some(Box::new(builder));
         self.redraw_painted_on();
     }
 
@@ -308,7 +310,7 @@ impl State {
             self.liquify.halt();
             self.close_liquify_step();
             self.flush();
-            self.canvas.as_ref().map_or(0, Canvas::steps_made)
+            self.canvas.as_deref().map_or(0, Canvas::steps_made)
         } else {
             0
         };
@@ -844,6 +846,19 @@ impl CanvasSession {
     pub fn adjust_end(&self, commit: bool) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // a filter layer's settings: kept as a step, or put back
+        if let Some(edit) = st.filters.layer.as_ref() {
+            let (layer, added) = (edit.layer, edit.added);
+            st.end_layer_edit(commit);
+            self.shared.frame(st);
+            drop(guard);
+            // Cancel in the settings a filter layer opened with as it was added: it goes again,
+            // its adding undone and nothing left to redo, as if it was never added
+            if added && !commit {
+                self.take_back_added(layer);
+            }
+            return;
+        }
         if st.adjusting {
             st.end_adjustment(commit);
             st.flush();

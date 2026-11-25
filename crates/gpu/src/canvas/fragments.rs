@@ -15,9 +15,10 @@
 use procraft_engine::geom::IRect;
 
 use super::{
-    Canvas, LAYER_FORMAT, LIQUIFY_LEAST_RADIUS, LiquifyStamp, LiquifyUniform, RULE_LISTS_KEPT, SMUDGE_GRID,
-    SMUDGE_UNIFORM_SIZE, SmudgeUniform, StampInstance, UNIFORM_SIZE, UniformData, WET_PASS_SIZE, WET_PLOT_MOST,
-    WET_PLOTS_TEXELS, by_rule, copy_at, extent, quad_reach, rule_lists, smudge, texture,
+    Aside, Canvas, Carry, Kept, LAYER_FORMAT, LIQUIFY_LEAST_RADIUS, LiquifyStamp, LiquifyUniform, RULE_LISTS_KEPT,
+    SMUDGE_GRID, SMUDGE_REACH, SMUDGE_UNIFORM_SIZE, SmudgeUniform, StampInstance, UNIFORM_SIZE, UniformData,
+    WET_PASS_SIZE, WET_PLOT_MOST, WET_PLOTS_TEXELS, by_rule, carry_hand_overs, copy_at, extent, quad_reach, rule_lists,
+    smudge, texture,
 };
 use crate::Gpu;
 
@@ -239,6 +240,8 @@ impl FragmentPipelines {
                 loaded(8, FLOAT),
                 loaded(9, FLOAT),
                 loaded(10, UINT),
+                // the paper's tile, which wet paint takes (filtered, as a stroke's paper is)
+                loaded(11, wgpu::TextureSampleType::Float { filterable: true }),
             ],
         });
         let smudge_carry_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -710,6 +713,42 @@ impl Held {
     }
 }
 
+/// Hands the stroke's carry textures `held` from copy `out` (what of its carry is kept goes aside) to
+/// copy `into` (what of its carry its piece reads comes back), as `smudge::hand_over` does buffers.
+fn hand_over(
+    encoder: &mut wgpu::CommandEncoder,
+    held: &Held,
+    carries: &[Carry],
+    out: Option<(usize, Kept)>,
+    (into, needs): (usize, Kept),
+) {
+    let aside = |copy: usize| match carries.get(copy).and_then(|c| c.aside.as_ref()) {
+        Some(Aside::Texture(tex)) => Some(tex),
+        _ => None,
+    };
+    // where it lies: the grid's rows within that many cells of its middle, or the rows of the
+    // carried-over plot its texels take (in the copy's put aside, the same)
+    let kept_in = |kept: Kept| match (kept, held) {
+        (Kept::Cells(cells), Held::Smudge { carry, .. }) => {
+            let (cells, middle) = (cells.clamp(0, SMUDGE_REACH), SMUDGE_GRID as i32 / 2);
+            Some((carry, IRect::new(0, middle - cells, SMUDGE_GRID as i32, middle + cells + 1)))
+        }
+        (Kept::Plot { which, texels }, Held::Wet { carried, .. }) => {
+            let rows = texels.div_ceil(CARRIED_ROW).min(CARRIED_ROW);
+            carried.get(which.min(1) as usize).map(|t| (t, IRect::new(0, 0, CARRIED_ROW as i32, rows as i32)))
+        }
+        _ => None,
+    };
+    if let Some((copy, kept)) = out
+        && let (Some(aside), Some((tex, rect))) = (aside(copy), kept_in(kept))
+    {
+        copy_rect(encoder, tex, aside, rect, 0);
+    }
+    if let (Some(aside), Some((tex, rect))) = (aside(into), kept_in(needs)) {
+        copy_rect(encoder, aside, tex, rect, 0);
+    }
+}
+
 /// A dulling stamp's sums are summed in this many parts (as the shader's `DULL_PARTS`).
 const DULL_PARTS: u32 = 64;
 
@@ -843,6 +882,8 @@ impl Canvas {
         (brush, second): (&wgpu::BindGroup, Option<&wgpu::TextureView>),
     ) -> bool {
         let device = &gpu.device;
+        // the paper as it is now, which each wet stamp takes as it lays
+        let paper = self.paper_look();
         let reach = if reach.is_empty() { IRect::new(0, 0, 1, 1) } else { reach }.intersect(self.full());
         if reach.is_empty() || !self.fits_window(reach) {
             log::error!("smudging: {} by {} pixels is past what a window holds", reach.width(), reach.height());
@@ -853,9 +894,10 @@ impl Canvas {
         let (work, kept) = pieces.iter().fold((false, false), |(w, k), p| (w || p.work, k || p.kept));
         let count: usize = pieces.iter().map(|p| p.uniforms.len()).sum();
         self.smudge_uniform_room(gpu, params, count);
-        // the layer as it was is read by a glaze and paint put together, else not filled in
+        // the layer as it was is read by a glaze, paint laid apart and paint put together, else
+        // not filled in
         let before = pieces.iter().any(|p| {
-            p.uniforms.iter().any(|u| u.source_before == 1)
+            p.uniforms.iter().any(|u| u.source_before == 1 || u.laid_apart == 2)
                 || p.dispatches.iter().any(|d| matches!(d.0, smudge::Pipe::Synthesize))
         });
         if !self.window_in_fragments(gpu, encoder, (reach, before), &each) {
@@ -869,6 +911,9 @@ impl Canvas {
             (spares.eight.view.clone(), spares.word.view.clone(), spares.words.view.clone());
         let Some(smudge) = self.smudge.as_ref() else { return false };
         let (Some(window), Some(held)) = (smudge.frag_window.as_ref(), smudge.held.as_ref()) else { return false };
+        // where the carry goes from one of a symmetry's copies to another's
+        let (overs, resident) = carry_hand_overs(smudge.resident, pieces);
+        let mut overs = overs.into_iter().peekable();
         let uniform = |binding, buffer, size| wgpu::BindGroupEntry {
             binding,
             resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -899,6 +944,8 @@ impl Canvas {
                 // the image as last shown, for a stroke that picks up from it (else anything)
                 view(9, if from_image { &self.composite_view } else { before_view }),
                 view(10, &first(&window.shown).unwrap_or_else(|| spare_word.clone())),
+                // the paper's tile, which wet paint takes
+                view(11, &self.paper_view),
             ],
         });
         let carry_bind = |carry: &wgpu::TextureView, plots: &wgpu::TextureView| {
@@ -931,12 +978,15 @@ impl Canvas {
             IRect::new(r.x0 - reach.x0, r.y0 - reach.y0, r.x1 - reach.x0, r.y1 - reach.y0)
         };
         let grid = SMUDGE_GRID as i32;
-        for piece in pieces {
+        for (k, piece) in pieces.iter().enumerate() {
+            if let Some((_, out, into)) = overs.next_if(|o| o.0 == k) {
+                hand_over(encoder, held, &smudge.carries, out, into);
+            }
             let laid: Vec<(u32, SmudgeUniform)> = piece
                 .uniforms
                 .iter()
                 .map(|u| {
-                    let u = SmudgeUniform { origin, stride, rows: reach.height(), ..*u };
+                    let u = SmudgeUniform { origin, stride, rows: reach.height(), paper, ..*u };
                     (params.push(&u), u)
                 })
                 .collect();
@@ -1023,6 +1073,9 @@ impl Canvas {
                 }
             }
         }
+        if let Some(smudge) = self.smudge.as_mut() {
+            smudge.resident = resident;
+        }
         self.window_out_fragments(encoder, reach, writes, (work, kept));
         true
     }
@@ -1049,11 +1102,14 @@ impl Canvas {
         if smudge.stalled {
             return false;
         }
-        let keeps = smudge.keeps;
+        let (keeps, tile_side) = (smudge.keeps, smudge.tile);
         let (width, height) = (reach.width(), reach.height());
         let small = smudge.frag_window.as_ref().is_none_or(|w| !w.fits(width, height));
-        let mut missing: Vec<(u32, u32)> =
-            writes.iter().flat_map(|w| smudge::tiles_of(*w)).filter(|t| !smudge.tiles.contains_key(t)).collect();
+        let mut missing: Vec<(u32, u32)> = writes
+            .iter()
+            .flat_map(|w| smudge::tiles_of(*w, tile_side))
+            .filter(|t| !smudge.tiles.contains_key(t))
+            .collect();
         missing.sort_unstable();
         missing.dedup();
         if small || !missing.is_empty() {
@@ -1062,7 +1118,7 @@ impl Canvas {
             // grown in steps, so a stroke that reaches further doesn't make them every frame
             let side = |n: u32, of: u32| n.next_multiple_of(256).min(of).max(n);
             let window = small.then(|| FragWindow::new(device, (side(width, canvas_w), side(height, canvas_h)), keeps));
-            let tile = |label, format| texture(device, label, smudge::TILE, smudge::TILE, format);
+            let tile = |label, format| texture(device, label, tile_side, tile_side, format);
             let made: Vec<((u32, u32), smudge::Tile)> = missing
                 .iter()
                 .map(|&at| {
@@ -1093,7 +1149,7 @@ impl Canvas {
             }
             for (at, tile) in made {
                 // the layer there as it was: the stroke hasn't written to it yet
-                let r = smudge::tile_rect(at).intersect(full);
+                let r = smudge::tile_rect(at, tile_side).intersect(full);
                 let kept = std::iter::once((&layer.texture, &tile.before))
                     .chain(tile.grained.iter().map(|g| (&layer.texture, g)))
                     .chain(also.iter().copied().zip(&tile.more));
@@ -1130,13 +1186,13 @@ impl Canvas {
             ));
         }
         // what the stroke keeps where it has been
-        for at in smudge::tiles_of(reach) {
+        for at in smudge::tiles_of(reach, tile_side) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let r = smudge::tile_rect(at).intersect(reach);
+            let r = smudge::tile_rect(at, tile_side).intersect(reach);
             if r.is_empty() {
                 continue;
             }
-            let t = smudge::tile_rect(at);
+            let t = smudge::tile_rect(at, tile_side);
             let (x, y, size) = (r.x0 - t.x0, r.y0 - t.y0, extent(r.width(), r.height()));
             let (wx, wy) = (r.x0 - reach.x0, r.y0 - reach.y0);
             if before {
@@ -1185,9 +1241,9 @@ impl Canvas {
         if !kept {
             return;
         }
-        for at in smudge::tiles_of(changed) {
+        for at in smudge::tiles_of(changed, smudge.tile) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let t = smudge::tile_rect(at);
+            let t = smudge::tile_rect(at, smudge.tile);
             let r = t.intersect(changed);
             if r.is_empty() {
                 continue;

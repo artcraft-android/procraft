@@ -36,6 +36,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.viewinterop.AndroidView
 import io.github.artcraftandroid.procraft.core.Adjustment
 import io.github.artcraftandroid.procraft.canvas.CanvasSurfaceView
@@ -46,6 +47,8 @@ import io.github.artcraftandroid.procraft.canvas.SelectionPopup
 import io.github.artcraftandroid.procraft.canvas.TransformPopup
 import io.github.artcraftandroid.procraft.core.LayerInfo
 import io.github.artcraftandroid.procraft.core.ToolKind
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 /** The canvas screen: the canvas, the bars over it, and the panel that is open. */
 @Composable
@@ -63,6 +66,12 @@ fun AppRoot(vm: CanvasViewModel) {
 /** The gallery, or the open artwork's canvas with the bars and panels over it. */
 @Composable
 private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
+    // (while a plugin lays the panels out, windows lie over the bars and each other: the panels nearly solid)
+    androidx.compose.runtime.CompositionLocalProvider(LocalSolidPanels provides vm.layoutLook.on) { ScreensShown(vm, keptClear) }
+}
+
+@Composable
+private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
     if (vm.screen == Screen.GALLERY) {
         ZoomingGallery(vm, overlay = false)
         // a share from the gallery shows its card there, and a file brought in its own
@@ -171,31 +180,149 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                 val up = Modifier.graphicsLayer { translationY = -size.height * (1f - barsShown) }
                 val aside = Modifier.graphicsLayer { translationX = size.width * (1f - barsShown) * if (vm.rightHanded) 1f else -1f }
                 // the top bar and the side bar each at the size a plugin may give them
+                // the top bar's halves, where they always are, told to Edit layout to move them from
+                val barK = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.TOP_BAR)
+                val barWidth = maxWidth / barK
+                val halfEnd = (Pc.barFit(barWidth).margin - TopBarHalfEnd) * barK
+                val leftLength = topBarHalfLength(true, barWidth) * barK
+                val rightLength = topBarHalfLength(false, barWidth) * barK
+                val thick = Pc.BarHeight * barK
+                androidx.compose.runtime.SideEffect {
+                    vm.tellBar(maxWidth.value, maxHeight.value, io.github.artcraftandroid.procraft.core.LayoutBar.TOP_LEFT, io.github.artcraftandroid.procraft.core.BarPlace(halfEnd.value, 0f, false), leftLength.value, thick.value)
+                    vm.tellBar(maxWidth.value, maxHeight.value, io.github.artcraftandroid.procraft.core.LayoutBar.TOP_RIGHT, io.github.artcraftandroid.procraft.core.BarPlace((maxWidth - halfEnd - rightLength).value, 0f, false), rightLength.value, thick.value)
+                }
+                // (each half on glass of its own while moved, or sliding into its side or out: Collapse to edge)
+                val halfSlides = listOf(io.github.artcraftandroid.procraft.core.LayoutBar.TOP_LEFT, io.github.artcraftandroid.procraft.core.LayoutBar.TOP_RIGHT).map { collapseSlide(vm.barCollapsed(it) != null) }
+                val halvesMoved = vm.barMoved(io.github.artcraftandroid.procraft.core.LayoutBar.TOP_LEFT) != null || vm.barMoved(io.github.artcraftandroid.procraft.core.LayoutBar.TOP_RIGHT) != null ||
+                    halfSlides.any { it > 0f }
+                val rootDensity = androidx.compose.ui.platform.LocalDensity.current.density
                 PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.TOP_BAR) {
-                    val height = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.BarHeight.toPx() }
-                    val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
-                    TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
+                    if (!halvesMoved) {
+                        val height = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.BarHeight.toPx() }
+                        val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
+                        TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
+                    } else {
+                        // moved by Edit layout: each half on glass of its own where it was left
+                        for ((bar, left) in listOf(io.github.artcraftandroid.procraft.core.LayoutBar.TOP_LEFT to true, io.github.artcraftandroid.procraft.core.LayoutBar.TOP_RIGHT to false)) {
+                            val at = vm.barShown(bar) ?: continue
+                            // gone into its side: its tab shows there instead
+                            val slide = halfSlides[if (left) 0 else 1]
+                            if (slide >= 1f && vm.barCollapsed(bar) != null) continue
+                            androidx.compose.runtime.key(bar) {
+                                // square only on its sides against the window's edges
+                                val edges = vm.barTouching(bar)
+                                TopBarHalf(
+                                    vm,
+                                    left,
+                                    at.vertical,
+                                    barWidth,
+                                    Modifier.offset { androidx.compose.ui.unit.IntOffset((at.x * rootDensity).roundToInt(), (at.y * rootDensity).roundToInt()) }
+                                        .collapseSlid(vm.barCollapsePlace(bar), slide, rootDensity)
+                                        .then(rememberFrost(Pc.BarHeight / 2, pastEdges(edges, Pc.BarHeight / 2, BarGlass()))).then(fade),
+                                    edges,
+                                )
+                            }
+                        }
+                    }
                 }
                 val side = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.SIDE_BAR)
-                val sideBar = Pc.sideBarFit(maxHeight / side, Pc.barShown / side)
+                // the window as the side bar measures it, at its kept place (its modify button
+                // dragged, it follows the finger up or down stretching a little toward it, and let
+                // go settles back to its width)
+                vm.sideBarRoom = floatArrayOf(maxHeight.value / side, Pc.barShown.value / side)
+                val sideBar = io.github.artcraftandroid.procraft.core.sideBarFit(maxHeight.value / side, Pc.barShown.value / side, vm.sideBarCentre)
+                val sideTop = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(sideBar.top) }
+                val sideStretch = androidx.compose.runtime.remember { androidx.compose.animation.core.Animatable(0f) }
+                val moving = vm.sideBarMoving
+                androidx.compose.runtime.LaunchedEffect(moving, vm.sideBarSettling, sideBar.top) {
+                    when {
+                        moving != null -> {
+                            sideTop.snapTo(moving.top)
+                            sideStretch.snapTo(moving.stretch)
+                        }
+                        vm.sideBarSettling -> {
+                            kotlinx.coroutines.coroutineScope {
+                                launch { sideStretch.animateTo(0f, Motion.sideBarSettle()) }
+                                sideTop.animateTo(sideBar.top, Motion.sideBarSettle())
+                            }
+                            vm.sideBarSettling = false
+                        }
+                        else -> {
+                            sideTop.snapTo(sideBar.top)
+                            sideStretch.snapTo(0f)
+                        }
+                    }
+                }
                 // a mode taking the screen slides it off its edge, and back when it ends
+                val sideMoved = vm.barMoved(io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR)
+                // collapsed into its side (Collapse to edge): sliding there, then gone, its tab there instead
+                val sideCollapsed = vm.barCollapsed(io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR) != null
+                val sideSlide = collapseSlide(sideCollapsed)
+                val sideGone = sideCollapsed && sideSlide >= 1f
+                // where it always is, told to Edit layout to move it from
+                vm.sideBarBounds?.takeIf { sideMoved == null }?.let { b ->
+                    val d = androidx.compose.ui.platform.LocalDensity.current.density
+                    androidx.compose.runtime.SideEffect {
+                        vm.tellBar(maxWidth.value, maxHeight.value, io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR, io.github.artcraftandroid.procraft.core.BarPlace(b.left / d, b.top / d, true), b.height / d, b.width / d)
+                    }
+                }
                 androidx.compose.animation.AnimatedVisibility(
-                    vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
+                    vm.showSideBar && !sideGone && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
                         vm.opacityLayer == null &&
                         (vm.adjustment == null || vm.adjustPencil),
-                    Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = sideBar.top * side),
+                    if (sideMoved != null) {
+                        // moved by Edit layout: where it was left
+                        Modifier.align(Alignment.TopStart).offset {
+                            androidx.compose.ui.unit.IntOffset((sideMoved.x * density).roundToInt(), (sideMoved.y * density).roundToInt())
+                        }
+                    } else {
+                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset {
+                            val k = side * density
+                            val outward = if (vm.rightHanded) -1f else 1f
+                            // (stretched, what is on it moves out with its far side; its glass reaches back to the edge)
+                            androidx.compose.ui.unit.IntOffset((sideStretch.value * k * outward).roundToInt(), (sideTop.value * k).roundToInt())
+                        }
+                    },
                     enter = Motion.sideBarIn(vm.rightHanded),
                     exit = Motion.sideBarOut(vm.rightHanded),
                 ) {
                     // where it is, for a dragged colour over it
                     DisposableEffect(Unit) { onDispose { vm.sideBarBounds = null } }
                     PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.SIDE_BAR) {
+                        // lying down where Edit layout moved it: turned a quarter about its top-left, then down by its width
+                        val lying = if (sideMoved?.vertical == false) {
+                            Modifier.graphicsLayer {
+                                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                                rotationZ = -90f
+                                translationY = Pc.SideBarWidth.toPx()
+                            }
+                        } else {
+                            Modifier
+                        }
                         SideBar(
                             vm,
-                            aside.then(fade).onGloballyPositioned { vm.sideBarBounds = it.boundsInRoot().translate(-keptClear.corner) },
-                            right = vm.rightHanded,
-                            trackHeight = sideBar.track,
+                            // (a press on its glass never the canvas's, wherever it is and however it is turned)
+                            Modifier.collapseSlid(vm.barCollapsePlace(io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR), sideSlide, rootDensity)
+                                .then(lying).then(aside).then(fade).keepsItsTouches()
+                                .onGloballyPositioned {
+                                    val b = it.boundsInRoot().translate(-keptClear.corner)
+                                    vm.sideBarBounds = b
+                                    // back where it always is (Reset): its handle follows as it lands there
+                                    if (sideMoved == null && sideSlide == 0f && barsShown >= 1f && sideStretch.value == 0f) {
+                                        val d = rootDensity
+                                        vm.tellBar(maxWidth.value, maxHeight.value, io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR, io.github.artcraftandroid.procraft.core.BarPlace(b.left / d, b.top / d, true), b.height / d, b.width / d)
+                                    }
+                                },
+                            // standing against a side Edit layout took it to: mirrored to that side
+                            right = sideMoved?.takeIf { it.vertical }?.let { vm.barTouching(io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR)?.right } ?: vm.rightHanded,
+                            trackHeight = sideBar.track.dp,
                             shown = barsShown,
+                            stretch = sideStretch.value.dp,
+                            // moved: square only on its sides against the window's edges (its own, lying down)
+                            edges = sideMoved?.let { at ->
+                                vm.barTouching(io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR)?.let { if (at.vertical) it else turnedSides(it) }
+                            },
+                            glassEdges = sideMoved?.let { vm.barTouching(io.github.artcraftandroid.procraft.core.LayoutBar.SIDE_BAR) },
                         )
                     }
                 }
@@ -208,11 +335,11 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                 vm.animatedExport != null || vm.modelAnimatedExport != null
             if (!vm.barsHidden && !pageOver) AnimationBar(vm)
             // the bottom toolbars rise from below the screen, and drop away
-            androidx.compose.animation.AnimatedVisibility(
+            FloatableBottom(
+                vm,
+                io.github.artcraftandroid.procraft.core.LayoutPiece.TRANSFORM,
                 vm.transforming && !vm.barsHidden,
-                Modifier.align(Alignment.BottomCenter),
-                enter = Motion.toolbarIn(),
-                exit = Motion.toolbarOut(),
+                goesWith = { if (vm.transforming && !vm.barsHidden) TransformPopover(vm, maxWidth, maxHeight) },
             ) { TransformToolbar(vm, maxWidth) }
             BrushCursor(vm)
             // the Reference window floats over the bars and the canvas's own marks; the panels,
@@ -223,6 +350,10 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
             FloatingColors(vm, maxWidth, maxHeight)
             // the Layers panel and the brush library torn off into windows of their own, likewise
             FloatingPanels(vm, maxWidth, maxHeight)
+            // Collapse to edge's buttons by the bars and the tabs of what went into a side
+            if (!vm.barsHidden) CollapseControls(vm)
+            // Edit layout: a handle on each bar, Reset and Done
+            if (vm.editingLayout && !vm.barsHidden) EditLayoutHandles(vm)
             // each panel hangs from its button: colour, layers, then the tool that opened the library;
             // it grows out of its arrow as it opens and fades as it closes
             PanelPresence(vm.panel, Panel.NONE, fading = vm.panelFading, onFaded = { vm.panelFading = false }) { shown, alpha, scale, origin ->
@@ -247,30 +378,83 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                 // placed at the size it shows (the panels' size), and laid out at its own
                 val k = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.PANELS)
                 val place = if (vm.rightHanded) popoverPlace(width * k, buttonX, maxWidth, minRight = clear) else popoverPlace(width * k, buttonX, maxWidth, clear)
+                // from where Edit layout moved its half of the top bar, if it did: under the button,
+                // over it, or beside it (the core works out where)
+                val half = if (fromLeft) io.github.artcraftandroid.procraft.core.LayoutBar.TOP_LEFT else io.github.artcraftandroid.procraft.core.LayoutBar.TOP_RIGHT
+                val hang = vm.barMoved(half)?.let {
+                    val barWidth = maxWidth / bar
+                    val fit = Pc.barFit(barWidth)
+                    val along = if (fromLeft) {
+                        TopBarHalfEnd + Pc.GalleryWidth + fit.actionGap + fit.button / 2 + (fit.button + fit.actionGap) * button
+                    } else {
+                        topBarHalfLength(false, barWidth) - TopBarHalfEnd - fit.button / 2 - (fit.button + fit.toolGap) * button
+                    }
+                    vm.barLayout.hang(half, (along * bar).value, (width * k).value, Pc.ArrowShift.value, Pc.PopoverGap.value, (Pc.ArrowHeight * k).value)
+                }
+                val hangSide = when (hang?.side) {
+                    null, io.github.artcraftandroid.procraft.core.HangSide.BELOW -> ArrowSide.TOP
+                    io.github.artcraftandroid.procraft.core.HangSide.ABOVE -> ArrowSide.BOTTOM
+                    io.github.artcraftandroid.procraft.core.HangSide.RIGHT -> ArrowSide.LEFT
+                    io.github.artcraftandroid.procraft.core.HangSide.LEFT -> ArrowSide.RIGHT
+                }
+                val panelLeft = hang?.x?.dp ?: place.left
+                // its top; hanging over the bar, its bottom
+                val panelTop = hang?.y?.dp ?: Pc.barShown
+                // the arrow's tip along its edge, as it shows
+                val arrowShown = hang?.arrow?.dp ?: place.arrowX
+                val sideways = hangSide == ArrowSide.LEFT || hangSide == ArrowSide.RIGHT
                 val density = androidx.compose.ui.platform.LocalDensity.current
                 val pivot = with(density) {
-                    origin + androidx.compose.ui.geometry.Offset((place.left + place.arrowX).toPx(), Pc.barShown.toPx())
+                    val at = if (sideways) {
+                        androidx.compose.ui.geometry.Offset((panelLeft + if (hangSide == ArrowSide.RIGHT) width * k else 0.dp).toPx(), (panelTop + arrowShown).toPx())
+                    } else {
+                        androidx.compose.ui.geometry.Offset((panelLeft + arrowShown).toPx(), panelTop.toPx())
+                    }
+                    origin + at
                 }
-                val left = with(density) { place.left.roundToPx() }
-                val top = with(density) { Pc.barShown.roundToPx() }
+                val left = with(density) { panelLeft.roundToPx() }
+                val top = with(density) { panelTop.roundToPx() }
                 // dragged out by its grabber, it is not seen (nor its blur) until let go, the window floating
                 val undocking = when (shown) {
                     Panel.LAYERS -> vm.panelUndocking == io.github.artcraftandroid.procraft.core.FloatingPanel.LAYERS
                     Panel.BRUSHES -> vm.panelUndocking == io.github.artcraftandroid.procraft.core.FloatingPanel.BRUSHES
+                    Panel.ACTIONS -> vm.pieceUndocking == io.github.artcraftandroid.procraft.core.LayoutPiece.ACTIONS
+                    Panel.ADJUSTMENTS -> vm.pieceUndocking == io.github.artcraftandroid.procraft.core.LayoutPiece.ADJUSTMENTS
                     else -> false
                 }
                 val seen = if (undocking) 0f else alpha
-                val at = Modifier.offset { androidx.compose.ui.unit.IntOffset(left, top) }.graphicsLayer {
+                // (where it covers the canvas: the pen hovering over it shows no brush cursor)
+                val cover = androidx.compose.runtime.remember { Any() }
+                DisposableEffect(cover) { onDispose { vm.covers(cover, null) } }
+                // hanging over the bar: placed by its bottom
+                val above = if (hangSide == ArrowSide.BOTTOM) {
+                    Modifier.layout { measurable, constraints ->
+                        val p = measurable.measure(constraints)
+                        layout(p.width, p.height) { p.place(0, -p.height) }
+                    }
+                } else {
+                    Modifier
+                }
+                val growFrom = when (hangSide) {
+                    ArrowSide.BOTTOM -> androidx.compose.ui.graphics.TransformOrigin(arrowShown / (width * k), 1f)
+                    ArrowSide.LEFT -> androidx.compose.ui.graphics.TransformOrigin(0f, 0.2f)
+                    ArrowSide.RIGHT -> androidx.compose.ui.graphics.TransformOrigin(1f, 0.2f)
+                    else -> androidx.compose.ui.graphics.TransformOrigin(arrowShown / (width * k), 0f)
+                }
+                val at = Modifier.offset { androidx.compose.ui.unit.IntOffset(left, top) }.then(above).graphicsLayer {
                     this.alpha = seen
                     scaleX = scale
                     scaleY = scale
-                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / (width * k), 0f)
+                    transformOrigin = growFrom
                 }.then(if (vm.panel == Panel.NONE) Modifier.takingNoTouches() else Modifier)
+                    .onGloballyPositioned { vm.covers(cover, it.boundsInRoot().translate(-keptClear.corner)) }
                 // the screen as a panel at its size measures it: the room under the top bar
                 // as it shows, in the panel's own dp (the panels take the bar's height off it)
-                val room = (maxHeight - Pc.barShown) / k + Pc.BarHeight
-                val arrowX = place.arrowX / k
+                // (hanging from a moved button, the room the core leaves it)
+                val room = (hang?.room?.dp ?: (maxHeight - Pc.barShown)) / k + Pc.BarHeight
+                val arrowX = arrowShown / k
                 PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.PANELS) {
+                androidx.compose.runtime.CompositionLocalProvider(LocalHang provides hang?.let { Hang(hangSide, arrowX) }) {
                 ProvidePanelLook(PanelLook(seen, scale, pivot)) {
                     when (shown) {
                         Panel.LAYERS -> if (vm.backgroundPicking) {
@@ -289,9 +473,21 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                     }
                 }
                 }
+                }
+                // the Actions panel and the Adjustments menu hanging: a grabber over them tears them off, while a plugin lets them float
+                val tearing = when (shown) {
+                    Panel.ACTIONS -> io.github.artcraftandroid.procraft.core.LayoutPiece.ACTIONS
+                    Panel.ADJUSTMENTS -> io.github.artcraftandroid.procraft.core.LayoutPiece.ADJUSTMENTS
+                    else -> null
+                }
+                if (tearing != null && vm.mayFloat(tearing) && hangSide == ArrowSide.TOP && vm.panel != Panel.NONE) {
+                    val grabX = with(density) { (panelLeft + width * k / 2 - 50.dp).roundToPx() }
+                    val grabY = with(density) { (panelTop + Pc.ArrowHeight * k).roundToPx() }
+                    PieceGrabber(vm, tearing, Modifier.offset { androidx.compose.ui.unit.IntOffset(grabX, grabY) }, density.density)
+                }
             }
+            // (its popover goes with the Transform toolbar, floating or not)
             if (vm.transforming && !vm.barsHidden) {
-                TransformPopover(vm, maxWidth, maxHeight)
                 TransformNumeric(vm)
             }
             TouchCompanion(vm)
@@ -311,8 +507,11 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                 enter = androidx.compose.animation.slideInVertically(Motion.studioIn()) { it },
                 exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
             ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
-            // a plugin's own panel, while its action keeps it open
-            if (vm.pluginPanel != null) {
+            // a plugin's own panel, while its action keeps it open: a ring where the pen was, or a card
+            val ring = vm.pluginPanel?.takeIf { it.ring }
+            if (ring != null) {
+                PluginRingView(vm, ring)
+            } else if (vm.pluginPanel != null) {
                 Box(Modifier.fillMaxSize()) {
                     // what its rows don't take stays on the panel, never reaching the canvas under it
                     // (being touched is enough for that). Only a press is taken, as the brush
@@ -330,10 +529,13 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
             ModelPicture(vm)
             BlockedDialog(vm)
             ModelWarningsAlert(vm)
+            ImportTroubleAlert(vm)
             SharedLayerAlert(vm)
             PluginOfferAlert(vm)
-            // a fill a plugin is finishing: nothing is touched until it is done
-            if (vm.fillFinishing) {
+            LeaveUnsavedAlert(vm)
+            // a fill a plugin is finishing, or a dropped colour's being made: nothing is touched until
+            // it is done (the screen goes on drawing)
+            if (vm.fillFinishing || vm.dropFilling) {
                 Box(
                     Modifier.fillMaxSize().pointerInput(Unit) {
                         awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
@@ -372,16 +574,12 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                 AdjustModes(vm, Modifier.align(Alignment.TopCenter).offset(y = Pc.barShown + 52.dp))
                 AdjustmentMenu(vm, maxWidth, maxHeight)
             }
-            // the adjustment's own panel rises from below the screen, and drops away
+            // the adjustment's own panel rises from below the screen, and drops away (Liquify's is a piece of its own)
             val bottomPanel = vm.adjustment?.takeIf { !vm.barsHidden && it in BottomPanels }
             val shownPanel = androidx.compose.runtime.remember { arrayOfNulls<Adjustment>(1) }
             if (bottomPanel != null) shownPanel[0] = bottomPanel
-            androidx.compose.animation.AnimatedVisibility(
-                bottomPanel != null,
-                Modifier.align(Alignment.BottomCenter),
-                enter = Motion.toolbarIn(),
-                exit = Motion.toolbarOut(),
-            ) {
+            val bottomPiece = if (shownPanel[0] == Adjustment.LIQUIFY) io.github.artcraftandroid.procraft.core.LayoutPiece.LIQUIFY else io.github.artcraftandroid.procraft.core.LayoutPiece.ADJUSTING
+            FloatableBottom(vm, bottomPiece, bottomPanel != null) {
                 shownPanel[0]?.let {
                     when (it) {
                         Adjustment.HSB -> HsbPanel(vm, Modifier)
@@ -400,21 +598,14 @@ private fun Screens(vm: CanvasViewModel, keptClear: Clearance) {
                     }
                 }
             }
-            androidx.compose.animation.AnimatedVisibility(
-                vm.recoloring && !vm.barsHidden,
-                Modifier.align(Alignment.BottomCenter),
-                enter = Motion.toolbarIn(),
-                exit = Motion.toolbarOut(),
-            ) { RecolorPanel(vm, Modifier) }
-            androidx.compose.animation.AnimatedVisibility(
+            // Recolor's panel floats as an adjustment's controls do
+            FloatableBottom(vm, io.github.artcraftandroid.procraft.core.LayoutPiece.ADJUSTING, vm.recoloring && !vm.barsHidden) { RecolorPanel(vm, Modifier) }
+            FloatableBottom(
+                vm,
+                io.github.artcraftandroid.procraft.core.LayoutPiece.SELECTION,
                 vm.selecting && !vm.barsHidden,
-                Modifier.align(Alignment.BottomCenter),
-                enter = Motion.toolbarIn(),
-                exit = Motion.toolbarOut(),
+                goesWith = { if (vm.selecting && !vm.barsHidden) SelectionPopover(vm, maxWidth, maxHeight) },
             ) { SelectionToolbar(vm, maxWidth) }
-            if (vm.selecting && !vm.barsHidden) {
-                SelectionPopover(vm, maxWidth, maxHeight)
-            }
             GuideEditor(vm)
             LightingStudio(vm)
             BrushStudio(vm)
@@ -490,6 +681,23 @@ private fun hiddenMessage(name: String, by: io.github.artcraftandroid.procraft.c
         io.github.artcraftandroid.procraft.core.HiddenBy.ITSELF, null -> "it is hidden."
     }
 
+/**
+ * The artwork open couldn't be saved to leave it (the storage full, say): Stay, the default (Cancel's
+ * place, as a tap beside it or back), or Leave Without Saving, which says what it loses.
+ */
+@Composable
+internal fun LeaveUnsavedAlert(vm: CanvasViewModel) {
+    Alert(
+        vm.leaveUnsaved,
+        title = { it.title },
+        message = { it.message },
+        action = "Leave Without Saving",
+        cancel = "Stay",
+        onCancel = { vm.stayUnsaved() },
+        onAction = { vm.leaveWithoutSaving() },
+    )
+}
+
 /** A layer a texture set's meshes share is about to go from all of them. */
 @Composable
 internal fun SharedLayerAlert(vm: CanvasViewModel) {
@@ -516,6 +724,24 @@ internal fun ModelWarningsAlert(vm: CanvasViewModel) {
         action = "OK",
         onCancel = { vm.modelWarnings = emptyList() },
         onAction = { vm.modelWarnings = emptyList() },
+        destructive = false,
+        alone = true,
+    )
+}
+
+/**
+ * What a plugin's brush engine couldn't do with a brush file (too big for it on this device, too
+ * long, unreadable): its brushes came in with the built-in reader, and the plugin is still on.
+ */
+@Composable
+internal fun ImportTroubleAlert(vm: CanvasViewModel) {
+    Alert(
+        vm.importTrouble,
+        title = { it.first },
+        message = { it.second },
+        action = "OK",
+        onCancel = { vm.importTrouble = null },
+        onAction = { vm.importTrouble = null },
         destructive = false,
         alone = true,
     )

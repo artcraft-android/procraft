@@ -1,11 +1,12 @@
-# The iPad app while it is being made: each push to the `ipad` branch builds its unsigned .ipa
-# (ios/build-ipa.sh), kept as the run's artifact. Nothing is released. Public repository only (a
-# private one pays for macOS runners' minutes).
+# The iPad app: each push to main builds its unsigned .ipa (ios/build-ipa.sh), kept as the run's
+# artifact, runs the plugin filters on Metal and captures its screens on the simulator. Releases
+# are the Release workflow's. Public repository only (a private one pays for macOS runners'
+# minutes).
 name: iPad
 
 on:
   push:
-    branches: [ipad]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -51,6 +52,15 @@ jobs:
           name: ipados-work-in-progress
           path: dist/*
           if-no-files-found: error
+
+      # the app with its Recent artwork widget (ios/widget.yml) builds too: a check, its .ipa not
+      # kept (the widget needs signing of its own to install)
+      - name: The widget builds
+        continue-on-error: true
+        env:
+          PROCRAFT_WIDGET: "YES"
+          DIST: ${{ github.workspace }}/dist-widget
+        run: bash ios/build-ipa.sh
 
   # plugin filters' GPU path on Metal, which nothing else here runs it on. A test with no GPU says
   # "skipped" and passes, so this job's colour means nothing: its summary says what ran. The hostile

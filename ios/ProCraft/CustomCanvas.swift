@@ -24,6 +24,14 @@ private var doneBlue: Color { Pc.tinted(Color(argb: 0xFF01_90FF)) }
 /// Where the last row the keypad types into (DPI) ends, down from the top: the page's 120, two rows
 /// and their line, 24 between the groups, one row.
 private let typedBottom: CGFloat = 286
+/// Under this wide a window (beside another app) the sections are a row of tabs over the page, which
+/// takes the width, everything 12 from the window's edges; the page starts lower by as much.
+private let narrowWidth: CGFloat = 700
+private let narrowMargin: CGFloat = 12
+private let narrowTabsTop: CGFloat = 76
+private let narrowTabHeight: CGFloat = 44
+private let narrowTabGap: CGFloat = 6
+private let narrowPageTop: CGFloat = 136
 
 /// The units sizes are typed in: the key's name, the unit's (as presets keep it) and its mark.
 private enum SizeUnit: CaseIterable {
@@ -319,6 +327,26 @@ struct CustomCanvas: View {
         .padding(.vertical, 10)
     }
 
+    /// The sections as a row of tabs, in a narrow window: their icons, the chosen one blue.
+    private func tabs(width: CGFloat) -> some View {
+        let tab = max((width - narrowMargin * 2 - narrowTabGap * CGFloat(sections.count - 1)) / CGFloat(sections.count), 1)
+        return HStack(spacing: narrowTabGap) {
+            ForEach(sections.indices, id: \.self) { i in
+                let chosen = i == section
+                PcIconView(sections[i].icon, size: sections[i].size * 0.8, color: chosen ? Color.white : idleInk)
+                    .frame(width: tab, height: narrowTabHeight)
+                    .background(Capsule().fill(chosen ? Pc.accent : panelFill))
+                    .contentShape(Capsule())
+                    .onTapGesture {
+                        commit()
+                        section = i
+                    }
+                    .accessibilityLabel(sections[i].label)
+            }
+        }
+        .offset(x: narrowMargin, y: narrowTabsTop)
+    }
+
     @ViewBuilder private var page: some View {
         switch section {
         case 0:
@@ -421,20 +449,23 @@ struct CustomCanvas: View {
             .onTapGesture(perform: tap)
     }
 
-    private func topRow(wide: Bool, screenWidth: CGFloat) -> some View {
-        ZStack(alignment: .topLeading) {
+    private func topRow(wide: Bool, narrow: Bool, screenWidth: CGFloat) -> some View {
+        // narrow, the name from the window's left edge up to Cancel and Done
+        let nameX: CGFloat = narrow ? narrowMargin : wide ? 372 : 394
+        let nameWidth = narrow ? screenWidth - narrowMargin * 2 - 160 : wide ? screenWidth - 372 - 32 : screenWidth - 394 - 160
+        return ZStack(alignment: .topLeading) {
             TextField("", text: $name)
                 .font(.system(size: 22, weight: .bold))
                 .foregroundStyle(ink)
                 .tint(Pc.accent)
-                .multilineTextAlignment(wide ? .center : .leading)
+                .multilineTextAlignment(wide && !narrow ? .center : .leading)
                 .onChange(of: name) { _, value in
                     if value.count > 64 {
                         name = String(value.prefix(64))
                     }
                 }
-                .frame(width: wide ? screenWidth - 372 - 32 : screenWidth - 394 - 160)
-                .offset(x: wide ? 372 : 394, y: 28)
+                .frame(width: max(nameWidth, 1))
+                .offset(x: nameX, y: 28)
             HStack(spacing: 13) {
                 Spacer(minLength: 0)
                 // Cancel, and Import beside it on the colour profile page
@@ -454,26 +485,33 @@ struct CustomCanvas: View {
                     .onTapGesture(perform: create)
             }
             .padding(.top, 20)
-            .padding(.trailing, 20)
+            .padding(.trailing, narrow ? narrowMargin : 20)
         }
     }
 
     var body: some View {
         GeometryReader { screen in
             let wide = screen.size.width > screen.size.height
+            // beside another app (Slide Over, Split View) the rail and the page can't sit side by side
+            let narrow = screen.size.width < narrowWidth
             ZStack(alignment: .topLeading) {
                 screenFill
                     .contentShape(Rectangle())
                     .onTapGesture {}
-                rail
-                topRow(wide: wide, screenWidth: screen.size.width)
+                if narrow {
+                    tabs(width: screen.size.width)
+                } else {
+                    rail
+                }
+                topRow(wide: wide, narrow: narrow, screenWidth: screen.size.width)
                 page
-                    .padding(.leading, 372)
-                    .padding(.trailing, 32)
-                    .padding(.top, 120)
+                    .padding(.leading, narrow ? narrowMargin : 372)
+                    .padding(.trailing, narrow ? narrowMargin : 32)
+                    .padding(.top, narrow ? narrowPageTop : 120)
                 if section == 0, field != nil {
                     Keypad(
-                        wide: wide, room: screen.size.height - typedBottom, unit: unit,
+                        wide: wide && !narrow, room: screen.size.height - typedBottom - (narrow ? narrowPageTop - 120 : 0),
+                        window: narrow ? screen.size.width : nil, unit: unit,
                         onUnit: {
                             commit()
                             convert(to: $0)
@@ -501,7 +539,7 @@ struct CustomCanvas: View {
                         .contentShape(Rectangle())
                         .onTapGesture { self.picking = nil }
                     CompactColors(c: picking, arrowX: 200, screen: screen.size)
-                        .offset(x: screen.size.width - compactColorsWidth, y: 168)
+                        .offset(x: max(screen.size.width - compactColorsWidth, 0), y: narrow ? 168 + narrowPageTop - 120 : 168)
                 }
             }
         }
@@ -526,10 +564,13 @@ struct CustomCanvas: View {
 /// The keypad: units on the left, the digits, and Backspace, Next and Done on the right. Upright its
 /// keys are 120 x 71 (8 apart down) in a 342 panel; on a `wide` screen 150 x 87.5 (9 apart) in a 457
 /// one, the rows from 47 below its top. Where the screen leaves it less than that (`room`), it and
-/// its keys are that much shorter (to half), so it stays under the rows it types into.
+/// its keys are that much shorter (to half), so it stays under the rows it types into. In a `window`
+/// only so wide (beside another app) its five columns share that width, 9 apart and 12 in from
+/// the edges, the units and Backspace by their short names.
 private struct Keypad: View {
     let wide: Bool
     let room: CGFloat
+    var window: CGFloat?
     let unit: SizeUnit
     let onUnit: (SizeUnit) -> Void
     let onKey: (String) -> Void
@@ -549,15 +590,18 @@ private struct Keypad: View {
     var body: some View {
         let full: CGFloat = wide ? 457 : 342
         let fit = min(max(room / full, 0.5), 1)
-        let w: CGFloat = wide ? 150 : 120
+        let gap: CGFloat = 9
+        let columnGap: CGFloat = window != nil ? gap : 30
+        let w: CGFloat = window.map { min(max(($0 - narrowMargin * 2 - columnGap * 2 - gap * 2) / 5, 1), 120) } ?? (wide ? 150 : 120)
         let h = (wide ? 87.5 : 71) * fit
         let down = (wide ? 9 : 8) * fit
-        let across: CGFloat = 9
+        let across: CGFloat = gap
+        let short = window != nil
         let chosenInk = Look.shared.light ? Color.white : Color(argb: 0xFF1F_1F1F)
-        HStack(alignment: .top, spacing: 30) {
+        HStack(alignment: .top, spacing: columnGap) {
             VStack(spacing: down) {
                 ForEach(SizeUnit.allCases, id: \.self) { u in
-                    key(u.label, fill: u == unit ? unitChosen : keyFill, ink: u == unit ? chosenInk : ink, size: 15, width: w, height: h) { onUnit(u) }
+                    key(short ? u.key : u.label, fill: u == unit ? unitChosen : keyFill, ink: u == unit ? chosenInk : ink, size: 15, width: w, height: h) { onUnit(u) }
                 }
             }
             VStack(spacing: down) {
@@ -574,7 +618,7 @@ private struct Keypad: View {
                 }
             }
             VStack(spacing: down) {
-                key("Backspace", fill: keyFill, ink: ink, size: 15, width: w, height: h) { onKey("⌫") }
+                key(short ? "⌫" : "Backspace", fill: keyFill, ink: ink, size: 15, width: w, height: h) { onKey("⌫") }
                 key("Next", fill: keyFill, ink: ink, size: 15, width: w, height: h, tap: onNext)
                 key("Done", fill: keyFill, ink: ink, size: 15, width: w, height: h * 2 + down, tap: onDone)
             }

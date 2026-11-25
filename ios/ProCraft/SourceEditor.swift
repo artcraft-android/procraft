@@ -108,13 +108,15 @@ struct SourceEditor: View {
         let settings: Repeating
     }
 
-    /// The image shown, made off the main thread: repeating one takes a moment.
+    /// The image shown, made off the main thread: repeating one takes a moment, so Auto repeat
+    /// shows on the image as small as a brush holds it, quick enough to follow the sliders (the
+    /// tick makes it at full size).
     private func redraw() async {
         let pixels = image
         let how = repeating && !pixels.isEmpty ? settings : nil
         let shape = !grain
         let made = await Task.detached(priority: .userInitiated) {
-            SourceImages.image(how.map { Self.repeated(pixels, $0) } ?? pixels, shape: shape)
+            SourceImages.image(how.map { Self.repeated(smallSource(pixels: pixels), $0) } ?? pixels, shape: shape)
         }.value
         if !Task.isCancelled {
             shown = made

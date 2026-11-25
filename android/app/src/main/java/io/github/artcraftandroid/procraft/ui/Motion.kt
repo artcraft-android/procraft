@@ -174,6 +174,9 @@ object Motion {
     fun sideBarOut(right: Boolean): androidx.compose.animation.ExitTransition =
         androidx.compose.animation.slideOutHorizontally(tween(130, easing = CubicBezierEasing(0.42f, 0f, 1f, 1f))) { if (right) it else -it }
 
+    /** The side bar let go where its modify button dragged it: back to its width and its place, 0.15 s, easing out. */
+    fun sideBarSettle(): AnimationSpec<Float> = tween(150, easing = EaseOut)
+
     /** A tool's header (crop, guides) fading in over the top bar as its mode begins. */
     fun toolHeaderIn(): AnimationSpec<Float> = tween(220, easing = EaseInOut)
 
@@ -389,6 +392,14 @@ fun <T> PanelPresence(
     Box(Modifier.fillMaxSize().onGloballyPositioned { origin = backdrops?.onCanvas(it.positionOnScreen()) ?: (it.positionOnScreen() - corner) }) {
         content(shown, if (target == hidden) fade.value else 1f, 1f, origin)
     }
+}
+
+/**
+ * Takes every touch on it that what is inside doesn't (those go to what is inside first): none reaches the canvas under
+ * it, for all its drag. For what Edit layout moves, whose glass between its buttons would let a press through.
+ */
+fun Modifier.keepsItsTouches(): Modifier = pointerInput(Unit) {
+    awaitEachGesture { awaitFirstDown(requireUnconsumed = false).consume() }
 }
 
 /** Keeps touches from what is inside: a panel fading away takes none (the canvas around it does). */

@@ -5,6 +5,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import io.github.artcraftandroid.procraft.core.GestureAction
 import io.github.artcraftandroid.procraft.core.PointerKind
+import io.github.artcraftandroid.procraft.core.QuickAction
 import io.github.artcraftandroid.procraft.core.TouchSettings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -151,6 +152,47 @@ class PenKeysTest {
         assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn = true))
     }
 
+    /** The buttons pressed and let go by an event of [action] with [buttonState], as the canvas reads one. */
+    private fun PenButtons.event(action: Int, buttonState: Int) =
+        next(buttonState, penIn = true, penTouching(action), penLifting(action), penLeaving(action))
+
+    @Test
+    fun a_button_held_as_the_pen_goes_down_is_still_held_though_its_hover_exit_leaves_it_out() {
+        // #322: the Galaxy Tab S6 Lite's S Pen, Erase's Pen button on: held while hovering, then
+        // drawing. Its hover exit and touches leave the button out: it is held all through, one
+        // press, let go only when a hover says so
+        val first = MotionEvent.BUTTON_STYLUS_PRIMARY
+        val b = PenButtons()
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_HOVER_MOVE, 0))
+        assertEquals(FIRST_BUTTON to 0, b.event(MotionEvent.ACTION_HOVER_MOVE, first))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_HOVER_EXIT, 0))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_DOWN, 0))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_MOVE, 0))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_UP, 0))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_HOVER_ENTER, first))
+        assertEquals(0 to FIRST_BUTTON, b.event(MotionEvent.ACTION_HOVER_MOVE, 0))
+        // a click while hovering is still a press and a let go
+        assertEquals(FIRST_BUTTON to 0, b.event(MotionEvent.ACTION_HOVER_MOVE, first))
+        assertEquals(0 to FIRST_BUTTON, b.event(MotionEvent.ACTION_HOVER_MOVE, 0))
+        // let go out of range: the pen's next hover lets it go
+        assertEquals(FIRST_BUTTON to 0, b.event(MotionEvent.ACTION_HOVER_MOVE, first))
+        assertEquals(0 to 0, b.event(MotionEvent.ACTION_HOVER_EXIT, 0))
+        assertEquals(0 to FIRST_BUTTON, b.event(MotionEvent.ACTION_HOVER_ENTER, 0))
+        // a pen whose touches show the button: one press and one let go, never let go and pressed
+        // again on the way down (which, left alone in Gesture controls, switched to the eraser and
+        // straight back)
+        val shows = PenButtons()
+        assertEquals(FIRST_BUTTON to 0, shows.event(MotionEvent.ACTION_HOVER_MOVE, first))
+        assertEquals(0 to 0, shows.event(MotionEvent.ACTION_HOVER_EXIT, 0))
+        assertEquals(0 to 0, shows.event(MotionEvent.ACTION_DOWN, first))
+        assertEquals(0 to 0, shows.event(MotionEvent.ACTION_MOVE, first))
+        assertEquals(0 to FIRST_BUTTON, shows.event(MotionEvent.ACTION_UP, 0))
+        assertEquals(true, penLeaving(MotionEvent.ACTION_HOVER_EXIT))
+        for (a in listOf(MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+            assertEquals(false, penLeaving(a))
+        }
+    }
+
     @Test
     fun a_pen_whose_touches_show_its_buttons_lets_go_as_it_lifts_without_one() {
         val first = MotionEvent.BUTTON_STYLUS_PRIMARY
@@ -211,7 +253,7 @@ class PenKeysTest {
         fingerPaint = fingerPaint, oneFingerPan = oneFingerPan, undoTaps = true, rotate = true, modelFingerPaint = modelFingerPaint,
         drawAndHold = true, touch = null, pen = null, hold = GestureAction.EYEDROPPER, modifyTouch = null, modifyPen = null,
         fourTap = null, threeSwipe = null, penButton = null, penSecondButton = null, scrub = true, hoverTouch = false,
-        holdMs = 400.0, quickshapeMs = 650.0, rapidUndoMs = 650.0,
+        holdMs = 400.0, quickshapeMs = 650.0, rapidUndoMs = 650.0, liquifyRoll = true,
     )
 
     @Test
@@ -223,6 +265,41 @@ class PenKeysTest {
             assertEquals(true, tablet.pointerFollowsTouch)
             assertEquals(shipped(paint, pan, modelFingerPaint = false), tablet.copy(pointerFollowsTouch = false))
         }
+    }
+
+    @Test
+    fun the_pen_buttons_set_in_pen_buttons_go_to_the_touches_and_nothing_else_changes() {
+        val gestures = shipped(fingerPaint = true, oneFingerPan = false, modelFingerPaint = false)
+        // as they start: what Gesture controls say
+        val plain = tabletTouchSettings(gestures, listOf(null, null))
+        assertNull(plain.penButtonDoes)
+        assertNull(plain.penSecondButtonDoes)
+        assertEquals(plain, tabletTouchSettings(gestures))
+        // one button left to swap the eraser, the other set to undo
+        val undo = tabletTouchSettings(gestures, listOf(null, QuickAction.UNDO))
+        assertNull(undo.penButtonDoes)
+        assertEquals(QuickAction.UNDO, undo.penSecondButtonDoes)
+        assertEquals(plain, undo.copy(penSecondButtonDoes = null))
+        val both = tabletTouchSettings(gestures, listOf(QuickAction.REDO, QuickAction.UNDO))
+        assertEquals(QuickAction.REDO to QuickAction.UNDO, both.penButtonDoes to both.penSecondButtonDoes)
+        // a plugin's action on the second, the rest as it was
+        assertNull(both.penButtonRuns)
+        val palette = tabletTouchSettings(gestures, listOf(QuickAction.REDO, null), listOf(null, "org.example.palette.open"))
+        assertEquals("org.example.palette.open", palette.penSecondButtonRuns)
+        assertEquals(tabletTouchSettings(gestures, listOf(QuickAction.REDO, null)), palette.copy(penSecondButtonRuns = null))
+    }
+
+    @Test
+    fun a_key_a_pen_sends_that_isnt_taken_is_told_once() {
+        assertEquals(true, maybePenKeys(keyboard or InputDevice.SOURCE_STYLUS, "Touch"))
+        assertEquals(true, maybePenKeys(keyboard, "Xiaomi Smart Pen"))
+        assertEquals(false, maybePenKeys(keyboard, "Virtual"))
+        assertEquals(false, maybePenKeys(keyboard, "Open Keyboard"))
+        val told = KeysTold()
+        assertEquals(true, told.isNew(7, KeyEvent.KEYCODE_F21))
+        assertEquals(false, told.isNew(7, KeyEvent.KEYCODE_F21))
+        assertEquals(true, told.isNew(7, KeyEvent.KEYCODE_Z))
+        assertEquals(true, told.isNew(8, KeyEvent.KEYCODE_F21))
     }
 
     @Test
@@ -256,6 +333,32 @@ class PenKeysTest {
         assertEquals(PointerKind.FINGER, pointerKind(MotionEvent.TOOL_TYPE_FINGER, screen or InputDevice.SOURCE_STYLUS))
         // (a palm's tool type is no pen's)
         assertEquals(PointerKind.FINGER, pointerKind(5, screen or InputDevice.SOURCE_STYLUS))
+    }
+
+    /**
+     * A hand resting on the screen never paints: a contact the screen calls a palm (one that tells
+     * palms apart names them), at any size, and a finger's 25 mm or more across; a fingertip, a
+     * pen's or a mouse's contact never, nor any on a screen that says nothing of a touch's size.
+     */
+    @Test
+    fun a_palm_is_told_by_its_tool_type_or_its_size() {
+        val dpi = 287f // a Galaxy Tab S6's
+        val mm = { size: Float -> size / 25.4f * dpi }
+        // the screen's own word, whatever the size (none, a fingertip's)
+        assertEquals(true, palmContact(TOOL_TYPE_PALM, PointerKind.FINGER, 0f, dpi))
+        assertEquals(true, palmContact(TOOL_TYPE_PALM, PointerKind.FINGER, mm(10f), dpi))
+        // a finger's by its size: a fingertip and a flat thumb not, the side of a hand yes
+        assertEquals(false, palmContact(MotionEvent.TOOL_TYPE_FINGER, PointerKind.FINGER, mm(10f), dpi))
+        assertEquals(false, palmContact(MotionEvent.TOOL_TYPE_FINGER, PointerKind.FINGER, mm(19f), dpi))
+        assertEquals(true, palmContact(MotionEvent.TOOL_TYPE_FINGER, PointerKind.FINGER, mm(25f), dpi))
+        assertEquals(true, palmContact(MotionEvent.TOOL_TYPE_FINGER, PointerKind.FINGER, mm(40f), dpi))
+        // a screen that gives no size, or no dpi: no palm by size
+        assertEquals(false, palmContact(MotionEvent.TOOL_TYPE_FINGER, PointerKind.FINGER, 0f, dpi))
+        assertEquals(false, palmContact(MotionEvent.TOOL_TYPE_FINGER, PointerKind.FINGER, mm(40f), 0f))
+        assertEquals(false, palmContact(MotionEvent.TOOL_TYPE_FINGER, PointerKind.FINGER, Float.NaN, dpi))
+        // a pen's or a mouse's, however big its contact reads
+        assertEquals(false, palmContact(MotionEvent.TOOL_TYPE_STYLUS, PointerKind.STYLUS, mm(40f), dpi))
+        assertEquals(false, palmContact(MotionEvent.TOOL_TYPE_MOUSE, PointerKind.MOUSE, mm(40f), dpi))
     }
 
     @Test

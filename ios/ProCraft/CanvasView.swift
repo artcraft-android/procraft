@@ -36,6 +36,21 @@ final class CanvasView: UIView {
     var cursorStaysAway: () -> Bool = { false }
     /// A touch is down on the canvas.
     var touching: Bool { !ids.isEmpty }
+    /// Whether the canvas takes touches now (not while Edit Layout moves the bars).
+    var takesTouches: () -> Bool = { true }
+    /// Where one touch is on the canvas or the Pencil hovers (points), for Liquify's ring; none
+    /// with no touch, or more than one.
+    var ringAt: (CGPoint?) -> Void = { _ in }
+    /// Tap Assistance (the system's Settings): for its first moments a lone finger's touch stays
+    /// where it landed (its moves held back, its lift put back there), so a tap that drifts still
+    /// lands where it began. More fingers, a touch held longer, or one gone farther than a drift go
+    /// on as they are.
+    var tapAssistance = false
+    /// The finger held where it landed (points), and when it landed.
+    private var heldTap: (touch: ObjectIdentifier, at: CGPoint, since: TimeInterval)?
+    /// How long (seconds) and how far (points) a touch stays held at most.
+    private static let tapHold: TimeInterval = 0.3
+    private static let tapDrift: CGFloat = 24
 
     private var attached = false
     /// Hears the window's scene going inactive.
@@ -51,6 +66,9 @@ final class CanvasView: UIView {
     private var strokeTouch: ObjectIdentifier?
     /// Where the Pencil last was over or on the canvas (its double-tap acts there).
     private var pencilAt: CGPoint?
+    /// How far the hovering Pencil's outline turns past the brush's own rotation (radians), as the
+    /// core last said.
+    private var hoverTurn: CGFloat = 0
     /// The touches' next wait (a hold, a repeat) running out.
     private var tick: Timer?
     /// Asks the display for its fastest refresh (120 Hz on a ProMotion iPad) while the canvas is
@@ -118,6 +136,7 @@ final class CanvasView: UIView {
     init(session: CanvasSession) {
         self.session = session
         super.init(frame: .zero)
+        CanvasLife.made(.view)
         isMultipleTouchEnabled = true
         isOpaque = true
         backgroundColor = .black
@@ -131,11 +150,17 @@ final class CanvasView: UIView {
         let pointerHover = UIHoverGestureRecognizer(target: self, action: #selector(pointerHovered(_:)))
         pointerHover.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         addGestureRecognizer(pointerHover)
+        // what lies over the canvas (a side slider's notch) is felt through it too
+        PencilFeedback.canvas = feedback
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("the canvas is made in code")
+    }
+
+    deinit {
+        CanvasLife.gone(.view)
     }
 
     /// Pixels to a point on the screen the view is on.
@@ -219,11 +244,14 @@ final class CanvasView: UIView {
     private func attach(width: UInt32, height: UInt32) {
         guard let metal = layer as? CAMetalLayer else { return }
         session.setDisplayScale(pixelsPerPoint: Float(screenScale))
+        // frames no more often than the screen shows them (120 a second on a ProMotion iPad)
+        let fastest = window?.screen.maximumFramesPerSecond ?? 0
+        session.setRefreshRate(hertz: Float(fastest > 0 ? fastest : 60))
         // the core takes a retain of its own, let go with the window
         let pointer = UInt64(UInt(bitPattern: Unmanaged.passRetained(metal).toOpaque()))
         let id = acquireLayer(layer: pointer)
         guard id != 0 else {
-            NSLog("ProCraft: the canvas's layer wasn't taken")
+            AppLog.error("canvas", "the canvas's layer wasn't taken")
             return
         }
         do {
@@ -231,7 +259,7 @@ final class CanvasView: UIView {
             attached = true
         } catch {
             releaseLayer(id: id)
-            NSLog("ProCraft: attaching the canvas: %@", "\(error)")
+            AppLog.error("canvas", "attaching the canvas: \(error)")
         }
     }
 
@@ -302,10 +330,14 @@ final class CanvasView: UIView {
     // MARK: touches
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        // (none while Edit Layout moves the bars: nothing picked, nothing painted)
+        guard takesTouches() else { return }
         keepFastRefresh()
         // painting, the hovering outline goes (Brush cursor may show one as it paints)
         cursor.hide()
         dropLostTouches(beginning: touches, in: event)
+        // a stroke may begin: the strokes' sound wakes if it rests
+        StrokeSound.shared.wake()
         if ids.isEmpty {
             beforeTouches()
         }
@@ -332,7 +364,32 @@ final class CanvasView: UIView {
         if ids.count > 1 {
             onLoneFinger(.takenBack)
         }
+        // Tap Assistance holds a lone finger where it landed for its first moments
+        if tapAssistance, ids.count == 1, touches.count == 1, let touch = touches.first, touch.type == .direct {
+            heldTap = (ObjectIdentifier(touch), touch.location(in: self), touch.timestamp)
+        } else {
+            heldTap = nil
+        }
         obey(out)
+        ringFollows(event)
+    }
+
+    /// Whether Tap Assistance still holds `touch` where it landed: not long down, nor gone farther
+    /// than a finger drifts. Once it isn't, it goes on as it is.
+    private func heldBack(_ touch: UITouch) -> Bool {
+        guard let held = heldTap, held.touch == ObjectIdentifier(touch) else { return false }
+        let at = touch.location(in: self)
+        if touch.timestamp - held.since <= Self.tapHold, hypot(at.x - held.at.x, at.y - held.at.y) <= Self.tapDrift {
+            return true
+        }
+        heldTap = nil
+        return false
+    }
+
+    /// Liquify's ring under the touch on the canvas while there is just one.
+    private func ringFollows(_ event: UIEvent?) {
+        let down = ids.count == 1 ? event?.allTouches?.first(where: { ids[ObjectIdentifier($0)] != nil }) : nil
+        ringAt(down?.location(in: self))
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -340,34 +397,41 @@ final class CanvasView: UIView {
         rates.moves += 1
         #endif
         var out: [TouchCommand] = []
-        var lone: CGPoint?
-        inputTogether {
-            for touch in touches {
-                guard let id = ids[ObjectIdentifier(touch)] else { continue }
-                if pencil.holds(touch) {
-                    pencil.add(coalesced(touch, in: event), sample: sample)
-                    pencil.release(predicted: (event?.predictedTouches(for: touch) ?? []).map(sample))
-                } else {
-                    out += session.touchMove(id: id, samples: samples(of: touch, in: event))
-                    if ids.count == 1 {
-                        lone = touch.location(in: self)
+            var lone: CGPoint?
+            // the fingers this event moves go together: the view goes by all of them at once, never by
+            // a spread only some of them have got to
+            var moves: [TouchMove] = []
+            inputTogether {
+                for touch in touches {
+                    guard let id = ids[ObjectIdentifier(touch)] else { continue }
+                    if pencil.holds(touch) {
+                        pencil.add(coalesced(touch, in: event), sample: sample)
+                        pencil.release(predicted: (event?.predictedTouches(for: touch) ?? []).map(sample))
+                    } else if !heldBack(touch) {
+                        moves.append(TouchMove(id: id, samples: samples(of: touch, in: event)))
+                        if ids.count == 1 {
+                            lone = touch.location(in: self)
+                        }
                     }
                 }
+                if !moves.isEmpty {
+                    out += session.touchMoves(moves: moves)
+                }
+                // the stroke drawn ahead to where it is predicted to go, until the next move
+                if let key = strokeTouch, heldTap?.touch != key,
+                   let touch = touches.first(where: { ObjectIdentifier($0) == key }), !pencil.holds(touch),
+                   let predicted = event?.predictedTouches(for: touch), !predicted.isEmpty
+                {
+                    session.strokePredict(samples: predicted.map(sample))
+                }
             }
-            // the stroke drawn ahead to where it is predicted to go, until the next move
-            if let key = strokeTouch,
-               let touch = touches.first(where: { ObjectIdentifier($0) == key }), !pencil.holds(touch),
-               let predicted = event?.predictedTouches(for: touch), !predicted.isEmpty
-            {
-                session.strokePredict(samples: predicted.map(sample))
-            }
-        }
         obey(out)
         // (after what the move asked for: sliding off, the finger may just have opened the
         // QuickMenu, which follows it from here)
         if let lone {
             onLoneFinger(.slid(lone))
         }
+        ringFollows(event)
         afterTouches(false)
     }
 
@@ -378,6 +442,15 @@ final class CanvasView: UIView {
             if pencil.holds(touch) {
                 pencil.add(coalesced(touch, in: event), sample: sample)
                 pencil.lift()
+            } else if let held = heldTap, heldBack(touch) {
+                // Tap Assistance: a tap that drifted lands where it began
+                heldTap = nil
+                let x = Float(held.at.x * scale)
+                let y = Float(held.at.y * scale)
+                let landed = samples(of: touch, in: event).map {
+                    PenSample(x: x, y: y, pressure: $0.pressure, tilt: $0.tilt, orientation: $0.orientation, timeMs: $0.timeMs, roll: $0.roll)
+                }
+                out += session.touchUp(id: id, samples: landed)
             } else {
                 out += session.touchUp(id: id, samples: samples(of: touch, in: event))
             }
@@ -388,6 +461,8 @@ final class CanvasView: UIView {
             onLoneFinger(.lifted)
         }
         obey(out)
+        // a touch lifted: the ring goes, until one alone moves again
+        ringAt(nil)
         afterTouches(ids.isEmpty)
     }
 
@@ -395,6 +470,9 @@ final class CanvasView: UIView {
         var out: [TouchCommand] = []
         for touch in touches {
             guard let id = ids.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
+            if heldTap?.touch == ObjectIdentifier(touch) {
+                heldTap = nil
+            }
             // the system took the touch back (a palm, its own gesture): what it did is undone
             if pencil.holds(touch) {
                 if pencil.cancel() {
@@ -410,6 +488,8 @@ final class CanvasView: UIView {
             onLoneFinger(.takenBack)
         }
         obey(out)
+        // a touch lifted: the ring goes, until one alone moves again
+        ringAt(nil)
         afterTouches(ids.isEmpty)
     }
 
@@ -482,13 +562,21 @@ final class CanvasView: UIView {
             keepFastRefresh()
             let at = hover.location(in: self)
             pencilAt = at
-            // a sound plugin hears where (a spray can's ball rattles shaken back and forth)
-            session.soundHover(x: Float(at.x * scale), y: Float(at.y * scale))
+            // a spray can's sound (a plugin's) rattles shaken above the canvas
+            if StrokeSound.shared.sounding {
+                session.soundHover(x: Float(at.x * scale), y: Float(at.y * scale))
+                StrokeSound.shared.wake()
+            }
             obey(session.touchPenHover(hover: penHover(at, height: hover.zOffset, seconds: CACurrentMediaTime())))
+            // the outline turned as a stamp laid there: the way the Pencil goes, as it is held
+            hoverTurn = CGFloat(session.cursorHovers(x: Float(at.x * scale), y: Float(at.y * scale), pen: heldPencil(hover)))
             showHoverCursor()
+            ringAt(at)
         default:
             obey(session.touchPenHover(hover: nil))
+            session.cursorHoverGone()
             cursor.hide()
+            ringAt(nil)
         }
     }
 
@@ -500,10 +588,16 @@ final class CanvasView: UIView {
             // a pointer has no height over the glass: one that has is the Pencil, followed above
             guard hover.zOffset == 0 else { return }
             let at = hover.location(in: self)
-            session.soundHover(x: Float(at.x * scale), y: Float(at.y * scale))
-            showCursor(at: at, hovering: true)
+            if StrokeSound.shared.sounding {
+                session.soundHover(x: Float(at.x * scale), y: Float(at.y * scale))
+            }
+            let turn = CGFloat(session.cursorHovers(x: Float(at.x * scale), y: Float(at.y * scale), pen: nil))
+            showCursor(at: at, hovering: true, turn: turn)
+            ringAt(at)
         default:
+            session.cursorHoverGone()
             cursor.hide()
+            ringAt(nil)
         }
     }
 
@@ -513,24 +607,63 @@ final class CanvasView: UIView {
             cursor.hide()
             return
         }
-        showCursor(at: CGPoint(x: CGFloat(shown.x) / scale, y: CGFloat(shown.y) / scale), hovering: true, alpha: CGFloat(shown.alpha), size: CGFloat(shown.scale))
+        // as big as the brush, as the other apps draw it: its stamp's fill shows what the estimated
+        // pressure makes of it
+        let at = CGPoint(x: CGFloat(shown.x) / scale, y: CGFloat(shown.y) / scale)
+        showCursor(at: at, hovering: true, alpha: CGFloat(shown.alpha), turn: hoverTurn)
     }
 
     /// The brush's outline at `point` (points), as long as Brush cursor shows it when hovering (or
-    /// painting); none, it goes.
-    func showCursor(at point: CGPoint?, hovering: Bool, alpha: CGFloat = 1, size: CGFloat = 1) {
+    /// painting); none, it goes. Hovering, it is turned `turn` past the brush's own rotation;
+    /// painting, it is as big and turned as the newest stamp laid, as the core has it.
+    func showCursor(at point: CGPoint?, hovering: Bool, alpha: CGFloat = 1, turn: CGFloat = 0) {
         let settings = AppSettings.shared
         let wanted = hovering ? settings.cursorShows != .painting : settings.cursorShows != .hovering
-        guard let point, settings.brushCursorOn, wanted, !cursorStaysAway() else {
+        guard let asked = point, settings.brushCursorOn, wanted, !cursorStaysAway() else {
+            // (hovering again, it goes on from where it comes back)
+            if point == nil {
+                session.cursorHoverGone()
+            }
             cursor.hide()
             return
         }
-        cursor.show(at: point, alpha: alpha, scale: size, session: session, pixels: scale, drawn: settings.cursorStyle)
+        // where a stroke's sample there lands, as a plugin may move it: the cursor stands where the stroke goes
+        let landed = session.cursorPoint(x: Float(asked.x * scale), y: Float(asked.y * scale))
+        let point = landed.count == 2 ? CGPoint(x: CGFloat(landed[0]) / scale, y: CGFloat(landed[1]) / scale) : asked
+        if hovering {
+            cursor.show(at: point, alpha: alpha, session: session, pixels: scale, drawn: settings.cursorStyle, turn: turn)
+        } else {
+            // read without waiting on the canvas: the newest stamp's size (pressure and taper in)
+            let radius = session.cursorRadius().map { CGFloat($0) / scale }
+            let turned = CGFloat(session.cursorTurn())
+            cursor.show(at: point, alpha: alpha, painting: true, painted: radius, session: session, pixels: scale, drawn: settings.cursorStyle, turn: turned)
+        }
     }
 
     /// A shape drawn snapped into place: Apple Pencil Pro feels it, where the Pencil is.
     func shapeSnapped() {
         feedback.completed(at: pencilAt ?? CGPoint(x: bounds.midX, y: bounds.midY))
+    }
+
+    /// What is moved lined up with something (a transformed box snapping onto a guide): Apple
+    /// Pencil Pro feels it, where the Pencil is.
+    func linedUp() {
+        feedback.aligned(at: pencilAt ?? CGPoint(x: bounds.midX, y: bounds.midY))
+    }
+
+    /// How the hovering Pencil is held, as the core takes it: the way its top leans, clockwise from
+    /// up (as its samples' orientation), and its barrel (Apple Pencil Pro, iPadOS 17.5; 0 else).
+    private func heldPencil(_ hover: UIHoverGestureRecognizer) -> CursorPen {
+        var lean = Double(hover.azimuthAngle(in: self)) + Double.pi / 2
+        lean = lean.truncatingRemainder(dividingBy: 2 * Double.pi)
+        if lean < 0 {
+            lean += 2 * Double.pi
+        }
+        var roll: Float = 0
+        if #available(iOS 17.5, *) {
+            roll = Float(hover.rollAngle)
+        }
+        return CursorPen(azimuth: Float(lean), roll: roll)
     }
 
     /// The Pencil's double-tap, where it hovers (`hovering`, else where it last was): what Gesture

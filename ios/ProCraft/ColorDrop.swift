@@ -6,6 +6,8 @@ private let bandShown: TimeInterval = 2.5
 /// How far a touch goes before it is a drag, points; how long it stays still to be a hold, seconds.
 private let dragSlop: CGFloat = 8
 private let holdWait: TimeInterval = 0.4
+/// How long (ms) a plugin may finish a fill before the band says it is.
+private let finishingSaid: Double = 500
 /// The dragged colour's dot, across.
 private let dotSize: CGFloat = 55.5
 
@@ -28,6 +30,11 @@ final class ColorDrop {
     private(set) var band = Band.none
     /// The dragged colour's dot (window points) and its colour (0xRRGGBB), while it is dragged.
     private(set) var dot: (at: CGPoint, rgb: UInt32)?
+    /// The dragged colour as it is drawn: pulled out of the colour button, a drop that lets go and
+    /// follows the pointer as a ball on a spring (the core works its outline out each frame).
+    private(set) var blob: ColourBlob?
+    /// The colour button's centre while its colour is dragged, over which the dot shrinks on a bar.
+    @ObservationIgnored private var buttonCentre: CGPoint?
     /// The threshold the colour fills with (0..1), kept from one drop to the next.
     private(set) var threshold: Float
     /// The threshold is being slid: its row shows under the band.
@@ -61,6 +68,10 @@ final class ColorDrop {
 
     /// A fill's work, in order, off the main thread (a slid threshold redoes the whole fill).
     @ObservationIgnored private let queue = DispatchQueue(label: "pour", qos: .userInitiated)
+    /// A plugin is finishing a fill let go, and the cover taking the touches meanwhile.
+    @ObservationIgnored private var finishing = false
+    @ObservationIgnored private var finishingTold = false
+    @ObservationIgnored private var shield: UIView?
     /// The latest threshold waiting for that queue.
     @ObservationIgnored private let waiting = NSLock()
     @ObservationIgnored private var nextThreshold: Float?
@@ -122,8 +133,8 @@ final class ColorDrop {
     // MARK: the drag
 
     /// A colour starts being dragged from the colour button, or `swatch` from the palette, by a pen
-    /// or not.
-    func start(at: CGPoint, swatch: UInt32?, pen: Bool) {
+    /// or not, pulled out `from` the button's centre or where the swatch was touched.
+    func start(at: CGPoint, swatch: UInt32?, pen: Bool, from: CGPoint) {
         if swatch == nil {
             model.closePanels()
         }
@@ -134,7 +145,21 @@ final class ColorDrop {
         poured = false
         pourRefused = false
         drag = ColourDrag(x: Float(at.x), y: Float(at.y), ms: Self.now, pen: pen, threshold: threshold)
+        // with Reduce Motion it neither stretches nor wobbles
+        buttonCentre = swatch == nil ? from : nil
+        blob = ColourBlob(
+            x: Float(from.x), y: Float(from.y), fromButton: swatch == nil, pen: pen,
+            reduceMotion: UIAccessibility.isReduceMotionEnabled, ms: Self.now
+        )
+        blobTo(at)
         waitForRest()
+    }
+
+    /// The drawn colour goes after `p`: over the top bar it shrinks the further it is from the
+    /// colour button.
+    private func blobTo(_ p: CGPoint) {
+        let button = buttonCentre ?? p
+        blob?.pointTo(x: Float(p.x), y: Float(p.y), overBar: p.y <= Pc.barHeight, buttonX: Float(button.x), buttonY: Float(button.y))
     }
 
     /// The dragged colour's pointer moved: the dot follows, or, resting, the threshold slides.
@@ -143,6 +168,7 @@ final class ColorDrop {
         let step = drag.moved(x: Float(at.x), y: Float(at.y), ms: Self.now)
         let shown = Self.point(step)
         dot = dot.map { (shown, $0.rgb) }
+        blobTo(shown)
         if step.slid {
             if poured {
                 pourThreshold(step.threshold)
@@ -189,6 +215,8 @@ final class ColorDrop {
     func end(at: CGPoint?) {
         let step = drag?.now()
         drag = nil
+        blob = nil
+        buttonCentre = nil
         restTimer?.invalidate()
         // come to rest, it fills where it rests (already, if its threshold was slid)
         if poured {
@@ -254,7 +282,31 @@ final class ColorDrop {
         model.refresh()
     }
 
-    /// Fills from window point `p` with the dropped colour; false if nothing was filled.
+    /// Continue filling's touch landed where it fills: `fill` poured from window pixel (`x`, `y`)
+    /// on the fill's queue, after what was asked of it before; the touch goes on meanwhile.
+    func tapFill(x: Float, y: Float, fill: Fill) {
+        let session = model.session
+        queue.async {
+            _ = session.pourBegin(x: x, y: y, r: fill.r, g: fill.g, b: fill.b, threshold: fill.threshold)
+        }
+    }
+
+    /// Continue filling's touch's fill ends on the fill's queue, after a threshold slid before it is
+    /// redone: `keep` makes it an undo step, else it is taken back. What it changed is read once
+    /// it is made.
+    func tapFillEnd(keep: Bool) {
+        let session = model.session
+        queue.async { [weak self] in
+            session.pourEnd(keep: keep, name: nil)
+            DispatchQueue.main.async {
+                self?.model.refresh()
+                self?.watchFinishing()
+            }
+        }
+    }
+
+    /// Fills from window point `p` with the dropped colour, spreading in from there; false if
+    /// nothing was filled.
     private func pourBegin(_ p: CGPoint) -> Bool {
         guard model.currentTakesChanges(paint: true) else { return false }
         // text takes no colour until it is rasterized
@@ -267,8 +319,9 @@ final class ColorDrop {
         let x = Float(p.x * model.pixels)
         let y = Float(p.y * model.pixels)
         let t = threshold
+        // made at once, and shown spreading in from where it landed
         return queue.sync {
-            session.pourBegin(x: x, y: y, r: c.r, g: c.g, b: c.b, threshold: t)
+            session.pourDrop(x: x, y: y, r: c.r, g: c.g, b: c.b, threshold: t)
         }
     }
 
@@ -305,6 +358,46 @@ final class ColorDrop {
         }
         keepThreshold()
         model.refresh()
+        watchFinishing()
+    }
+
+    /// While a plugin finishes a fill let go (on a thread of its own), nothing is touched until it
+    /// is done: a cover over the window takes the touches, and after a while the band says why.
+    private func watchFinishing() {
+        let session = model.session
+        guard !finishing, session.pourFinishing() else { return }
+        finishing = true
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)
+        if let window {
+            let cover = UIView(frame: window.bounds)
+            cover.backgroundColor = .clear
+            cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            window.addSubview(cover)
+            shield = cover
+        }
+        let since = Self.now
+        finishingTold = false
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            guard let self else {
+                timer.invalidate()
+                return
+            }
+            if session.pourFinishing() {
+                if !finishingTold, Self.now - since >= finishingSaid {
+                    finishingTold = true
+                    model.showNotice("Finishing the fill…")
+                }
+                return
+            }
+            timer.invalidate()
+            shield?.removeFromSuperview()
+            shield = nil
+            finishing = false
+            model.refresh()
+        }
     }
 }
 
@@ -345,7 +438,9 @@ final class DropTouchView: UIView {
             guard hypot(at.x - start.x, at.y - start.y) > dragSlop else { return }
             holdTimer?.invalidate()
             dragging = true
-            drop?.start(at: start, swatch: swatch, pen: touch.type == .pencil)
+            // out of the colour button's centre, or where the swatch was touched
+            let centre = Interface.shared.point(convert(CGPoint(x: bounds.midX, y: bounds.midY), to: nil))
+            drop?.start(at: start, swatch: swatch, pen: touch.type == .pencil, from: swatch == nil ? centre : start)
         }
         drop?.move(to: at)
     }
@@ -406,17 +501,43 @@ struct DropSource: UIViewRepresentable {
     }
 }
 
-/// The colour being dragged out: a flat dot under the finger.
+/// The colour being dragged out, as the core's `ColourBlob` works it out each frame: a drop pulled
+/// out of the colour button that lets go and follows the finger as a ball, springing and wobbling
+/// on its own (a swatch's grows out of nothing).
 struct ColorDropDot: View {
     let drop: ColorDrop
 
     var body: some View {
         if let dot = drop.dot {
-            Circle()
-                .fill(CanvasSpace.shared.color(dot.rgb))
-                .frame(width: dotSize, height: dotSize)
-                .offset(x: dot.at.x - dotSize / 2, y: dot.at.y - dotSize / 2)
+            if let blob = drop.blob {
+                TimelineView(.animation) { _ in
+                    Canvas { context, _ in
+                        let shape = blob.shape(ms: ProcessInfo.processInfo.systemUptime * 1000)
+                        // the outlines filled together, where they cross too
+                        var path = Path()
+                        for outline in shape.outlines {
+                            let p = outline.points
+                            guard p.count >= 6 else { continue }
+                            path.move(to: CGPoint(x: CGFloat(p[0]), y: CGFloat(p[1])))
+                            var i = 2
+                            while i + 1 < p.count {
+                                path.addLine(to: CGPoint(x: CGFloat(p[i]), y: CGFloat(p[i + 1])))
+                                i += 2
+                            }
+                            path.closeSubpath()
+                        }
+                        context.fill(path, with: .color(CanvasSpace.shared.color(dot.rgb)))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .allowsHitTesting(false)
+            } else {
+                Circle()
+                    .fill(CanvasSpace.shared.color(dot.rgb))
+                    .frame(width: dotSize, height: dotSize)
+                    .offset(x: dot.at.x - dotSize / 2, y: dot.at.y - dotSize / 2)
+                    .allowsHitTesting(false)
+            }
         }
     }
 }

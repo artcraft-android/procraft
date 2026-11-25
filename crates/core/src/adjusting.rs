@@ -68,9 +68,12 @@ fn glitch_defaults() -> [Vec<f32>; 4] {
     [vec![1.0, 0.09, 1.0], vec![0.2, 0.3, 1.0], vec![0.8, 0.19, 1.0], vec![0.98, -0.5, 0.85, 0.5]]
 }
 
-fn straight() -> Vec<(f32, f32)> {
+pub(crate) fn straight() -> Vec<(f32, f32)> {
     vec![(0.0, 0.0), (1.0, 1.0)]
 }
+
+/// How many curves are kept: all, red, green, blue, and alpha (a filter layer's alone).
+pub(crate) const CURVES: usize = 5;
 
 /// What an open adjustment shows: its values as its bar and panels show them.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -96,6 +99,10 @@ pub struct AdjustShown {
     pub exposure: Vec<f32>,
     /// Curves' limit: its peak (stops above white, 0..5; none from 6) and its knee (0..0.95).
     pub limit: Vec<f32>,
+    /// How many of the curves its panel offers: 4 (all, red, green, blue), or 5 with alpha last,
+    /// for a filter layer's curves (interface 18).
+    #[uniffi(default = 4)]
+    pub curve_channels: u32,
     /// The gradient mapped by (its place in the library).
     pub gradient: u32,
     pub noise_kind: NoiseKind,
@@ -221,7 +228,8 @@ pub(crate) struct Adjusting {
     balance_tone: usize,
     balance: [f32; 9],
     curve_channel: usize,
-    curves: [Vec<(f32, f32)>; 4],
+    curves: [Vec<(f32, f32)>; CURVES],
+    curve_channels: usize,
     exposure: [f32; 3],
     limit: [f32; 2],
     gradient: usize,
@@ -294,7 +302,8 @@ impl Default for Adjusting {
             balance_tone: 1,
             balance: [0.5; 9],
             curve_channel: 0,
-            curves: [straight(), straight(), straight(), straight()],
+            curves: std::array::from_fn(|_| straight()),
+            curve_channels: 4,
             exposure: NO_EXPOSURE,
             limit: NO_LIMIT,
             gradient: 0,
@@ -410,6 +419,33 @@ impl Adjusting {
         self.open == Some(Adjustment::ChromaticAberration) && self.chroma_kind == ChromaticKind::Displace
     }
 
+    /// Curves open on a filter layer (interface 18): its five curves as it keeps them, alpha too.
+    pub(crate) fn open_layer_curves(&mut self, curves: [Vec<(f32, f32)>; CURVES]) {
+        self.open = Some(Adjustment::Curves);
+        self.curves = curves;
+        self.curve_channel = 0;
+        self.curve_channels = CURVES;
+        self.amount = 0.0;
+        self.pencil = false;
+        self.preview = false;
+        self.touched = false;
+    }
+
+    /// Gradient Map open on a filter layer (interface 18), library gradient `gradient` chosen.
+    pub(crate) fn open_layer_gradient(&mut self, gradient: usize) {
+        self.open = Some(Adjustment::GradientMap);
+        self.gradient = gradient;
+        self.amount = 1.0;
+        self.pencil = false;
+        self.preview = false;
+        self.touched = false;
+    }
+
+    /// The gradients of the library, if it is given.
+    pub(crate) fn gradient_list(&self) -> Vec<crate::gradients::GradientInfo> {
+        self.gradients.as_ref().map(|g| g.list()).unwrap_or_default()
+    }
+
     /// A plugin's filter is open, as if just begun.
     pub(crate) fn open_plugin(&mut self) {
         self.open = Some(Adjustment::Plugin);
@@ -460,6 +496,7 @@ impl Adjusting {
             curves: self.curves.iter().map(|c| c.iter().flat_map(|&(x, y)| [x, y]).collect()).collect(),
             exposure: self.exposure.to_vec(),
             limit: self.limit.to_vec(),
+            curve_channels: self.curve_channels as u32,
             gradient: self.gradient as u32,
             noise_kind: self.noise_kind,
             noise: self.noise.to_vec(),
@@ -611,7 +648,7 @@ enum Redraw {
     Swipe(SwipeAdjustment, f32),
     Hsb([f32; 3]),
     Balance([f32; 9]),
-    Curves([Vec<f32>; 4], [f32; 3], [f32; 2]),
+    Curves([Vec<f32>; CURVES], [f32; 3], [f32; 2]),
     Gradient(Vec<f32>, f32),
     Noise(NoiseKind, f32, [f32; 3], bool, bool),
     Bloom(f32, [f32; 3]),
@@ -758,6 +795,15 @@ impl CanvasSession {
     }
 
     fn redraw_adjustment(&self, redraw: Redraw) {
+        // a filter layer's editor sets the layer, not pixels
+        let set = match &redraw {
+            Redraw::Curves(curves, ..) => self.set_layer_curves(curves),
+            Redraw::Gradient(stops, _) => self.set_layer_gradient(stops),
+            _ => false,
+        };
+        if set {
+            return;
+        }
         match redraw {
             Redraw::None => {}
             Redraw::Swipe(kind, amount) => self.adjust_swipe(kind, amount),
@@ -767,7 +813,7 @@ impl CanvasSession {
                 let tone = |k: usize| v.get(k * 3..k * 3 + 3).map(<[f32]>::to_vec).unwrap_or_default();
                 self.adjust_color_balance(tone(0), tone(1), tone(2));
             }
-            Redraw::Curves([all, red, green, blue], exposure, limit) => {
+            Redraw::Curves([all, red, green, blue, _], exposure, limit) => {
                 self.adjust_curves(all, red, green, blue, exposure.to_vec(), limit.to_vec())
             }
             Redraw::Gradient(stops, amount) => self.adjust_gradient_map(stops, amount),
@@ -855,7 +901,7 @@ impl CanvasSession {
             a.layer = Some(id);
             a.hsb = [0.5; 3];
             a.balance = [0.5; 9];
-            a.curves = [straight(), straight(), straight(), straight()];
+            a.curves = std::array::from_fn(|_| straight());
             a.exposure = NO_EXPOSURE;
             a.limit = NO_LIMIT;
             a.chroma_offset = (0.0, 0.0);
@@ -1003,6 +1049,10 @@ impl CanvasSession {
             return false;
         }
         self.adjustment_close(true);
+        // a filter layer's editor, again as it began (Reset, Undo, Apply)
+        if matches!(adjustment, Adjustment::Curves | Adjustment::GradientMap) && self.filter_layer_editor_again() {
+            return true;
+        }
         let begun = match adjustment {
             Adjustment::Liquify => self.liquify_begin(),
             Adjustment::Clone => self.clone_begin(),
@@ -1026,7 +1076,8 @@ impl CanvasSession {
             a.preview = false;
             a.hsb = [0.5; 3];
             a.balance = [0.5; 9];
-            a.curves = [straight(), straight(), straight(), straight()];
+            a.curves = std::array::from_fn(|_| straight());
+            a.curve_channels = 4;
             a.exposure = NO_EXPOSURE;
             a.limit = NO_LIMIT;
             a.chroma_offset = (0.0, 0.0);
@@ -1124,8 +1175,8 @@ impl CanvasSession {
         });
     }
 
-    /// Curves' channel shown: 0 all, 1 red, 2 green, 3 blue, 4 exposure, 5 limit (their sliders in
-    /// place of a curve).
+    /// Curves' channel shown: 0 all, 1 red, 2 green, 3 blue (4 alpha, on a filter layer); on an HDR
+    /// canvas's plain Curves 4 exposure and 5 limit (their sliders in place of a curve).
     pub fn adjustment_curve_channel(&self, channel: u32) {
         self.adjusting(|a, _| a.curve_channel = (channel as usize).min(CURVE_CHANNELS - 1));
     }
@@ -1160,7 +1211,10 @@ impl CanvasSession {
     pub fn adjustment_curve_add(&self, x: f32, y: f32) -> u32 {
         let mut at = 0;
         self.change_adjustment(|a, _| {
-            let Some(points) = a.curves.get_mut(a.curve_channel) else { return };
+            // (Exposure and Limit, shown in place of a curve, have no points)
+            let Some(points) = a.curves.get_mut(a.curve_channel).filter(|_| a.curve_channel < a.curve_channels) else {
+                return;
+            };
             let p = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
             at = points.partition_point(|q| q.0 <= p.0);
             points.insert(at, p);
@@ -1171,7 +1225,10 @@ impl CanvasSession {
     /// Moves point `index` of the channel shown to (`x`, `y`), kept between its neighbours.
     pub fn adjustment_curve_move(&self, index: u32, x: f32, y: f32) {
         self.change_adjustment(|a, _| {
-            let Some(points) = a.curves.get_mut(a.curve_channel) else { return };
+            // (Exposure and Limit, shown in place of a curve, have no points)
+            let Some(points) = a.curves.get_mut(a.curve_channel).filter(|_| a.curve_channel < a.curve_channels) else {
+                return;
+            };
             let i = index as usize;
             if i >= points.len() {
                 return;
@@ -1187,7 +1244,8 @@ impl CanvasSession {
     /// Takes point `index` off the channel shown (a curve keeps two).
     pub fn adjustment_curve_delete(&self, index: u32) {
         self.change_adjustment(|a, _| {
-            if let Some(points) = a.curves.get_mut(a.curve_channel)
+            if a.curve_channel < a.curve_channels
+                && let Some(points) = a.curves.get_mut(a.curve_channel)
                 && points.len() > 2
                 && (index as usize) < points.len()
             {
@@ -1314,6 +1372,10 @@ impl CanvasSession {
 
     /// The layer shown as it was before the adjustment, or as adjusted.
     pub fn adjustment_preview(&self, original: bool) {
+        // (a filter layer's editor shows its layer as set)
+        if self.shared.lock().filters.layer.is_some() {
+            return;
+        }
         if self.adjusting(|a, _| a.open.map(|_| a.preview = original)).is_some() {
             self.adjust_preview(original);
         }

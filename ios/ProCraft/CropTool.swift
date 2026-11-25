@@ -21,7 +21,6 @@ private var mark: Color { themed(0xFFD0_D0D0, 0xFF3A_3A3A) }
 private var popoverFill: Color { themed(0xF21F_1F1F, 0xF2DB_DEDF) }
 private var fieldFill: Color { themed(0xFF24_2424, 0xFFD3_D3D5) }
 private var groupFill: Color { themed(0xFF2A_2A2A, 0xFFE4_E4E6) }
-private var rowLine: Color { themed(0xFF3A_3A3A, 0xFFD6_D6D8) }
 private var settingsInk: Color { themed(0xFFD2_D2D2, 0xFF3B_3B3B) }
 private var rotationTrack: Color { themed(0xFF55_5555, 0xFFCF_CFD1) }
 private let muted = Color(argb: 0xFF8E_8E93)
@@ -114,6 +113,7 @@ final class CropTool {
 
     func press(_ at: CGPoint) {
         model.session.cropPress(x: Float(at.x * model.pixels), y: Float(at.y * model.pixels))
+        read()
     }
 
     func drag(_ at: CGPoint) {
@@ -123,6 +123,7 @@ final class CropTool {
 
     func release() {
         model.session.cropRelease()
+        read()
     }
 
     func change(_ apply: (CanvasSession) -> Void) {
@@ -147,7 +148,7 @@ final class CropTool {
         }
         model.refresh()
         model.refreshView()
-        if changed, model.panel == .layers {
+        if changed, model.layersShown {
             model.refreshThumbnails()
         }
     }
@@ -253,11 +254,66 @@ struct CropOverlay: View {
                     ],
                     onDone: { tool.end(keep: true) }
                 )
+                CropSizeReadout(readout: shown.readout, pixels: model.pixels)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 // 9 from the screen's right edge, its arrow up at Settings (183 from that edge)
                 if tool.settingsOpen {
                     CropSettings(tool: tool, shown: shown)
                         .offset(x: -9, y: 66)
                 }
+            }
+        }
+    }
+}
+
+/// While a corner or side of the frame is dragged: its width and height in a small box above the
+/// touch, beside it away from the frame's middle (the core places it, window pixels), fading as the
+/// touch lifts.
+private struct CropSizeReadout: View {
+    let readout: CropReadout?
+    let pixels: CGFloat
+    /// The last one shown, kept while it fades.
+    @State private var last: CropReadout?
+
+    /// A row: its name from its left half, its value to the right; 8 either side of the middle.
+    private func row(_ name: String, _ value: UInt32) -> some View {
+        HStack(spacing: 0) {
+            Text(verbatim: name)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(settingsInk)
+                .lineLimit(1)
+                .padding(.leading, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(verbatim: "\(value)px")
+                .font(.system(size: 13))
+                .foregroundStyle(settingsInk)
+                .lineLimit(1)
+                .padding(.horizontal, 4)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 16)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if let shown = readout ?? last {
+                VStack(spacing: 16) {
+                    row("Width", shown.width)
+                    row("Height", shown.height)
+                }
+                .padding(.top, 3)
+                .frame(width: 148, height: 54, alignment: .top)
+                .background(RoundedRectangle(cornerRadius: 8, style: .circular).fill(popoverFill))
+                .offset(x: CGFloat(shown.x) / pixels, y: CGFloat(shown.y) / pixels)
+                .opacity(readout == nil ? 0 : 1)
+                .animation(readout == nil ? Animation.easeOut(duration: 0.3) : nil, value: readout == nil)
+            }
+        }
+        .allowsHitTesting(false)
+        .onChange(of: readout, initial: true) { _, now in
+            if let now {
+                last = now
             }
         }
     }
@@ -300,7 +356,7 @@ private struct CropSettings: View {
                         }
                     }
                     .frame(width: 137)
-                    PcIconView(PcIcons.link, size: 24, color: shown.aspectLocked ? Pc.accent : settingsInk)
+                    PcIconView(PcIcons.link, size: 16, color: shown.aspectLocked ? Pc.accent : settingsInk)
                         .frame(width: 34, height: 40)
                         .contentShape(Rectangle())
                         .onTapGesture { tool.change { $0.cropSetAspectLocked(on: !shown.aspectLocked) } }
@@ -330,11 +386,12 @@ private struct CropSettings: View {
                     .padding(.leading, 12)
                     .padding(.trailing, 4)
                     .frame(height: 44)
-                    Rectangle().fill(rowLine).frame(height: 1)
+                    // rows a point apart, no line between them, as measured
+                    Color.clear.frame(height: 1)
                     switchRow("Resample canvas", on: shown.resample) { tool.change { $0.cropSetResample(on: !shown.resample) } }
-                    Rectangle().fill(rowLine).frame(height: 1)
+                    Color.clear.frame(height: 1)
                     switchRow("Pixelated", on: shown.pixelated) { tool.change { $0.cropSetPixelated(on: !shown.pixelated) } }
-                    Rectangle().fill(rowLine).frame(height: 1)
+                    Color.clear.frame(height: 1)
                     switchRow("Snapping", on: shown.snapping) { tool.change { $0.cropSetSnapping(on: !shown.snapping) } }
                 }
                 .background(group.fill(groupFill))
@@ -357,8 +414,11 @@ private struct NumberField: View {
     let onChange: (String) -> Void
 
     @State private var text = ""
+    @FocusState private var focused: Bool
 
     var body: some View {
+        // the number and its unit together in the middle ("2048 px"); a tap anywhere on the field
+        // types into it
         HStack(spacing: 0) {
             TextField("", text: $text)
                 .keyboardType(.decimalPad)
@@ -366,6 +426,8 @@ private struct NumberField: View {
                 .font(.system(size: 17))
                 .foregroundStyle(settingsInk)
                 .tint(.white)
+                .focused($focused)
+                .fixedSize(horizontal: true, vertical: false)
                 .onChange(of: text) { _, typed in
                     let kept = String(typed.filter { $0.isNumber || $0 == "." }.prefix(7))
                     if kept != typed {
@@ -381,8 +443,11 @@ private struct NumberField: View {
             }
         }
         .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity)
         .frame(height: 40)
         .background(Capsule().fill(fieldFill))
+        .contentShape(Capsule())
+        .onTapGesture { focused = true }
         .onChange(of: value, initial: true) { _, next in
             text = next
         }
@@ -396,7 +461,7 @@ private struct RotationSlider: View {
 
     var body: some View {
         let degrees = radians * 180 / .pi
-        VStack(spacing: 0) {
+        VStack(spacing: -2) {
             HStack(spacing: 0) {
                 Text(verbatim: "Rotation")
                 Spacer(minLength: 0)
@@ -406,11 +471,12 @@ private struct RotationSlider: View {
             .foregroundStyle(settingsInk)
             GeometryReader { g in
                 let w = g.size.width
-                let x = min(max(CGFloat((degrees + 180) / 360) * w, 13), max(w - 13, 13))
+                let x = min(max(CGFloat((degrees + 180) / 360) * w, 8), max(w - 8, 8))
+                // a small knob, as the studio's sliders have
                 ZStack(alignment: .leading) {
                     Capsule().fill(rotationTrack).frame(height: 3)
                     Rectangle().fill(muted).frame(width: 1, height: 12).offset(x: w / 2)
-                    Capsule().fill(Color.white).frame(width: 26, height: 15).offset(x: x - 13)
+                    Capsule().fill(Color.white).frame(width: 16, height: 10).offset(x: x - 8)
                 }
                 .frame(width: w, height: 22)
                 .contentShape(Rectangle())
@@ -422,6 +488,7 @@ private struct RotationSlider: View {
             .frame(height: 22)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.top, 14)
+        .padding(.bottom, 2)
     }
 }

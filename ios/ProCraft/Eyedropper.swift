@@ -3,10 +3,12 @@ import UIKit
 
 private let loupeOuter: CGFloat = 69
 private let loupeInner: CGFloat = 53.5
-private let loupeLift: CGFloat = 41
+/// How far above a finger the loupe is centred (points), where the touches don't say.
+let fingerLoupeLift: Float = 40
 
 /// The eyedropper while it is open: where it is (window pixels), what it sees and the colour under
-/// it, once read.
+/// it, once read; and how far above its point the loupe is centred (points): none on the Pencil's
+/// tip, clear above a finger.
 struct PickState {
     let x: Float
     let y: Float
@@ -15,6 +17,7 @@ struct PickState {
     /// On an HDR canvas, how many stops above white the colour under it is lit.
     var stops: Float = 0
     var fromReference = false
+    var lift = fingerLoupeLift
 }
 
 /// The bar under the top bar while the eyedropper is open.
@@ -30,8 +33,9 @@ struct PickingBar: View {
     }
 }
 
-/// The eyedropper's loupe, centred above the finger: a ring whose top half is the colour under the
-/// finger and bottom half the current colour, around what is shown there at twice the size.
+/// The eyedropper's loupe, centred on the Pencil's tip or above the finger: a ring whose top half
+/// is the colour under the point and bottom half the current colour, around what is shown there at
+/// twice the size.
 struct Loupe: View {
     let pick: PickState
     let current: Color
@@ -77,7 +81,7 @@ struct Loupe: View {
             }
         }
         .frame(width: area, height: area)
-        .position(x: CGFloat(pick.x) / pixels, y: CGFloat(pick.y) / pixels - loupeLift)
+        .position(x: CGFloat(pick.x) / pixels, y: CGFloat(pick.y) / pixels - CGFloat(pick.lift))
         .allowsHitTesting(false)
     }
 

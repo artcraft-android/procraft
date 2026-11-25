@@ -5,23 +5,41 @@ import UniformTypeIdentifiers
 private let cardHeight: CGFloat = 490
 private let cardGap: CGFloat = 8
 private let cardCorner: CGFloat = 16
-private let cardSetRow: CGFloat = 19
-private let cardBrushHeight: CGFloat = 30
-/// The brushes a card has room for under its name: any more would only be cut off at its foot.
-private let cardBrushesShown = 15
-/// Inside a card (two to a row, 12 in from the panel's sides, 10 in from its own): the sets take
-/// this share of it, the brushes the rest.
-private let cardInside = (brushLibraryWidth - 24 - cardGap) / 2 - 20
-private let cardSetsShare: CGFloat = 0.45
+/// A card is the library as its panel shows it, this much smaller (as measured: its set cells 22.9
+/// tall, 28.3 apart), its sets starting this far below the card's top, under its name.
+private let cardScale: CGFloat = 0.457
+private let cardSetsTop: CGFloat = 27
+/// The sets and brushes a card has room for under its name: any more would only be cut off.
+private let cardSetsShown = 17
+private let cardBrushesShown = 12
+/// How tall a card's columns of sets and brushes are, under its name.
+private let cardColumnHeight = cardHeight - cardSetsTop + 12 * cardScale
+
+/// How far a card's column is moved up for its lit row to sit in the column's middle, no further
+/// than its last row lets it (as the library's own card shows them): `count` rows `row` tall and
+/// `pitch` apart, `lead` above the first and `trail` under the last.
+private func cardScroll(lit: Int?, count: Int, lead: CGFloat, row: CGFloat, pitch: CGFloat, trail: CGFloat) -> CGFloat {
+    guard let lit, count > 0 else { return 0 }
+    let content = lead + pitch * CGFloat(count - 1) + row + trail
+    let middle = lead + pitch * CGFloat(lit) + row / 2
+    return min(max(middle - cardColumnHeight / 2, 0), max(content - cardColumnHeight, 0))
+}
+
+/// The rows of a column moved up `scroll` that it has room for: from the first that shows, at most
+/// `most`.
+private func cardRows(scroll: CGFloat, count: Int, lead: CGFloat, pitch: CGFloat, most: Int) -> Range<Int> {
+    let first = min(max(Int(((scroll - lead) / pitch).rounded(.down)), 0), count)
+    return first ..< min(first + most, count)
+}
 /// Menus stay below the top bar.
 private let librariesMenuTop: CGFloat = 57
 /// The space the cards report their places in, for a card's menu.
 private let librariesSpace = "libraries"
 
-/// Where a library's title menu hangs in its panel: from the title's left, under its row (the
-/// header starting under the arrow, its title 19 down).
+/// Where a library's title menu hangs in its panel, as measured: 8 in from the panel's left, its
+/// top 54 below the panel's (the header starting under the arrow).
 func libraryTitleMenuAt(_ model: CanvasModel) -> CGPoint {
-    CGPoint(x: 20, y: Pc.arrowHeight + drawModesHeight(model) + 48)
+    CGPoint(x: 8, y: Pc.arrowHeight + drawModesHeight(model) + 54)
 }
 
 /// `p`, a menu `size` big's place in a panel whose top left corner is `origin` on a screen
@@ -33,7 +51,8 @@ private func keptOnScreen(_ p: CGPoint, _ size: CGSize, origin: CGPoint, screen:
     )
 }
 
-/// A library's title menu: rename it, share it, or go back to every library's card.
+/// A library's title menu: rename it, share it, or go back to every library's card. Shaped as the
+/// system's own menus are: frosted, the panel showing through blurred.
 struct LibraryTitleMenu: View {
     let model: CanvasModel
     let close: () -> Void
@@ -42,7 +61,7 @@ struct LibraryTitleMenu: View {
     static let height: CGFloat = 14 + 80 + 23 + 40
 
     var body: some View {
-        GlassMenu(overPanel: true) {
+        GlassMenu(system: true) {
             MenuRow(icon: PcIcons.menuRename, label: "Rename") {
                 close()
                 model.renamingLibrary = model.libraryPlace
@@ -87,16 +106,20 @@ struct LibrariesPanel: View {
     /// The panel's top left corner on the screen, and the screen's size: the menus are kept on it.
     let origin: CGPoint
     let screen: CGSize
+    /// Floating in a window of its own, as the library it shows in place of: its frame.
+    var floating: FloatingFrame?
     @State private var ui = LibrariesUi()
 
     var body: some View {
         let showing = model.showingLibraries
         let renaming = !showing && model.renamingLibrary == model.libraryPlace
-        Popover(width: brushLibraryWidth, arrowX: arrowX) {
+        Popover(width: floating?.width ?? brushLibraryWidth, arrowX: arrowX, side: floating == nil ? .top : .none) {
+            if let floating {
+                FloatingTopStrip(frame: floating)
+            }
             DrawModeBar(model: model)
             PanelHeader(
-                title: showing ? "Brush libraries" : model.libraryName, start: 20, end: 12, height: 52,
-                chevronOn: ui.titleMenu,
+                title: showing ? "Brush Libraries" : model.libraryName, start: 20, end: 12, height: 52,
                 onTitle: { withAnimation(Motion.menuOpen) { ui.titleMenu = true } },
                 rename: renaming ? { model.renameLibrary(model.libraryPlace, name: $0) } : nil
             ) {
@@ -110,6 +133,10 @@ struct LibrariesPanel: View {
                 LibraryCards(model: model, ui: ui)
             } else {
                 EmptyLibrary()
+            }
+            if floating != nil {
+                Spacer(minLength: 0)
+                FloatingBottomStrip()
             }
         }
         .coordinateSpace(.named(librariesSpace))
@@ -186,31 +213,50 @@ private struct LibraryCard: View {
     let ui: LibrariesUi
     let index: Int
     let library: BrushLibraryInfo
+    /// Two fingers pinching out on it: how far (their spread, a part of what it was).
+    @State private var zoom: CGFloat = 1
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cardCorner, style: .circular)
         // the one in use's shown set; another's first with a brush chosen in it
         let chosen = library.current ? model.shownSet : (library.sets.firstIndex { $0.chosen != nil } ?? 0)
-        VStack(alignment: .leading, spacing: 0) {
-            if model.renamingLibrary == index {
-                InlineName(name: library.name, color: Pc.panelTitle, fontSize: 14) { model.renameLibrary(index, name: $0) }
-            } else {
-                Text(verbatim: library.name)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Pc.panelTitle)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
+        let k = cardScale
+        ZStack(alignment: .topLeading) {
+            // the library's lists, small: the sets (Recent first) and the shown one's brushes
             HStack(alignment: .top, spacing: 0) {
-                CardSets(model: model, sets: library.sets, chosen: chosen)
-                    .frame(width: cardInside * cardSetsShare, alignment: .top)
-                CardBrushes(model: model, library: index, brushes: library.sets.indices.contains(chosen) ? library.sets[chosen].brushes : [])
-                    .padding(.leading, 6)
-                    .frame(width: cardInside * (1 - cardSetsShare), alignment: .top)
+                CardSets(
+                    model: model, sets: library.sets, chosen: chosen,
+                    recentLit: library.current && model.shownSet == CanvasModel.recentSet, current: library.current
+                )
+                    .frame(width: 168 * k, height: cardColumnHeight, alignment: .top)
+                    .clipped()
+                CardBrushes(
+                    model: model, library: index, current: library.current,
+                    set: library.sets.indices.contains(chosen) ? library.sets[chosen] : nil,
+                    tint: model.previewTints().other
+                )
+                .frame(maxWidth: .infinity, minHeight: cardColumnHeight, maxHeight: cardColumnHeight, alignment: .top)
+                .clipped()
+                .background(Pc.brushColumn)
             }
-            .padding(.top, 8)
+            .padding(.top, cardSetsTop - 12 * k)
+            .frame(maxHeight: .infinity, alignment: .top)
+            // its name over them, its middle 14.5 down
+            Group {
+                if model.renamingLibrary == index {
+                    InlineName(name: library.name, color: Pc.panelTitle, fontSize: 14) { model.renameLibrary(index, name: $0) }
+                } else {
+                    Text(verbatim: library.name)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Pc.panelTitle)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            .padding(.leading, 9)
+            .padding(.trailing, 9)
+            .frame(height: 29)
         }
-        .padding(10)
         .frame(maxWidth: .infinity, minHeight: cardHeight, maxHeight: cardHeight, alignment: .topLeading)
         .background(shape.fill(Pc.setCell))
         .overlay {
@@ -220,6 +266,19 @@ private struct LibraryCard: View {
         }
         .clipShape(shape)
         .contentShape(shape)
+        // pinched out, it grows with the fingers, and let go far enough apart it opens
+        .scaleEffect(min(max(zoom, 1), pinchToLibrary))
+        .zIndex(zoom > 1 ? 1 : 0)
+        .simultaneousGesture(
+            MagnifyGesture()
+                .onChanged { zoom = $0.magnification }
+                .onEnded { value in
+                    withAnimation(Motion.swipeSettle) { zoom = 1 }
+                    if value.magnification > pinchToLibrary {
+                        model.openLibrary(index)
+                    }
+                }
+        )
         .onTapGesture { model.openLibrary(index) }
         .onLongPressGesture(minimumDuration: 0.5, maximumDistance: 10) {
             withAnimation(Motion.menuOpen) { ui.cardMenu = index }
@@ -230,55 +289,100 @@ private struct LibraryCard: View {
     }
 }
 
-/// A card's sets, the one whose brushes it shows lit.
+/// A card's sets, as the library's column shows them small: Recent, then the sets, the one whose
+/// brushes it shows lit; the library in use's moved up as far as puts that one in the column's
+/// middle.
 private struct CardSets: View {
     let model: CanvasModel
     let sets: [BrushSetInfo]
     let chosen: Int
+    let recentLit: Bool
+    let current: Bool
 
     var body: some View {
-        VStack(spacing: 3) {
-            ForEach(Array(sets.enumerated()), id: \.offset) { s, set in
-                CardSetRow(icon: model.setIcon(set), name: set.name, lit: s == chosen)
+        let k = cardScale
+        let lead = 12 * k
+        let pitch = 62 * k
+        // Recent first, then the sets
+        let count = sets.count + 1
+        let lit: Int? = recentLit ? 0 : (sets.indices.contains(chosen) ? chosen + 1 : nil)
+        let scroll = cardScroll(lit: current ? lit : nil, count: count, lead: lead, row: 50 * k, pitch: pitch, trail: lead)
+        let rows = cardRows(scroll: scroll, count: count, lead: lead, pitch: pitch, most: cardSetsShown + 1)
+        VStack(spacing: 12 * k) {
+            ForEach(Array(rows), id: \.self) { i in
+                if i == 0 {
+                    CardSetRow(icon: PcIcons.recentSet, name: "Recent", lit: recentLit)
+                } else {
+                    CardSetRow(icon: model.setIcon(sets[i - 1]), name: sets[i - 1].name, lit: !recentLit && i - 1 == chosen)
+                }
             }
         }
+        .padding(.horizontal, 12 * k)
+        .offset(y: lead + pitch * CGFloat(rows.lowerBound) - scroll)
     }
 }
 
+/// A set's cell, small: its icon and name on a rounded cell, blue when lit.
 private struct CardSetRow: View {
     let icon: PcIcon
     let name: String
     let lit: Bool
 
     var body: some View {
+        let k = cardScale
         let ink = lit ? Color.white : Pc.panelTitle
         HStack(spacing: 0) {
-            PcIconView(icon, size: 18, color: ink)
-                .frame(width: 18, height: 18)
+            PcIconView(icon, size: 40 * k, color: ink)
+                .padding(.leading, 4 * k)
             Text(verbatim: name)
-                .font(.system(size: 8))
+                .font(.system(size: 14 * k, weight: .semibold))
                 .foregroundStyle(ink)
-                .lineLimit(1)
-                .truncationMode(.tail)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .padding(.leading, 1 * k)
+                .padding(.trailing, 8 * k)
             Spacer(minLength: 0)
         }
-        .frame(height: cardSetRow)
-        .background(RoundedRectangle(cornerRadius: 5, style: .circular).fill(lit ? Pc.rowSelected : Pc.popoverFill.opacity(0.35)))
+        .frame(height: 50 * k)
+        .background(RoundedRectangle(cornerRadius: 12 * k, style: .circular).fill(lit ? Pc.rowSelected : Pc.setCell))
     }
 }
 
-/// A card's brushes: each its name over its stroke, drawn small.
+/// A card's brushes, as the library's column shows them small: each its name over its stroke, the
+/// set's lit one blue.
 private struct CardBrushes: View {
     let model: CanvasModel
     let library: Int
-    let brushes: [BrushInfo]
+    /// Whether the card is the library in use's (its lit brush the one the library lights).
+    let current: Bool
+    let set: BrushSetInfo?
+    /// The colour a plugin gives the sample strokes, if one does.
+    let tint: Color?
+
+    private func lit(_ b: BrushInfo) -> Bool {
+        current ? model.highlighted(b) : set?.chosen == b.index
+    }
 
     var body: some View {
-        VStack(spacing: 2) {
-            ForEach(Array(brushes.prefix(cardBrushesShown).enumerated()), id: \.offset) { _, b in
-                CardBrush(model: model, library: library, brush: b)
+        let k = cardScale
+        let brushes = set?.brushes ?? []
+        let lead = 9.75 * k
+        let pitch = 88 * k
+        // the library in use's moved up as far as puts the lit one in the column's middle
+        let scroll = cardScroll(
+            lit: current ? brushes.firstIndex { lit($0) } : nil,
+            count: brushes.count, lead: lead, row: 80 * k, pitch: pitch, trail: lead
+        )
+        let rows = cardRows(scroll: scroll, count: brushes.count, lead: lead, pitch: pitch, most: cardBrushesShown + 1)
+        VStack(spacing: 8 * k) {
+            ForEach(Array(rows), id: \.self) { i in
+                let b = brushes[i]
+                let on = lit(b)
+                CardBrush(model: model, library: library, brush: b, lit: on, tint: on ? nil : tint)
             }
         }
+        .padding(.horizontal, 12 * k)
+        .offset(y: lead + pitch * CGFloat(rows.lowerBound) - scroll)
     }
 }
 
@@ -286,26 +390,32 @@ private struct CardBrush: View {
     let model: CanvasModel
     let library: Int
     let brush: BrushInfo
+    let lit: Bool
+    let tint: Color?
 
     var body: some View {
+        let k = cardScale
         let key = "\(library)-\(brush.set)-\(brush.index)"
         let stroke = model.cardPreviews[key]
         let missing = stroke == nil
+        let shape = RoundedRectangle(cornerRadius: 12 * k, style: .circular)
         ZStack(alignment: .topLeading) {
+            shape.fill(lit ? Pc.rowSelected : Color.clear)
             if let stroke {
-                Image(uiImage: stroke)
-                    .resizable()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // filling the cell's height, centred, as the library's strokes do; in the colour a
+                // plugin gives them, if one does
+                SampleStroke(image: stroke, tint: tint)
             }
             Text(verbatim: brush.name)
-                .font(.system(size: 8))
-                .foregroundStyle(Pc.panelTitle)
+                .font(.system(size: 14 * k, weight: .semibold))
+                .foregroundStyle(lit ? Color.white : Pc.panelTitle)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .padding(.leading, 3)
-                .padding(.top, 1)
+                .padding(.leading, 18 * k)
+                .padding(.top, 11.75 * k)
         }
-        .frame(maxWidth: .infinity, minHeight: cardBrushHeight, maxHeight: cardBrushHeight, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 80 * k, maxHeight: 80 * k, alignment: .topLeading)
+        .clipShape(shape)
         // drawn once it shows, and again once the libraries are read again (they go by place)
         .task(id: "\(key) \(missing)") {
             if missing {
@@ -356,7 +466,8 @@ private struct LibrariesMenus: View {
     private var titleMenu: some View {
         if model.showingLibraries {
             let at = kept(libraryTitleMenuAt(model), CGSize(width: glassMenuWidth, height: 14 + 40))
-            GlassMenu(overPanel: true) {
+            // a title's menu, as a library's is
+            GlassMenu(system: true) {
                 MenuRow(icon: PcIcons.menuRestore, label: "Restore default library") {
                     closeAll()
                     model.restoreLibraries()

@@ -44,7 +44,7 @@ private val HeldWidth = 360.dp
 private val HeldHeight = 69.dp
 private val HeldCorner = 8.dp
 /** The badge saying it would land (a copy), and the one counting several. */
-private val LandsBadge = Color(0xFF30D158)
+internal val LandsBadge = Color(0xFF30D158)
 private val CountBadge = Color(0xFFFF3B30)
 
 /**
@@ -111,13 +111,13 @@ private fun HeldRow(held: CanvasViewModel.HeldLayers, lands: Boolean, corner: Of
                 modifier = Modifier.padding(horizontal = 12.dp).width(HeldWidth - 140.dp),
             )
         }
-        if (held.items > 1) Badge(CountBadge, held.items.toString(), Modifier.align(Alignment.TopStart).offset((-8).dp, (-8).dp))
-        if (lands) Badge(LandsBadge, "+", Modifier.align(Alignment.TopEnd).offset(8.dp, (-8).dp))
+        if (held.items > 1) DragBadge(CountBadge, held.items.toString(), Modifier.align(Alignment.TopStart).offset((-8).dp, (-8).dp))
+        if (lands) DragBadge(LandsBadge, "+", Modifier.align(Alignment.TopEnd).offset(8.dp, (-8).dp))
     }
 }
 
 @Composable
-private fun Badge(fill: Color, text: String, modifier: Modifier) {
+internal fun DragBadge(fill: Color, text: String, modifier: Modifier) {
     Box(modifier.size(24.dp).clip(CircleShape).background(fill), contentAlignment = Alignment.Center) {
         Text(text, color = Color.White, fontSize = 15.sp, maxLines = 1)
     }

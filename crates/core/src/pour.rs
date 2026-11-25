@@ -475,12 +475,12 @@ impl State {
     /// first if it outgrew the part read for it.
     fn show_pour(&mut self, same_flood: bool) {
         let Some(pour) = self.pour.as_mut() else { return };
-        if pour.show(self.canvas.as_mut(), same_flood).is_ok() {
+        if pour.show(self.canvas.as_deref_mut(), same_flood).is_ok() {
             return;
         }
         self.widen_pour();
         if let Some(pour) = self.pour.as_mut() {
-            let _ = pour.show(self.canvas.as_mut(), false);
+            let _ = pour.show(self.canvas.as_deref_mut(), false);
         }
     }
 
@@ -626,15 +626,125 @@ fn unit(c: f32) -> f32 {
 }
 
 /// The canvas pixel under window point (`x`, `y`), if it is on the canvas.
+/// What a pour goes by, read with the lock let go (see [`CanvasSession::read_ahead`]): the point,
+/// the layer, the part of the canvas and the reference layer it was read for, the artwork's edits
+/// and those layers' versions then, their pixels there, and the pour measured on them.
+struct ReadAhead {
+    seed: (u32, u32),
+    current: LayerId,
+    area: [u32; 4],
+    reference: Option<LayerId>,
+    seen: (u64, u64, Option<u64>),
+    before: Vec<u8>,
+    elsewhere: Option<Vec<u8>>,
+    flood: Option<Flood>,
+}
+
+impl ReadAhead {
+    /// The artwork's edits and the versions of `current` and `reference` as they are now.
+    fn seen(st: &State, current: LayerId, reference: Option<LayerId>) -> Option<(u64, u64, Option<u64>)> {
+        let canvas = st.canvas.as_ref()?;
+        Some((st.edits(), canvas.layer_version(current), reference.map(|r| canvas.layer_version(r))))
+    }
+
+    /// Whether what was read is as the canvas is now (nothing laid or undone since).
+    fn still(&self, st: &State) -> bool {
+        Self::seen(st, self.current, self.reference) == Some(self.seen)
+    }
+}
+
 fn seed_at(st: &crate::State, x: f32, y: f32) -> Option<(u32, u32)> {
     st.window_texel(x, y)
+}
+
+/// What a fill at a window point lands on: nothing it fills (off the artwork, or a layer that takes
+/// none), text (which takes none until it is rasterized), a plugin's layer (which makes of it what
+/// it will, as one step), or a layer it pours into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PourTarget {
+    Nothing,
+    Text,
+    Plugin,
+    Layer,
+}
+
+/// What a fill at window point (`x`, `y`) lands on, as [`CanvasSession::pour_begin`] goes by it
+/// (whether a plugin's layer takes it is for its plugin to say).
+pub(crate) fn pour_target(st: &State, x: f32, y: f32) -> PourTarget {
+    match layer_target(st) {
+        PourTarget::Text => PourTarget::Text,
+        _ if seed_at(st, x, y).is_none() => PourTarget::Nothing,
+        target => target,
+    }
+}
+
+/// What the current layer is to a fill (see [`PourTarget`]); a plugin's layer whatever its plugin
+/// would say.
+fn layer_target(st: &State) -> PourTarget {
+    let current = st.doc.current();
+    let Some(layer) = st.doc.layer(current) else { return PourTarget::Nothing };
+    if layer.text.is_some() {
+        PourTarget::Text
+    } else if st.doc.is_locked(current) {
+        PourTarget::Nothing
+    } else if layer.plugin.is_some() {
+        PourTarget::Plugin
+    } else {
+        PourTarget::Layer
+    }
+}
+
+/// Where the artwork is on the screen as last seen (its view and its size; none while a model is
+/// shown, whose surface goes by more than that), and what its current layer is to a fill: whether
+/// a dragged colour lands on it, and what Continue filling's touch fills, are told from this while
+/// a pour holds the canvas, which a whole layer's does for a while.
+#[derive(Default)]
+pub(crate) struct LandsOn(parking_lot::Mutex<Option<Seen>>);
+
+/// The view the artwork was last seen through, its size, and what its current layer is to a fill.
+type Seen = (procraft_engine::view::View, (u32, u32), PourTarget);
+
+impl LandsOn {
+    /// Notes where the artwork is as `st` has it.
+    pub(crate) fn note(&self, st: &State) {
+        let seen =
+            st.view.filter(|_| !st.scene_shown()).map(|v| (v, (st.doc.width(), st.doc.height()), layer_target(st)));
+        *self.0.lock() = seen;
+    }
+
+    /// Whether window point (`x`, `y`) is on the artwork as last noted; none if that isn't known.
+    fn lands(&self, x: f32, y: f32) -> Option<bool> {
+        let (view, (w, h), _) = (*self.0.lock())?;
+        let p = view.screen_to_canvas(Vec2::new(x, y))?;
+        Some(p.x >= 0.0 && p.y >= 0.0 && p.x < w as f32 && p.y < h as f32)
+    }
+
+    /// What a fill at window point (`x`, `y`) lands on as last noted (see [`pour_target`]); none if
+    /// that isn't known.
+    pub(crate) fn target(&self, x: f32, y: f32) -> Option<PourTarget> {
+        let target = self.0.lock().map(|(.., target)| target)?;
+        Some(match target {
+            PourTarget::Text => PourTarget::Text,
+            _ if !self.lands(x, y)? => PourTarget::Nothing,
+            target => target,
+        })
+    }
 }
 
 #[uniffi::export]
 impl CanvasSession {
     /// Whether window point (`x`, `y`) is on the artwork, where a dragged colour can come to rest.
+    /// Asked while the colour is dragged, it never waits on a pour holding the canvas (an earlier
+    /// drop's still being made): it goes by where the artwork was last seen.
     pub fn pour_lands(&self, x: f32, y: f32) -> bool {
-        seed_at(&self.shared.lock(), x, y).is_some()
+        if let Some(st) = self.shared.try_lock() {
+            self.shared.lands_on.note(&st);
+            return seed_at(&st, x, y).is_some();
+        }
+        match self.shared.lands_on.lands(x, y) {
+            Some(lands) => lands,
+            None => seed_at(&self.shared.lock(), x, y).is_some(),
+        }
     }
 
     /// Pours colour (`r`, `g`, `b`, 0..1) at window point (`x`, `y`) with `threshold` (0..1) on
@@ -821,6 +931,7 @@ impl CanvasSession {
     fn begin_pour(&self, x: f32, y: f32, colour: [f32; 3], threshold: f32, spread: bool) -> bool {
         self.pour_end(true, None);
         self.await_pour();
+        let ahead = self.read_ahead(x, y);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         // a fill still spreading in shows all of itself
@@ -881,14 +992,25 @@ impl CanvasSession {
         // on unless every layer is, which that fill changed)
         let trail = st.pour_trail.as_mut();
         let known = trail.and_then(|t| t.layer.take()).filter(|(l, _)| *l == current).map(|(_, p)| p);
-        let Some(before) = known.or_else(|| read(st, current)) else { return false };
+        // read (and measured) with the lock let go, if nothing changed meanwhile; else now
+        let ahead = ahead
+            .filter(|a| (a.seed, a.current, a.area, a.reference) == (seed, current, area, reference) && a.still(st));
+        let (before, elsewhere, flood) = match (known, ahead) {
+            (Some(before), _) => (before, None, None),
+            (None, Some(a)) => (a.before, a.elsewhere, Some(a.flood)),
+            (None, None) => {
+                let Some(before) = read(st, current) else { return false };
+                (before, None, None)
+            }
+        };
         let within = st.reach_selection();
         let measured =
             st.pour_trail.as_ref().filter(|t| !all_layers || t.kept == 0).and_then(|t| t.measured.clone());
-        let elsewhere = match measured {
-            Some(measured) => measured,
-            None if all_layers => st.pour_measured_on(current),
-            None => reference.and_then(|r| read(st, r)),
+        let elsewhere = match (measured, all_layers, elsewhere) {
+            (Some(measured), ..) => measured,
+            (None, true, _) => st.pour_measured_on(current),
+            (None, false, Some(read_ahead)) => Some(read_ahead),
+            (None, false, None) => reference.and_then(|r| read(st, r)),
         };
         let measured_on = match (&elsewhere, reference) {
             (None, _) => Measured::Own,
@@ -914,7 +1036,10 @@ impl CanvasSession {
             closed: None,
             finishing: None,
         };
-        pour.measure(seed);
+        match flood {
+            Some(flood) if !all_layers => pour.flood = flood,
+            _ => pour.measure(seed),
+        }
         if pour.flood.is_none() {
             return false;
         }
@@ -1027,6 +1152,58 @@ impl CanvasSession {
         self.shared.frame(st);
     }
 
+    /// The pixels a pour at window point (`x`, `y`) goes by, read as [`CanvasSession::begin_pour`]
+    /// would read them but with the lock let go while the GPU copies them back: frames and touches
+    /// waited on that copy, and on all the work queued before it, a fifth of a second or more on a
+    /// large canvas. None where it reads otherwise (on every layer seen, or not at all).
+    fn read_ahead(&self, x: f32, y: f32) -> Option<ReadAhead> {
+        let (mut ahead, reads) = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let seed = seed_at(st, x, y)?;
+            let (w, h) = (st.doc.width(), st.doc.height());
+            let current = st.doc.current();
+            let layer = st.doc.layer(current)?;
+            if layer.plugin.is_some() || st.doc.is_locked(current) || layer.drawn_from_data() {
+                return None;
+            }
+            if st.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
+                return None;
+            }
+            let reference = st.doc.reference().filter(|&r| r != current);
+            let area = if whole_at_once() { [0, 0, w, h] } else { pour_area(seed, (w, h)) };
+            let before = st.start_layer_part(current, area_rect(area))?;
+            let other = match reference {
+                Some(r) => Some(st.start_layer_part(r, area_rect(area))?),
+                None => None,
+            };
+            let ahead = ReadAhead {
+                seed,
+                current,
+                area,
+                reference,
+                seen: ReadAhead::seen(st, current, reference)?,
+                before: Vec::new(),
+                elsewhere: None,
+                flood: None,
+            };
+            (ahead, (before, other))
+        };
+        ahead.before = reads.0.pixels().ok()?;
+        ahead.elsewhere = match reads.1 {
+            Some(read) => Some(read.pixels().ok()?),
+            None => None,
+        };
+        // and measured, as the pour measures it
+        let [ax, ay, aw, ah] = ahead.area;
+        let sample = ahead.elsewhere.as_deref().unwrap_or(&ahead.before);
+        ahead.flood = match (ahead.seed.0.checked_sub(ax), ahead.seed.1.checked_sub(ay)) {
+            (Some(x), Some(y)) => Flood::new(aw, ah, sample, (x, y)),
+            _ => None,
+        };
+        Some(ahead)
+    }
+
     /// Waits for a fill a plugin is finishing, if there is one.
     pub(crate) fn await_pour(&self) {
         let finishing = self.shared.lock().pour.as_ref().and_then(|pour| pour.finishing.clone());
@@ -1051,7 +1228,7 @@ impl CanvasSession {
             let st = &mut *guard;
             if let (Some(pour), Some(closed)) = (st.pour.as_mut(), closed) {
                 pour.closed = Some(closed);
-                let _ = pour.show(st.canvas.as_mut(), false);
+                let _ = pour.show(st.canvas.as_deref_mut(), false);
             }
             end_pour(&shared, st, true, name.as_deref());
             drop(guard);

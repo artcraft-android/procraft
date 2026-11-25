@@ -292,6 +292,10 @@ pub struct Colours {
     floating_scale: f32,
     floating_picker_only: bool,
     floating_transform: egui::emath::TSTransform,
+    /// The floating panels' layout, while a plugin lays them out: the window goes where it has it,
+    /// snapping, folding and kept; and whether it changed something to keep.
+    pub layout: Option<std::sync::Arc<procraft_core::PanelLayout>>,
+    pub layout_changed: bool,
     /// The colour model's button left of the swatches, its menu, and a model chosen there (for
     /// the preferences to keep).
     model_button: Rect,
@@ -305,6 +309,11 @@ pub struct Colours {
     /// it to the background); and the tick tapped.
     pub background: bool,
     pub background_done: bool,
+    /// A plugin has the sliders step one unit at a click on either end, and the swatch show the
+    /// colour as the panel opened (`before`, while it is open) beside the colour now (interface 12).
+    pub steps: bool,
+    pub before_shown: bool,
+    before: Option<u32>,
 }
 
 impl Default for Colours {
@@ -316,9 +325,18 @@ impl Default for Colours {
             other: kept.1,
             on_mask: false,
             secondary: [1.0, 1.0, 1.0],
-            history: ColourHistory::new(),
+            // kept from one run to the next, as the palettes are (a test's strokes leave the
+            // file be)
+            history: if cfg!(test) {
+                ColourHistory::new()
+            } else {
+                ColourHistory::open(crate::files::app_dir().join("colour-history.json").to_string_lossy().into_owned())
+            },
             palettes: Palettes::open(crate::files::app_dir().join("palettes.json").to_string_lossy().into_owned()),
             pickers: Pickers::default(),
+            steps: false,
+            before_shown: false,
+            before: None,
             mode: Mode::default(),
             harmony: HarmonyKind::default(),
             harmony_menu: crate::menu::Menu::default(),
@@ -343,6 +361,8 @@ impl Default for Colours {
             floating_scale: 1.0,
             floating_picker_only: false,
             floating_transform: egui::emath::TSTransform::IDENTITY,
+            layout: None,
+            layout_changed: false,
             model_button: Rect::NOTHING,
             model_menu: crate::menu::Menu::default(),
             model_chosen: None,
@@ -571,11 +591,28 @@ impl Colours {
         self.send(session);
     }
 
-    /// The last colour in the history other than the current one, back; false if there is none.
+    /// The colour and the previous one trade places (the colour button held, or the quick menu's
+    /// Previous colour), so another hold comes back; false if there is none to go to.
     pub fn previous(&mut self, session: &CanvasSession) -> bool {
-        let Some(before) = self.history.previous(to_hex(self.rgb())) else { return false };
+        let Some(before) = self.history.swap_previous(to_hex(self.rgb()), self.on_mask) else { return false };
         self.set_rgb(session, before);
         true
+    }
+
+    /// The eyedropper picked `rgb`: the colour it replaces is the previous colour.
+    pub fn picked(&mut self, session: &CanvasSession, rgb: u32) {
+        let before = to_hex(self.rgb());
+        self.set_rgb(session, rgb);
+        self.history.chose(before, to_hex(self.rgb()), self.on_mask);
+    }
+
+    /// Whether the colour panel shows (docked, `docked`, or floating), told each frame: closed on
+    /// another colour than it opened on, that one is the previous colour.
+    pub fn panel_shown(&mut self, docked: bool) {
+        let shown = docked || self.floating.is_some();
+        self.history.panel_shown(shown, to_hex(self.rgb()), self.on_mask);
+        // the colour as it opened, while it is open
+        self.before = if shown { self.before.or(Some(to_hex(self.rgb()))) } else { None };
     }
 
     /// The current and second colours trade places.
@@ -666,10 +703,11 @@ impl Colours {
         self.scrolled = self.scrolled.min(overflow);
         let mut hex_row = Rect::NOTHING;
         let rect = Rect::from_min_size(pos2(left, top), vec2(PANEL_WIDTH, height));
+        let rect = panel::hung_rect(ctx, rect, whole, PANEL_MARGIN);
         panel::area(ctx, egui::Id::unique("colour panel"), rect).show(ctx, |ui| {
             ui.allocate_rect(rect, Sense::click());
             panel::frame(ui, look, "colour frame", rect, arrow_x, backdrops);
-            let body = panel::body(rect);
+            let body = panel::body_in(ui.ctx(), rect);
             if self.background {
                 // titled so on every page, with a tick 12 in from the right that closes it
                 panel::header(ui, look, body, "Background", 20.0, false, false);
@@ -701,7 +739,23 @@ impl Colours {
                     let model = Rect::from_min_size(pos2(first.left() - 8.0 - 70.0, first.top()), vec2(70.0, swatch.y));
                     self.model_button(ui, model);
                 }
-                ui.painter().rect_filled(first, 6, srgb(self.rgb()));
+                match self.before.filter(|_| self.before_shown) {
+                    // a plugin's: the colour before (a click goes back to it) beside the colour now
+                    Some(before) => {
+                        let was = Rect::from_min_max(first.min, pos2(first.center().x, first.max.y));
+                        let now = Rect::from_min_max(pos2(first.center().x, first.min.y), first.max);
+                        let left = egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 };
+                        let right = egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 };
+                        ui.painter().rect_filled(was, left, srgb(of_hex(before)));
+                        ui.painter().rect_filled(now, right, srgb(self.rgb()));
+                        if ui.interact(was, ui.scope_id().with("colour before"), Sense::click()).clicked() {
+                            self.set_rgb(session, before);
+                        }
+                    }
+                    None => {
+                        ui.painter().rect_filled(first, 6, srgb(self.rgb()));
+                    }
+                }
                 ui.painter().rect_stroke(first, 6, egui::Stroke::new(1.0, argb(SWATCH_EDGE)), egui::StrokeKind::Inside);
                 ui.painter().rect_filled(second, 6, srgb(self.secondary));
                 if ui.interact(second, ui.scope_id().with("swap"), Sense::click()).clicked() {
@@ -903,7 +957,7 @@ impl Colours {
                 let slot = (row * 10 + i) as u32;
                 let id = ui.scope_id().with(("palette swatch", slot));
                 match rgb {
-                    Some(c) => match drop.source(ui, session, id, cell, c, true, true, Some(panel)) {
+                    Some(c) => match drop.source(ui, session, id, cell, c, true, Some(panel)) {
                         Some(Touch::Tap) => self.set_rgb(session, c),
                         Some(Touch::Hold) => self.palettes.set_swatch(index, slot, None),
                         Some(Touch::Dragged) | None => {}
@@ -1353,7 +1407,7 @@ impl Colours {
     /// Harmony's kinds: a menu left of the panel, its top level with the wheel; the kind shown
     /// ticked.
     fn harmony_menu(&mut self, ctx: &egui::Context, look: &mut Look, panel: Rect, backdrops: &mut Vec<f32>) {
-        let body = panel::body(panel);
+        let body = panel::body_in(ctx, panel);
         let rect = Rect::from_min_size(
             pos2(body.left() + 20.0 - 204.0, body.top() + 50.0 + 36.0),
             vec2(195.0, 9.0 * 2.0 + 38.0 * HarmonyKind::ALL.len() as f32),
@@ -1486,7 +1540,17 @@ impl Colours {
                 );
                 let track =
                     Rect::from_center_size(pos2(row.left() + 32.0 + 132.0, row.center().y), vec2(264.0, SLIDER_ROW));
-                let Some(to) = slider_row(ui, track, ("value", k, i), value, &colours) else { continue };
+                // a plugin's steps: a degree of hue, a percent, a level of red, green or blue
+                let unit = match (k, i) {
+                    (0, 0) if model != ColourModel::Oklab => 1.0 / 360.0,
+                    (0, _) => 0.01,
+                    _ => 1.0 / 255.0,
+                };
+                let Some(to) =
+                    slider_row_stepped(ui, track, ("value", k, i), value, &colours, self.steps.then_some(unit))
+                else {
+                    continue;
+                };
                 let byte = (to * 255.0).round() as u32;
                 match (k, i) {
                     (0, _) if model == ColourModel::Oklab => {
@@ -1964,6 +2028,23 @@ pub(crate) fn slider_row(
     value: f32,
     colours: &[Color32],
 ) -> Option<f32> {
+    slider_row_stepped(ui, rect, id, value, colours, None)
+}
+
+/// How far in from either end of a slider a click steps it, while a plugin has them step.
+const STEP_END: f32 = 18.0;
+
+/// [`slider_row`], stepping `step` (a share of the track) at a click within [`STEP_END`] of either
+/// end, while a plugin has the sliders step: a drag from anywhere, or a click between, goes where it
+/// is.
+pub(crate) fn slider_row_stepped(
+    ui: &Ui,
+    rect: Rect,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    value: f32,
+    colours: &[Color32],
+    step: Option<f32>,
+) -> Option<f32> {
     let response = ui.interact(rect, ui.scope_id().with(id), Sense::click_and_drag());
     let y = rect.center().y;
     let track = Rect::from_min_max(pos2(rect.left(), y - 2.0), pos2(rect.right(), y + 2.0));
@@ -1972,6 +2053,20 @@ pub(crate) fn slider_row(
     let x = (rect.left() + value * rect.width()).clamp(rect.left() + pill.x / 2.0, rect.right() - pill.x / 2.0);
     ui.painter().rect_filled(Rect::from_center_size(pos2(x, y), pill), pill.y / 2.0, colour_along(colours, value));
     let p = response.interact_pointer_pos()?;
+    if let Some(unit) = step {
+        let from = ui.input(|i| i.pointer.press_origin()).unwrap_or(p);
+        let side = if from.x < rect.left() + STEP_END {
+            -1.0
+        } else if from.x > rect.right() - STEP_END {
+            1.0
+        } else {
+            0.0
+        };
+        if side != 0.0 && !response.dragged() {
+            // pressed at an end: a step as it is let go, nothing until then
+            return response.clicked().then(|| (value + side * unit).clamp(0.0, 1.0));
+        }
+    }
     Some(((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0))
 }
 
@@ -2294,6 +2389,30 @@ mod tests {
             let back = hue_at(HueControl::Slider, hue_position(HueControl::Slider, hue));
             assert!((back - hue).abs() < 1e-3, "{hue} came back {back}");
         }
+    }
+
+    #[test]
+    fn the_colour_button_s_hold_trades_the_colour_with_the_one_before_the_last_chosen() {
+        let session = CanvasSession::new(64, 64);
+        let mut colours = Colours::default();
+        colours.set_rgb(&session, 0xFF0000);
+        // nothing chosen or painted yet: nothing to go back to
+        assert!(!colours.previous(&session));
+        // the eyedropper picks green over red: held, red; held again, green
+        colours.picked(&session, 0x00FF00);
+        assert!(colours.previous(&session));
+        assert_eq!(to_hex(colours.rgb()), 0xFF0000);
+        assert!(colours.previous(&session));
+        assert_eq!(to_hex(colours.rgb()), 0x00FF00);
+        // the panel opened on green, closed on blue: held, green, not what it passed
+        colours.panel_shown(true);
+        colours.set_rgb(&session, 0x123456);
+        colours.set_rgb(&session, 0x0000FF);
+        colours.panel_shown(true);
+        colours.panel_shown(false);
+        assert!(colours.previous(&session));
+        assert_eq!(to_hex(colours.rgb()), 0x00FF00);
+        assert_eq!(procraft_core::COLOUR_HOLD_MS, 300);
     }
 
     #[test]

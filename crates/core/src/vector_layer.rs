@@ -336,14 +336,7 @@ impl State {
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, style, brush);
         }
-        // a brush file's grain at its own size, fixed to the canvas or moving with each stamp
-        let full = brush.grain_file_now().and_then(|f| f.full.as_ref());
-        if let Some(full) = full
-            && let Some(pixels) = self.grain_store.pixels(full)
-            && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
-        {
-            canvas.use_full_grain(gpu, style, full.id, full.side, &pixels);
-        }
+        self.use_full_grain(style, brush);
         self.use_full_shape(style, brush);
     }
 
@@ -529,7 +522,7 @@ impl State {
                     let shown_by = self.vector_shown_by;
                     let stamps = |stamps: Vec<Stamp>| {
                         let all = match stroke.guide.as_deref() {
-                            Some(guide) => crate::guide::mirrored(guide, &stamps),
+                            Some(guide) => crate::guide::mirrored(guide, &stamps).into_owned(),
                             None => stamps,
                         };
                         let all = match shown_by {
@@ -624,7 +617,7 @@ impl State {
             let shown_by = self.vector_shown_by;
             let copies = |stamps: Vec<Stamp>| {
                 let all = match kept.guide.as_deref() {
-                    Some(guide) => crate::guide::mirrored(guide, &stamps),
+                    Some(guide) => crate::guide::mirrored(guide, &stamps).into_owned(),
                     None => stamps,
                 };
                 match shown_by {

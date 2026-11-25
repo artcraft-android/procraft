@@ -149,6 +149,10 @@ struct ArtworkPreview: View {
     /// A tap shows (or hides) the close button and the arrows to the other artworks.
     @State private var controls: Bool
     @State private var picture: UIImage?
+    /// The artwork itself as large as it shows, drawn whole (its thumbnail enlarged till then).
+    @State private var sharp: UIImage?
+    /// It is being drawn whole: the thumbnail shows enlarged smoothly meanwhile, not in squares.
+    @State private var loads = false
     /// An animated artwork's frame, playing over its thumbnail once its frames are read.
     @State private var frame: UIImage?
 
@@ -164,13 +168,22 @@ struct ArtworkPreview: View {
         #endif
     }
 
-    private func show(_ artwork: GalleryArtwork, side: UInt32) async {
+    /// Shows `artwork` filling `box` (pixels): its thumbnail at once, then the whole picture drawn as
+    /// large as it shows, or, animated, its frames at no more than `side` playing.
+    private func show(_ artwork: GalleryArtwork, side: UInt32, box: CGSize) async {
         picture = nil
+        sharp = nil
         frame = nil
+        loads = previewLoads(artwork, box: box)
         let read = await thumbnail(of: artwork)
         guard !Task.isCancelled else { return }
         picture = read
-        let played = await Task.detached(priority: .userInitiated) { readFrames(artwork.dir, side: side) }.value
+        if loads {
+            let drawn = await Task.detached(priority: .userInitiated) { onBigStack { previewPicture(artwork, box: box) } }.value
+            guard !Task.isCancelled else { return }
+            sharp = drawn
+        }
+        let played = await Task.detached(priority: .userInitiated) { onBigStack { readFrames(artwork.dir, side: side) } }.value
         guard let played, !Task.isCancelled else { return }
         // as its settings say
         var at: UInt32 = 0
@@ -229,11 +242,13 @@ struct ArtworkPreview: View {
         GeometryReader { place in
             ZStack {
                 Color.black
-                if let shown = frame ?? picture {
+                if let shown = frame ?? sharp ?? picture {
                     let ratio = shown.size.width / max(shown.size.height, 1)
+                    // the thumbnail enlarged smoothly while the artwork is drawn
+                    let smooth = shown === picture && loads
                     Image(uiImage: shown)
                         .resizable()
-                        .interpolation(thumbnailInterpolation(shown, shown: min(place.size.width, place.size.height * ratio)))
+                        .interpolation(smooth ? .high : thumbnailInterpolation(shown, shown: min(place.size.width, place.size.height * ratio)))
                         .scaledToFit()
                 }
                 if controls {
@@ -249,7 +264,8 @@ struct ArtworkPreview: View {
                     onClose()
                     return
                 }
-                await show(list[index], side: UInt32(max(place.size.width, place.size.height) * displayScale))
+                let box = CGSize(width: place.size.width * displayScale, height: place.size.height * displayScale)
+                await show(list[index], side: UInt32(max(box.width, box.height)), box: box)
             }
         }
         .ignoresSafeArea()
@@ -282,6 +298,35 @@ private struct PreviewArrow: View {
     }
 }
 
+/// The gallery thumbnail's longest side (the core's): an artwork shown no larger has its thumbnail
+/// to show.
+private let thumbnailSide: UInt32 = 512
+
+/// The longest side `artwork` is drawn at for Preview filling `box` (pixels), turned as it shows.
+private func shownSide(_ artwork: GalleryArtwork, box: CGSize) -> UInt32 {
+    let turned = artwork.turns % 2 == 1
+    let width = max(turned ? artwork.height : artwork.width, 1)
+    let height = max(turned ? artwork.width : artwork.height, 1)
+    return previewSide(width: width, height: height, boxWidth: UInt32(max(box.width, 1)), boxHeight: UInt32(max(box.height, 1)))
+}
+
+/// Whether Preview draws `artwork` whole for `box`: it shows larger than its thumbnail.
+private func previewLoads(_ artwork: GalleryArtwork, box: CGSize) -> Bool {
+    box.width >= 1 && box.height >= 1 && shownSide(artwork, box: box) > thumbnailSide
+}
+
+/// `artwork` as Preview shows it filling `box` (pixels): the whole picture, a pixel of its own a
+/// screen pixel, made as its thumbnail is. None where its thumbnail shows as much, it plays, opening
+/// it ended the app before (it isn't opened again unasked), or it can't be drawn. Slow: the artwork
+/// is opened whole, then let go.
+private func previewPicture(_ artwork: GalleryArtwork, box: CGSize) -> UIImage? {
+    let dir = artwork.dir
+    guard previewLoads(artwork, box: box), !artworkPlays(dir: dir), !openingEndedApp(dir: dir),
+          let png = artworkPreviewPng(dir: dir, maxSide: shownSide(artwork, box: box))
+    else { return nil }
+    return UIImage(data: png)
+}
+
 /// An artwork's frames as read for Preview, and how they play.
 private struct PlayedFrames: @unchecked Sendable {
     let pictures: [UIImage]
@@ -292,15 +337,32 @@ private struct PlayedFrames: @unchecked Sendable {
 
 /// The frames of the artwork in `dir` if it is animated, at no more than `side` pixels. Slow.
 private func readFrames(_ dir: String, side: UInt32) -> PlayedFrames? {
-    guard artworkPlays(dir: dir), let session = try? CanvasSession.open(dir: dir),
-          let settings = session.animationSettings(), !settings.pages, session.drawWithoutWindow()
-    else { return nil }
+    guard artworkPlays(dir: dir), let session = try? CanvasSession.open(dir: dir) else { return nil }
+    if session.modelInfo() != nil {
+        return readTurntable(session, side: side)
+    }
+    guard let settings = session.animationSettings(), !settings.pages, session.drawWithoutWindow() else { return nil }
     let count = session.animationFrameCount()
     let fit = UInt32((playedMost / 4 / Double(max(count, 1))).squareRoot())
     let pictures = (0 ..< count).compactMap { i in
         session.animationFrame(index: i, transparent: false, maxSide: min(side, fit)).flatMap { CanvasModel.image($0) }
     }
-    return PlayedFrames(pictures: pictures, order: session.animationSequence(), fps: Int(settings.fps), playback: settings.playback)
+    // the played frames in order, each as often as it is held (a background or foreground frame is
+    // drawn with each, not on its own)
+    return PlayedFrames(pictures: pictures, order: session.animationPlayOrder(), fps: Int(settings.fps), playback: settings.playback)
+}
+
+/// A model going round, opened in `session`, at no more than `side` pixels.
+private func readTurntable(_ session: CanvasSession, side: UInt32) -> PlayedFrames? {
+    guard session.drawWithoutWindow() else { return nil }
+    let count = session.modelPreviewFrames()
+    let fit = UInt32((playedMost / 4 / Double(max(count, 1))).squareRoot())
+    let pictures = (0 ..< count).compactMap { i in
+        session.modelPreviewPicture(index: i, side: min(side, fit)).flatMap { CanvasModel.image($0) }
+    }
+    return PlayedFrames(
+        pictures: pictures, order: (0 ..< UInt32(pictures.count)).map { $0 }, fps: Int(session.modelPreviewFps()), playback: .loop
+    )
 }
 
 /// Hears two fingers on the window, over whatever they are on: SwiftUI's own pinch can't say where

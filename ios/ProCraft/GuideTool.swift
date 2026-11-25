@@ -31,8 +31,13 @@ private let keyGroups: CGFloat = 30
 /// The sheet: the keys from 51 below its top to 38 above the screen's foot.
 private let sheetHeight = 51 + keyHeight * 4 + keyGap * 3 + 38
 
-/// How near a touch takes a handle, points.
-private let handleReach: CGFloat = 30
+/// The menu of a handle tapped in the guide editor: its width and its row's height, as a curve
+/// node's; how far above (or below) the handle it sits, and how near the window's top a handle puts
+/// it below.
+private let nodeMenuWidth: CGFloat = 70
+private let nodeMenuRow: CGFloat = 36
+private let nodeMenuGap: CGFloat = 11
+private let nodeMenuBelowUnder: CGFloat = 80
 
 /// The colour bar's stops, as the engine's (dark through blue, green, orange, red, pink, white).
 private let barStops: [UInt32] = [
@@ -82,7 +87,16 @@ private func sliderToSize(_ v: Float) -> Float {
     1 + v * v * 499
 }
 
-/// The drawing guide as the core has it, and its editor.
+/// A handle tapped in the guide editor, at `at` (window points): a perspective guide's point
+/// (`point`, its place) offers Delete, the centre of the others Reset.
+struct GuideNodeMenu {
+    let point: UInt32?
+    let at: CGPoint
+}
+
+/// The drawing guide as the core has it, and its editor. While it is open the canvas's touches work
+/// the guide in the core: a touch drags the handle it lands on, a tap on one shows its menu, a tap
+/// elsewhere gives a perspective guide a point, and two fingers move the view.
 @Observable
 final class GuideTool {
     @ObservationIgnored private unowned let model: CanvasModel
@@ -92,6 +106,8 @@ final class GuideTool {
     var symmetryOptionsOpen = false
     /// Zoom Fade's popover (held open from its switch).
     var zoomFadeOpen = false
+    /// The menu of the handle tapped, while it shows.
+    var nodeMenu: GuideNodeMenu?
 
     init(model: CanvasModel) {
         self.model = model
@@ -112,7 +128,7 @@ final class GuideTool {
         model.refresh()
     }
 
-    /// Opens the editor (turning the guide on), the canvas fitted between its bars.
+    /// Opens the editor (turning the guide on), the canvas moving to fit the middle of the screen.
     func open() {
         let session = model.session
         model.endQuickShape()
@@ -120,24 +136,54 @@ final class GuideTool {
         if !info.on {
             _ = session.setGuideOn(on: true)
         }
-        // (the core fits the editor's canvas in the window itself, and takes its pinches and pans)
         info = session.guideEditBegin()
+        session.setTouchGuideEditing(editing: true)
         editing = true
-        model.refreshView()
+        model.followView()
     }
 
     func close(keep: Bool) {
+        model.session.setTouchGuideEditing(editing: false)
         info = model.session.guideEditEnd(keep: keep)
         editing = false
         symmetryOptionsOpen = false
         zoomFadeOpen = false
-        model.refreshView()
+        nodeMenu = nil
+        model.followView()
     }
 
     func choose(_ kind: GuideType) {
         info = model.session.setGuideKind(kind: kind)
         symmetryOptionsOpen = false
         zoomFadeOpen = false
+        nodeMenu = nil
+    }
+
+    /// The editor's canvas touched (`touched`: a touch came down, closing its popovers) or its
+    /// handle dragged: the guide as it now is (a perspective tap may have added a point).
+    func touched(_ touched: Bool) {
+        if touched {
+            symmetryOptionsOpen = false
+            nodeMenu = nil
+        }
+        read()
+    }
+
+    /// A handle tapped at window pixels (`x`, `y`): its menu.
+    func nodeTapped(point: UInt32?, x: Float, y: Float) {
+        let pixels = model.pixels
+        nodeMenu = GuideNodeMenu(point: point, at: CGPoint(x: CGFloat(x) / pixels, y: CGFloat(y) / pixels))
+    }
+
+    /// What the handle's menu offers, picked: the point deleted, or the centre put back.
+    func nodeAction(_ menu: GuideNodeMenu) {
+        nodeMenu = nil
+        let session = model.session
+        if let point = menu.point {
+            info = session.removeVanishingPoint(index: point)
+        } else {
+            info = session.resetGuidePlace()
+        }
     }
 
     /// The shown kind's look, each left as it is when not given.
@@ -166,40 +212,6 @@ final class GuideTool {
 
     func setSymmetry(_ kind: SymmetryType, rotational: Bool) {
         info = model.session.setGuideSymmetry(kind: kind, rotational: rotational)
-    }
-
-    /// What a touch at window points `p` takes: the turn handle (-2), the centre (-1), a vanishing
-    /// point (its index), or nothing.
-    func grab(_ p: CGPoint) -> Int? {
-        let pixels = model.pixels
-        let x = p.x * pixels
-        let y = p.y * pixels
-        symmetryOptionsOpen = false
-        zoomFadeOpen = false
-        if info.kind == .perspective {
-            let index = model.session.touchVanishingPoint(x: Float(x), y: Float(y)).map { Int($0) }
-            read()
-            return index
-        }
-        func near(_ at: [Float]) -> Bool {
-            at.count >= 2 && hypot(CGFloat(at[0]) - x, CGFloat(at[1]) - y) <= handleReach * pixels
-        }
-        if near(info.handle) {
-            return -2
-        }
-        return near(info.centre) ? -1 : nil
-    }
-
-    func drag(_ grab: Int?, _ p: CGPoint) {
-        guard let grab else { return }
-        let session = model.session
-        let x = Float(p.x * model.pixels)
-        let y = Float(p.y * model.pixels)
-        switch grab {
-        case -2: info = session.turnGuide(x: x, y: y)
-        case -1: info = session.moveGuideCentre(x: x, y: y)
-        default: info = session.moveVanishingPoint(index: UInt32(grab), x: x, y: y)
-        }
     }
 }
 
@@ -247,16 +259,15 @@ struct GuideOverlay: View {
 }
 
 /// The guide editor over the canvas: its title with Cancel and Done, the colour bar, the canvas
-/// fitted between them and the toolbar (kinds, look and assisted drawing), the guide's handles
-/// dragged on the canvas, and the grid size typed on a keypad from its chip.
+/// fitted between them and the toolbar (kinds, look and assisted drawing), and the grid size typed
+/// on a keypad from its chip. The canvas between them takes its touches as ever, the core working
+/// the guide's handles with them.
 struct GuideEditor: View {
     let model: CanvasModel
     let screen: CGSize
 
     /// What the grid size's keypad has typed, and in which unit, while it is up.
     @State private var keypad: (typed: String, unit: GuideUnit)?
-    /// What the touch on the canvas took, once it has come down.
-    @State private var grabbed: Int??
 
     private func type(_ typed: String, unit: GuideUnit) {
         keypad = (typed, unit)
@@ -321,21 +332,6 @@ struct GuideEditor: View {
         // up while the kind has a grid
         let hasGrid = g.kind == .grid || g.kind == .isometric
         ZStack(alignment: .topLeading) {
-            // the canvas: handles dragged, perspective points added; nothing paints
-            Color.clear
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { drag in
-                            if grabbed == nil {
-                                grabbed = .some(tool.grab(drag.startLocation))
-                            }
-                            if drag.translation != .zero, let grab = grabbed {
-                                tool.drag(grab, drag.location)
-                            }
-                        }
-                        .onEnded { _ in grabbed = nil }
-                )
             header
             ColorBar(hue: g.hue) { tool.setLook(hue: $0) }
                 .offset(y: 84)
@@ -366,7 +362,37 @@ struct GuideEditor: View {
                 )
                 .frame(width: screen.width, height: screen.height, alignment: .bottom)
             }
+            if let menu = tool.nodeMenu {
+                // a touch anywhere else closes it, and goes no further
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { _ in tool.nodeMenu = nil })
+                GuideNodeMenuView(menu: menu) { tool.nodeAction(menu) }
+            }
         }
+    }
+}
+
+/// The menu of a handle tapped in the guide editor, as a curve node's: Delete for a perspective
+/// guide's point, Reset for the centre of the others. Centred over the handle, its bottom 11 above
+/// it; under it, 11 below, where the handle is within 80 of the window's top.
+private struct GuideNodeMenuView: View {
+    let menu: GuideNodeMenu
+    let onPick: () -> Void
+
+    var body: some View {
+        let below = menu.at.y < nodeMenuBelowUnder
+        let top = below ? menu.at.y + nodeMenuGap : menu.at.y - nodeMenuGap - nodeMenuRow
+        Text(verbatim: menu.point != nil ? "Delete" : "Reset")
+            .font(.system(size: 17))
+            .foregroundStyle(Color.white)
+            .lineLimit(1)
+            .frame(width: nodeMenuWidth, height: nodeMenuRow)
+            .background(RoundedRectangle(cornerRadius: 12, style: .circular).fill(Color(argb: 0xFF10_1010)))
+            .shadow(color: .black, radius: 7)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onPick)
+            .offset(x: menu.at.x - nodeMenuWidth / 2, y: top)
     }
 }
 

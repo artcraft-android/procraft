@@ -103,6 +103,8 @@ pub enum Act {
     /// then [`Showing::plugin_actions`]: a switch flipped, a setting named at every step moved to
     /// the next, an action run.
     PluginPlaced(u8),
+    /// Edit Layout, while a plugin lets the bars move: their handles show.
+    EditLayout,
     GestureControls,
     CanvasInfo,
     AnimationAssist,
@@ -138,6 +140,8 @@ pub enum Page {
     Pressure,
     Cursor,
     Plugins,
+    /// What the pen's side buttons do.
+    PenButtons,
 }
 
 /// The settings a slider row sets.
@@ -284,6 +288,8 @@ pub struct Showing {
     /// The controls and actions plugins put in the Canvas tab, after its own rows.
     pub plugin_controls: Vec<PluginControl>,
     pub plugin_actions: Vec<PluginAction>,
+    /// A plugin lets the bars move: Edit Layout follows those rows.
+    pub edit_layout: bool,
 }
 
 /// The rows of what plugins put in the Canvas tab: each control as its card shows it, then each
@@ -303,6 +309,8 @@ fn plugin_placed_rows(showing: &Showing) -> Vec<Row> {
             Slid::Plugin(0),
         ),
         PluginControl::File { control } => Row::Button(kept_label(&control.label), None, None),
+        PluginControl::Texture { control } => Row::Button(kept_label(&control.label), None, None),
+        PluginControl::Folder { control } => Row::Button(kept_label(&control.label), None, None),
     });
     let actions = showing.plugin_actions.iter().map(|action| Row::Button(kept_label(&action.label), None, None));
     // each by its place, as far as a number counts
@@ -388,6 +396,8 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
         .into_iter()
         // what plugins put here
         .chain(Some(plugin_placed_rows(showing)).filter(|rows| !rows.is_empty()))
+        // and Edit Layout, while a plugin lets the bars move
+        .chain(showing.edit_layout.then(|| vec![Button("Edit Layout", None, Some(Act::EditLayout))]))
         .collect(),
         2 => vec![
             vec![
@@ -448,6 +458,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     Button("Advanced cursor settings", None, Some(Act::Page(Page::Cursor))),
                 ],
                 vec![
+                    Button("Pen buttons", None, Some(Act::Page(Page::PenButtons))),
                     Button("Pressure and Smoothing", None, Some(Act::Page(Page::Pressure))),
                     Button("Gesture controls", None, Some(Act::GestureControls)),
                     Button("Plugins", None, Some(Act::Page(Page::Plugins))),
@@ -554,9 +565,13 @@ pub struct Actions {
     plugin_moved: Option<(String, f32)>,
     /// The key of a plugin's action tapped, for the app to run.
     plugin_action: Option<String>,
+    /// Pen buttons: the button whose choices are listed (true: the second), or none.
+    pen_picking: Option<bool>,
     /// A plugin's choice menu, and the setting it picks for.
     plugin_menu: Menu,
     plugin_choice: Option<PluginChoice>,
+    /// A plugin's texture row clicked: the control's key, for the Textures sheet (interface 15).
+    textures_asked: Option<String>,
     /// Remove tapped on a plugin's card: the question it asks, and the plugin's id.
     removing: Alert,
     remove_what: Option<String>,
@@ -640,7 +655,7 @@ impl Actions {
                 let to = plugin_slider_choice(control.clone(), next);
                 prefs.plugins.set_slider(control.key.clone(), to).is_some()
             }
-            PluginControl::File { .. } => false,
+            PluginControl::File { .. } | PluginControl::Texture { .. } | PluginControl::Folder { .. } => false,
         };
         changed.then_some(Act::Prefs)
     }
@@ -648,6 +663,11 @@ impl Actions {
     /// The key of the plugin action last tapped, once ([`Act::PluginAction`]).
     pub fn take_plugin_action(&mut self) -> Option<String> {
         self.plugin_action.take()
+    }
+
+    /// The key of the texture control whose row was last clicked, once: its Textures sheet opens.
+    pub fn take_textures_asked(&mut self) -> Option<String> {
+        self.textures_asked.take()
     }
 
     /// Shows the panel hanging from `button`; returns where it is (points) and what a row asked. A setting changed in `prefs` returns
@@ -703,6 +723,17 @@ impl Actions {
                             + 13.0;
                         header + rows.min(MOST_ROWS)
                     }
+                    Page::PenButtons => {
+                        let rows = match self.pen_picking {
+                            Some(_) => {
+                                let plugins = prefs.plugins.actions_in(procraft_core::PluginPlace::Pen).len();
+                                let n = procraft_core::pen_button_choices().len() + plugins;
+                                8.0 + choices_height(n, 0) + 13.0
+                            }
+                            None => 8.0 + 2.0 * (6.0 + 21.0 + 8.0 + CHOICE_HEIGHT) + 13.0,
+                        };
+                        header + rows.min(MOST_ROWS)
+                    }
                     Page::Plugins => {
                         let painter = ctx.layer_painter(egui::LayerId::background());
                         let list = prefs.plugins.plugins();
@@ -731,12 +762,13 @@ impl Actions {
         }
         let height = content.min(screen.bottom() - BOTTOM_MARGIN - top);
         let rect = Rect::from_min_size(pos2(left, top), vec2(ACTIONS_WIDTH, height));
+        let rect = panel::hung_rect(ctx, rect, content, BOTTOM_MARGIN);
         let mut tapped = None;
         let page = self.page;
         panel::area(ctx, Id::unique("actions panel"), rect).show(ctx, |ui| {
             ui.allocate_rect(rect, Sense::click());
             panel::frame(ui, look, "actions frame", rect, arrow_x, backdrops);
-            let body = panel::body(rect);
+            let body = panel::body_in(ui.ctx(), rect);
             ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
                 ui.set_clip_rect(body.intersect(ui.clip_rect()));
                 let width = body.width();
@@ -759,6 +791,7 @@ impl Actions {
         let mut act = match tapped {
             Some(Tapped::Act(Act::Page(page))) => {
                 self.page = page;
+                self.pen_picking = None;
                 None
             }
             Some(Tapped::Act(Act::ScalingMenu)) => {
@@ -868,6 +901,7 @@ impl Actions {
             Page::Cursor => self.cursor_page(ui, look, body, prefs),
             Page::Pressure => self.pressure_page(ui, look, body, prefs),
             Page::Plugins => self.plugins_page(ui, look, body, prefs),
+            Page::PenButtons => self.pen_buttons_page(ui, look, body, prefs),
         }
     }
 
@@ -1167,6 +1201,7 @@ impl Actions {
                                     &mut self.plugin_moved,
                                     &mut self.plugin_action,
                                     &mut self.plugin_choice,
+                                    &mut self.textures_asked,
                                     &mut remove,
                                 )
                             })
@@ -1225,6 +1260,102 @@ impl Actions {
             return Some(Tapped::Act(Act::PluginAction));
         }
         changed.then_some(Tapped::Act(Act::Prefs))
+    }
+
+    /// Pen buttons: what the pen's first and second side buttons do, a QuickMenu action each or, as
+    /// they start, what Gesture controls say. A button's row tapped lists the choices, the one set
+    /// blue; a choice tapped sets it and comes back.
+    fn pen_buttons_page(&mut self, ui: &mut Ui, look: &mut Look, body: Rect, prefs: &mut Prefs) -> Option<Tapped> {
+        let label = |a: Option<procraft_core::QuickAction>| {
+            a.map_or("Gesture controls".to_owned(), procraft_core::quick_action_label)
+        };
+        let title = match self.pen_picking {
+            None => "Pen buttons",
+            Some(false) => "Pen button",
+            Some(true) => "Pen second button",
+        };
+        // the plugins' actions a button can run, of those on: after the app's own, by their labels
+        let plugin_actions = prefs.plugins.actions_in(procraft_core::PluginPlace::Pen);
+        let plugin_set = |prefs: &Prefs, k: usize| {
+            let key = prefs.pen_button_plugins.get(k).cloned().flatten()?;
+            plugin_actions.iter().position(|a| a.key == key)
+        };
+        if self.page_header(ui, look, body, title) {
+            // back from the choices to the buttons
+            if self.pen_picking.take().is_some() {
+                self.page = Page::PenButtons;
+            }
+            return None;
+        }
+        let (left, right) = (body.left() + 12.0, body.right() - 12.0);
+        let top = body.top() + 12.0 + 44.0 + 8.0;
+        let Some(second) = self.pen_picking else {
+            let mut y = top;
+            for (k, heading) in ["Pen button", "Pen second button"].into_iter().enumerate() {
+                y += 6.0;
+                text(
+                    ui.painter(),
+                    pos2(left + 14.0, y),
+                    Align2::LEFT_TOP,
+                    heading,
+                    17.0,
+                    Weight::Bold,
+                    argb(CURSOR_HEADING),
+                );
+                y += 21.0 + 8.0;
+                let row = Rect::from_min_size(pos2(left, y), vec2(right - left, CHOICE_HEIGHT));
+                let set = match plugin_set(prefs, k).and_then(|at| plugin_actions.get(at)) {
+                    Some(action) => action.label.clone(),
+                    None => label(prefs.pen_buttons.get(k).copied().flatten()),
+                };
+                // one row saying what it is set to, none of it blue
+                if choice_group(ui, row, &[set.as_str()], 1, 10 + k).is_some() {
+                    self.pen_picking = Some(k == 1);
+                }
+                y = row.bottom();
+            }
+            return None;
+        };
+        let choices = procraft_core::pen_button_choices();
+        let mut labels: Vec<String> = choices.iter().map(|&a| label(a)).collect();
+        labels.extend(plugin_actions.iter().map(|a| a.label.clone()));
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let at = usize::from(second);
+        let set = prefs.pen_buttons.get(at).copied().flatten();
+        let chosen = match plugin_set(prefs, at) {
+            Some(k) => choices.len() + k,
+            None => choices.iter().position(|&c| c == set).unwrap_or(0),
+        };
+        let list = Rect::from_min_max(pos2(left, top), pos2(right, body.bottom()));
+        let mut picked = None;
+        ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+            ScrollArea::vertical()
+                .id_salt("pen button choices")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    let (group, _) = ui
+                        .allocate_exact_size(vec2(right - left, choices_height(labels.len(), chosen)), Sense::hover());
+                    picked = choice_group(ui, group, &labels, chosen, 20);
+                    ui.add_space(13.0);
+                });
+        });
+        let i = picked?;
+        if prefs.pen_buttons.len() < 2 {
+            prefs.pen_buttons.resize(2, None);
+        }
+        if prefs.pen_button_plugins.len() < 2 {
+            prefs.pen_button_plugins.resize(2, None);
+        }
+        // a plugin's action in place of the app's, or the app's and none of a plugin's
+        let plugin = i.checked_sub(choices.len()).and_then(|k| plugin_actions.get(k)).map(|a| a.key.clone());
+        if let Some(slot) = prefs.pen_buttons.get_mut(at) {
+            *slot = choices.get(i).copied().flatten();
+        }
+        if let Some(slot) = prefs.pen_button_plugins.get_mut(at) {
+            *slot = plugin;
+        }
+        self.pen_picking = None;
+        Some(Tapped::Act(Act::Prefs))
     }
 
     /// Advanced cursor settings: when the brush cursor shows, and how it is drawn.
@@ -1324,6 +1455,36 @@ fn controls_show(plugin: &PluginInfo) -> bool {
     plugin.on && plugin.problem.is_none()
 }
 
+/// A feature's head on a card (interface 16): its padding above and below, its name's height, and
+/// the room its words leave for its switch.
+const FEATURE_PAD: f32 = 10.0;
+const FEATURE_NAME: f32 = 21.0;
+const FEATURE_ROOM: f32 = 16.0 + 8.0 + 63.0 + 12.0;
+
+/// How tall `feature`'s head is on a card `width` wide.
+fn feature_head_height(painter: &Painter, feature: &procraft_core::PluginFeature, width: f32) -> f32 {
+    let said = if feature.description.is_empty() {
+        0.0
+    } else {
+        4.0 + wrapped(painter, &feature.description, 14.0, Weight::Regular, Color32::WHITE, width - FEATURE_ROOM)
+            .size()
+            .y
+    };
+    2.0 * FEATURE_PAD + FEATURE_NAME + said
+}
+
+/// How tall `control` is as a card's row, its line above it with it.
+fn control_height(control: &PluginControl) -> f32 {
+    match control {
+        PluginControl::Switch { .. }
+        | PluginControl::File { .. }
+        | PluginControl::Texture { .. }
+        | PluginControl::Folder { .. } => 1.0 + ROW_HEIGHT,
+        PluginControl::Slider { control } if !plugin_slider_choices(control.clone()).is_empty() => 1.0 + ROW_HEIGHT,
+        PluginControl::Slider { .. } => 1.0 + SLIDE_HEIGHT,
+    }
+}
+
 /// A row under a card's controls.
 #[derive(Clone, Copy)]
 enum CardRow {
@@ -1337,7 +1498,9 @@ enum CardRow {
 /// What can be done with `plugin`: what it does when tapped, once it's on; it is on or off; and
 /// what was imported can go.
 fn card_rows(plugin: &PluginInfo) -> Vec<CardRow> {
-    let actions = (0..plugin.actions.len()).filter(|_| controls_show(plugin)).map(CardRow::Action);
+    // (a plugin of features has its actions under them)
+    let flat = controls_show(plugin) && plugin.features.is_empty();
+    let actions = (0..plugin.actions.len()).filter(|_| flat).map(CardRow::Action);
     let mut rows: Vec<CardRow> = actions.collect();
     rows.push(if plugin.on { CardRow::TurnOff } else { CardRow::TurnOn });
     if plugin.source == PluginSource::File {
@@ -1351,16 +1514,19 @@ fn plugin_height(painter: &Painter, plugin: &PluginInfo, width: f32) -> f32 {
     let inside = width - 2.0 * PLUGIN_INSET;
     let said = wrapped(painter, &plugin.description, 14.0, Weight::Regular, Color32::WHITE, inside);
     let problem = if plugin.problem.is_some() { PLUGIN_PROBLEM } else { 0.0 };
-    let controls: f32 = plugin
-        .controls
-        .iter()
-        .filter(|_| controls_show(plugin))
-        .map(|c| match c {
-            PluginControl::Switch { .. } | PluginControl::File { .. } => 1.0 + ROW_HEIGHT,
-            PluginControl::Slider { control } if !plugin_slider_choices(control.clone()).is_empty() => 1.0 + ROW_HEIGHT,
-            PluginControl::Slider { .. } => 1.0 + SLIDE_HEIGHT,
-        })
-        .sum();
+    let controls: f32 = if !controls_show(plugin) {
+        0.0
+    } else if plugin.features.is_empty() {
+        plugin.controls.iter().map(control_height).sum()
+    } else {
+        let under = |f: &procraft_core::PluginFeature| {
+            let rows: f32 = f.controls.iter().map(control_height).sum();
+            if f.control.on { rows + f.actions.len() as f32 * (1.0 + ROW_HEIGHT) } else { 0.0 }
+        };
+        // its own controls at the top (a folder of the whole plugin's), then each feature
+        let top: f32 = plugin.top.iter().map(control_height).sum();
+        top + plugin.features.iter().map(|f| 1.0 + feature_head_height(painter, f, width) + under(f)).sum::<f32>()
+    };
     let rows = card_rows(plugin).len() as f32 * (1.0 + ROW_HEIGHT);
     PLUGIN_HEAD + said.size().y + problem + PLUGIN_FOOT + controls + rows
 }
@@ -1381,6 +1547,7 @@ fn plugin_card(
     moved: &mut Option<(String, f32)>,
     action: &mut Option<String>,
     choice: &mut Option<PluginChoice>,
+    textures: &mut Option<String>,
     remove: &mut Option<PluginInfo>,
 ) -> (bool, egui::Response, Rect) {
     let width = ui.available_width();
@@ -1404,89 +1571,64 @@ fn plugin_card(
     let head = ui.interact(head_rect, ui.scope_id().with(("plugin head", g)), Sense::click());
     let line = |y: f32| Rect::from_min_size(pos2(area.left(), y), vec2(width, 1.0));
     let mut changed = false;
-    for (i, control) in plugin.controls.iter().enumerate().filter(|_| controls_show(plugin)) {
-        painter.rect_filled(line(y), 0, argb(ACTIONS_SEPARATOR));
-        y += 1.0;
-        match control {
-            PluginControl::Switch { control } => {
-                let cell = Rect::from_min_size(pos2(area.left(), y), vec2(width, ROW_HEIGHT));
+    if controls_show(plugin) && !plugin.features.is_empty() {
+        // its own, under none of its features (a folder of the whole plugin's)
+        for (i, control) in plugin.top.iter().enumerate() {
+            painter.rect_filled(line(y), 0, argb(ACTIONS_SEPARATOR));
+            y += 1.0;
+            changed |= card_control(ui, &painter, area, &mut y, (g, 90 + i), control, plugins, moved, choice, textures);
+        }
+        // made of features: each a heading with its switch, what comes under it while it is on
+        for (f, feature) in plugin.features.iter().enumerate() {
+            painter.rect_filled(line(y), 0, argb(ACTIONS_SEPARATOR));
+            y += 1.0;
+            let tall = feature_head_height(&painter, feature, width);
+            let cell = Rect::from_min_size(pos2(area.left(), y), vec2(width, tall));
+            let switch = &feature.control;
+            let name_at = pos2(cell.left() + 16.0, cell.top() + FEATURE_PAD);
+            text(&painter, name_at, Align2::LEFT_TOP, &switch.label, 17.0, Weight::SemiBold, argb(PANEL_TITLE));
+            if !feature.description.is_empty() {
+                let said = wrapped(
+                    &painter,
+                    &feature.description,
+                    14.0,
+                    Weight::Regular,
+                    argb(ACTIONS_ROW),
+                    width - FEATURE_ROOM,
+                );
+                painter.galley(pos2(cell.left() + 16.0, name_at.y + FEATURE_NAME + 4.0), said, argb(ACTIONS_ROW));
+            }
+            let switch_at = pos2(cell.right() - 8.0 - 63.0, cell.center().y - 14.0);
+            crate::transform::switch(ui, switch_at, switch.on, &switch.key);
+            if ui.interact(cell, ui.scope_id().with(("plugin feature", g, f)), Sense::click()).clicked() {
+                changed |= plugins.set_switch(switch.key.clone(), !switch.on);
+            }
+            y += tall;
+            if !switch.on {
+                continue;
+            }
+            for (i, control) in feature.controls.iter().enumerate() {
+                painter.rect_filled(line(y), 0, argb(ACTIONS_SEPARATOR));
+                y += 1.0;
+                let at = (g, (f + 1) * 100 + i);
+                changed |= card_control(ui, &painter, area, &mut y, at, control, plugins, moved, choice, textures);
+            }
+            for (a, act) in feature.actions.iter().enumerate() {
+                painter.rect_filled(line(y), 0, argb(ACTIONS_SEPARATOR));
+                let cell = Rect::from_min_size(pos2(area.left(), y + 1.0), vec2(width, ROW_HEIGHT));
                 let at = pos2(cell.left() + 16.0, cell.center().y);
-                text(&painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
-                let switch_at = pos2(cell.right() - 8.0 - 63.0, cell.center().y - 14.0);
-                crate::transform::switch(ui, switch_at, control.on, &control.key);
-                if ui.interact(cell, ui.scope_id().with(("plugin switch", g, i)), Sense::click()).clicked() {
-                    changed |= plugins.set_switch(control.key.clone(), !control.on);
+                text(&painter, at, Align2::LEFT_CENTER, &act.label, 17.0, Weight::Regular, argb(pc::ACCENT));
+                if ui.interact(cell, ui.scope_id().with(("plugin feature action", g, f, a)), Sense::click()).clicked() {
+                    *action = Some(act.key.clone());
                 }
-                y += ROW_HEIGHT;
+                y += 1.0 + ROW_HEIGHT;
             }
-            PluginControl::Slider { control } if !plugin_slider_choices(control.clone()).is_empty() => {
-                // its label, the one chosen in blue; a click opens a menu of them
-                let cell = Rect::from_min_size(pos2(area.left(), y), vec2(width, ROW_HEIGHT));
-                let at = pos2(cell.left() + 16.0, cell.center().y);
-                text(&painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
-                let right = pos2(cell.right() - 16.0, cell.center().y);
-                let shown = plugin_slider_shown(control.clone(), control.value);
-                text(&painter, right, Align2::RIGHT_CENTER, &shown, 17.0, Weight::Regular, argb(pc::ACCENT));
-                let clicked = ui.interact(cell, ui.scope_id().with(("plugin choice", g, i)), Sense::click()).clicked();
-                if clicked || choice.as_ref().is_some_and(|c| c.slider.key == control.key) {
-                    let clicked = clicked || choice.as_ref().is_some_and(|c| c.clicked);
-                    *choice = Some(PluginChoice { slider: control.clone(), row: cell, clicked });
-                }
-                y += ROW_HEIGHT;
-            }
-            PluginControl::Slider { control } => {
-                let cell = Rect::from_min_size(pos2(area.left(), y), vec2(width, SLIDE_HEIGHT));
-                let held = moved.as_ref().filter(|(key, _)| *key == control.key).map(|(_, value)| *value);
-                let value = held.unwrap_or(control.value);
-                let shown = plugin_slider_shown(control.clone(), value);
-                let along = plugin_slider_along(control.clone(), value);
-                if let Some(at) = slide_row(ui, cell, &control.label, &shown, along, (g, i)) {
-                    let to = plugin_slider_at(control.clone(), at);
-                    if control.live {
-                        changed |= plugins.set_slider(control.key.clone(), to).is_some();
-                    } else {
-                        *moved = Some((control.key.clone(), to));
-                    }
-                }
-                y += SLIDE_HEIGHT;
-            }
-            PluginControl::File { control } => {
-                // its label; the name of what was picked and Clear, or Import; a click picks another
-                let cell = Rect::from_min_size(pos2(area.left(), y), vec2(width, ROW_HEIGHT));
-                let at = pos2(cell.left() + 16.0, cell.center().y);
-                text(&painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
-                let right = pos2(cell.right() - 16.0, cell.center().y);
-                let clear = control.chosen.as_ref().map(|chosen| {
-                    let clear =
-                        text(&painter, right, Align2::RIGHT_CENTER, "Clear", 17.0, Weight::Regular, argb(pc::ACCENT));
-                    let shown: String = if chosen.chars().count() > 28 {
-                        chosen.chars().take(27).chain(['\u{2026}']).collect()
-                    } else {
-                        chosen.clone()
-                    };
-                    let name_at = pos2(clear.left() - 12.0, cell.center().y);
-                    text(&painter, name_at, Align2::RIGHT_CENTER, &shown, 15.0, Weight::Regular, argb(SLIDE_VALUE));
-                    clear
-                });
-                if clear.is_none() {
-                    text(&painter, right, Align2::RIGHT_CENTER, "Import", 17.0, Weight::Regular, argb(pc::ACCENT));
-                }
-                let response = ui.interact(cell, ui.scope_id().with(("plugin file", g, i)), Sense::click());
-                if response.clicked() {
-                    let on_clear =
-                        clear.zip(response.interact_pointer_pos()).is_some_and(|(c, at)| c.expand(8.0).contains(at));
-                    if on_clear {
-                        changed |= plugins.clear_file(control.key.clone());
-                    } else if let Some((bytes, name)) = crate::files::pick_sound(&control.label) {
-                        if plugins.set_sound_file(control.key.clone(), name, bytes) {
-                            changed = true;
-                        } else {
-                            crate::files::say("This sound couldn't be used. On the computer, pick a WAV file.");
-                        }
-                    }
-                }
-                y += ROW_HEIGHT;
-            }
+        }
+    } else {
+        for (i, control) in plugin.controls.iter().enumerate().filter(|_| controls_show(plugin)) {
+            painter.rect_filled(line(y), 0, argb(ACTIONS_SEPARATOR));
+            y += 1.0;
+            changed |= card_control(ui, &painter, area, &mut y, (g, i), control, plugins, moved, choice, textures);
         }
     }
     for (r, row) in card_rows(plugin).into_iter().enumerate() {
@@ -1514,11 +1656,172 @@ fn plugin_card(
     (changed, head, area)
 }
 
+/// One of a plugin card's controls, whatever it is, drawn at `y` (moved past it), `at` its card's
+/// place and its own for what it is told, as [`plugin_card`] has it: whether a value changed.
+#[allow(clippy::too_many_arguments)]
+fn card_control(
+    ui: &mut Ui,
+    painter: &Painter,
+    area: Rect,
+    y: &mut f32,
+    (g, i): (usize, usize),
+    control: &PluginControl,
+    plugins: &Plugins,
+    moved: &mut Option<(String, f32)>,
+    choice: &mut Option<PluginChoice>,
+    textures: &mut Option<String>,
+) -> bool {
+    let width = area.width();
+    let mut changed = false;
+    match control {
+        PluginControl::Switch { control } => {
+            let cell = Rect::from_min_size(pos2(area.left(), *y), vec2(width, ROW_HEIGHT));
+            let at = pos2(cell.left() + 16.0, cell.center().y);
+            text(painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
+            let switch_at = pos2(cell.right() - 8.0 - 63.0, cell.center().y - 14.0);
+            crate::transform::switch(ui, switch_at, control.on, &control.key);
+            if ui.interact(cell, ui.scope_id().with(("plugin switch", g, i)), Sense::click()).clicked() {
+                changed |= plugins.set_switch(control.key.clone(), !control.on);
+            }
+            *y += ROW_HEIGHT;
+        }
+        PluginControl::Slider { control } if !plugin_slider_choices(control.clone()).is_empty() => {
+            // its label, the one chosen in blue; a click opens a menu of them
+            let cell = Rect::from_min_size(pos2(area.left(), *y), vec2(width, ROW_HEIGHT));
+            let at = pos2(cell.left() + 16.0, cell.center().y);
+            text(painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
+            let right = pos2(cell.right() - 16.0, cell.center().y);
+            let shown = plugin_slider_shown(control.clone(), control.value);
+            text(painter, right, Align2::RIGHT_CENTER, &shown, 17.0, Weight::Regular, argb(pc::ACCENT));
+            let clicked = ui.interact(cell, ui.scope_id().with(("plugin choice", g, i)), Sense::click()).clicked();
+            if clicked || choice.as_ref().is_some_and(|c| c.slider.key == control.key) {
+                let clicked = clicked || choice.as_ref().is_some_and(|c| c.clicked);
+                *choice = Some(PluginChoice { slider: control.clone(), row: cell, clicked });
+            }
+            *y += ROW_HEIGHT;
+        }
+        PluginControl::Slider { control } => {
+            let cell = Rect::from_min_size(pos2(area.left(), *y), vec2(width, SLIDE_HEIGHT));
+            let held = moved.as_ref().filter(|(key, _)| *key == control.key).map(|(_, value)| *value);
+            let value = held.unwrap_or(control.value);
+            let shown = plugin_slider_shown(control.clone(), value);
+            let along = plugin_slider_along(control.clone(), value);
+            if let Some(at) = slide_row(ui, cell, &control.label, &shown, along, (g, i)) {
+                let to = plugin_slider_at(control.clone(), at);
+                if control.live {
+                    changed |= plugins.set_slider(control.key.clone(), to).is_some();
+                } else {
+                    *moved = Some((control.key.clone(), to));
+                }
+            }
+            *y += SLIDE_HEIGHT;
+        }
+        PluginControl::Texture { control } => {
+            // its label, the texture chosen in blue; a click opens the Textures sheet
+            let cell = Rect::from_min_size(pos2(area.left(), *y), vec2(width, ROW_HEIGHT));
+            let at = pos2(cell.left() + 16.0, cell.center().y);
+            text(painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
+            let right = pos2(cell.right() - 16.0, cell.center().y);
+            let shown = crate::textures::chosen_name(plugins, control);
+            text(painter, right, Align2::RIGHT_CENTER, &shown, 17.0, Weight::Regular, argb(pc::ACCENT));
+            if ui.interact(cell, ui.scope_id().with(("plugin texture", g, i)), Sense::click()).clicked() {
+                *textures = Some(control.key.clone());
+            }
+            *y += ROW_HEIGHT;
+        }
+        PluginControl::Folder { control } => {
+            // its label; the folder's name and Clear, or Choose; a click picks another
+            let cell = Rect::from_min_size(pos2(area.left(), *y), vec2(width, ROW_HEIGHT));
+            let at = pos2(cell.left() + 16.0, cell.center().y);
+            text(painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
+            let right = pos2(cell.right() - 16.0, cell.center().y);
+            let clear = control.chosen.as_ref().map(|chosen| {
+                let clear =
+                    text(painter, right, Align2::RIGHT_CENTER, "Clear", 17.0, Weight::Regular, argb(pc::ACCENT));
+                let shown: String = if chosen.chars().count() > 28 {
+                    chosen.chars().take(27).chain(['\u{2026}']).collect()
+                } else {
+                    chosen.clone()
+                };
+                let name_at = pos2(clear.left() - 12.0, cell.center().y);
+                text(painter, name_at, Align2::RIGHT_CENTER, &shown, 15.0, Weight::Regular, argb(SLIDE_VALUE));
+                clear
+            });
+            if clear.is_none() {
+                text(painter, right, Align2::RIGHT_CENTER, "Choose", 17.0, Weight::Regular, argb(pc::ACCENT));
+            }
+            let response = ui.interact(cell, ui.scope_id().with(("plugin folder", g, i)), Sense::click());
+            if response.clicked() {
+                let on_clear =
+                    clear.zip(response.interact_pointer_pos()).is_some_and(|(c, at)| c.expand(8.0).contains(at));
+                if on_clear {
+                    changed |= plugins.clear_file(control.key.clone());
+                } else if let Some((location, name)) = crate::files::pick_plugin_folder(&control.label) {
+                    if plugins.set_folder(control.key.clone(), location, name) {
+                        changed = true;
+                    } else {
+                        crate::files::say("This folder couldn't be used.");
+                    }
+                }
+            }
+            *y += ROW_HEIGHT;
+        }
+        PluginControl::File { control } => {
+            // its label; the name of what was picked and Clear, or Import; a click picks another
+            let cell = Rect::from_min_size(pos2(area.left(), *y), vec2(width, ROW_HEIGHT));
+            let at = pos2(cell.left() + 16.0, cell.center().y);
+            text(painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
+            let right = pos2(cell.right() - 16.0, cell.center().y);
+            let clear = control.chosen.as_ref().map(|chosen| {
+                let clear =
+                    text(painter, right, Align2::RIGHT_CENTER, "Clear", 17.0, Weight::Regular, argb(pc::ACCENT));
+                let shown: String = if chosen.chars().count() > 28 {
+                    chosen.chars().take(27).chain(['\u{2026}']).collect()
+                } else {
+                    chosen.clone()
+                };
+                let name_at = pos2(clear.left() - 12.0, cell.center().y);
+                text(painter, name_at, Align2::RIGHT_CENTER, &shown, 15.0, Weight::Regular, argb(SLIDE_VALUE));
+                clear
+            });
+            if clear.is_none() {
+                text(painter, right, Align2::RIGHT_CENTER, "Import", 17.0, Weight::Regular, argb(pc::ACCENT));
+            }
+            let response = ui.interact(cell, ui.scope_id().with(("plugin file", g, i)), Sense::click());
+            if response.clicked() {
+                let on_clear =
+                    clear.zip(response.interact_pointer_pos()).is_some_and(|(c, at)| c.expand(8.0).contains(at));
+                if on_clear {
+                    changed |= plugins.clear_file(control.key.clone());
+                } else if control.accepts == procraft_core::PluginFileKind::Picture {
+                    if let Some((bytes, name)) = crate::files::pick_control_picture(&control.label) {
+                        if plugins.set_picture_file(control.key.clone(), name, bytes) {
+                            changed = true;
+                        } else {
+                            crate::files::say("This picture couldn't be used. Pick a PNG or a JPEG.");
+                        }
+                    }
+                } else if let Some((bytes, name)) = crate::files::pick_sound(&control.label) {
+                    if plugins.set_sound_file(control.key.clone(), name, bytes) {
+                        changed = true;
+                    } else {
+                        crate::files::say("This sound couldn't be used. On the computer, pick a WAV file.");
+                    }
+                }
+            }
+            *y += ROW_HEIGHT;
+        }
+    }
+    changed
+}
+
 /// What a plugin's panel was asked.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PanelTouch {
     /// Row `.0` touched with `.1` (a slider's, a switch's 1 or 0, a choice's place, 1 for a button).
     Touch(u32, f32),
+    /// A row of the plugin's texture control kept under `.0` clicked: its Textures sheet opens.
+    Textures(String),
     Close,
 }
 
@@ -1533,26 +1836,146 @@ fn panel_value(value: f32, step: f32, unit: &str) -> String {
 }
 
 /// The height of `row` in a plugin's panel, `inside` wide.
+/// How far apart a plugin panel's colours are, centre to centre.
+const SWATCH_STEP: f32 = 30.0;
+
 fn panel_row_height(painter: &Painter, row: &PanelRow, inside: f32) -> f32 {
     match row {
         PanelRow::Text { text } => {
             wrapped(painter, text, 15.0, Weight::Regular, Color32::WHITE, inside - 32.0).size().y + 22.0
         }
         PanelRow::Slider { .. } => SLIDE_HEIGHT,
+        // its label, then its brushes under it
+        PanelRow::Brushes { .. } => BRUSHES_ROW_HEIGHT,
         _ => ROW_HEIGHT,
     }
+}
+
+/// A plugin panel's row of brushes: how tall, how big each brush's disc is and how far apart.
+const BRUSHES_ROW_HEIGHT: f32 = 86.0;
+const BRUSH_DISC: f32 = 34.0;
+const BRUSH_STEP: f32 = 38.0;
+
+/// The sample strokes a plugin's panel shows its brushes with, by their place in the library, as
+/// drawn so far.
+pub type Strokes = HashMap<(u32, u32), egui::TextureId>;
+
+/// A brush on a plugin's panel or ring: its sample stroke (`stroke`, once drawn) in a disc of
+/// `radius` about `centre`, white on the accent while `chosen`.
+fn brush_disc(painter: &Painter, centre: Pos2, radius: f32, stroke: Option<egui::TextureId>, chosen: bool) {
+    painter.circle_filled(centre, radius, if chosen { argb(pc::ACCENT) } else { argb(pc::ACTION_DISC) });
+    if let Some(stroke) = stroke {
+        // the stroke's middle part across the disc, in the square inside it
+        let side = radius * std::f32::consts::SQRT_2;
+        let shown = Rect::from_center_size(centre, vec2(side, side));
+        let uv = Rect::from_min_max(pos2(0.3, 0.0), pos2(0.7, 1.0));
+        let tint = if crate::look::light() && !chosen { Color32::BLACK } else { Color32::WHITE };
+        painter.image(stroke, shown, uv, tint);
+    }
+    let edge = if chosen { Stroke::new(2.0, argb(pc::ACCENT)) } else { Stroke::new(1.0, argb(RING_EDGE)) };
+    painter.circle_stroke(centre, radius, edge);
+}
+
+const RING_EDGE: Themed = Themed(0xFF5A5A5A, 0xFFC0C0C0);
+
+/// How far a ring's first row runs from its middle and each next one further, a colour's disc
+/// and a brush's across, and how far its backdrop reaches past its outer row.
+const RING_FIRST: f32 = 62.0;
+const RING_STEP: f32 = 58.0;
+const RING_COLOUR: f32 = 34.0;
+const RING_BRUSH: f32 = 52.0;
+const RING_MARGIN: f32 = 12.0;
+
+/// How far a ring of `rows` reaches from its middle, its backdrop with it.
+fn ring_reach(rows: &[PanelRow]) -> f32 {
+    let outer = rows.len().saturating_sub(1) as f32;
+    let item = if matches!(rows.last(), Some(PanelRow::Brushes { .. })) { RING_BRUSH } else { RING_COLOUR };
+    RING_FIRST + RING_STEP * outer + item / 2.0 + RING_MARGIN
+}
+
+/// Where item `i` of `n` sits on row `k` of a ring about `middle`, the first at the top and the
+/// rest clockwise, and how big it is (`base` at most): they never touch, 6 apart at least.
+fn ring_item(middle: Pos2, k: usize, i: usize, n: usize, base: f32) -> (Pos2, f32) {
+    let radius = RING_FIRST + RING_STEP * k as f32;
+    let n = n.max(1);
+    let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * i as f32 / n as f32;
+    // as far apart as their middles are, less 6
+    let size = if n == 1 { base } else { base.min(2.0 * radius * (std::f32::consts::PI / n as f32).sin() - 6.0) };
+    (middle + vec2(angle.cos(), angle.sin()) * radius, size)
+}
+
+/// A plugin's panel shown as a ring (interface 11) about where its action came from (`panel.at`,
+/// window pixels; else the window's middle), kept in the window where it fits: its rows of colours
+/// and brushes each a ring, the first innermost, on a round backdrop. A tap on a colour or a brush
+/// is told as its place; one off the backdrop closes it.
+pub fn plugin_ring(ctx: &egui::Context, panel: &PluginPanel, strokes: &Strokes) -> Option<PanelTouch> {
+    let screen = ctx.content_rect();
+    let reach = ring_reach(&panel.rows);
+    let want = panel.at.map_or(screen.center(), |at| pos2(at.x, at.y) / ctx.pixels_per_point());
+    let inside = |v: f32, least: f32, most: f32| {
+        if most - least < reach * 2.0 { (least + most) / 2.0 } else { v.clamp(least + reach, most - reach) }
+    };
+    let middle = pos2(inside(want.x, screen.left(), screen.right()), inside(want.y, screen.top(), screen.bottom()));
+    let mut asked = None;
+    egui::Area::new(Id::unique("plugin ring")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
+        let around = ui.allocate_rect(screen, Sense::click());
+        let painter = ui.painter().clone();
+        painter.circle_filled(middle, reach, argb(panel::POPOVER_FROST));
+        painter.circle_stroke(middle, 4.0, Stroke::new(1.5, argb(PANEL_TITLE)));
+        for (k, row) in panel.rows.iter().enumerate() {
+            let (n, base, chosen) = match row {
+                PanelRow::Colours { colours, chosen, .. } => (colours.len(), RING_COLOUR, *chosen),
+                PanelRow::Brushes { brushes, chosen, .. } => (brushes.len(), RING_BRUSH, *chosen),
+                _ => continue,
+            };
+            for i in 0..n {
+                let (centre, size) = ring_item(middle, k, i, n, base);
+                let picked = chosen == Some(i as u32);
+                match row {
+                    PanelRow::Colours { colours, .. } => {
+                        let [_, r, g, b] = colours.get(i).copied().unwrap_or(0).to_be_bytes();
+                        let fill = Color32::from_rgb(r, g, b);
+                        if picked {
+                            painter.circle_stroke(centre, size / 2.0 - 1.0, Stroke::new(2.0, argb(pc::TEXT)));
+                            painter.circle_filled(centre, size / 2.0 - 5.0, fill);
+                        } else {
+                            painter.circle_filled(centre, size / 2.0, fill);
+                        }
+                    }
+                    PanelRow::Brushes { brushes, .. } => {
+                        let stroke = brushes.get(i).and_then(|b| strokes.get(&(b.set, b.index)).copied());
+                        brush_disc(&painter, centre, size / 2.0, stroke, picked);
+                    }
+                    _ => {}
+                }
+                let spot = Rect::from_center_size(centre, vec2(size, size));
+                if ui.interact(spot, ui.scope_id().with(("ring item", k, i)), Sense::click()).clicked() {
+                    asked = Some(PanelTouch::Touch(k as u32, i as f32));
+                }
+            }
+        }
+        // off the backdrop: closed, as Done would
+        let off = around.interact_pointer_pos().is_some_and(|p| p.distance(middle) > reach);
+        if asked.is_none() && around.clicked() && off {
+            asked = Some(PanelTouch::Close);
+        }
+    });
+    asked
 }
 
 /// A plugin's panel, floating under the bar at the window's right: its title and Done, then its rows
 /// on a card as the Actions panel's are. A slider moved is told as it lets go (`held` keeps where it
 /// is meanwhile); anything else at once. Returns what was asked. It shows at the size a plugin
 /// gives floating panels, its top right corner where it stays.
+#[allow(clippy::too_many_arguments)]
 pub fn plugin_panel(
     ctx: &egui::Context,
     look: &mut Look,
+    plugins: &Plugins,
     panel: &PluginPanel,
     held: &mut Option<(usize, f32)>,
     backdrops: &mut Vec<f32>,
+    strokes: &Strokes,
 ) -> Option<PanelTouch> {
     let screen = ctx.content_rect();
     let k = panel::part_scale(ctx, procraft_core::InterfacePart::Floating);
@@ -1686,6 +2109,63 @@ pub fn plugin_panel(
                                     asked = Some(PanelTouch::Touch(row_at, 1.0));
                                 }
                             }
+                            // its label, then each colour a disc from the row's right end, the
+                            // one chosen ringed
+                            PanelRow::Colours { label, colours, chosen } => {
+                                text(
+                                    &painter,
+                                    label_at,
+                                    Align2::LEFT_CENTER,
+                                    label,
+                                    17.0,
+                                    Weight::Regular,
+                                    argb(ACTIONS_ROW),
+                                );
+                                let count = colours.len();
+                                for (at, &colour) in colours.iter().enumerate() {
+                                    let x =
+                                        cell.right() - 10.0 - SWATCH_STEP / 2.0 - (count - 1 - at) as f32 * SWATCH_STEP;
+                                    let centre = pos2(x, cell.center().y);
+                                    let [_, r, g, b] = colour.to_be_bytes();
+                                    let fill = Color32::from_rgb(r, g, b);
+                                    if *chosen == Some(at as u32) {
+                                        painter.circle_stroke(centre, 11.0, egui::Stroke::new(2.0, argb(ACTIONS_ROW)));
+                                        painter.circle_filled(centre, 8.0, fill);
+                                    } else {
+                                        painter.circle_filled(centre, 12.0, fill);
+                                    }
+                                    let spot = Rect::from_center_size(centre, vec2(SWATCH_STEP, cell.height()));
+                                    let id = ui.scope_id().with(("plugin colour", i, at));
+                                    if ui.interact(spot, id, Sense::click()).clicked() {
+                                        asked = Some(PanelTouch::Touch(row_at, at as f32));
+                                    }
+                                }
+                            }
+                            // its label, then each brush's stroke in a disc under it, the one
+                            // chosen on the accent
+                            PanelRow::Brushes { label, brushes, chosen } => {
+                                let label_at = pos2(cell.left() + 16.0, cell.top() + 22.0);
+                                text(
+                                    &painter,
+                                    label_at,
+                                    Align2::LEFT_CENTER,
+                                    label,
+                                    17.0,
+                                    Weight::Regular,
+                                    argb(ACTIONS_ROW),
+                                );
+                                for (at, b) in brushes.iter().enumerate() {
+                                    let x = cell.left() + 16.0 + BRUSH_DISC / 2.0 + at as f32 * BRUSH_STEP;
+                                    let centre = pos2(x, cell.top() + 44.0 + BRUSH_DISC / 2.0);
+                                    let stroke = strokes.get(&(b.set, b.index)).copied();
+                                    brush_disc(&painter, centre, BRUSH_DISC / 2.0, stroke, *chosen == Some(at as u32));
+                                    let spot = Rect::from_center_size(centre, vec2(BRUSH_STEP, BRUSH_STEP));
+                                    let id = ui.scope_id().with(("plugin brush", i, at));
+                                    if ui.interact(spot, id, Sense::click()).clicked() {
+                                        asked = Some(PanelTouch::Touch(row_at, at as f32));
+                                    }
+                                }
+                            }
                             // its label, and the keys at its end as a file control's name is
                             PanelRow::Keys { label, keys } => {
                                 text(
@@ -1711,6 +2191,40 @@ pub fn plugin_panel(
                                     asked = Some(PanelTouch::Touch(row_at, 1.0));
                                 }
                             }
+                            // one of its texture controls, as its card shows it (others show nothing)
+                            PanelRow::Control { key } => {
+                                let texture =
+                                    plugins.plugins().into_iter().flat_map(|p| p.controls).find_map(|c| match c {
+                                        PluginControl::Texture { control } if control.key == *key => Some(control),
+                                        _ => None,
+                                    });
+                                if let Some(control) = texture {
+                                    let ink = argb(ACTIONS_ROW);
+                                    text(
+                                        &painter,
+                                        label_at,
+                                        Align2::LEFT_CENTER,
+                                        &control.label,
+                                        17.0,
+                                        Weight::Regular,
+                                        ink,
+                                    );
+                                    let right = pos2(cell.right() - 16.0, cell.center().y);
+                                    let shown = crate::textures::chosen_name(plugins, &control);
+                                    text(
+                                        &painter,
+                                        right,
+                                        Align2::RIGHT_CENTER,
+                                        &shown,
+                                        17.0,
+                                        Weight::Regular,
+                                        argb(pc::ACCENT),
+                                    );
+                                    if tapped(ui) {
+                                        asked = Some(PanelTouch::Textures(key.clone()));
+                                    }
+                                }
+                            }
                         }
                         y += h;
                     }
@@ -1721,7 +2235,7 @@ pub fn plugin_panel(
     if !ctx.input(|i| i.pointer.any_down())
         && let Some((row, value)) = held.take()
     {
-        asked = asked.or(Some(PanelTouch::Touch(row as u32, value)));
+        asked = asked.take().or(Some(PanelTouch::Touch(row as u32, value)));
     }
     asked
 }
@@ -2029,8 +2543,15 @@ mod tests {
                     chosen: 1,
                 },
                 PanelRow::Keys { label: "Undo".to_owned(), keys: "Ctrl+Z".to_owned() },
+                PanelRow::Colours {
+                    label: "Colour".to_owned(),
+                    colours: vec![0xFF0000, 0x00FF00, 0x0000FF],
+                    chosen: None,
+                },
             ],
             key_press: false,
+            ring: false,
+            at: None,
         };
         let top = pc::BAR_HEIGHT + PANEL_MARGIN;
         let left = 1200.0 - PANEL_MARGIN - PANEL_WIDTH * scale;
@@ -2059,7 +2580,15 @@ mod tests {
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
                 panel::put_part_scales(ui.ctx(), [scale, 1.0, 1.0, 1.0, 1.0]);
-                asked = asked.or(plugin_panel(ui.ctx(), &mut look, &panel, &mut held, &mut Vec::new()));
+                asked = asked.take().or(plugin_panel(
+                    ui.ctx(),
+                    &mut look,
+                    &Plugins::new(),
+                    &panel,
+                    &mut held,
+                    &mut Vec::new(),
+                    &Strokes::new(),
+                ));
             });
             output.textures_delta.clear();
         }
@@ -2074,6 +2603,12 @@ mod tests {
         assert_eq!(panel_tapped(row(1.0)), Some(PanelTouch::Touch(1, 0.0)), "the switch turned off");
         assert_eq!(panel_tapped(row(2.0)), Some(PanelTouch::Touch(2, 0.0)), "the choice to the next, round");
         assert_eq!(panel_tapped(row(3.0)), Some(PanelTouch::Touch(3, 1.0)), "the keys");
+        // the colours from the row's right end, each its place; the label between them none
+        let colour =
+            |from_right: f32| move |r: Rect| pos2(r.right() - 25.0 - from_right * 30.0, r.top() + 82.0 + 4.0 * 45.0);
+        assert_eq!(panel_tapped(colour(0.0)), Some(PanelTouch::Touch(4, 2.0)), "the last colour");
+        assert_eq!(panel_tapped(colour(2.0)), Some(PanelTouch::Touch(4, 0.0)), "the first colour");
+        assert_eq!(panel_tapped(row(4.0)), None, "the colours' label");
         assert_eq!(panel_tapped(|r| pos2(r.right() - 40.0, r.top() + 33.0)), Some(PanelTouch::Close));
         assert_eq!(panel_tapped(|r| pos2(r.left() + 60.0, r.top() + 20.0)), None, "the title does nothing");
     }
@@ -2092,6 +2627,8 @@ mod tests {
                 PanelRow::Switch { label: "Round".to_owned(), on: true },
             ],
             key_press: false,
+            ring: false,
+            at: None,
         };
         let top = pc::BAR_HEIGHT + PANEL_MARGIN;
         let rect = Rect::from_min_size(pos2(1200.0 - PANEL_MARGIN - PANEL_WIDTH, top), vec2(PANEL_WIDTH, 300.0));
@@ -2128,11 +2665,87 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                asked = asked.or(plugin_panel(ui.ctx(), &mut look, &panel, &mut held, &mut Vec::new()));
+                asked = asked.take().or(plugin_panel(
+                    ui.ctx(),
+                    &mut look,
+                    &Plugins::new(),
+                    &panel,
+                    &mut held,
+                    &mut Vec::new(),
+                    &Strokes::new(),
+                ));
             });
             output.textures_delta.clear();
         }
         assert_eq!(asked, Some(PanelTouch::Touch(1, 0.0)), "the switch turned off");
+    }
+
+    /// What a press and lift at `at` asks of a ring of three colours and two brushes about window
+    /// pixel `about` (none: the window's middle), the window 1200 by 900 at a pixel a point.
+    fn ring_tapped(about: Option<(f32, f32)>, at: Pos2) -> Option<PanelTouch> {
+        let ctx = egui::Context::default();
+        crate::look::install_fonts(&ctx);
+        let brush = |index| procraft_core::PanelBrush { set: 0, index, name: "B".to_owned() };
+        let colours = vec![0xFF0000, 0x00FF00, 0x0000FF];
+        let panel = PluginPanel {
+            title: "Palette".to_owned(),
+            rows: vec![
+                PanelRow::Colours { label: "C".to_owned(), colours, chosen: Some(1) },
+                PanelRow::Brushes { label: "B".to_owned(), brushes: vec![brush(0), brush(1)], chosen: None },
+            ],
+            key_press: false,
+            ring: true,
+            at: about.map(|(x, y)| procraft_core::PanelPoint { x, y }),
+        };
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let (mut time, mut asked) = (0.0, None);
+        for step in 0..6 {
+            time += 1.0 / 60.0;
+            let events = match step {
+                2 => vec![Event::PointerMoved(at)],
+                3 => vec![press(at, true)],
+                4 => vec![press(at, false)],
+                _ => Vec::new(),
+            };
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                time: Some(time),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                asked = asked.take().or(plugin_ring(ui.ctx(), &panel, &Strokes::new()));
+            });
+            output.textures_delta.clear();
+        }
+        asked
+    }
+
+    #[test]
+    fn a_ring_opens_where_the_pen_was_and_tells_each_colour_and_brush_tapped() {
+        let pen = pos2(400.0, 300.0);
+        let about = Some((400.0, 300.0));
+        // the colours on the first ring from the top, clockwise; the brushes on the second
+        assert_eq!(ring_tapped(about, pen + vec2(0.0, -RING_FIRST)), Some(PanelTouch::Touch(0, 0.0)));
+        let second = ring_item(pen, 0, 1, 3, RING_COLOUR).0;
+        assert_eq!(ring_tapped(about, second), Some(PanelTouch::Touch(0, 1.0)));
+        let below = pen + vec2(0.0, RING_FIRST + RING_STEP);
+        assert_eq!(ring_tapped(about, below), Some(PanelTouch::Touch(1, 1.0)));
+        // between the rings nothing, off the backdrop closed
+        assert_eq!(ring_tapped(about, pen + vec2(0.0, 30.0)), None);
+        assert_eq!(ring_tapped(about, pos2(1000.0, 800.0)), Some(PanelTouch::Close));
+        // from its card: about the window's middle
+        let middle = pos2(600.0, 450.0);
+        assert_eq!(ring_tapped(None, middle + vec2(0.0, -RING_FIRST)), Some(PanelTouch::Touch(0, 0.0)));
+        // by a window's corner: moved in so it shows whole
+        let reach = RING_FIRST + RING_STEP + RING_BRUSH / 2.0 + RING_MARGIN;
+        let kept = pos2(reach, reach);
+        assert_eq!(ring_tapped(Some((5.0, 5.0)), kept + vec2(0.0, -RING_FIRST)), Some(PanelTouch::Touch(0, 0.0)));
     }
 
     #[test]
@@ -2493,6 +3106,150 @@ mod tests {
     }
 
     #[test]
+    fn finger_pressure_s_card_shows_its_sliders_once_it_is_on() {
+        const ID: &str = "io.github.artcraftandroid.brush-extras";
+        let dir = std::env::temp_dir().join(format!("procraft-actions-finger-pressure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut page = Page::new();
+        page.prefs.plugins = Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        assert!(page.list().iter().any(|p| p.id == ID && !p.on), "it comes with the app, off");
+        let shapes = page.run(Vec::new()).1;
+        assert!(drawn(&shapes, "Brush extras").is_some());
+        assert!(drawn(&shapes, "Finger pressure").is_none(), "off, its features don't show");
+        assert!(page.prefs.plugins.set_on(ID.to_owned(), true));
+        page.frame(Vec::new());
+        // on: a heading for each feature, Finger pressure's sliders once it is on
+        let shapes = page.run(Vec::new()).1;
+        assert!(drawn(&shapes, "Finger pressure").is_some() && drawn(&shapes, "Touch position offset").is_some());
+        assert!(drawn(&shapes, "Speed influence").is_none(), "its feature off, its sliders don't show");
+        assert!(page.prefs.plugins.set_switch(format!("{ID}.finger_pressure"), true));
+        page.frame(Vec::new());
+        let shapes = page.run(Vec::new()).1;
+        let rows = [
+            ("Speed influence", "70%"),
+            ("Start taper", "20 pt"),
+            ("End taper", "40 pt"),
+            ("Least pressure", "10%"),
+            ("Most pressure", "100%"),
+        ];
+        let mut tops = Vec::new();
+        for (label, value) in rows {
+            let (Some(at), Some(shown)) = (drawn(&shapes, label), drawn(&shapes, value)) else {
+                panic!("{label} {value}")
+            };
+            tops.push(at.y);
+            assert!(shown.x > at.x, "{value} right of {label}");
+        }
+        assert!(tops.windows(2).all(|w| w[0] < w[1]), "in the manifest's order: {tops:?}");
+        // a taper at its least reads Off
+        assert!(page.prefs.plugins.set_slider(format!("{ID}.start"), 0.0).is_some());
+        page.frame(Vec::new());
+        assert!(drawn(&page.run(Vec::new()).1, "Off").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Finger pressure's card, on, drawn on a headless GPU as the window draws the interface, at 2
+    /// pixels a point, into `PROCRAFT_DUMP/finger-pressure-card.png` (no window opens):
+    /// `PROCRAFT_DUMP=dir cargo test -p procraft-desktop dump_finger_pressure_card -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_finger_pressure_card() {
+        use procraft_gpu::wgpu;
+        const ID: &str = "io.github.artcraftandroid.brush-extras";
+        let Ok(out) = std::env::var("PROCRAFT_DUMP") else { return };
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return eprintln!("skipped: no GPU") };
+        let dir = std::env::temp_dir().join(format!("procraft-actions-finger-dump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut page = Page::new();
+        page.prefs.plugins = Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        // its card alone, on
+        for other in page.list().into_iter().filter(|p| p.id != ID) {
+            assert!(page.prefs.plugins.remove(other.id).is_some());
+        }
+        assert!(page.prefs.plugins.set_on(ID.to_owned(), true));
+        assert!(page.prefs.plugins.set_switch(format!("{ID}.finger_pressure"), true));
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        let (_, bottom) = page.cards()[0];
+        // drawn afresh at 2 pixels a point, keeping every texture the frames make (its fonts')
+        let scale = 2.0;
+        page.ctx = egui::Context::default();
+        crate::look::install_fonts(&page.ctx);
+        page.ctx.set_pixels_per_point(scale);
+        let mut textures = Vec::new();
+        let mut shapes = Vec::new();
+        for _ in 0..4 {
+            page.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 1600.0))),
+                time: Some(page.time),
+                ..RawInput::default()
+            };
+            let Page { ctx, look, actions, prefs, .. } = &mut page;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let _ = actions.plugins_page(ui, look, body(), prefs);
+            });
+            textures.extend(std::mem::take(&mut output.textures_delta.set));
+            shapes = output.shapes;
+        }
+        let ctx = page.ctx.clone();
+        assert_eq!(ctx.pixels_per_point(), scale);
+        let size = [(1200.0 * scale) as u32, (1600.0 * scale) as u32];
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("card"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
+        for (id, deltas) in &textures {
+            for delta in deltas {
+                renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
+            }
+        }
+        let jobs = ctx.tessellate(shapes, scale);
+        let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: size, pixels_per_point: scale };
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("card") });
+        let uploads = renderer.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &jobs, &screen);
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("card"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            renderer.render(&mut pass.forget_lifetime(), &jobs, &screen);
+        }
+        gpu.queue.submit(uploads.into_iter().chain([encoder.finish()]));
+        let pixels = procraft_gpu::read_texture(&gpu, &target, size[0], size[1]).unwrap();
+        let picture = image::RgbaImage::from_raw(size[0], size[1], pixels).unwrap();
+        // the page from its top to under the card
+        let (x, y) = (((body().left() - 8.0) * scale) as u32, ((body().top() - 8.0) * scale) as u32);
+        let (w, h) = (((ACTIONS_WIDTH + 16.0) * scale) as u32, ((bottom - body().top() + 24.0) * scale) as u32);
+        let card = image::imageops::crop_imm(&picture, x, y, w, h).to_image();
+        let path = std::path::Path::new(&out).join("finger-pressure-card.png");
+        card.save(&path).unwrap();
+        println!("{}", path.display());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn remove_asks_first_with_the_plugin_s_name_and_cancel_keeps_it() {
         let (mut page, dir) = with_store("remove-asks");
         assert_eq!(page.prefs.plugins.install(filter_file()), None);
@@ -2611,6 +3368,8 @@ mod tests {
     #[test]
     fn a_plugin_nothing_answers_to_draws_and_does_nothing() {
         let stranger = PluginInfo {
+            features: Vec::new(),
+            top: Vec::new(),
             brush_controls: Vec::new(),
             actions: Vec::new(),
             kinds: Vec::new(),
@@ -2668,7 +3427,7 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved, &mut None, &mut None, &mut None).0);
+                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved, &mut None, &mut None, &mut None, &mut None).0);
             });
             output.textures_delta.clear();
         };

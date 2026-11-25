@@ -58,22 +58,26 @@ impl State {
                 // the second display's own density isn't known: crisp once a pixel covers more
                 crisp_from: 1.0,
                 look: None,
+                traced: false,
             }),
         );
     }
 
+    /// The bands over what is not selected, `started` being when drawing began.
+    fn stripes_shown(&self, started: Instant) -> SelectionLook {
+        let s = self.display_scale;
+        let period = STRIPE_PERIOD_PT * s;
+        let drift = (started.elapsed().as_secs_f32() * STRIPE_SPEED_PT * s) % period;
+        SelectionLook::Stripes(Stripes { period, drift, coverage: STRIPE_COVERAGE * self.selection_visibility })
+    }
+
     /// How the selection looks, `started` being when drawing began.
     fn selection_shown(&self, started: Instant, screen: Profile) -> SelectionLook {
-        let s = self.display_scale;
         match self.selection_display {
-            SelectionDisplay::Stripes => {
-                let period = STRIPE_PERIOD_PT * s;
-                let drift = (started.elapsed().as_secs_f32() * STRIPE_SPEED_PT * s) % period;
-                SelectionLook::Stripes(Stripes { period, drift, coverage: STRIPE_COVERAGE * self.selection_visibility })
-            }
+            SelectionDisplay::Stripes => self.stripes_shown(started),
             SelectionDisplay::Tint => SelectionLook::Tint(Profile::Srgb.convert(SELECTION_TINT, screen)),
             SelectionDisplay::Fill => SelectionLook::Fill(Profile::Srgb.convert(SELECTION_FILL, screen)),
-            // the paint colour is in the canvas's colours
+            // the paint colour is in the canvas's colours (a model shows it over what is selected)
             SelectionDisplay::ColourFill => SelectionLook::Fill(self.doc.profile.convert(self.color, screen)),
         }
     }
@@ -97,8 +101,23 @@ impl State {
         screen: Profile,
         started: Instant,
     ) {
+        self.lay_frame(view, format, size, screen, started);
+        // and when it ends: a frame that took long (a weak GPU's, a third of a second) still counts
+        // as one being drawn, so a read beside the frames keeps leaving them what they lay
+        self.frame_drawn_at = Some(Instant::now());
+    }
+
+    fn lay_frame(
+        &mut self,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        screen: Profile,
+        started: Instant,
+    ) {
         self.needs_frame = false;
         self.frame_due = None;
+        self.frame_drawn_at = Some(Instant::now());
         // an HDR canvas's light above white, rolled off to what the screen shows now (white, on
         // a surface without extended range)
         if let Some(canvas) = self.canvas.as_mut() {
@@ -116,6 +135,8 @@ impl State {
         self.draw_moved_shape();
         // what runs ahead of the open stroke, once however many samples came since the last frame
         self.draw_ahead();
+        // a fill's region as it has grown since, once however many samples came
+        self.show_fill();
         // the view settling into place keeps drawing until it is there
         if self.step_view_motion() {
             self.needs_frame = true;
@@ -131,6 +152,21 @@ impl State {
         let grid = self.surround_grid(Vec2::ZERO);
         let surround = self.surround();
         let selection_shown = self.selection_shown(started, screen);
+        // Color Fill's colour shows on the canvas in the current layer's place, those above it
+        // over it; bands while that layer can't be filled
+        let fill_preview = self.colour_fill_preview();
+        let canvas_selection = match self.selection_display {
+            SelectionDisplay::ColourFill if fill_preview.is_some() => None,
+            SelectionDisplay::ColourFill => Some(self.stripes_shown(started)),
+            _ => Some(selection_shown),
+        };
+        // (a model or the drawing pad as a sphere shows the canvas as its layers are)
+        let flat = !self.scene_shown() && self.sphere.is_none();
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.set_fill_preview(fill_preview.filter(|_| flat));
+            // the line where the selection fades out, while its feathering is dragged
+            canvas.set_selection_edge(self.feather_edge && self.selection.is_some() && self.transform.is_none());
+        }
         // while a transform is open the selection shows no bands: its box shows what moves
         let banded = self.transform.is_none();
         // vector layers drawn again as fine as the screen, once the view has rested zoomed in
@@ -141,6 +177,8 @@ impl State {
         };
         // (a lasso's fill shown as it is drawn shows there too)
         self.crisp_lasso();
+        // what filter layers run, before they are drawn
+        self.give_layer_filters();
         // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
         if self.scene_shown() {
             let convert = colours_to(self.doc.profile, screen);
@@ -162,10 +200,13 @@ impl State {
         {
             // the paper the plugins give, which a canvas made since hasn't taken yet
             canvas.set_paper(gpu, self.plugin_paper.as_ref());
+            // and how much they dim the layers but the current one, likewise
+            canvas.set_dim_others(self.plugin_dim);
+            // and the picture round it, likewise
+            crate::surround::put_on(canvas, gpu, self.surround_picture.as_deref());
             let s = self.display_scale;
             // the bands over what is not selected drift, so they keep drawing
-            let shown = selection_shown;
-            let look = (canvas.has_selection() && banded).then_some(shown);
+            let look = canvas_selection.filter(|_| canvas.has_selection() && banded);
             let animating = matches!(look, Some(SelectionLook::Stripes(_)));
             let convert = colours_to(self.doc.profile, screen);
             // a canvas with a profile of its own shows through a table, made when that changes
@@ -182,7 +223,7 @@ impl State {
                 sigma: BACKDROP_SIGMA_PT * s,
             });
             // a dropped colour's fill spreading in: the canvas as it was over it, but for a hole
-            match self.reveal.as_ref().map(|r| r.hole_at(Instant::now())) {
+            match self.reveal.as_mut().map(|r| r.hole_at(Instant::now())) {
                 Some(Some(hole)) => {
                     canvas.veil_hole(&hole);
                     self.needs_frame = true;
@@ -205,7 +246,7 @@ impl State {
                 Some(sharp) => (&mut sharp.canvas, &mut sharp.doc, sharp.to_screen),
                 None => (canvas, &mut self.doc, to_screen),
             };
-            let look = (canvas.has_selection() && banded).then_some(shown);
+            let look = (canvas.has_selection() && banded).then_some(selection_shown);
             canvas.render(
                 gpu,
                 doc,
@@ -222,6 +263,7 @@ impl State {
                     lut,
                     crisp_from: self.display_scale,
                     look: shown_look,
+                    traced: true,
                 }),
             );
             // caches still being remade: another frame soon, and the artwork isn't shown yet
@@ -232,9 +274,14 @@ impl State {
             } else if animating {
                 self.frame_due = Some(self.stripes_due());
             }
-            // counted only when the canvas was drawn, so a first frame means the artwork shows
+            // counted only when the canvas was drawn, so a first frame means the artwork shows (and
+            // its opening didn't end the app)
             if !busy {
                 self.frames += 1;
+                if let Some(mark) = self.open_mark.take() {
+                    // (its file written off the frame's thread; on it if no thread can be made)
+                    let _ = std::thread::Builder::new().name("open mark".into()).spawn(move || drop(mark));
+                }
             }
             if let (Some(to_screen), Some(sharp)) = (over, self.crisp.as_mut()) {
                 let (sharp, doc) = (&mut sharp.canvas, &mut sharp.doc);
@@ -256,6 +303,7 @@ impl State {
                         // (it is no longer a pixel to a pixel: smoothed, never squares)
                         crisp_from: f32::INFINITY,
                         look: shown_look,
+                        traced: false,
                     }),
                 );
                 sharp.set_over(false);
@@ -266,6 +314,10 @@ impl State {
             self.frame_due = Some(self.frame_due.map_or(due, |at| at.min(due)));
         }
         self.heed_filter_run();
+        // a time-lapse frame asked for: taken once this frame has laid what it waited for (a model
+        // or the pad as a sphere lays the canvas only as a read does: taken at once)
+        let at_once = self.scene_shown() || self.sphere.is_some();
+        self.take_lapse_picture(at_once);
     }
 }
 
@@ -275,6 +327,17 @@ impl State {
 pub(crate) fn frame_spacing(hertz: f32) -> Option<Duration> {
     (hertz.is_finite() && hertz >= 1.0).then(|| Duration::from_secs_f32(0.9 / hertz.min(1000.0)))
 }
+
+/// The present mode a surface is configured with, of those it offers: Mailbox, where the screen
+/// shows the newest frame at each refresh and drops any older one waiting (none queue up behind each
+/// other), else Fifo.
+fn present_mode(offered: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    if offered.contains(&wgpu::PresentMode::Mailbox) { wgpu::PresentMode::Mailbox } else { wgpu::PresentMode::Fifo }
+}
+
+/// The frames a surface is configured to have in flight: one, the least (the GPU drawing one while
+/// the screen shows the last).
+const FRAME_LATENCY: u32 = 1;
 
 /// The profile a configured surface shows colours in.
 pub fn screen_profile(config: &wgpu::SurfaceConfiguration) -> Profile {
@@ -306,6 +369,19 @@ pub fn configure(
     if hdr && let Some(config) = configure_extended(gpu, surface, &caps, size) {
         return Some(config);
     }
+    configure_with(gpu, surface, &caps, size, wide)
+}
+
+/// [`configure`] with the surface's capabilities as asked before: they don't change while the
+/// surface lasts, and asking for them can be slow (some systems try out a buffer of each format to
+/// tell, each time they are asked).
+pub(crate) fn configure_with(
+    gpu: &Gpu,
+    surface: &wgpu::Surface<'_>,
+    caps: &wgpu::SurfaceCapabilities,
+    size: (u32, u32),
+    wide: bool,
+) -> Option<wgpu::SurfaceConfiguration> {
     // an 8-bit one first: a float surface (Rgba16Float, offered first on some Linux drivers) is
     // read by the compositor as linear, so the sRGB-encoded colours drawn on it show washed out
     let eight_bit = [wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureFormat::Rgba8Unorm];
@@ -315,13 +391,18 @@ pub fn configure(
         .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
         .or_else(|| caps.formats.first().copied())?;
 
-    let mut config = surface.get_default_config(&gpu.adapter, size.0.max(1), size.1.max(1))?;
-    config.format = format;
-    config.view_formats = Vec::new();
-    config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-        wgpu::PresentMode::Mailbox
-    } else {
-        wgpu::PresentMode::Fifo
+    // (a surface that presents no way at all can't be configured)
+    caps.present_modes.first()?;
+    let mut config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: size.0.max(1),
+        height: size.1.max(1),
+        present_mode: present_mode(&caps.present_modes),
+        desired_maximum_frame_latency: FRAME_LATENCY,
+        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        view_formats: Vec::new(),
+        color_space: wgpu::SurfaceColorSpace::Auto,
     };
     if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
         config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
@@ -339,7 +420,7 @@ pub fn configure(
     // frame can only be begun once the one before shows, and one that then takes longer than what
     // is left of that refresh waits a whole refresh more, so a 120 Hz screen shows 60 frames a
     // second. A third lets the next be drawn meanwhile.
-    config.desired_maximum_frame_latency = if cfg!(target_os = "ios") { 2 } else { 1 };
+    config.desired_maximum_frame_latency = if cfg!(target_os = "ios") { 2 } else { FRAME_LATENCY };
     // a configure the GPU refuses (it couldn't come idle in time, as while an artwork opens) leaves
     // the surface unconfigured: none, so the next frame tries again (else it stayed blank)
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -361,18 +442,10 @@ pub fn configure(
     Some(config)
 }
 
-/// Whether the surface has the screen's extended range for an HDR canvas: what [`configure`] gives
-/// it, unless the GPU refuses the configure just then (as while an artwork opens), when it is
-/// given an 8-bit surface and only white shows.
-#[cfg(any(target_os = "android", target_os = "ios"))]
-pub(crate) fn extended_offered(gpu: &Gpu, surface: &wgpu::Surface<'_>) -> bool {
-    offers_extended(&surface.get_capabilities(&gpu.adapter))
-}
-
 /// Half floats in extended sRGB among `caps`. Extended sRGB only: wgpu's extended Display P3 looks
 /// its colour space up in a way that crashes on the iPad simulator. A Display P3 canvas's colours
 /// past sRGB go out as values below 0 and past 1, which extended sRGB carries (see `display.wgsl`).
-fn offers_extended(caps: &wgpu::SurfaceCapabilities) -> bool {
+pub(crate) fn offers_extended(caps: &wgpu::SurfaceCapabilities) -> bool {
     caps.format_capabilities.iter().any(|f| {
         f.format == wgpu::TextureFormat::Rgba16Float && f.color_spaces.contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB)
     })
@@ -381,7 +454,7 @@ fn offers_extended(caps: &wgpu::SurfaceCapabilities) -> bool {
 /// [`configure`] for an HDR canvas: half floats in the screen's extended range (extended sRGB, which
 /// also carries Display P3's colours), sRGB-encoded as the canvas draws, with light past white
 /// shown brighter than it. None where the surface has no extended range.
-fn configure_extended(
+pub(crate) fn configure_extended(
     gpu: &Gpu,
     surface: &wgpu::Surface<'_>,
     caps: &wgpu::SurfaceCapabilities,
@@ -405,7 +478,7 @@ fn configure_extended(
         config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
     }
     // (as `configure` has it)
-    config.desired_maximum_frame_latency = if cfg!(target_os = "ios") { 2 } else { 1 };
+    config.desired_maximum_frame_latency = if cfg!(target_os = "ios") { 2 } else { FRAME_LATENCY };
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     surface.configure(&gpu.device, &config);
     if let Some(e) = pollster::block_on(scope.pop()) {
@@ -416,4 +489,19 @@ fn configure_extended(
     crate::window::commit();
     log::info!("surface {}×{} {:?} {:?}", config.width, config.height, config.format, config.color_space);
     Some(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use procraft_gpu::wgpu::PresentMode;
+
+    /// The desktop's windows and the tablets' are configured alike: the newest frame shown at each
+    /// refresh where the system offers that, one frame in flight.
+    #[test]
+    fn a_surface_shows_the_newest_frame_where_it_can_with_one_in_flight() {
+        assert_eq!(super::present_mode(&[PresentMode::Fifo, PresentMode::Mailbox]), PresentMode::Mailbox);
+        assert_eq!(super::present_mode(&[PresentMode::Fifo, PresentMode::Immediate]), PresentMode::Fifo);
+        assert_eq!(super::present_mode(&[]), PresentMode::Fifo);
+        assert_eq!(super::FRAME_LATENCY, 1);
+    }
 }

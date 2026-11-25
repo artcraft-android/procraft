@@ -9,7 +9,8 @@ use procraft_engine::geom::IRect;
 
 use super::smudge::{tile_rect, tiles_of};
 use super::{
-    Canvas, LAYER_FORMAT, Paced, StampInstance, UniformData, WET_PLOT_MOST, copy_at, extent, texture, wet_reach,
+    Canvas, Carry, Kept, LAYER_FORMAT, Paced, StampInstance, UniformData, WET_PLOT_MOST, copy_at, extent, texture,
+    wet_reach,
 };
 use crate::Gpu;
 
@@ -36,13 +37,12 @@ impl Keep {
     }
 }
 
-/// Paint laid ahead of a stroke: the pixels it changed, and the stroke's counts as they were.
-#[derive(Clone, Copy)]
+/// Paint laid ahead of a stroke: the pixels it changed, and the stroke's counts as they were (each
+/// copy's carry's, and whose the stroke's carry held).
 pub(super) struct Laid {
     changed: IRect,
-    stamps: u32,
-    passes: u32,
-    plot: u32,
+    carries: Vec<Carry>,
+    resident: Option<(usize, Kept)>,
     synthesized: IRect,
 }
 
@@ -76,10 +76,15 @@ impl Canvas {
         let Some(style) = self.active.filter(|a| self.lays_ahead_onto(a.layer)).map(|a| a.style) else { return };
         let full = self.full();
         let Some(smudge) = self.smudge.as_ref() else { return };
-        if smudge.laid_ahead.is_some() || smudge.stalled || smudge.keep.refused {
+        if smudge.laid_ahead.is_some() || smudge.stalled || smudge.keep.refused || smudge.carries.len() > 1 {
             return;
         }
         let stamps: Vec<(StampInstance, [f32; 8], Paced)> = smudge.pending.iter().chain(&self.ahead).copied().collect();
+        // a symmetry's copies take turns in the stroke's carry, putting theirs aside: what they put
+        // aside isn't kept, so nothing is laid ahead of a stroke a symmetry copies
+        if stamps.iter().any(|(_, _, p)| p.copy != 0) {
+            return;
+        }
         let changed = stamps.iter().fold(IRect::EMPTY, |r, (s, ..)| r.union(wet_reach(s))).intersect(full);
         if changed.is_empty() {
             return;
@@ -95,9 +100,9 @@ impl Canvas {
         if let Some(keep) = &smudge.keep.layer {
             encoder.copy_texture_to_texture(copy_at(&layer.texture, changed.x0, changed.y0), copy_at(keep, 0, 0), size);
         }
-        for at in tiles_of(changed) {
+        for at in tiles_of(changed, smudge.tile) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let t = tile_rect(at);
+            let t = tile_rect(at, smudge.tile);
             let r = t.intersect(changed);
             if r.is_empty() {
                 continue;
@@ -122,9 +127,8 @@ impl Canvas {
         }
         smudge.laid_ahead = Some(Laid {
             changed,
-            stamps: smudge.stamps,
-            passes: smudge.passes,
-            plot: smudge.plot,
+            carries: smudge.carries.iter().map(Carry::plain).collect(),
+            resident: smudge.resident,
             synthesized: smudge.synthesized,
         });
         self.lay_wet(gpu, encoder, uniforms, &stamps, &style);
@@ -144,9 +148,9 @@ impl Canvas {
                 extent(changed.width(), changed.height()),
             );
         }
-        for at in tiles_of(changed) {
+        for at in tiles_of(changed, smudge.tile) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let t = tile_rect(at);
+            let t = tile_rect(at, smudge.tile);
             let r = t.intersect(changed);
             if r.is_empty() {
                 continue;
@@ -169,9 +173,11 @@ impl Canvas {
         if let (Some(keep), Some(carry)) = (&smudge.keep.carry, &smudge.carry) {
             encoder.copy_buffer_to_buffer(keep, 0, carry, 0, CARRIED_BYTES);
         }
-        smudge.stamps = laid.stamps;
-        smudge.passes = laid.passes;
-        smudge.plot = laid.plot;
+        smudge.carries.truncate(laid.carries.len());
+        for (carry, was) in smudge.carries.iter_mut().zip(laid.carries) {
+            *carry = Carry { aside: carry.aside.take(), unkept: carry.unkept, ..was };
+        }
+        smudge.resident = laid.resident;
         smudge.synthesized = laid.synthesized;
         self.dirty = self.dirty.union(changed);
     }

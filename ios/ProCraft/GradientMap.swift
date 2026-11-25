@@ -173,7 +173,9 @@ struct GradientMapPanel: View {
             }
             .frame(height: 40)
             if let editing, tool.gradients.indices.contains(editing) {
+                // its card 8 in from the panel's sides, as measured
                 GradientEditor(tool: tool, gradient: tool.gradients[editing], index: editing)
+                    .padding(.horizontal, -6)
             } else {
                 GradientCards(tool: tool)
             }

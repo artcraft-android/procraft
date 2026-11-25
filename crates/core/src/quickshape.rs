@@ -10,7 +10,7 @@ use procraft_engine::geom::Vec2;
 use procraft_engine::input::Sample;
 use procraft_engine::quickshape::{Anchor, Shape, ShapeKind, end_hook_reach, fit_ellipse, recognise, without_end_hook};
 use procraft_engine::stroke::StrokeBuilder;
-use procraft_gpu::{Canvas, StrokeStyle};
+use procraft_gpu::{Canvas, SecondStroke, StrokeStyle};
 
 use crate::{CanvasSession, PointerKind, State};
 
@@ -148,8 +148,8 @@ impl ShapeEdit {
     }
 }
 
-/// A stroke made a shape, as it can be laid again: where, its builder as it began and its input.
-/// (A dual brush's isn't kept: its shape is its first alone.)
+/// A stroke made a shape, as it can be laid again: where, its builder as it began and its input,
+/// and a dual brush's second, which its shape is drawn with too.
 pub(crate) struct DrawnStroke {
     layer: LayerId,
     style: StrokeStyle,
@@ -157,6 +157,15 @@ pub(crate) struct DrawnStroke {
     samples: Vec<Sample>,
     /// What its randomness was seeded with: a brush engine draws it again the same.
     seed: u32,
+    second: Option<SecondAgain>,
+}
+
+/// A dual brush's second as its stroke began, to draw it again (along a shape, or the stroke a
+/// shape gave way to): how it is laid and combines, and its builder before any input.
+#[derive(Clone)]
+pub(crate) struct SecondAgain {
+    pub(crate) stroke: SecondStroke,
+    pub(crate) fresh: StrokeBuilder,
 }
 
 /// A shape kept, as it first snapped, or the stroke it gave way to: the canvas's undo steps once
@@ -196,8 +205,10 @@ pub(crate) struct LastStroke {
     /// Which stroke the canvas counts it as (see `Canvas::step_of_stroke`): once it is laid, its
     /// step is the last made unless something has been done since.
     pub(crate) stroke: u64,
-    /// Its builder as it began (none for a dual brush), and its input.
+    /// Its builder as it began (none for a brush engine's dual brush), and its input.
     pub(crate) fresh: Option<StrokeBuilder>,
+    /// A dual brush's second as it began.
+    pub(crate) second: Option<SecondAgain>,
     pub(crate) samples: Vec<Sample>,
     /// Its builder as it began (a dual brush's first), for the line a shape is fitted to.
     pub(crate) line: StrokeBuilder,
@@ -217,12 +228,22 @@ impl LastStroke {
     /// The stroke as it can be laid again, given its input.
     fn laid_again(&self, samples: Vec<Sample>) -> Option<DrawnStroke> {
         let builder = self.fresh.clone()?;
-        Some(DrawnStroke { layer: self.layer, style: self.style, builder, samples, seed: self.seed })
+        let second = self.second.clone();
+        Some(DrawnStroke { layer: self.layer, style: self.style, builder, samples, seed: self.seed, second })
     }
 }
 
-/// What a shape's stroke's randomness is seeded with.
+/// What a shape's stroke's randomness is seeded with, and its second's (a dual brush's).
 pub(crate) const SHAPE_SEED: u32 = 0x5eed_1234;
+const SECOND_SHAPE_SEED: u32 = SHAPE_SEED ^ 0x5eed_0002;
+
+/// Begins the canvas's stroke for `stroke` again, as it began: a dual brush's with its second.
+fn begin_again(canvas: &mut Canvas, stroke: &DrawnStroke) {
+    match &stroke.second {
+        Some(second) => canvas.begin_dual_stroke(stroke.layer, stroke.style, second.stroke),
+        None => canvas.begin_stroke(stroke.layer, stroke.style),
+    }
+}
 
 /// The outline is redrawn with samples this far apart (canvas pixels), at the pace its stroke was
 /// drawn: this if that isn't known (canvas pixels a millisecond).
@@ -265,13 +286,15 @@ impl State {
     }
 
     /// `edit`'s shape was just kept: undo can give back the stroke it was made of.
-    pub(crate) fn note_kept_shape(&mut self, edit: Option<ShapeEdit>) {
-        let Some(ShapeEdit { first, choices, drawn, along, stroke: Some(stroke), .. }) = edit else { return };
+    pub(crate) fn note_kept_shape(&mut self, edit: Option<Box<ShapeEdit>>) {
+        let Some(ShapeEdit { first, choices, drawn, along, stroke: Some(stroke), .. }) = edit.map(|e| *e) else {
+            return;
+        };
         // its step is made now, so that a later change shows against it
         self.flush();
         let Some(canvas) = self.canvas.as_ref() else { return };
         let steps = canvas.steps_made();
-        self.kept_shape = Some(KeptShape { first, choices, drawn, along, stroke, steps });
+        self.kept_shape = Some(Box::new(KeptShape { first, choices, drawn, along, stroke, steps }));
     }
 
     /// Whether `kept` is still the last thing done, with nothing undone after it.
@@ -290,15 +313,16 @@ impl State {
         let Some(mut kept) = self.kept_shape.take().filter(|kept| self.still_stands(kept)) else { return false };
         let Some(canvas) = self.canvas.as_mut() else { return false };
         canvas.undo();
-        canvas.begin_stroke(kept.stroke.layer, kept.stroke.style);
+        begin_again(canvas, &kept.stroke);
         // a brush engine's stroke drawn by it again, as it was
         let mut builder = self.engine_again(kept.stroke.builder.clone(), kept.stroke.layer, kept.stroke.seed);
+        let mut second = kept.stroke.second.as_ref().map(|s| s.fresh.clone());
         let guide = self.doc.stroke_guide();
         let Some(canvas) = self.canvas.as_mut() else { return false };
-        crate::draw_samples(canvas, &mut builder, None, &kept.stroke.samples, &guide, false);
-        crate::close_stroke(canvas, builder, None, &guide);
+        crate::draw_samples(canvas, &mut builder, second.as_mut(), &kept.stroke.samples, &guide, false);
+        crate::close_stroke(canvas, builder, second, &guide);
         self.flush();
-        kept.steps = self.canvas.as_ref().map_or(0, Canvas::steps_made);
+        kept.steps = self.canvas.as_deref().map_or(0, Canvas::steps_made);
         self.unkept_shape = Some(kept);
         true
     }
@@ -312,10 +336,11 @@ impl State {
         }
         let (Some(kept), Some(canvas)) = (self.unkept_shape.take(), self.canvas.as_mut()) else { return false };
         canvas.undo();
-        canvas.begin_stroke(kept.stroke.layer, kept.stroke.style);
-        self.stroke = Some(kept.stroke.builder.clone());
+        begin_again(canvas, &kept.stroke);
+        self.stroke = Some(Box::new(kept.stroke.builder.clone()));
         self.second = None;
-        self.shape = Some(ShapeEdit::new(kept.first, kept.choices, kept.drawn, kept.along, None, Some(kept.stroke)));
+        self.shape =
+            Some(Box::new(ShapeEdit::new(kept.first, kept.choices, kept.drawn, kept.along, None, Some(kept.stroke))));
         self.draw_shape();
         self.finish_stroke();
         true
@@ -330,8 +355,25 @@ impl State {
         // the outline is the path: nothing smooths it, or round its corners
         let builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), SHAPE_SEED)
             .scaled(self.brush_scale())
-            .exact_path();
+            .exact_path()
+            .drawn_like(old);
+        let builder = crate::pressure::pressed_like(builder, old);
         let samples = edit.samples();
+        // a dual brush's second drawn along it too, as the stroke drew it
+        let scale = self.brush_scale();
+        let mut second = edit.stroke.as_ref().and_then(|s| s.second.as_ref()).map(|s| {
+            let fresh = &s.fresh;
+            let builder =
+                StrokeBuilder::with_seed(fresh.brush().clone(), fresh.diameter(), fresh.pointer(), SECOND_SHAPE_SEED)
+                    .scaled(scale)
+                    .exact_path()
+                    .drawn_like(fresh);
+            crate::pressure::pressed_like(builder, fresh)
+        });
+        let second_stamps = second.as_mut().map(|b| {
+            b.add(&samples);
+            b.finish()
+        });
         // a brush engine's stroke drawn by it along the shape
         let mut builder = self.engine_again(builder, self.doc.current(), SHAPE_SEED);
         builder.add(&samples);
@@ -342,12 +384,15 @@ impl State {
             // nothing drawn ahead of the pen before it snapped stays over the shape
             canvas.set_prediction(&[]);
             canvas.set_tip(&[]);
-            // made a shape, a dual brush's stroke goes on as its first alone
-            canvas.drop_second();
+            match &second_stamps {
+                Some(second) => canvas.replace_second_stamps(&crate::guide::mirrored(&guide, second)),
+                // (a brush engine's dual brush goes on as its first alone)
+                None => canvas.drop_second(),
+            }
             canvas.replace_stamps(&crate::guide::mirrored(&guide, &stamps));
         }
-        self.stroke = Some(builder);
-        self.second = None;
+        self.stroke = Some(Box::new(builder));
+        self.second = second.map(Box::new);
     }
 
     /// Redraws the open stroke along the shape if it moved since it was last drawn: as a frame is
@@ -671,15 +716,6 @@ fn resample(outline: &[Vec2], along: &StrokeAlong) -> Vec<Sample> {
     out
 }
 
-/// The outline (x and y in turn) of the shape a path of points (x and y in turn) looks like, if
-/// any: a freehand selection held still snaps to it.
-#[uniffi::export]
-pub fn quickshape_outline(points: Vec<f32>) -> Option<Vec<f32>> {
-    let path: Vec<Vec2> = points.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
-    let shape = recognise(&path).into_iter().next()?;
-    Some(shape.outline().into_iter().flat_map(|p| [p.x, p.y]).collect())
-}
-
 #[uniffi::export]
 impl CanvasSession {
     /// The stroke being drawn has been held still: it snaps to the shape it looks like, if any.
@@ -699,7 +735,7 @@ impl CanvasSession {
         let held = st.drawn.last().map(|&at| Held { snapped: first.clone(), from: at, at, finger: false });
         let (drawn, along) = (line, StrokeAlong::of(&st.drawn_samples, st.pace()));
         let stroke = st.began.take().and_then(|began| began.laid_again(st.drawn_samples.clone()));
-        st.shape = Some(ShapeEdit::new(first, choices, drawn, along, held, stroke));
+        st.shape = Some(Box::new(ShapeEdit::new(first, choices, drawn, along, held, stroke)));
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
@@ -729,14 +765,19 @@ impl CanvasSession {
         let choices = found.iter().map(|s| s.kind).collect();
         let canvas = st.canvas.as_mut()?;
         canvas.undo();
-        canvas.begin_stroke(last.layer, last.style);
+        match &last.second {
+            Some(second) => canvas.begin_dual_stroke(last.layer, last.style, second.stroke),
+            None => canvas.begin_stroke(last.layer, last.style),
+        }
         let scale = st.brush_scale();
         let stroke = last.laid_again(last.samples.clone());
         let along = StrokeAlong::of(&last.samples, last.pace);
-        st.stroke =
-            Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), SHAPE_SEED).scaled(scale));
+        let builder = StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), SHAPE_SEED)
+            .scaled(scale)
+            .drawn_like(&last.line);
+        st.stroke = Some(Box::new(crate::pressure::pressed_like(builder, &last.line)));
         st.second = None;
-        st.shape = Some(ShapeEdit::new(first, choices, line, along, None, stroke));
+        st.shape = Some(Box::new(ShapeEdit::new(first, choices, line, along, None, stroke)));
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
@@ -1049,7 +1090,7 @@ mod tests {
         {
             let mut st = s.shared.lock();
             st.view = Some(procraft_engine::view::View::fit((1000, 800), (1000, 800)));
-            st.stroke = Some(StrokeBuilder::new(brush, 8.0, Pointer::Stylus));
+            st.stroke = Some(Box::new(StrokeBuilder::new(brush, 8.0, Pointer::Stylus)));
             st.remember_input(samples);
         }
         assert!(s.quickshape_hold().is_some());

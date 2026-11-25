@@ -21,7 +21,7 @@ const HEIGHT: f32 = 69.0;
 const CORNER: u8 = 8;
 const THUMB: Vec2 = vec2(93.0, 61.0);
 /// The badge saying letting go lands them (a copy), and the one counting several.
-const LANDS: u32 = 0xFF30D158;
+pub(crate) const LANDS: u32 = 0xFF30D158;
 const COUNT: u32 = 0xFFFF3B30;
 
 /// What held layers stay over that opens if they stay long enough.

@@ -12,6 +12,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -67,6 +68,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
+import io.github.artcraftandroid.procraft.canvas.label
+import io.github.artcraftandroid.procraft.core.QuickAction
 import io.github.artcraftandroid.procraft.core.PluginControl
 import io.github.artcraftandroid.procraft.core.PluginFile
 import io.github.artcraftandroid.procraft.core.PluginInfo
@@ -106,7 +109,7 @@ private class Heading(val label: String) : ActionRow
 private class Slide(val label: String, val value: String, val fraction: Float, val tall: Dp = 63.dp, val onDone: () -> Unit = {}, val onChange: (Float) -> Unit) : ActionRow
 
 /** The pages the panel shows: its tabs, or a page of settings reached from one of them. */
-private enum class ActionsPage { TABS, PRESSURE, CURSOR, PLUGINS }
+private enum class ActionsPage { TABS, PRESSURE, CURSOR, PLUGINS, PEN_BUTTONS }
 
 private val CurveFill get() = if (Pc.light) Color(0xFFE7E7E9) else Color(0xFF262626)
 
@@ -151,7 +154,10 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         // made outside the panel, which may be closed meanwhile: the share comes all the same
         // (cancelled or failed, there is nothing to share; a failure is told)
         vm.viewModelScope.launch {
-            vm.exportTimeLapse(seconds)?.let { runCatching { shareFile(context, it, "video/mp4") } }
+            vm.exportTimeLapse(seconds)?.let { video ->
+                runCatching { shareFile(context, video, "video/mp4") }
+                    .onFailure { io.github.artcraftandroid.procraft.AppLog.e("ProCraft", "sharing the time-lapse video (${video.length()} bytes)", it) }
+            }
         }
     }
     var page by remember { mutableStateOf(ActionsPage.TABS) }
@@ -315,6 +321,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("Advanced cursor settings") { page = ActionsPage.CURSOR },
             ),
             listOf(
+                Act("Pen buttons") { page = ActionsPage.PEN_BUTTONS },
                 Act("Pressure and Smoothing") { page = ActionsPage.PRESSURE },
                 Act("Gesture controls") { vm.gestureControlsOpen = true },
                 Act("Plugins") { page = ActionsPage.PLUGINS },
@@ -347,13 +354,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 },
                 Act("Share log") {
                     // made outside the panel, which may be closed meanwhile
-                    vm.viewModelScope.launch {
-                        val log = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            io.github.artcraftandroid.procraft.AppLog.toShare(context)
-                        }
-                        if (log == null) dialog = "Share log" to "The log couldn't be made ready to share."
-                        else runCatching { shareFile(context, log, "text/plain") }
-                    }
+                    shareLog(context, vm.viewModelScope) { dialog = "Share log" to LOG_NOT_READY }
                 },
             ),
         )
@@ -375,6 +376,10 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 }
                 if (shown == ActionsPage.PLUGINS) {
                     PluginsPage(vm) { page = ActionsPage.TABS }
+                    return@Column
+                }
+                if (shown == ActionsPage.PEN_BUTTONS) {
+                    PenButtonsPage(vm) { page = ActionsPage.TABS }
                     return@Column
                 }
                 Text(
@@ -598,6 +603,59 @@ private fun CursorPage(vm: CanvasViewModel, onBack: () -> Unit) {
     }
 }
 
+/** What a pen button set to [a] says it does: its QuickMenu action, or (null) what Gesture controls say. */
+private fun penButtonLabel(a: QuickAction?): String = a?.label ?: "Gesture controls"
+
+/**
+ * Pen buttons, a page of the panel: what the pen's first and second side buttons do, a QuickMenu
+ * action each (Undo, Redo, ...) or, as they start, what Gesture controls say. A row tapped lists
+ * the choices, the one set blue; a choice tapped sets it and comes back.
+ */
+@Composable
+private fun PenButtonsPage(vm: CanvasViewModel, onBack: () -> Unit) {
+    // the button whose choices are listed (true: the second), or none
+    var picking by remember { mutableStateOf<Boolean?>(null) }
+    val second = picking
+    BackHandler { if (second != null) picking = null else onBack() }
+    val title = when (second) {
+        null -> "Pen buttons"
+        false -> "Pen button"
+        true -> "Pen second button"
+    }
+    Row(Modifier.padding(start = 8.dp, top = 12.dp).height(44.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(44.dp, 34.dp).clickable { if (second != null) picking = null else onBack() }, contentAlignment = Alignment.Center) {
+            Icon(PcIcons.ChevronLeft, contentDescription = "Back", tint = Pc.PanelTitle, modifier = Modifier.size(22.dp))
+        }
+        Text(title, color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    }
+    // the plugins' actions a button can run, of those on: after the app's own, by their labels
+    val pluginActions = remember(vm.pluginList) { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.PEN) }
+    val pluginSet = { i: Int -> vm.penButtonPlugins.getOrNull(i)?.let { key -> pluginActions.firstOrNull { it.key == key } } }
+    val label = { i: Int -> pluginSet(i)?.label ?: penButtonLabel(vm.penButtonActions.getOrNull(i)) }
+    if (second == null) {
+        Column(Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp)) {
+            Group(
+                listOf(
+                    Act("Pen button", value = label(0)) { picking = false },
+                    Act("Pen second button", value = label(1)) { picking = true },
+                ),
+            )
+        }
+        return
+    }
+    val choices = remember { io.github.artcraftandroid.procraft.core.penButtonChoices() }
+    val at = if (second) 1 else 0
+    val set = vm.penButtonActions.getOrNull(at)
+    val chosen = pluginSet(at)?.let { choices.size + pluginActions.indexOf(it) } ?: choices.indexOf(set).coerceAtLeast(0)
+    Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp)) {
+        ChoiceGroup(choices.map(::penButtonLabel) + pluginActions.map { it.label }, chosen) {
+            val plugin = pluginActions.getOrNull(it - choices.size)
+            if (plugin != null) vm.setPenButtonPlugin(second, plugin.key) else vm.setPenButtonAction(second, choices.getOrNull(it))
+            picking = null
+        }
+    }
+}
+
 /**
  * The plugins, a page of the panel: a card each, drawn from what the list says of them, in the
  * order they were put in. A card held by its name lifts and follows the finger or pen, faint where
@@ -741,7 +799,27 @@ private fun PluginHead(plugin: PluginInfo, modifier: Modifier = Modifier, lifted
 private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel, modifier: Modifier, head: Modifier, onRemove: () -> Unit) {
     Column(modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
         PluginHead(plugin, modifier = head)
-        if (plugin.on && plugin.problem == null) {
+        if (plugin.on && plugin.problem == null && plugin.features.isNotEmpty()) {
+            // its own, under none of its features (a folder of the whole plugin's)
+            for (control in plugin.top) {
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+                PluginControlRow(control, vm)
+            }
+            // made of features: each a heading with its switch, what comes under it while it is on
+            for (feature in plugin.features) {
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+                PluginFeatureHead(feature, vm)
+                if (!feature.control.on) continue
+                for (control in feature.controls) {
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+                    PluginControlRow(control, vm)
+                }
+                for (action in feature.actions) {
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+                    PluginActionRow(action.label) { vm.runPluginAction(action.key) }
+                }
+            }
+        } else if (plugin.on && plugin.problem == null) {
             for (control in plugin.controls) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
                 PluginControlRow(control, vm)
@@ -760,6 +838,22 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel, modifier: Modifi
     }
 }
 
+/** One of a plugin's features as its card shows it: its name and words, and the switch that turns it on. */
+@Composable
+private fun PluginFeatureHead(feature: io.github.artcraftandroid.procraft.core.PluginFeature, vm: CanvasViewModel) {
+    val switch = feature.control
+    Row(
+        Modifier.fillMaxWidth().clickable { vm.setPluginSwitch(switch.key, !switch.on) }.padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(switch.label, color = Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            if (feature.description.isNotEmpty()) Text(feature.description, color = Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+        Switch(switch.on, true)
+    }
+}
+
 /** A plugin's control as its card shows it, whatever it is: a switch, a slider, a setting named at every step, a file. */
 @Composable
 private fun PluginControlRow(control: PluginControl, vm: CanvasViewModel) {
@@ -771,6 +865,8 @@ private fun PluginControlRow(control: PluginControl, vm: CanvasViewModel) {
             else PluginChoiceRow(control.control, choices, vm::setPluginSlider)
         }
         is PluginControl.File -> PluginFileRow(control.control, vm)
+        is PluginControl.Texture -> PluginTextureRow(control.control, vm)
+        is PluginControl.Folder -> PluginFolderRow(control.control, vm)
     }
 }
 
@@ -783,7 +879,9 @@ private fun PluginCanvasRows(vm: CanvasViewModel) {
     val list = vm.pluginList
     val controls = remember(list) { vm.plugins.controlsIn(io.github.artcraftandroid.procraft.core.PluginPlace.CANVAS) }
     val actions = remember(list) { vm.plugins.actionsIn(io.github.artcraftandroid.procraft.core.PluginPlace.CANVAS) }
-    if (controls.isEmpty() && actions.isEmpty()) return
+    // Edit Layout, while a plugin lets the bars move
+    val edits = vm.layoutLook.edit
+    if (controls.isEmpty() && actions.isEmpty() && !edits) return
     Spacer(Modifier.height(20.dp))
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
         controls.forEachIndexed { i, control ->
@@ -793,6 +891,10 @@ private fun PluginCanvasRows(vm: CanvasViewModel) {
         actions.forEachIndexed { i, action ->
             if (i > 0 || controls.isNotEmpty()) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
             PluginActionRow(action.label) { vm.runPluginAction(action.key) }
+        }
+        if (edits) {
+            if (controls.isNotEmpty() || actions.isNotEmpty()) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+            PluginActionRow("Edit Layout") { vm.startEditLayout() }
         }
     }
 }
@@ -820,7 +922,12 @@ fun PluginPanelView(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                         is PanelRow.Switch -> ActionRowView(Toggle(row.label, row.on) { vm.touchPluginPanel(i, if (it) 1f else 0f) })
                         is PanelRow.Choice -> PanelChoiceRow(row) { vm.touchPluginPanel(i, it.toFloat()) }
                         is PanelRow.Button -> PluginActionRow(row.label) { vm.touchPluginPanel(i, 1f) }
+                        is PanelRow.Colours -> PanelColoursRow(row) { vm.touchPluginPanel(i, it.toFloat()) }
                         is PanelRow.Keys -> PanelKeysRow(row) { vm.touchPluginPanel(i, 1f) }
+                        is PanelRow.Brushes -> PanelBrushesRow(vm, row) { vm.touchPluginPanel(i, it.toFloat()) }
+                        // one of its texture controls, as its card shows it (others show nothing)
+                        is PanelRow.Control -> vm.pluginList.flatMap { it.controls }.filterIsInstance<PluginControl.Texture>()
+                            .firstOrNull { it.control.key == row.key }?.let { PluginTextureRow(it.control, vm) }
                     }
                 }
             }
@@ -867,17 +974,69 @@ private fun PanelChoiceRow(row: PanelRow.Choice, onPick: (Int) -> Unit) {
     }
 }
 
+/** A row of colours on a plugin's panel: its label, then each colour a disc, the one chosen ringed; a tap picks one. */
+@Composable
+private fun PanelColoursRow(row: PanelRow.Colours, onPick: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().height(52.dp).padding(start = 16.dp, end = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1, modifier = Modifier.padding(end = 8.dp))
+        Box(Modifier.weight(1f))
+        row.colours.forEachIndexed { at, colour ->
+            val chosen = row.chosen?.toInt() == at
+            Box(Modifier.size(30.dp).clip(CircleShape).clickable { onPick(at) }, contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier.size(24.dp).clip(CircleShape)
+                        .then(if (chosen) Modifier.border(2.dp, Pc.ActionsRow, CircleShape) else Modifier)
+                        .padding(if (chosen) 4.dp else 0.dp).clip(CircleShape)
+                        .background(Color(0xFF000000L or colour.toLong())),
+                )
+            }
+        }
+    }
+}
+
+/** A row of brushes on a plugin's panel: its label, then each brush's sample stroke in a disc, the one chosen ringed; a tap picks one. */
+@Composable
+private fun PanelBrushesRow(vm: CanvasViewModel, row: PanelRow.Brushes, onPick: (Int) -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 10.dp, top = 10.dp, bottom = 10.dp)) {
+        Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
+        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            row.brushes.forEachIndexed { at, b ->
+                RingBrush(vm, b, row.chosen?.toInt() == at, 34.dp, Modifier) { onPick(at) }
+            }
+        }
+    }
+}
+
 /** A row of keys on a plugin's panel: its label, the keys at its end as a file control's name is; tapped as a button is. */
 @Composable
 private fun PanelKeysRow(row: PanelRow.Keys, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().height(44.dp).clickable(onClick = onClick).padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-        Box(Modifier.weight(1f))
-        Text(row.keys, color = Pc.SlideValue, fontSize = 15.sp, maxLines = 1, modifier = Modifier.padding(start = 12.dp))
+    androidx.compose.ui.layout.Layout(
+        content = {
+            Text(row.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            Text(row.keys, color = Pc.SlideValue, fontSize = 15.sp, maxLines = 1)
+        },
+        modifier = Modifier.fillMaxWidth().height(44.dp).clickable(onClick = onClick).padding(horizontal = 16.dp),
+    ) { measurables, constraints ->
+        val loose = constraints.copy(minWidth = 0, minHeight = 0)
+        val keys = measurables[1].measure(loose)
+        val (labelMost, keysAt) = keysRowPlaces(constraints.maxWidth, keys.width, 12.dp.roundToPx())
+        val label = measurables[0].measure(loose.copy(maxWidth = labelMost))
+        val height = constraints.maxHeight
+        layout(constraints.maxWidth, height) {
+            label.placeRelative(0, (height - label.height) / 2)
+            keys.placeRelative(keysAt, (height - keys.height) / 2)
+        }
     }
+}
+
+/**
+ * Where a row of keys [width] px wide puts its parts: the keys ([keys] px) end where it ends, and
+ * its label has all the room before them but [gap] (none if the keys take it all), cut short only
+ * past that. The label's most width, and where the keys begin.
+ */
+internal fun keysRowPlaces(width: Int, keys: Int, gap: Int): Pair<Int, Int> {
+    val keysAt = (width - keys).coerceAtLeast(0)
+    return (keysAt - gap).coerceAtLeast(0) to keysAt
 }
 
 /** One of a plugin's actions on its card: its words in blue, run when tapped. */
@@ -888,14 +1047,15 @@ private fun PluginActionRow(label: String, onClick: () -> Unit) {
     }
 }
 
-/** A file control on a card (a sound): its label, then the name of what was picked and Clear, or Import; a tap on the row picks another. */
+/** A file control on a card (a sound or a picture): its label, then the name of what was picked and Clear, or Import; a tap on the row picks another. */
 @Composable
 private fun PluginFileRow(file: PluginFile, vm: CanvasViewModel) {
+    val picture = file.accepts == io.github.artcraftandroid.procraft.core.PluginFileKind.PICTURE
     val picker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { vm.pickPluginSound(file.key, it) }
+        uri?.let { if (picture) vm.pickPluginPicture(file.key, it) else vm.pickPluginSound(file.key, it) }
     }
     Row(
-        Modifier.fillMaxWidth().height(44.dp).clickable { picker.launch(arrayOf("audio/*")) }.padding(start = 16.dp, end = 16.dp),
+        Modifier.fillMaxWidth().height(44.dp).clickable { picker.launch(arrayOf(if (picture) "image/*" else "audio/*")) }.padding(start = 16.dp, end = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(file.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
@@ -906,6 +1066,28 @@ private fun PluginFileRow(file: PluginFile, vm: CanvasViewModel) {
             Text("Clear", color = Pc.Accent, fontSize = 17.sp, maxLines = 1, modifier = Modifier.clickable { vm.clearPluginFile(file.key) }.padding(start = 12.dp))
         } else {
             Text("Import", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+        }
+    }
+}
+
+/** A folder picked for a plugin: its label, then Choose, or the folder's name and Clear; a tap opens the system's folder picker. */
+@Composable
+private fun PluginFolderRow(folder: io.github.artcraftandroid.procraft.core.PluginFolder, vm: CanvasViewModel) {
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()) { tree ->
+        tree?.let { vm.pickPluginFolder(folder.key, it) }
+    }
+    Row(
+        Modifier.fillMaxWidth().height(44.dp).clickable { runCatching { picker.launch(null) } }.padding(start = 16.dp, end = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(folder.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
+        Box(Modifier.weight(1f))
+        val chosen = folder.chosen
+        if (chosen != null) {
+            Text(chosen, color = Pc.SlideValue, fontSize = 15.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(start = 12.dp).weight(1f, fill = false))
+            Text("Clear", color = Pc.Accent, fontSize = 17.sp, maxLines = 1, modifier = Modifier.clickable { vm.clearPluginFile(folder.key) }.padding(start = 12.dp))
+        } else {
+            Text("Choose", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
         }
     }
 }
@@ -1263,6 +1445,21 @@ internal fun shareFiles(context: Context, files: List<File>, mime: String) {
     val uris = ArrayList(files.map { FileProvider.getUriForFile(context, context.packageName + ".files", it) })
     val send = Intent(Intent.ACTION_SEND_MULTIPLE).setType(mime).putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     context.startActivity(shareSheet(context, send, files, mime))
+}
+
+/** What is said when the log couldn't be made ready to share (the storage full, say). */
+internal const val LOG_NOT_READY = "The log couldn't be made ready to share."
+
+/**
+ * The app's log made ready to share (off the main thread, in [scope]) and offered through the share
+ * sheet: Help's Share log, the gallery's question about an artwork that closed the app, and the
+ * app's own settings page. [failed] hears when it couldn't be made ready.
+ */
+internal fun shareLog(context: Context, scope: kotlinx.coroutines.CoroutineScope, failed: () -> Unit) {
+    scope.launch {
+        val log = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { io.github.artcraftandroid.procraft.AppLog.toShare(context) }
+        if (log == null) failed() else runCatching { shareFile(context, log, "text/plain") }
+    }
 }
 
 /** Offers [file] to other apps through the share sheet. */

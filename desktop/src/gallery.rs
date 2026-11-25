@@ -213,6 +213,8 @@ const FORMATS_WIDTH: f32 = 260.0;
 
 pub struct Gallery {
     pub store: Arc<ArtworkStore>,
+    /// What a plugin brings in from its folder as the gallery opens, brought on a thread of its own.
+    bringing: Option<std::thread::JoinHandle<procraft_core::FolderBroughtIn>>,
     entries: Vec<GalleryEntry>,
     /// The stack open: its folder and name.
     stack: Option<(String, String)>,
@@ -239,6 +241,8 @@ pub struct Gallery {
     preview: Option<(Vec<GalleryArtwork>, usize, bool, f32)>,
     /// The animation of the artwork shown in Preview, by its folder.
     played: Option<Played>,
+    /// The artwork shown in Preview drawn whole, as large as it shows.
+    sharp: Option<Sharp>,
     /// An artwork two fingers are spreading open into Preview.
     spreading: Option<Spread>,
     alert: crate::alert::Alert,
@@ -380,6 +384,7 @@ impl Gallery {
         let presets = presets_from_json(std::fs::read_to_string(presets_path()).ok());
         let mut gallery = Gallery {
             store,
+            bringing: None,
             entries: Vec::new(),
             stack: None,
             thumbs: HashMap::new(),
@@ -395,6 +400,7 @@ impl Gallery {
             more_open: false,
             preview: None,
             played: None,
+            sharp: None,
             spreading: None,
             alert: crate::alert::Alert::default(),
             pdf_alert: crate::alert::Alert::default(),
@@ -431,6 +437,40 @@ impl Gallery {
         };
         gallery.refresh();
         gallery
+    }
+
+    /// The gallery shows: what a plugin brings in from its folder comes in, on a thread of its own
+    /// (one at a time). With no plugin bringing anything in, nothing happens.
+    pub fn bring_in(&mut self, plugins: &Arc<procraft_core::Plugins>) {
+        if self.bringing.is_some() {
+            return;
+        }
+        let (plugins, store) = (Arc::clone(plugins), Arc::clone(&self.store));
+        let started =
+            std::thread::Builder::new().name("bringing in".into()).spawn(move || plugins.gallery_opened(store));
+        match started {
+            Ok(thread) => self.bringing = Some(thread),
+            Err(e) => log::error!("bringing artworks in from a folder: {e}"),
+        }
+    }
+
+    /// Whether artworks are being brought in from a plugin's folder (the gallery looks again soon).
+    pub fn bringing_in(&self) -> bool {
+        self.bringing.is_some()
+    }
+
+    /// Once what a plugin brought in from its folder is in: the gallery read again if anything came,
+    /// and what to tell once (a folder out of reach).
+    pub fn brought(&mut self) -> Option<String> {
+        if !self.bringing.as_ref().is_some_and(std::thread::JoinHandle::is_finished) {
+            return None;
+        }
+        let brought = self.bringing.take()?.join().ok()?;
+        if brought.added + brought.updated + brought.copies > 0 {
+            self.thumbs.clear();
+            self.refresh();
+        }
+        brought.notice
     }
 
     /// Reads what is in the gallery (or the stack open) again.
@@ -1143,7 +1183,8 @@ impl Gallery {
             ui.painter().rect_filled(screen, 0, Color32::BLACK);
             self.play(ctx, &a);
             let frame = self.played.as_ref().and_then(Played::frame);
-            if let Some(t) = frame.or_else(|| self.texture(&a)) {
+            let sharp = self.sharp(ctx, &a, screen);
+            if let Some(t) = frame.or(sharp).or_else(|| self.texture(&a)) {
                 let picture = Self::fitted(screen, &a);
                 let picture = picture.translate(vec2(0.0, screen.center().y - picture.center().y));
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -1188,9 +1229,31 @@ impl Gallery {
         });
         if closed {
             self.played = None;
+            self.sharp = None;
         } else {
             self.preview = Some((list, index, controls, moved));
         }
+    }
+
+    /// Preview's artwork `a` drawn whole for `screen` (points) at a pixel of its own a screen
+    /// pixel, where that shows more than its thumbnail: made on a thread of its own the first
+    /// time (one at a time; again only for a larger window), the thumbnail shown till then.
+    fn sharp(&mut self, ctx: &egui::Context, a: &GalleryArtwork, screen: Rect) -> Option<egui::TextureId> {
+        let ppp = ctx.pixels_per_point();
+        let (bw, bh) = ((screen.width() * ppp).round() as u32, (screen.height() * ppp).round() as u32);
+        let (w, h) = if a.turns % 2 == 1 { (a.height, a.width) } else { (a.width, a.height) };
+        let side = procraft_core::preview_side(w, h, bw, bh);
+        if side <= THUMBNAIL_SIDE {
+            return None;
+        }
+        let again = self
+            .sharp
+            .as_ref()
+            .is_none_or(|s| s.dir != a.dir || s.modified_ms != a.modified_ms || (s.read.is_none() && side > s.side));
+        if again {
+            self.sharp = Some(Sharp::start(a, side));
+        }
+        self.sharp.as_mut()?.texture(ctx)
     }
 
     /// Preview's artwork `a`, if it is animated: its frames read on a thread, then played as its
@@ -2256,6 +2319,53 @@ fn presets_path() -> std::path::PathBuf {
 
 /// The most memory (bytes) an animation's frames take in Preview: past it they are smaller.
 const PLAYED_MOST: f64 = 256e6;
+
+/// The gallery thumbnail's longest side (the core's project.rs): an artwork Preview shows no
+/// larger has its thumbnail to show.
+const THUMBNAIL_SIDE: u32 = 512;
+
+/// The artwork shown in Preview drawn whole at `side` pixels on its longest side (as large as it
+/// shows), as its thumbnail is made: on a thread of its own, the thumbnail shown till then. None
+/// is made for one that plays (its frames show) or whose opening ended the app before.
+struct Sharp {
+    dir: String,
+    modified_ms: i64,
+    side: u32,
+    read: Option<std::sync::mpsc::Receiver<Option<egui::ColorImage>>>,
+    texture: Option<TextureHandle>,
+}
+
+impl Sharp {
+    fn start(a: &GalleryArtwork, side: u32) -> Sharp {
+        let (done, read) = std::sync::mpsc::channel();
+        let dir = a.dir.clone();
+        let _ = std::thread::Builder::new().name("preview".into()).spawn(move || {
+            let left = procraft_core::artwork_plays(dir.clone()) || procraft_core::opening_ended_app(dir.clone());
+            let made = if left { None } else { procraft_core::artwork_preview_png(dir, side) };
+            let image = made
+                .and_then(|png| crate::files::png_rgba(&png))
+                .filter(|(w, h, rgba)| rgba.len() == *w as usize * *h as usize * 4)
+                .map(|(w, h, rgba)| egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba));
+            let _ = done.send(image);
+        });
+        Sharp { dir: a.dir.clone(), modified_ms: a.modified_ms, side, read: Some(read), texture: None }
+    }
+
+    /// The picture once made (looked for again soon until then).
+    fn texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureId> {
+        if let Some(read) = &self.read {
+            match read.try_recv() {
+                Ok(image) => {
+                    self.read = None;
+                    self.texture = image.map(|i| ctx.load_texture("preview", i, egui::TextureOptions::LINEAR));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(50)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.read = None,
+            }
+        }
+        self.texture.as_ref().map(TextureHandle::id)
+    }
+}
 
 /// An artwork's frames as read for Preview, and how they play.
 struct PlayedFrames {

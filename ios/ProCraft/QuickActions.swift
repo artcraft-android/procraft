@@ -58,6 +58,13 @@ final class QuickMenus {
         keep()
     }
 
+    /// Names menu `i` `name` (left empty, it keeps its name).
+    func rename(_ i: Int, _ name: String) {
+        guard sets.indices.contains(i) else { return }
+        sets = quickMenuRenamed(menus: sets, index: UInt32(i), name: name)
+        keep()
+    }
+
     /// Takes menu `i` away; the last one stays.
     func delete(_ i: Int) {
         guard sets.count > 1, sets.indices.contains(i) else { return }

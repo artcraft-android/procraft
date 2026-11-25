@@ -55,13 +55,15 @@ final class SelectionTool {
     private static let kindKey = "selectionKind"
     private static let thresholdKey = "selectionThreshold"
     private static let pixelatedKey = "selectionPixelated"
+    private static let colorFillKey = "selectionColorFill"
 
     @ObservationIgnored private unowned let model: CanvasModel
 
     private(set) var kind: SelectionKind
     /// New shapes take away from the selection instead of adding to it.
     private(set) var removes = false
-    /// Each new selection is filled with the paint colour.
+    /// What is selected shows covered by the paint colour, and is filled with it as the tool closes;
+    /// kept between launches.
     private(set) var colorFill = false
     /// Pixelated, for pixel art (in Feather's popover, the selection's edge being what it sets):
     /// the shapes drawn to select with land on whole pixels and take whole pixels only. (The Pen's
@@ -89,6 +91,9 @@ final class SelectionTool {
     /// While the tool is open on a plugin's layer: the box round the strokes the selection takes
     /// (four corners, x then y, canvas pixels), else empty.
     private(set) var takenBox: [Float] = []
+    /// While the tool is open: the paths of the shapes joined to the selection meanwhile (canvas
+    /// pixels, each closed), shown dashed.
+    private(set) var outlines: [[CGPoint]] = []
 
     /// A feather's work off the main thread, the newest amount when it gets there.
     @ObservationIgnored private let queue = DispatchQueue(label: "feather", qos: .userInitiated)
@@ -101,6 +106,7 @@ final class SelectionTool {
         kind = d.string(forKey: Self.kindKey).flatMap(SelectionKind.init(rawValue:)) ?? .freehand
         threshold = d.object(forKey: Self.thresholdKey) as? Float ?? 0.5
         pixelated = d.bool(forKey: Self.pixelatedKey)
+        colorFill = d.bool(forKey: Self.colorFillKey)
     }
 
     /// Each time the tool opens, shapes add to the selection.
@@ -108,10 +114,15 @@ final class SelectionTool {
         removes = false
     }
 
-    /// The tool closes: a path being drawn becomes a selection.
+    /// The tool closes: a path being drawn becomes a selection; with Color Fill, what is selected is
+    /// filled and the selection ends with it (one undo step, which brings it back), as the core does.
     func closed() {
-        closeFreehand()
         setPopup(.none)
+        freehand = []
+        if model.session.closeSelectionTool(colourFill: colorFill) {
+            model.refresh()
+        }
+        hasSelection = model.session.hasSelection()
     }
 
     func choose(_ next: SelectionKind) {
@@ -125,9 +136,10 @@ final class SelectionTool {
         removes = value
     }
 
-    /// How a selection joins the one there is: selecting by colour always adds (Remove greyed).
+    /// How a selection joins the one there is: selecting by colour always adds, and so does
+    /// anything with nothing selected yet (Remove greyed).
     private var join: SelectionJoin {
-        removes && kind != .automatic ? .remove : .add
+        removes && kind != .automatic && hasSelection ? .remove : .add
     }
 
     /// How the canvas's touches select while the tool is open; none otherwise.
@@ -173,7 +185,7 @@ final class SelectionTool {
         shapeDrag = (CGPoint(x: a.x / pixels, y: a.y / pixels), CGPoint(x: b.x / pixels, y: b.y / pixels))
     }
 
-    /// The touches made a selection (or a shape dragged out ended): Color Fill fills it.
+    /// The touches made a selection (or a shape dragged out ended).
     func touched() {
         shapeDrag = nil
         changed()
@@ -196,7 +208,7 @@ final class SelectionTool {
             thresholdDrag = (CGPoint(x: p.x / model.pixels, y: p.y / model.pixels), value)
             session.setSelectionDisplay(display: .fill)
             session.selectByColour(x: Float(p.x), y: Float(p.y), threshold: value, join: join, live: true)
-            changed(fill: false)
+            changed()
             return
         }
         // the touches made the selection as it was let go
@@ -218,13 +230,13 @@ final class SelectionTool {
 
     func invert() {
         model.session.selectInvert()
-        changed(fill: false)
+        changed()
     }
 
     func copyToLayer() {
         guard model.session.copySelectionToLayer() != nil else { return }
         model.session.selectNone()
-        changed(fill: false)
+        changed()
         model.refresh()
     }
 
@@ -248,6 +260,15 @@ final class SelectionTool {
             if let latest {
                 session.selectFeather(amount: latest)
             }
+        }
+    }
+
+    /// The feather's slider let go of: the line where the selection fades out goes, after the
+    /// feathering on its way.
+    func featherLetGo() {
+        let session = model.session
+        queue.async {
+            session.selectFeatherLetGo()
         }
     }
 
@@ -292,15 +313,22 @@ final class SelectionTool {
 
     func load(_ i: Int) {
         _ = model.session.loadSelection(index: UInt32(i))
-        changed(fill: false)
+        changed()
     }
 
+    /// A kept selection deleted (its row slid left, Delete).
+    func deleteSaved(_ i: Int) {
+        model.session.deleteSavedSelection(index: UInt32(i))
+        saved = Int(model.session.savedSelectionCount())
+        loadThumbnails()
+    }
+
+    /// Color Fill on or off: what is selected shows covered by the colour (only shown, the layer
+    /// as it was), filled as the tool closes; off again, the colour goes and the selection stays.
     func toggleColorFill() {
         colorFill.toggle()
-        if colorFill, hasSelection {
-            model.session.fillSelection()
-            model.refresh()
-        }
+        UserDefaults.standard.set(colorFill, forKey: Self.colorFillKey)
+        showLook()
     }
 
     func togglePixelated() {
@@ -330,7 +358,7 @@ final class SelectionTool {
     func clear() {
         closeFreehand()
         model.session.selectNone()
-        changed(fill: false)
+        changed()
     }
 
     /// Whether anything is selected, read again (undo and redo may change it).
@@ -341,31 +369,43 @@ final class SelectionTool {
         }
     }
 
-    private func changed(fill: Bool = true) {
-        let session = model.session
-        hasSelection = session.hasSelection()
-        if fill, colorFill, hasSelection {
-            session.fillSelection()
-            model.refresh()
-        }
+    /// (Color Fill fills what is selected as the tool closes, not as it changes.)
+    private func changed(fill _: Bool = true) {
+        hasSelection = model.session.hasSelection()
         showLook()
         // one stroke picked on a vector layer shows its nodes
         model.readVectorNodes()
     }
 
-    /// Bands over what is not selected, except while selecting by colour, which tints what is.
+    /// Bands over what is not selected, except while selecting by colour, which tints what is, and
+    /// with Color Fill on in the selection tool, which covers it with the colour.
     func showLook() {
-        let tint = model.selecting && kind == .automatic
-        model.session.setSelectionDisplay(display: tint ? .tint : .stripes)
+        let display: SelectionDisplay
+        if model.selecting, colorFill {
+            display = .colourFill
+        } else if model.selecting, kind == .automatic {
+            display = .tint
+        } else {
+            display = .stripes
+        }
+        model.session.setSelectionDisplay(display: display)
         refreshTaken()
     }
 
     /// The box round the strokes the selection takes, read again while the tool is open.
     func refreshTaken() {
         let session = model.session
-        let box = model.selecting && session.hasSelection() ? session.takenPluginItemsBox() : []
+        let shown = model.selecting && session.hasSelection()
+        let box = shown ? session.takenPluginItemsBox() : []
         if box != takenBox {
             takenBox = box
+        }
+        // and the shapes' paths
+        let paths = shown ? session.selectionOutlines().map { path in
+            stride(from: 0, to: path.count - 1, by: 2).map { CGPoint(x: CGFloat(path[$0]), y: CGFloat(path[$0 + 1])) }
+        } : []
+        if paths != outlines {
+            outlines = paths
         }
     }
 }
@@ -379,8 +419,10 @@ struct SelectionToolbar: View {
         let tool = model.selection
         let has = tool.hasSelection
         let drawing = !tool.freehand.isEmpty
-        // selecting by colour always adds: Add shows chosen, and only the other ways can remove
+        // selecting by colour always adds: Add shows chosen, and only the other ways can remove,
+        // and only from a selection there is
         let joins = tool.kind != .automatic
+        let removable = joins && has
         FloatingToolbar(
             layout: ToolbarLayout(screenWidth: screenWidth, count: 8, roomy: buttonRoomy, narrow: buttonNarrow),
             onBackground: { tool.setPopup(.none) }
@@ -392,29 +434,31 @@ struct SelectionToolbar: View {
                 }
             }
         } buttons: { w in
-            // a long name smaller only where the buttons are narrow
-            let long: CGFloat = w < buttonRoomy ? 11 : 12.5
-            ToolbarButton(icon: PcIcons.selectAdd, label: "Add", active: !joins || !tool.removes, width: w, iconSize: 44) {
+            ToolbarButton(icon: PcIcons.selectAdd, label: "Add", active: !removable || !tool.removes, width: w, iconSize: 44) {
                 if joins {
                     tool.chooseRemoves(false)
                 }
             }
-            ToolbarButton(icon: PcIcons.selectRemove, label: "Remove", active: joins && tool.removes, enabled: joins, width: w, iconSize: 44) {
+            ToolbarButton(icon: PcIcons.selectRemove, label: "Remove", active: removable && tool.removes, enabled: removable, width: w, iconSize: 44) {
                 tool.chooseRemoves(true)
             }
             ToolbarButton(icon: PcIcons.invert, label: "Invert", enabled: has, width: w, iconSize: 44) { tool.invert() }
-            ToolbarButton(icon: PcIcons.selectCopyPaste, label: "Copy & Paste", enabled: has || drawing, width: w, iconSize: 44, labelSize: long) {
+            ToolbarButton(icon: PcIcons.selectCopyPaste, label: "Copy & Paste", enabled: has || drawing, width: w, iconSize: 44) {
                 tool.copyToLayer()
             }
             // always there to tap: its Pixelated is for the shapes yet to be drawn
             ToolbarButton(icon: PcIcons.feather, label: "Feather", active: tool.popup == .feather, width: w, iconSize: 44) {
                 tool.openPopup(.feather)
             }
-            ToolbarButton(icon: PcIcons.saveLoad, label: "Save & Load", active: tool.popup == .saved, enabled: has || drawing, width: w, iconSize: 44, labelSize: long) {
+            ToolbarButton(icon: PcIcons.saveLoad, label: "Save & Load", active: tool.popup == .saved, enabled: has || drawing, width: w, iconSize: 44) {
                 tool.openPopup(.saved)
             }
-            ToolbarButton(icon: PcIcons.colorFill, label: "Color Fill", active: tool.colorFill, width: w, iconSize: 37) {
-                tool.toggleColorFill()
+            ToolbarButton(icon: PcIcons.colorFill, label: "Color Fill", active: tool.colorFill, width: w, iconSize: 37) { tool.toggleColorFill() }
+            // on a model: a selection reaches every surface under it
+            if model.scene.open {
+                ToolbarButton(icon: PcIcons.xRay, label: "X-Ray", active: AppSettings.shared.selectionXRay, width: w, iconSize: 44) {
+                    model.scene.toggleXRay()
+                }
             }
             ToolbarButton(icon: PcIcons.clearSelection, label: "Clear", enabled: has || drawing, width: w, iconSize: 44) { tool.clear() }
         }
@@ -448,7 +492,8 @@ struct SelectionPopover: View {
                         PanelSlider(
                             label: "Amount", value: amount,
                             shown: amount <= 0 ? "None" : "\(wholeNumber(amount * 100))%",
-                            onChange: { tool.featherTo($0) }
+                            onChange: { tool.featherTo($0) },
+                            onLetGo: { tool.featherLetGo() }
                         )
                     }
                     .opacity(softens ? 1 : 0.4)
@@ -467,8 +512,14 @@ struct SelectionPopover: View {
     }
 }
 
+/// A kept selection's row slid left this far shows Delete (59 x 38, 13 in from the right) beside it.
+private let savedReveal: CGFloat = 82
+private let savedDelete = Color(argb: 0xFFEE_4246)
+
 private struct SavedSelections: View {
     let tool: SelectionTool
+    /// The row slid open, if one is.
+    @State private var open: Int?
 
     var body: some View {
         let corner = toolbarMenuCorner
@@ -488,30 +539,94 @@ private struct SavedSelections: View {
         .frame(height: 40)
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 1) {
-                ForEach(0 ..< tool.saved, id: \.self) { i in
-                    HStack(spacing: 14) {
-                        ZStack {
-                            savedThumb
-                            if let picture = tool.savedThumbnails[i] {
-                                Image(uiImage: picture)
-                                    .resizable()
-                                    .scaledToFit()
+                // the newest at the top, each named by its place among them, oldest first
+                ForEach((0 ..< tool.saved).reversed(), id: \.self) { i in
+                    SavedSelectionRow(
+                        tool: tool,
+                        index: i,
+                        open: open == i,
+                        onOpen: { open = $0 ? i : nil },
+                        onTap: {
+                            if open != nil {
+                                withAnimation(Motion.swipeSettle) { open = nil }
+                            } else {
+                                tool.load(i)
                             }
+                        },
+                        onDelete: {
+                            open = nil
+                            tool.deleteSaved(i)
                         }
-                        .frame(width: 64, height: 46)
-                        .clipShape(UnevenRoundedRectangle(topLeadingRadius: corner, bottomLeadingRadius: corner, style: .circular))
-                        ToolbarMenuLabel(text: "Selection \(i + 1)")
-                        Spacer(minLength: 0)
-                    }
-                    .frame(height: 51)
-                    .background(RoundedRectangle(cornerRadius: corner, style: .circular).fill(ToolbarInk.menuGroup))
-                    .contentShape(Rectangle())
-                    .onTapGesture { tool.load(i) }
+                    )
                 }
             }
         }
         .frame(height: 172)
         .padding(.top, 8)
+    }
+}
+
+/// A kept selection's row: a tap loads it; slid left under a finger, it shows Delete.
+private struct SavedSelectionRow: View {
+    let tool: SelectionTool
+    let index: Int
+    let open: Bool
+    let onOpen: (Bool) -> Void
+    let onTap: () -> Void
+    let onDelete: () -> Void
+
+    @State private var moved: CGFloat?
+
+    var body: some View {
+        let corner = toolbarMenuCorner
+        let x = moved ?? (open ? -savedReveal : 0)
+        ZStack(alignment: .trailing) {
+            Text(verbatim: "Delete")
+                .font(.system(size: 15))
+                .foregroundStyle(Color.white)
+                .lineLimit(1)
+                .frame(width: 59, height: 38)
+                .background(RoundedRectangle(cornerRadius: 11, style: .circular).fill(savedDelete))
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onDelete)
+                .padding(.trailing, 13)
+            HStack(spacing: 14) {
+                ZStack {
+                    savedThumb
+                    if let picture = tool.savedThumbnails[index] {
+                        Image(uiImage: picture)
+                            .resizable()
+                            .scaledToFit()
+                    }
+                }
+                .frame(width: 64, height: 46)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: corner, bottomLeadingRadius: corner, style: .circular))
+                ToolbarMenuLabel(text: "Selection \(index + 1)")
+                Spacer(minLength: 0)
+            }
+            .frame(height: 51)
+            .background(RoundedRectangle(cornerRadius: corner, style: .circular).fill(ToolbarInk.menuGroup))
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onTap)
+            .offset(x: x)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 14)
+                    .onChanged { drag in
+                        guard moved != nil || abs(drag.translation.width) > abs(drag.translation.height) else { return }
+                        let from: CGFloat = open ? -savedReveal : 0
+                        moved = min(max(from + drag.translation.width, -savedReveal), 0)
+                    }
+                    .onEnded { _ in
+                        guard let end = moved else { return }
+                        withAnimation(Motion.swipeSettle) {
+                            moved = nil
+                            onOpen(end < -savedReveal / 2)
+                        }
+                    }
+            )
+        }
+        .frame(height: 51)
+        .clipped()
     }
 }
 
@@ -546,10 +661,20 @@ struct SelectionOverlay: View {
             nil
         }
         let taken = tool.takenBox
-        if drag != nil || !path.isEmpty || slid != nil || taken.count == 8 {
+        let outlines = tool.outlines
+        if drag != nil || !path.isEmpty || slid != nil || taken.count == 8 || !outlines.isEmpty {
             let points = path.map { model.canvasToWindow($0) }
+            // (read with the view, so they follow it as it moves)
+            let shapes = outlines.map { $0.map { model.canvasToWindow($0) } }
             ZStack(alignment: .top) {
                 Canvas { context, _ in
+                    // the shapes joined to the selection while the tool is open: their paths, dashed
+                    for shape in shapes where shape.count >= 2 {
+                        var edge = Path()
+                        edge.addLines(shape)
+                        edge.closeSubpath()
+                        dashed(context, edge)
+                    }
                     if taken.count == 8 {
                         drawTakenBox(context, taken)
                     }

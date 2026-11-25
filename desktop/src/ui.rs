@@ -145,6 +145,15 @@ pub struct Interface {
     overlays: Overlays,
     /// The Layers panel and the brush library floating in windows of their own.
     floating: crate::floating_panels::Floating,
+    /// The interface's bars as Edit layout moves them (the core's), and whether it is on (their
+    /// handles show).
+    bars: Arc<procraft_core::BarLayout>,
+    editing_layout: bool,
+    /// How far each bar is into its side (Collapse to edge; 0 showing, 1 gone), in
+    /// [`procraft_core::LayoutBar`]'s order, as the last frame had it.
+    bar_slides: [f32; 4],
+    /// Edit layout's named layouts (the core's), kept with the preferences.
+    named_layouts: Arc<procraft_core::NamedLayouts>,
     /// The interface is hidden (full screen).
     bars_hidden: bool,
     /// A layer copied or cut, to paste.
@@ -161,6 +170,10 @@ pub struct Interface {
     actions_panel: Actions,
     /// A plugin's panel's slider being moved: its row, and where it is.
     plugin_panel_held: Option<(usize, f32)>,
+    /// A plugin's texture control's Textures sheet, while open (interface 15).
+    textures: Option<crate::textures::Textures>,
+    /// The list of filter layers the Layers panel's + opened, while open (interface 17).
+    filter_list: Option<crate::filter_list::FilterList>,
     /// A plugin's panel took Space as the key press it asked for: let go, it is no tap.
     space_to_panel: bool,
     layers: Layers,
@@ -286,7 +299,17 @@ impl Interface {
             drop: ColourDrop::default(),
             library: Library::default(),
             overlays: Overlays::default(),
-            floating: crate::floating_panels::Floating::kept(prefs.floating),
+            floating: crate::floating_panels::Floating::kept(prefs.panel_layout.as_deref(), prefs.floating),
+            bars: crate::edit_layout::kept_bars(prefs.bar_layout.as_deref()),
+            named_layouts: {
+                let named = procraft_core::NamedLayouts::new();
+                if let Some(kept) = &prefs.named_layouts {
+                    named.read_kept(kept.clone());
+                }
+                named
+            },
+            editing_layout: false,
+            bar_slides: [0.0; 4],
             bars_hidden: false,
             clipboard: None,
             system_clipboard: SystemClipboard::new(is_picture),
@@ -295,12 +318,14 @@ impl Interface {
             layer_choice: None,
             actions_panel: Actions::default(),
             plugin_panel_held: None,
+            textures: None,
+            filter_list: None,
             space_to_panel: false,
             layers: Layers::default(),
             look: Look::default(),
             side_bar: SideBar::default(),
             transform: crate::transform::Transform::default(),
-            selection: crate::selection::Selection::default(),
+            selection: crate::selection::Selection::with_color_fill(prefs.selection_color_fill),
             gestures: procraft_core::GestureSettings::new(crate::files::kept_gestures()),
             gesture_controls: crate::gesture_controls::GestureControls::default(),
             canvas_info: None,
@@ -425,7 +450,7 @@ impl Interface {
         self.selection.on = false;
         self.drop.end_filling();
         session.use_colour_history(self.colours.history.clone());
-        session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
+        session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
         session.use_gradients(self.gradients.clone());
         self.prefs.apply(session);
         self.time_lapse.open(self.artwork_dir.as_deref(), session.edits());
@@ -450,6 +475,9 @@ impl Interface {
         self.end_recolor(session);
         session.set_touch_layer_opacity(None);
         self.selection.close(session);
+        // a picker plugin's square drew from this artwork's session: kept, the session (and all
+        // the artwork's memory) would stay until another artwork showed the colour panel
+        self.colours.set_picker(None);
     }
 
     /// A new artwork just started: without time-lapse if that is turned off.
@@ -471,6 +499,12 @@ impl Interface {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn drag_format(&self) -> crate::files::Format {
         crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
+    }
+
+    /// Lets go of the pictures the interface keeps only to be quicker: the brush library's sample
+    /// strokes (the GPU short of memory). Between frames only.
+    pub fn let_go_of_kept(&mut self) {
+        self.library.let_go_of_previews();
     }
 
     /// The plugins, which say how big the interface shows.
@@ -500,6 +534,10 @@ impl Interface {
 
     /// Fitting the canvas keeps it clear of the bar.
     pub fn place_canvas(&self, session: &CanvasSession, scale: f32) {
+        // what the panels docked against the window's edges take from the drawing area, while a
+        // plugin says they make room
+        let room = self.floating.layout.canvas_insets();
+        session.set_room_insets(room.left * scale, room.top * scale, room.right * scale, room.bottom * scale);
         // with Fit Canvas Inside Interface, clear of the top bar and the side bar (on its side), as
         // they show
         if !self.prefs.fit_inside {
@@ -549,13 +587,16 @@ impl Interface {
         // and which notices show, and which panels float
         self.overlays.follow_plugins(&self.prefs.plugins);
         self.floating.follow(&self.prefs.plugins);
+        self.floating.place(&ctx);
+        crate::panel::set_panels_fold(&ctx, self.floating.layout.look().fold);
         self.ended_export = None;
         self.canvas_pressed = std::mem::take(&mut input.canvas_pressed);
         // looked at again soon while an insert is read, or brushes made
         let brushes_coming = self.brushes_added(session);
-        // the autosave told of when it fails (once until a save works again), the palettes too
-        if let Some(why) = session.take_save_failure() {
-            self.overlays.notice(procraft_core::save_failure_said(why), true);
+        // the autosave told of when it fails (once until a save works again; the storage full once
+        // until there is room, whichever meets it first), the palettes too
+        if let Some(said) = session.take_save_failure().and_then(procraft_core::save_failure_to_tell) {
+            self.overlays.notice(said, true);
         }
         // a crop or a smudge the GPU had no memory for
         if let Some(why) = session.take_failure() {
@@ -610,7 +651,7 @@ impl Interface {
         if self.pen_picking && !eyedropper_held {
             self.pen_picking = false;
             if let Some(rgb) = self.overlays.finish_pick() {
-                self.colours.set_rgb(session, rgb);
+                self.colours.picked(session, rgb);
             }
         }
         self.commands(&ctx, session, input);
@@ -683,7 +724,7 @@ impl Interface {
         if self.time_lapse.replaying() {
             self.canvas_rect = Rect::NOTHING;
             self.animation.reset(session);
-            if let Some(said) = self.time_lapse.show(&ctx, &mut self.look, &session.name()) {
+            if let Some(said) = self.time_lapse.show(&ctx, &mut self.look, &session.name(), &self.prefs.plugins) {
                 crate::files::tell("Time-lapse", said);
             }
             session.set_backdrops(Vec::new());
@@ -762,7 +803,55 @@ impl Interface {
             self.popover_open = self.text.editing();
             return;
         }
-        let bar = crate::chrome::top_bar(ui, &mut self.look, info.tool, colour, self.colours.hsv[2], &lit);
+        // the top bar, or its halves where Edit layout moved them (or as they slide into a side)
+        let [left_slid, right_slid, ..] = self.bar_slides;
+        let sliding = [left_slid > 0.0, right_slid > 0.0];
+        let mut moved = crate::edit_layout::place_bars(
+            &ctx,
+            &self.bars,
+            &self.floating.layout.look(),
+            self.prefs.right_handed,
+            self.prefs.side_bar_centre,
+            sliding,
+        );
+        let [left_slide, right_slide, side_slide, _] = self.bar_slides(&ctx);
+        let mut halves_glass = Vec::new();
+        // (each square only on its sides against the window's edges)
+        let edges = |bar| self.bars.touching(bar).unwrap_or_default();
+        let half_edges = [edges(procraft_core::LayoutBar::TopLeft), edges(procraft_core::LayoutBar::TopRight)];
+        // the side bar sliding into its side or out: drawn where it is on the way
+        let side_home = moved.side_bar.is_none();
+        if let Some((offset, _)) = side_slide.filter(|(_, gone)| !gone)
+            && let Some(r) = self.bars.rect(procraft_core::LayoutBar::SideBar)
+            && offset != egui::Vec2::ZERO
+        {
+            moved.side_bar = Some(egui::pos2(r.x, r.y) + offset);
+        }
+        let side_gone = side_slide.is_some_and(|(_, gone)| gone);
+        let side_edges = moved.side_bar.map(|_| edges(procraft_core::LayoutBar::SideBar));
+        let bar = match moved.halves {
+            Some(places) => crate::chrome::top_bar_halves(
+                &ctx,
+                &mut self.look,
+                info.tool,
+                colour,
+                self.colours.hsv[2],
+                &lit,
+                {
+                    let [left, right] = places;
+                    [(left, left_slide), (right, right_slide)].map(|(p, slide)| {
+                        let off = slide.map_or(egui::Vec2::ZERO, |(o, _)| o);
+                        procraft_core::BarPlace { x: p.x + off.x, y: p.y + off.y, ..p }
+                    })
+                },
+                half_edges,
+                [left_slide, right_slide].map(|s| s.is_some_and(|(_, gone)| gone)),
+                &mut halves_glass,
+            ),
+            None => crate::chrome::top_bar(ui, &mut self.look, info.tool, colour, self.colours.hsv[2], &lit),
+        };
+        self.side_bar.moved = moved.side_bar;
+        self.side_bar.edges = side_edges;
         self.gallery_button = bar.rect(BarButton::Gallery);
         let held = self.tool_hold(&ctx, session, &bar);
         match bar.pressed.filter(|_| !held) {
@@ -790,18 +879,24 @@ impl Interface {
             Some(BarButton::Adjustments) => self.adjustments_pressed(session),
             Some(BarButton::Colour) | None => {}
         }
+        // the colour panel opened or closed: closed on another colour, the one it opened on is
+        // the previous colour
+        self.colours.panel_shown(self.open == Some(Popover::Colour));
+        // what a plugin's action or panel set of its own controls: kept as the card keeps them, and
+        // the artwork follows the plugins again
+        if !self.prefs.plugins.take_controls_set().is_empty() {
+            self.prefs.keep();
+            self.prefs.apply(session);
+        }
         // the colour button: tapped it opens the colours, held it goes back to the previous
-        // colour, and dragged out its colour fills where it is let go (ColorDrop)
+        // colour (held again, comes back), and dragged out its colour fills where it is let go
+        // (ColorDrop)
         if let Some(rect) = bar.rect(BarButton::Colour) {
             let id = ui.scope_id().with("colour button");
             let rgb = to_hex(self.colours.rgb());
-            match self.drop.source(ui, session, id, rect, rgb, false, true, None) {
+            match self.drop.source(ui, session, id, rect, rgb, false, None) {
                 Some(Touch::Tap) => self.toggle(session, Popover::Colour),
-                Some(Touch::Hold) => {
-                    if self.colours.previous(session) {
-                        self.overlays.done("Previous colour", false);
-                    }
-                }
+                Some(Touch::Hold) => self.previous_colour(session),
                 Some(Touch::Dragged) => self.open = None,
                 None => {}
             }
@@ -809,25 +904,41 @@ impl Interface {
         self.canvas_rect = ui.available_rect_before_wrap();
         // the bars are glass over the canvas: the top bar's frost, the side bar's and its tracks'
         let (mut backdrops, mut windows) = (Vec::new(), Vec::new());
-        let top_bar = ctx.content_rect().with_max_y(ctx.content_rect().top() + crate::panel::bar_shown(&ctx));
-        crate::chrome::frost(&mut backdrops, top_bar, 0.0, ctx.pixels_per_point());
+        if moved.halves.is_some() {
+            backdrops.extend(halves_glass);
+        } else {
+            let top_bar = ctx.content_rect().with_max_y(ctx.content_rect().top() + crate::panel::bar_shown(&ctx));
+            crate::chrome::frost(&mut backdrops, top_bar, 0.0, ctx.pixels_per_point());
+        }
         // a mode taking the screen puts the side bar away
         let adjusting = session.adjustment_shown();
         let side_bar = self.side_bar_shown
+            && !side_gone
             && !self.transform.on
             && !self.selection.on
             && session.touch_layer_opacity().is_none()
             && !self.text.editing()
             && (adjusting.adjustment.is_none() || adjusting.pencil);
-        crate::panel::side_bar_at(&ctx, self.side_bar_shown, self.prefs.right_handed);
+        let side_bar_centre = self.prefs.side_bar_centre;
+        // (moved off its edge by Edit layout, the panels keep clear of no side bar)
+        let at_edge = side_home && !side_gone;
+        crate::panel::side_bar_at(&ctx, self.side_bar_shown && at_edge, self.prefs.right_handed, side_bar_centre);
         let taps = if side_bar {
             let modify_lit = session.pick_next();
             let right = self.prefs.right_handed;
-            self.side_bar.show(ui, &mut self.look, session, &info, modify_lit, right, &mut backdrops, &mut windows)
+            // its tracks as the plugins have them look
+            self.side_bar.slider_look = self.prefs.plugins.slider_look();
+            let (look, centre) = (&mut self.look, side_bar_centre);
+            self.side_bar.show(ui, look, session, &info, modify_lit, right, centre, &mut backdrops, &mut windows)
         } else {
             crate::chrome::SideTaps::default()
         };
         self.keep_brushes |= taps.brush_changed;
+        // the side bar moved by its modify button: kept where it was let go
+        if let Some(centre) = taps.centre {
+            self.prefs.side_bar_centre = centre;
+            self.prefs.keep();
+        }
         if taps.undo {
             self.undo(session);
         }
@@ -900,7 +1011,7 @@ impl Interface {
         // its rows not showing, held layers find none to drop on
         let layers_floating = self.floating.shown(procraft_core::FloatingPanel::Layers).is_some();
         if (self.open != Some(Popover::Layers) || self.background_pick.is_some()) && !layers_floating {
-            self.layers.closed();
+            self.layers.closed(session);
         }
         // the background's colour is kept, however its panel closed
         if self.open != Some(Popover::Layers) {
@@ -910,13 +1021,73 @@ impl Interface {
         // Classic as the plugins on now draw it
         if self.colours.floating.is_some() {
             self.colours.set_triangle(self.prefs.plugins.colour_triangle());
+            self.colours.steps = self.prefs.plugins.colour_steps();
+            self.colours.before_shown = self.prefs.plugins.colour_before();
             let picker = self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
             self.colours.set_picker(picker);
         }
         self.colours.set_floating_look(&self.prefs.plugins);
+        // where the layout has it, while a plugin lays the panels out
+        self.colours.layout = self.floating.layout.look().on.then(|| Arc::clone(&self.floating.layout));
         self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
+        self.floating.changed |= std::mem::take(&mut self.colours.layout_changed);
         // the Layers panel and the brush library torn off into windows of their own, likewise
         self.floating_panels(&ctx, session, &mut backdrops);
+        // Edit layout: a handle on each bar, Reset and Done
+        if self.editing_layout {
+            let hidden = !self.floating.layout.hidden_pieces().is_empty();
+            let belt = self.floating.layout.belt_shown().is_some();
+            let collapse = self.floating.layout.look().collapse.then(|| self.any_collapsed());
+            match crate::edit_layout::handles(&ctx, &self.bars, hidden, &self.named_layouts, belt, collapse) {
+                Some(crate::edit_layout::Done::CollapseAll(collapsed)) => self.collapse_all(collapsed),
+                Some(crate::edit_layout::Done::ShowHidden) => {
+                    self.floating.layout.show_hidden();
+                    self.keep_floating();
+                }
+                Some(crate::edit_layout::Done::Choose(name)) => {
+                    if self.named_layouts.choose(name, Arc::clone(&self.bars), Arc::clone(&self.floating.layout)) {
+                        self.prefs.bar_layout = Some(self.bars.kept());
+                        self.keep_named();
+                        self.keep_floating();
+                    }
+                }
+                Some(crate::edit_layout::Done::Save(name)) => {
+                    if self
+                        .named_layouts
+                        .save(name, Arc::clone(&self.bars), Arc::clone(&self.floating.layout))
+                        .is_some()
+                    {
+                        self.keep_named();
+                    }
+                }
+                Some(crate::edit_layout::Done::Rename(from, to)) => {
+                    if self.named_layouts.rename(from, to).is_some() {
+                        self.keep_named();
+                    }
+                }
+                Some(crate::edit_layout::Done::Delete(name)) => {
+                    if self.named_layouts.delete(name) {
+                        self.keep_named();
+                    }
+                }
+                Some(crate::edit_layout::Done::Kept) => {
+                    self.prefs.bar_layout = Some(self.bars.kept());
+                    self.prefs.keep();
+                }
+                Some(crate::edit_layout::Done::Ended) => {
+                    self.editing_layout = false;
+                    self.bars.set_editing(false);
+                    self.prefs.bar_layout = Some(self.bars.kept());
+                    self.prefs.keep();
+                }
+                None => {}
+            }
+        }
+        // no handles once no plugin lets the bars move
+        if self.editing_layout && !self.floating.layout.look().edit {
+            self.editing_layout = false;
+            self.bars.set_editing(false);
+        }
         // the colour model chosen on the panel, kept; the panel works in the one kept
         if let Some(model) = self.colours.model_chosen.take() {
             self.prefs.colour_model = model;
@@ -926,8 +1097,42 @@ impl Interface {
         if self.open != Some(Popover::Actions) {
             self.actions_panel.closed();
         }
+        crate::panel::drawing_bottom(
+            &ctx,
+            Some((procraft_core::LayoutPiece::Transform, self.bottom_at(&ctx, procraft_core::LayoutPiece::Transform))),
+        );
         self.transform.show(&ctx, &mut self.look, session, &mut backdrops);
+        crate::panel::drawing_bottom(&ctx, None);
         self.plugin_panel(&ctx, session, &mut backdrops);
+        // a texture control's sheet, over everything: what it changed kept as the card's would be
+        if let Some(key) = self.actions_panel.take_textures_asked() {
+            self.textures = crate::textures::Textures::open(&ctx, &self.prefs.plugins, &key);
+        }
+        if let Some(sheet) = self.textures.as_mut() {
+            let (closed, changed) = sheet.show(&ctx, &self.prefs.plugins);
+            if closed {
+                self.textures = None;
+            }
+            if changed {
+                self.prefs.apply(session);
+                self.prefs.keep();
+            }
+        }
+        // the filter layers' list, over everything: one picked is added, and its settings open
+        if let Some(sheet) = self.filter_list.as_mut() {
+            match sheet.show(&ctx) {
+                crate::filter_list::Picked::Open => {}
+                crate::filter_list::Picked::Cancelled => self.filter_list = None,
+                crate::filter_list::Picked::Filter(id) => {
+                    self.filter_list = None;
+                    if session.add_filter_layer(id) == 0 {
+                        crate::files::no_room(session);
+                    } else {
+                        self.start_filter_layer_settings(session);
+                    }
+                }
+            }
+        }
         crate::model_picture::show(&ctx, &mut self.look, session);
         self.selection.lasso_fill = self.prefs.lasso_fill;
         self.selection.lasso_fills = self.prefs.plugins.lasso_fills();
@@ -935,7 +1140,13 @@ impl Interface {
         self.selection.pixelated = self.prefs.selection_pixelated;
         // the bars and panels that hang from the top bar hang from where it ends as it shows
         let bar_bottom = crate::panel::bar_shown(&ctx);
-        if let Some(on) = self.selection.show(&ctx, &mut self.look, session, bar_bottom, self.model) {
+        crate::panel::drawing_bottom(
+            &ctx,
+            Some((procraft_core::LayoutPiece::Selection, self.bottom_at(&ctx, procraft_core::LayoutPiece::Selection))),
+        );
+        let selection = self.selection.show(&ctx, &mut self.look, session, bar_bottom, self.model);
+        crate::panel::drawing_bottom(&ctx, None);
+        if let Some(on) = selection {
             self.prefs.selection_x_ray = on;
             self.prefs.keep();
         }
@@ -950,7 +1161,19 @@ impl Interface {
             self.prefs.selection_pixelated = self.selection.pixelated;
             self.prefs.keep();
         }
-        if let Some(asked) = self.adjustments.show(
+        // Color Fill is kept between launches
+        if self.selection.color_fill() != self.prefs.selection_color_fill {
+            self.prefs.selection_color_fill = self.selection.color_fill();
+            self.prefs.keep();
+        }
+        // Liquify's panel a piece of its own, the other adjustments' controls another
+        let adjusting = if session.adjustment_shown().adjustment == Some(procraft_core::Adjustment::Liquify) {
+            procraft_core::LayoutPiece::Liquify
+        } else {
+            procraft_core::LayoutPiece::Adjusting
+        };
+        crate::panel::drawing_bottom(&ctx, Some((adjusting, self.bottom_at(&ctx, adjusting))));
+        let asked = self.adjustments.show(
             &ctx,
             &mut self.look,
             session,
@@ -958,7 +1181,9 @@ impl Interface {
             &self.gradients,
             &self.colours,
             &mut backdrops,
-        ) {
+        );
+        crate::panel::drawing_bottom(&ctx, None);
+        if let Some(asked) = asked {
             self.adjustment_asked(session, asked);
         }
         let hold = std::time::Duration::from_secs_f32(self.gestures.delay(GesturePurpose::Eyedropper).max(0.0));
@@ -983,7 +1208,7 @@ impl Interface {
             }
             Some(crate::reference::Picked::Done) => {
                 if let Some(rgb) = self.overlays.finish_pick() {
-                    self.colours.set_rgb(session, rgb);
+                    self.colours.picked(session, rgb);
                 }
             }
             None => {}
@@ -1027,7 +1252,7 @@ impl Interface {
         self.text_editor(&ctx, session);
         // a gesture setting changed: the touches follow it, and it is kept
         if self.gesture_controls.show(&ctx, &mut self.look, &self.gestures) {
-            session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
+            session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
             crate::files::keep_gestures(&self.gestures.kept());
         }
         if let Some(info) = self.canvas_info.as_mut() {
@@ -1049,7 +1274,7 @@ impl Interface {
                 None => {}
             }
         }
-        if let Some(said) = self.time_lapse.show(&ctx, &mut self.look, &session.name()) {
+        if let Some(said) = self.time_lapse.show(&ctx, &mut self.look, &session.name(), &self.prefs.plugins) {
             crate::files::tell("Time-lapse", said);
         }
         self.touch_companion(&ctx, session);
@@ -1151,9 +1376,12 @@ impl Interface {
             session.recolor_colour(r, g, b);
         }
         crate::recolor::reticle(ctx, session, rgb);
-        if !self.bars_hidden
-            && let Some(t) = crate::adjust_panels::recolor_toolbar(ctx, threshold)
-        {
+        // Recolor's toolbar floats as an adjustment's controls do
+        let at = self.bottom_at(ctx, procraft_core::LayoutPiece::Adjusting);
+        crate::panel::drawing_bottom(ctx, Some((procraft_core::LayoutPiece::Adjusting, at)));
+        let threshold = if self.bars_hidden { None } else { crate::adjust_panels::recolor_toolbar(ctx, threshold) };
+        crate::panel::drawing_bottom(ctx, None);
+        if let Some(t) = threshold {
             self.prefs.recolor_threshold = t;
             session.recolor_threshold(t);
         }
@@ -1291,6 +1519,12 @@ impl Interface {
             return;
         }
         if !input.idle() {
+            // the view moved (the middle button, Space, R, or Space and Ctrl held): the outline
+            // goes, nothing being painted where it was; hovering again, it comes back where the
+            // pointer is
+            if input.moving_view() && !input.pressing() {
+                self.overlays.hover(session, info, ctx.pixels_per_point(), None);
+            }
             if painting
                 && input.pressing()
                 && let Some(at) = ctx.pointer_latest_pos().filter(|at| on_canvas(*at))
@@ -1329,7 +1563,7 @@ impl Interface {
     }
 
     /// Does what the touches asked.
-    fn commands(&mut self, ctx: &egui::Context, session: &CanvasSession, input: &mut Input) {
+    fn commands(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, input: &mut Input) {
         let mut slid = None;
         let mut sliding = None;
         let mut stroke_ended = false;
@@ -1350,7 +1584,7 @@ impl Interface {
                 TouchCommand::Pick { x, y } => self.overlays.pick(ctx, session, x, y),
                 TouchCommand::PickDone => {
                     if let Some(rgb) = self.overlays.finish_pick() {
-                        self.colours.set_rgb(session, rgb);
+                        self.colours.picked(session, rgb);
                     }
                 }
                 TouchCommand::PickCancel => self.overlays.picking = None,
@@ -1388,6 +1622,17 @@ impl Interface {
                     self.drop.slid(threshold);
                     slid = Some(threshold);
                 }
+                // Continue filling's touch fills where it landed, and its fill ends (a threshold slid
+                // just before it is redone first, if it is kept): here, at once
+                TouchCommand::PourAt { x, y, fill } => {
+                    session.pour_begin(x, y, fill.r, fill.g, fill.b, fill.threshold);
+                }
+                TouchCommand::PourEnd { keep } => {
+                    if let Some(threshold) = slid.take().filter(|_| keep) {
+                        session.pour_threshold(threshold);
+                    }
+                    session.pour_end(keep, None);
+                }
                 TouchCommand::Filled => {
                     self.drop.filled();
                     slid = None;
@@ -1423,6 +1668,12 @@ impl Interface {
                 TouchCommand::CopyPaste => self.copy_paste = true,
                 TouchCommand::LayerSelect { x, y } => self.layer_select(ctx, session, x, y),
                 TouchCommand::QuickMenu { x, y } => self.quick_menu.toggle(egui::pos2(x, y) / ctx.pixels_per_point()),
+                // a pen button set to a QuickMenu action in Pen buttons
+                TouchCommand::Run { action, x, y } => {
+                    self.run_quick(ctx, session, action, egui::pos2(x, y) / ctx.pixels_per_point());
+                }
+                // one set to a plugin's action, run where the pen is
+                TouchCommand::RunPlugin { key, x, y } => self.run_plugin_action_at(ctx, session, key, Some((x, y))),
                 // what a pen's own settings ask its button to show
                 TouchCommand::ShowColours => self.toggle(session, Popover::Colour),
                 TouchCommand::ShowBrushes => self.toggle(session, Popover::Brushes),
@@ -1711,11 +1962,7 @@ impl Interface {
                 self.library.tool_changed();
             }
             QuickAction::Eyedropper => session.set_pick_next(true),
-            QuickAction::SwapColors => {
-                if self.colours.previous(session) {
-                    self.overlays.done("Previous colour", false);
-                }
-            }
+            QuickAction::SwapColors => self.previous_colour(session),
             QuickAction::Selection => self.toggle_selection(session),
             QuickAction::Transform => self.toggle_transform(session),
             QuickAction::Colors => self.toggle(session, Popover::Colour),
@@ -1732,7 +1979,7 @@ impl Interface {
             QuickAction::QuickshapeOn => {
                 let on = self.gestures.is_on(GesturePurpose::Quickshape, "DRAW_HOLD".into());
                 self.gestures.set(GesturePurpose::Quickshape, "DRAW_HOLD".into(), !on);
-                session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
+                session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
                 crate::files::keep_gestures(&self.gestures.kept());
             }
             QuickAction::AddText => self.add_text(ctx, session),
@@ -1795,6 +2042,10 @@ impl Interface {
     /// Brushes read from files meanwhile added to the library and told of (when asked to), the
     /// library kept. True while more are being read or wait to be added.
     fn brushes_added(&mut self, session: &CanvasSession) -> bool {
+        // what the library has to say (Combine refused)
+        if let Some(text) = self.library.notice.take() {
+            self.overlays.notice(text, true);
+        }
         // a file picked from the library's "+"
         if let Some((path, name, tell)) = self.library.take_picked_file() {
             let file = crate::library::BrushFileIn { path, name, taken: false };
@@ -1803,11 +2054,20 @@ impl Interface {
         let added = self.library.added(session, self.studio.open);
         // brushes from a file are on disk once they show in the library, not later on a thread
         // of its own: the app stopping right after (closed, or crashing) still has them
-        if added.iter().any(|&(any, _)| any) {
+        if added.iter().any(|a| a.any) {
             crate::files::keep_brushes(session);
         }
-        for (any, tell) in added {
-            if tell {
+        for crate::library::Added { any, tell, notices } in added {
+            // what a plugin's brush engine said (what came in, or what it couldn't do, with an OK),
+            // in place of the app's own word
+            if !notices.is_empty() {
+                for (title, text) in notices {
+                    match title {
+                        Some(title) => self.plugin_alert.tell(&title, &text, None),
+                        None => self.overlays.notice(text, false),
+                    }
+                }
+            } else if tell {
                 let said = if any { "Brushes added to the library." } else { "This file has no brushes in it." };
                 self.overlays.notice(said, false);
             } else if !any {
@@ -1976,7 +2236,35 @@ impl Interface {
             self.plugin_panel_held = None;
             return;
         };
-        let asked = crate::actions::plugin_panel(ctx, &mut self.look, &panel, &mut self.plugin_panel_held, backdrops);
+        // its brushes' sample strokes, as the library draws them
+        let brushes: Vec<((u32, u32), String)> = panel
+            .rows
+            .iter()
+            .flat_map(|row| match row {
+                procraft_core::PanelRow::Brushes { brushes, .. } => brushes.as_slice(),
+                _ => &[],
+            })
+            .map(|b| ((b.set, b.index), b.name.clone()))
+            .collect();
+        let strokes = if brushes.is_empty() {
+            crate::actions::Strokes::new()
+        } else {
+            self.library.panel_strokes(ctx, session, &brushes)
+        };
+        let asked = if panel.ring {
+            crate::actions::plugin_ring(ctx, &panel, &strokes)
+        } else {
+            let plugins = Arc::clone(&self.prefs.plugins);
+            crate::actions::plugin_panel(
+                ctx,
+                &mut self.look,
+                &plugins,
+                &panel,
+                &mut self.plugin_panel_held,
+                backdrops,
+                &strokes,
+            )
+        };
         match asked {
             Some(crate::actions::PanelTouch::Touch(row, value)) => {
                 let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
@@ -1984,6 +2272,9 @@ impl Interface {
                     plugins.panel_touched(row, value, session);
                     ctx.request_repaint();
                 });
+            }
+            Some(crate::actions::PanelTouch::Textures(key)) => {
+                self.textures = crate::textures::Textures::open(ctx, &self.prefs.plugins, &key);
             }
             Some(crate::actions::PanelTouch::Close) => self.prefs.plugins.close_panel(),
             None => {}
@@ -1994,11 +2285,26 @@ impl Interface {
     /// panel closes so what it does shows; anything it says, or its stopping, is told as a failure
     /// is.
     fn run_plugin_action(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, key: String) {
+        self.run_plugin_action_at(ctx, session, key, None);
+    }
+
+    /// A plugin's action `key` run as [`Self::run_plugin_action`] runs it, come from window pixel
+    /// `at` (where the pen was whose button ran it): a ring it shows opens there.
+    fn run_plugin_action_at(
+        &mut self,
+        ctx: &egui::Context,
+        session: &Arc<CanvasSession>,
+        key: String,
+        at: Option<(f32, f32)>,
+    ) {
         // (what it may paint on, it checks: not a locked layer)
         self.open = None;
         let (plugins, session, ctx) = (Arc::clone(&self.prefs.plugins), Arc::clone(session), ctx.clone());
         std::thread::spawn(move || {
-            plugins.run_action(key, session);
+            match at {
+                Some((x, y)) => plugins.run_action_at(key, session, x, y),
+                None => plugins.run_action(key, session),
+            };
             ctx.request_repaint();
         });
     }
@@ -2014,6 +2320,14 @@ impl Interface {
         if let Some(why) = session.plugin_filter_start(plugins, id, self.artwork_dir.clone()) {
             self.overlays.notice(why, true);
         }
+    }
+
+    /// The current filter layer's settings, in its filter's panel, as an adjustment is open.
+    fn start_filter_layer_settings(&mut self, session: &CanvasSession) {
+        self.switch_modes(session, ModeButton::Adjustment);
+        self.open = None;
+        session.set_pick_next(false);
+        session.filter_layer_settings();
     }
 
     /// Ends the open adjustment: `commit` keeps it (and says so), otherwise the layer goes back.
@@ -2473,6 +2787,21 @@ impl Interface {
     }
 
     /// A panel's button: the panel opens (or closes), what works on the canvas ending first.
+    /// The colour and the previous one trade places (the colour button held, or the quick menu's
+    /// Previous colour): as there, the paint tool is the tool then and the panels close.
+    fn previous_colour(&mut self, session: &CanvasSession) {
+        if !self.colours.previous(session) {
+            return;
+        }
+        self.open = None;
+        if session.info().tool != ToolKind::Paint {
+            self.end_recolor(session);
+            session.set_tool(ToolKind::Paint);
+            self.library.tool_changed();
+        }
+        self.overlays.done("Previous colour", false);
+    }
+
     fn toggle(&mut self, session: &CanvasSession, popover: Popover) {
         self.feedback();
         self.switch_modes(session, ModeButton::Panel { colour: popover == Popover::Colour });
@@ -2480,18 +2809,30 @@ impl Interface {
         if popover == Popover::Colour && self.colours.floating.take().is_some() {
             self.open = None;
         }
-        // as do the Layers and the brush library's with theirs floating
-        let floating = match popover {
-            Popover::Layers => Some(procraft_core::FloatingPanel::Layers),
-            Popover::Brushes => Some(procraft_core::FloatingPanel::Brushes),
-            _ => None,
+        // a panel's button with its window hidden shows the window again
+        let piece = match popover {
+            Popover::Layers => Some(procraft_core::LayoutPiece::Layers),
+            Popover::Brushes => Some(procraft_core::LayoutPiece::Brushes),
+            Popover::Actions => Some(procraft_core::LayoutPiece::Actions),
+            Popover::Adjustments => Some(procraft_core::LayoutPiece::Adjustments),
+            Popover::Colour => None,
         };
-        if let Some(panel) = floating.filter(|&p| self.floating.shown(p).is_some()) {
-            self.floating.close(panel);
+        let layout = &self.floating.layout;
+        if let Some(piece) = piece.filter(|&p| layout.may_float(p) && layout.is_open(p) && layout.is_hidden(p)) {
+            layout.set_hidden(piece, false);
+            self.keep_floating();
+            return;
+        }
+        // as do the Layers and the brush library's with theirs floating, and the others' with theirs
+        if let Some(piece) = piece.filter(|&p| self.floating.layout.shown(p).is_some()) {
+            self.floating.layout.close(piece);
             self.keep_floating();
             self.open = None;
         }
         self.open = if self.open == Some(popover) { None } else { Some(popover) };
+        if self.open == Some(Popover::Brushes) {
+            self.library.opens();
+        }
     }
 
     /// The modes open now, as the core's [`mode_switch`] takes them.
@@ -2556,6 +2897,8 @@ impl Interface {
     ) -> Rect {
         let Some(pick) = self.background_pick.as_mut() else { return Rect::NOTHING };
         self.colours.set_triangle(self.prefs.plugins.colour_triangle());
+        self.colours.steps = self.prefs.plugins.colour_steps();
+        self.colours.before_shown = self.prefs.plugins.colour_before();
         let picker = self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
         self.colours.set_picker(picker);
         let brush = std::mem::replace(&mut self.colours.hsv, pick.hsv);
@@ -2614,6 +2957,21 @@ impl Interface {
         let k = crate::panel::part_scale(ctx, procraft_core::InterfacePart::Panels);
         let space = crate::panel::PanelSpace::new(ctx.content_rect(), crate::panel::bar_shown(ctx), k);
         crate::panel::drawing_panel(ctx, Some(space));
+        // from a button of a half of the top bar Edit layout moved: under it, over it or beside it
+        let half = match which {
+            Popover::Actions | Popover::Adjustments => procraft_core::LayoutBar::TopLeft,
+            _ => procraft_core::LayoutBar::TopRight,
+        };
+        let moved = self.floating.layout.look().edit && self.bars.is_moved(half);
+        crate::panel::hang_from(ctx, moved.then(|| (Arc::clone(&self.bars), half, button.center())));
+        // the Actions panel and the Adjustments menu tear off by a grabber, while a plugin lets them float
+        let tearing = match which {
+            Popover::Actions => Some(procraft_core::LayoutPiece::Actions),
+            Popover::Adjustments => Some(procraft_core::LayoutPiece::Adjustments),
+            _ => None,
+        }
+        .filter(|&piece| self.floating.layout.may_float(piece));
+        crate::panel::tearing(ctx, tearing.is_some());
         let (on_window, button) = (button, space.to_window.inverse().mul_rect(button));
         let shown = match which {
             Popover::Brushes => {
@@ -2624,7 +2982,7 @@ impl Interface {
                 self.keep_brushes |= std::mem::take(&mut self.library.changed);
                 // its grabber dragged out: it floats instead
                 if let Some((from, to)) = self.library.undock.take()
-                    && self.floating.undock(ctx, procraft_core::FloatingPanel::Brushes, from, to)
+                    && self.floating.undock(procraft_core::FloatingPanel::Brushes, from, to)
                 {
                     self.open = None;
                 }
@@ -2633,14 +2991,16 @@ impl Interface {
             Popover::Layers if self.background_pick.is_some() => self.background_panel(ctx, session, button, backdrops),
             Popover::Layers => {
                 self.layers.plugin_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layer);
+                self.layers.panel_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layers);
                 self.layers.layer_kinds = self.prefs.plugins.layer_kinds();
+                self.layers.layer_filters = self.prefs.plugins.layer_filters();
                 self.layers.floats = self.floating.allowed(procraft_core::FloatingPanel::Layers);
                 let hang = crate::panel::Hang::Button(button);
                 let shown = self.layers.show(ctx, &mut self.look, session, &mut self.colours, hang, backdrops);
                 self.layers_asked(ctx, session);
                 // its grabber dragged out: it floats instead
                 if let Some((from, to)) = self.layers.undock.take()
-                    && self.floating.undock(ctx, procraft_core::FloatingPanel::Layers, from, to)
+                    && self.floating.undock(procraft_core::FloatingPanel::Layers, from, to)
                 {
                     self.open = None;
                 }
@@ -2649,6 +3009,8 @@ impl Interface {
             Popover::Colour => {
                 self.colours.set_classic_menu(self.prefs.plugins.menu_choices(procraft_core::PluginMenuPlace::Classic));
                 self.colours.set_triangle(self.prefs.plugins.colour_triangle());
+                self.colours.steps = self.prefs.plugins.colour_steps();
+                self.colours.before_shown = self.prefs.plugins.colour_before();
                 let picker =
                     self.prefs.plugins.picker_on().then(|| (Arc::clone(&self.prefs.plugins), Arc::clone(session)));
                 self.colours.set_picker(picker);
@@ -2670,182 +3032,22 @@ impl Interface {
                 }
                 rect
             }
-            Popover::Adjustments => {
-                use crate::adjustments::MenuRow;
-                let filters = self.prefs.plugins.filters();
-                let actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Adjustments);
-                let turned = self.adjustments.showing_filters && (!filters.is_empty() || !actions.is_empty());
-                let (shown, tapped) =
-                    crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, &actions, turned);
-                match tapped {
-                    Some(MenuRow::Open(a)) => self.start_adjustment(session, a),
-                    Some(MenuRow::Plugins) => self.adjustments.showing_filters = true,
-                    Some(MenuRow::Back) => self.adjustments.showing_filters = false,
-                    Some(MenuRow::Filter(id)) => {
-                        self.adjustments.showing_filters = false;
-                        self.start_plugin_filter(session, id);
-                    }
-                    Some(MenuRow::Action(key)) => {
-                        self.adjustments.showing_filters = false;
-                        self.run_plugin_action(ctx, session, key);
-                    }
-                    None => {}
-                }
-                shown
-            }
-            Popover::Actions => {
-                let assist = session.animation_settings();
-                let showing = crate::actions::Showing {
-                    can_paste: self.can_paste(),
-                    animation: assist.as_ref().is_some_and(|a| !a.pages),
-                    pages: assist.as_ref().is_some_and(|a| a.pages),
-                    time_lapse: self.time_lapse.recording(),
-                    time_lapse_recorded: self.time_lapse.recorded(),
-                    reference: self.reference.on,
-                    guide: session.guide().on,
-                    side_bar: self.side_bar_shown,
-                    model: self.model,
-                    model_flat: self.model && session.model_flat(),
-                    paint_through: self.model && session.paint_through(),
-                    svg: session.exports_svg(),
-                    vectors: session.exports_vectors(),
-                    plugin_exports: session.plugin_exports().into_iter().map(|e| e.label).collect(),
-                    plugin_controls: self.prefs.plugins.controls_in(procraft_core::PluginPlace::Canvas),
-                    plugin_actions: self.prefs.plugins.actions_in(procraft_core::PluginPlace::Canvas),
-                };
-                let (shown, act) =
-                    self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
-                match act {
-                    Some(Act::ImportPlugin) => {
-                        if let Some(path) = crate::files::pick_plugin() {
-                            self.offer_plugin_file(&path);
-                        }
-                    }
-                    Some(Act::PluginAction) => {
-                        if let Some(key) = self.actions_panel.take_plugin_action() {
-                            self.run_plugin_action(ctx, session, key);
-                        }
-                    }
-                    Some(Act::Prefs) => {
-                        self.prefs.apply(session);
-                        session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
-                        self.prefs.keep();
-                    }
-                    Some(Act::SideBar) => self.side_bar_shown = !self.side_bar_shown,
-                    Some(Act::TimeLapseReplay) => {
-                        self.open = None;
-                        self.time_lapse.replay();
-                    }
-                    Some(Act::TimeLapseRecording) => self.time_lapse.set_recording(!self.time_lapse.recording()),
-                    Some(Act::ExportTimeLapse) => {
-                        self.open = None;
-                        self.time_lapse.ask_length();
-                    }
-                    Some(Act::AnimatedExport(format)) => {
-                        self.open = None;
-                        self.animated_export = Some(crate::animated_export::AnimatedExport::new(format));
-                    }
-                    Some(act @ (Act::AnimationAssist | Act::PageAssist)) => {
-                        self.animation.reset(session);
-                        let pages = act == Act::PageAssist;
-                        let on = session.animation_settings().is_some_and(|a| a.pages == pages);
-                        if pages {
-                            session.set_page_assist(!on);
-                        } else {
-                            session.set_animation_assist(!on);
-                        }
-                    }
-                    Some(Act::Licences) => self.licences = true,
-                    Some(Act::Shortcuts) => {
-                        self.open = None;
-                        self.shortcut_list.open = true;
-                    }
-                    Some(Act::ModelFlat) => session.set_model_flat(!session.model_flat()),
-                    Some(Act::ModelAnimated(format)) => {
-                        self.open = None;
-                        self.animated_export = Some(crate::animated_export::AnimatedExport::model(format));
-                    }
-                    Some(Act::PaintThrough) => session.set_paint_through(!session.paint_through()),
-                    Some(Act::LightingStudio) => {
-                        self.open = None;
-                        self.lighting.begin(session);
-                    }
-                    Some(Act::AdvancedSettings) => {
-                        self.open = None;
-                        self.settings = true;
-                    }
-                    Some(Act::Flip { horizontal }) => session.flip_canvas(horizontal),
-                    Some(Act::AddText) => self.add_text(ctx, session),
-                    Some(
-                        act @ (Act::InsertFile | Act::InsertPhoto | Act::InsertPrivateFile | Act::InsertPrivatePhoto),
-                    ) => {
-                        self.open = None;
-                        let photo = matches!(act, Act::InsertPhoto | Act::InsertPrivatePhoto);
-                        let private = matches!(act, Act::InsertPrivateFile | Act::InsertPrivatePhoto);
-                        self.insert_picture(session, photo, private);
-                    }
-                    Some(Act::Share(format @ (Format::Pdf | Format::LayersPdf))) => {
-                        // how well it keeps its pictures, asked first
-                        self.pdf_for = Some(format);
-                        self.pdf_alert.ask(crate::alert::pdf_quality());
-                    }
-                    Some(Act::Share(format)) => {
-                        self.actions.push(Action::Export(format, 100));
-                        self.open = None;
-                    }
-                    // (the panel does these itself: a setting changed, or an action, says so)
-                    Some(Act::PluginPlaced(_)) => {}
-                    Some(Act::PluginExport(i)) => {
-                        self.actions.push(Action::PluginExport(i));
-                        self.open = None;
-                    }
-                    Some(Act::About) => crate::files::about(),
-                    Some(Act::GestureControls) => {
-                        self.open = None;
-                        self.gesture_controls.open = true;
-                    }
-                    Some(Act::Reference) => self.reference.on = !self.reference.on,
-                    Some(Act::DrawingGuide) => _ = session.set_guide_on(!session.guide().on),
-                    Some(Act::EditGuide) => {
-                        self.open = None;
-                        self.guide_editor.begin(session);
-                    }
-                    Some(Act::Crop) => {
-                        self.open = None;
-                        self.crop.begin(session);
-                    }
-                    Some(Act::CanvasInfo) => {
-                        self.open = None;
-                        self.canvas_info = Some(crate::canvas_info::CanvasInfo::new(
-                            session,
-                            self.artwork_dir.clone(),
-                            self.time_lapse.info(),
-                            self.time_lapse.settings(),
-                        ));
-                    }
-                    Some(Act::Cut) => self.cut_layer(session),
-                    Some(Act::Copy) => self.copy_layer(session),
-                    Some(Act::CopyCanvas) => self.copy_canvas(session),
-                    Some(Act::Paste) => self.paste(ctx, false),
-                    Some(Act::PastePrivate) => self.paste(ctx, true),
-                    // the panel does these itself
-                    Some(
-                        Act::Page(_)
-                        | Act::ScalingMenu
-                        | Act::TipAttachment
-                        | Act::LightInterface
-                        | Act::RightHanded
-                        | Act::BrushCursor
-                        | Act::VectorCrisp
-                        | Act::ProjectCanvas
-                        | Act::ResetInput,
-                    )
-                    | None => {}
-                }
-                shown
-            }
+            Popover::Adjustments => self.adjustments_menu(ctx, session, button, backdrops),
+            Popover::Actions => self.actions_menu(ctx, session, button, backdrops),
         };
         crate::panel::drawing_panel(ctx, None);
+        crate::panel::hang_from(ctx, None);
+        // its grabber dragged out past its start: it floats, following the pointer until let go
+        let torn = crate::panel::torn(ctx);
+        crate::panel::tearing(ctx, false);
+        if let (Some(piece), Some((from, to))) = (tearing, torn)
+            && to.distance(from) > 30.0
+            && self.floating.layout.open_at(piece, to.x, to.y, 12.0).is_some()
+        {
+            self.open = None;
+            self.floating.changed = true;
+            return;
+        }
         if !modal {
             self.close_outside(ctx, space.to_window.mul_rect(shown), on_window);
         }
@@ -2877,6 +3079,12 @@ impl Interface {
         if std::mem::take(&mut self.layers.layer_opacity) {
             self.start_layer_opacity(session);
         }
+        if std::mem::take(&mut self.layers.filter_list) {
+            self.filter_list = Some(crate::filter_list::FilterList::new(self.layers.layer_filters.clone()));
+        }
+        if std::mem::take(&mut self.layers.filter_settings) {
+            self.start_filter_layer_settings(session);
+        }
         // its background row tapped: the colour panel in its place (hanging from the Layers
         // button, from a floating one too), on the background's
         if std::mem::take(&mut self.layers.pick_background) {
@@ -2890,47 +3098,651 @@ impl Interface {
     /// left, at the floating windows' size, under the panels hanging from the bar. A window's strip
     /// moves it and its corner sizes it, with the pointer until let go; its Close closes it.
     fn floating_panels(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, backdrops: &mut Vec<f32>) {
-        use crate::floating_panels::{Floating, PANELS};
-        use procraft_core::FloatingPanel;
+        use crate::floating_panels::Floating;
+        use procraft_core::{FloatingPanel, LayoutPiece};
         self.floating.follow_pointer(ctx);
-        for panel in PANELS {
-            let Some(window) = self.floating.shown(panel) else { continue };
-            let (rect, space) = Floating::space(ctx, panel, window);
+        let order = self.floating.layout.order();
+        for &piece in &order {
+            let panel = match piece {
+                LayoutPiece::Layers => Some(FloatingPanel::Layers),
+                LayoutPiece::Brushes => Some(FloatingPanel::Brushes),
+                LayoutPiece::Actions | LayoutPiece::Adjustments => None,
+                // (the colour panel, the toolbars and an adjustment's controls float where they are drawn)
+                _ => continue,
+            };
+            let Some(window) = self.floating.layout.shown(piece) else { continue };
+            // sliding into its side or out of it (Collapse to edge): where it is on the way; gone, its
+            // tab instead (see Interface::collapse_tabs)
+            let window = match self.window_slide(ctx, piece) {
+                Some((_, true)) => continue,
+                Some((offset, false)) => {
+                    procraft_core::PieceShown { x: window.x + offset.x, y: window.y + offset.y, ..window }
+                }
+                None => window,
+            };
+            let collapses = self.floating.layout.look().collapse;
+            let edge = self.floating.layout.piece_collapse_edge(piece);
+            crate::panel::window_collapse(ctx, edge, collapses.then(|| self.any_collapsed()));
+            // folded, its tab
+            if window.folded {
+                let touch = crate::floating_panels::tab(ctx, &mut self.look, window, piece_title(piece), backdrops);
+                if touch.unfold {
+                    self.floating.fold(piece, false);
+                } else if touch.pressed
+                    && let Some(from) = ctx.input(|i| i.pointer.press_origin())
+                {
+                    self.floating.hold(piece, false, from);
+                }
+                continue;
+            }
+            let (rect, space) = Floating::space(ctx, window);
             crate::panel::drawing_panel(ctx, Some(space));
+            crate::panel::window_pinned(ctx, self.floating.layout.is_pinned(piece));
+            let tabs =
+                self.floating.layout.tabs_of(piece).into_iter().map(|p| (p, piece_title(p), p == piece)).collect();
+            crate::panel::window_tabs(ctx, tabs);
             let hang = crate::panel::Hang::Floating(rect);
             let chrome = match panel {
-                FloatingPanel::Layers => {
+                None => {
+                    // its own panel drawn as the window (see crate::panel::floating_in)
+                    let sizable = procraft_core::piece_sizes(piece).sizable;
+                    crate::panel::floating_in(ctx, Some((rect, sizable)));
+                    if piece == LayoutPiece::Actions {
+                        self.actions_menu(ctx, session, rect, backdrops);
+                    } else {
+                        self.adjustments_menu(ctx, session, rect, backdrops);
+                    }
+                    let chrome = crate::panel::float_chrome(ctx);
+                    // one that isn't sized: as tall as its rows want, under its strip
+                    if let Some(wants) = crate::panel::float_wants(ctx)
+                        && !sizable
+                    {
+                        let height = wants - crate::panel::ARROW_HEIGHT + crate::panel::FLOATING_TOP;
+                        self.floating.layout.set_size(piece, window.width, height);
+                    }
+                    crate::panel::floating_in(ctx, None);
+                    chrome
+                }
+                Some(FloatingPanel::Layers) => {
                     self.layers.plugin_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layer);
+                    self.layers.panel_actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Layers);
                     self.layers.layer_kinds = self.prefs.plugins.layer_kinds();
+                    self.layers.layer_filters = self.prefs.plugins.layer_filters();
                     self.layers.show(ctx, &mut self.look, session, &mut self.colours, hang, backdrops);
                     self.layers_asked(ctx, session);
                     std::mem::take(&mut self.layers.chrome)
                 }
-                FloatingPanel::Brushes => {
+                Some(FloatingPanel::Brushes) => {
                     self.library.show(ctx, &mut self.look, session, hang, backdrops);
                     self.keep_brushes |= std::mem::take(&mut self.library.changed);
                     std::mem::take(&mut self.library.chrome)
                 }
             };
             crate::panel::drawing_panel(ctx, None);
-            if chrome.closed {
-                self.floating.close(panel);
-            } else if (chrome.moving || chrome.sizing)
-                && let Some(from) = ctx.input(|i| i.pointer.press_origin())
-            {
-                self.floating.hold(panel, chrome.sizing, from);
-            }
+            crate::panel::window_tabs(ctx, Vec::new());
+            crate::panel::window_collapse(ctx, None, None);
+            self.window_chrome(ctx, piece, chrome);
+        }
+        // the Tool Belt, while a plugin says so
+        self.tool_belt(ctx);
+        // the collapse buttons of the bars against a side, and the tabs of all that went in
+        self.collapse_tabs(ctx);
+        // the windows over one another as the layout orders them
+        for &piece in &order {
+            let id = match piece {
+                LayoutPiece::Layers => egui::Id::unique("floating layers"),
+                LayoutPiece::Brushes => egui::Id::unique("floating brush library"),
+                LayoutPiece::Actions => egui::Id::unique("actions panel"),
+                LayoutPiece::Adjustments => egui::Id::unique("adjustments menu"),
+                _ => continue,
+            };
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
+        }
+        // the toolbars and an adjustment's controls: their strips, or their grabbers where they always are
+        for piece in [LayoutPiece::Transform, LayoutPiece::Selection, LayoutPiece::Adjusting, LayoutPiece::Liquify] {
+            self.bottom_chrome(ctx, piece);
         }
         if std::mem::take(&mut self.floating.changed) {
             self.keep_floating();
         }
     }
 
+    /// The Adjustments menu, hanging from `button` or floating (see [`crate::panel::floating_in`]):
+    /// where it shows.
+    fn adjustments_menu(
+        &mut self,
+        ctx: &egui::Context,
+        session: &Arc<CanvasSession>,
+        button: Rect,
+        backdrops: &mut Vec<f32>,
+    ) -> Rect {
+        use crate::adjustments::MenuRow;
+        let filters = self.prefs.plugins.filters();
+        let actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Adjustments);
+        let turned = self.adjustments.showing_filters && (!filters.is_empty() || !actions.is_empty());
+        let (shown, tapped) =
+            crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, &actions, turned);
+        match tapped {
+            Some(MenuRow::Open(a)) => self.start_adjustment(session, a),
+            Some(MenuRow::Plugins) => self.adjustments.showing_filters = true,
+            Some(MenuRow::Back) => self.adjustments.showing_filters = false,
+            Some(MenuRow::Filter(id)) => {
+                self.adjustments.showing_filters = false;
+                self.start_plugin_filter(session, id);
+            }
+            Some(MenuRow::Action(key)) => {
+                self.adjustments.showing_filters = false;
+                self.run_plugin_action(ctx, session, key);
+            }
+            None => {}
+        }
+        shown
+    }
+
+    /// The Actions panel, hanging from `button` or floating (see [`crate::panel::floating_in`]):
+    /// where it shows.
+    fn actions_menu(
+        &mut self,
+        ctx: &egui::Context,
+        session: &Arc<CanvasSession>,
+        button: Rect,
+        backdrops: &mut Vec<f32>,
+    ) -> Rect {
+        let assist = session.animation_settings();
+        let showing = crate::actions::Showing {
+            can_paste: self.can_paste(),
+            animation: assist.as_ref().is_some_and(|a| !a.pages),
+            pages: assist.as_ref().is_some_and(|a| a.pages),
+            time_lapse: self.time_lapse.recording(),
+            time_lapse_recorded: self.time_lapse.recorded(),
+            reference: self.reference.on,
+            guide: session.guide().on,
+            side_bar: self.side_bar_shown,
+            model: self.model,
+            model_flat: self.model && session.model_flat(),
+            paint_through: self.model && session.paint_through(),
+            svg: session.exports_svg(),
+            vectors: session.exports_vectors(),
+            plugin_exports: session.plugin_exports().into_iter().map(|e| e.label).collect(),
+            plugin_controls: self.prefs.plugins.controls_in(procraft_core::PluginPlace::Canvas),
+            plugin_actions: self.prefs.plugins.actions_in(procraft_core::PluginPlace::Canvas),
+            edit_layout: self.floating.layout.look().edit,
+        };
+        let (shown, act) = self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
+        match act {
+            Some(Act::ImportPlugin) => {
+                if let Some(path) = crate::files::pick_plugin() {
+                    self.offer_plugin_file(&path);
+                }
+            }
+            Some(Act::PluginAction) => {
+                if let Some(key) = self.actions_panel.take_plugin_action() {
+                    self.run_plugin_action(ctx, session, key);
+                }
+            }
+            Some(Act::Prefs) => {
+                self.prefs.apply(session);
+                session.set_touch_settings(self.prefs.touch_settings(&self.gestures));
+                self.prefs.keep();
+            }
+            Some(Act::SideBar) => self.side_bar_shown = !self.side_bar_shown,
+            Some(Act::EditLayout) => {
+                self.open = None;
+                self.editing_layout = true;
+                self.bars.set_editing(true);
+            }
+            Some(Act::TimeLapseReplay) => {
+                self.open = None;
+                self.time_lapse.replay();
+            }
+            Some(Act::TimeLapseRecording) => self.time_lapse.set_recording(!self.time_lapse.recording()),
+            Some(Act::ExportTimeLapse) => {
+                self.open = None;
+                self.time_lapse.ask_length();
+            }
+            Some(Act::AnimatedExport(format)) => {
+                self.open = None;
+                self.animated_export = Some(crate::animated_export::AnimatedExport::new(format));
+            }
+            Some(act @ (Act::AnimationAssist | Act::PageAssist)) => {
+                self.animation.reset(session);
+                let pages = act == Act::PageAssist;
+                let on = session.animation_settings().is_some_and(|a| a.pages == pages);
+                if pages {
+                    session.set_page_assist(!on);
+                } else {
+                    session.set_animation_assist(!on);
+                }
+            }
+            Some(Act::Licences) => self.licences = true,
+            Some(Act::Shortcuts) => {
+                self.open = None;
+                self.shortcut_list.open = true;
+            }
+            Some(Act::ModelFlat) => session.set_model_flat(!session.model_flat()),
+            Some(Act::ModelAnimated(format)) => {
+                self.open = None;
+                self.animated_export = Some(crate::animated_export::AnimatedExport::model(format));
+            }
+            Some(Act::PaintThrough) => session.set_paint_through(!session.paint_through()),
+            Some(Act::LightingStudio) => {
+                self.open = None;
+                self.lighting.begin(session);
+            }
+            Some(Act::AdvancedSettings) => {
+                self.open = None;
+                self.settings = true;
+            }
+            Some(Act::Flip { horizontal }) => session.flip_canvas(horizontal),
+            Some(Act::AddText) => self.add_text(ctx, session),
+            Some(act @ (Act::InsertFile | Act::InsertPhoto | Act::InsertPrivateFile | Act::InsertPrivatePhoto)) => {
+                self.open = None;
+                let photo = matches!(act, Act::InsertPhoto | Act::InsertPrivatePhoto);
+                let private = matches!(act, Act::InsertPrivateFile | Act::InsertPrivatePhoto);
+                self.insert_picture(session, photo, private);
+            }
+            Some(Act::Share(format @ (Format::Pdf | Format::LayersPdf))) => {
+                // how well it keeps its pictures, asked first
+                self.pdf_for = Some(format);
+                self.pdf_alert.ask(crate::alert::pdf_quality());
+            }
+            Some(Act::Share(format)) => {
+                self.actions.push(Action::Export(format, 100));
+                self.open = None;
+            }
+            // (the panel does these itself: a setting changed, or an action, says so)
+            Some(Act::PluginPlaced(_)) => {}
+            Some(Act::PluginExport(i)) => {
+                self.actions.push(Action::PluginExport(i));
+                self.open = None;
+            }
+            Some(Act::About) => crate::files::about(),
+            Some(Act::GestureControls) => {
+                self.open = None;
+                self.gesture_controls.open = true;
+            }
+            Some(Act::Reference) => self.reference.on = !self.reference.on,
+            Some(Act::DrawingGuide) => _ = session.set_guide_on(!session.guide().on),
+            Some(Act::EditGuide) => {
+                self.open = None;
+                self.guide_editor.begin(session);
+            }
+            Some(Act::Crop) => {
+                self.open = None;
+                self.crop.begin(session);
+            }
+            Some(Act::CanvasInfo) => {
+                self.open = None;
+                self.canvas_info = Some(crate::canvas_info::CanvasInfo::new(
+                    session,
+                    self.artwork_dir.clone(),
+                    self.time_lapse.info(),
+                    self.time_lapse.settings(),
+                ));
+            }
+            Some(Act::Cut) => self.cut_layer(session),
+            Some(Act::Copy) => self.copy_layer(session),
+            Some(Act::CopyCanvas) => self.copy_canvas(session),
+            Some(Act::Paste) => self.paste(ctx, false),
+            Some(Act::PastePrivate) => self.paste(ctx, true),
+            // the panel does these itself
+            Some(
+                Act::Page(_)
+                | Act::ScalingMenu
+                | Act::TipAttachment
+                | Act::LightInterface
+                | Act::RightHanded
+                | Act::BrushCursor
+                | Act::VectorCrisp
+                | Act::ProjectCanvas
+                | Act::ResetInput,
+            )
+            | None => {}
+        }
+        shown
+    }
+
+    /// What was done to `piece`'s window strips this frame: closed, folded, moved or sized from the
+    /// press, or what its menu chose.
+    fn window_chrome(
+        &mut self,
+        ctx: &egui::Context,
+        piece: procraft_core::LayoutPiece,
+        chrome: crate::panel::FloatingChrome,
+    ) {
+        use crate::panel::WindowAct;
+        let layout = &self.floating.layout;
+        if chrome.closed {
+            layout.close(piece);
+            self.floating.changed = true;
+        } else if chrome.folded {
+            self.floating.fold(piece, true);
+        } else if chrome.collapse {
+            if layout.set_piece_collapsed(piece, true) {
+                self.floating.changed = true;
+            }
+        } else if let Some(tab) = chrome.pick {
+            layout.set_active_tab(tab);
+            self.floating.changed = true;
+        } else if let Some((tab, at)) = chrome.tear {
+            // torn out of its window, it follows the pointer until let go (one at a time: nothing
+            // else is torn out as the drag goes on)
+            if layout.holding().is_none() {
+                layout.tear_tab(tab, at.x, at.y, 12.0);
+                self.floating.changed = true;
+            }
+        } else if let Some(act) = chrome.act {
+            match act {
+                WindowAct::Fold => layout.set_folded(piece, true),
+                WindowAct::Hide => layout.set_hidden(piece, true),
+                WindowAct::Pin => layout.set_pinned(piece, !layout.is_pinned(piece)),
+                WindowAct::Reset => {
+                    layout.reset_place(piece);
+                }
+                WindowAct::CollapseAll => {
+                    let any = self.any_collapsed();
+                    self.collapse_all(!any);
+                }
+            }
+            self.floating.changed = true;
+        } else if (chrome.moving || chrome.sizing)
+            && let Some(from) = ctx.input(|i| i.pointer.press_origin())
+        {
+            self.floating.hold(piece, chrome.sizing, from);
+        }
+    }
+
+    /// Whether Edit Layout is moving the bars (the canvas takes no press meanwhile).
+    pub fn editing_layout(&self) -> bool {
+        self.editing_layout
+    }
+
+    /// How far each bar is into its side this frame (Collapse to edge), kept for the next: for each,
+    /// while it can go in, how far it is moved on its way and whether it is gone (all the way in).
+    fn bar_slides(&mut self, ctx: &egui::Context) -> [Option<(egui::Vec2, bool)>; 4] {
+        use procraft_core::LayoutBar;
+        let bars = [LayoutBar::TopLeft, LayoutBar::TopRight, LayoutBar::SideBar, LayoutBar::Belt];
+        let mut slides = [None; 4];
+        for (i, bar) in bars.into_iter().enumerate() {
+            let collapsed = self.bars.collapsed(bar).is_some();
+            let slid = crate::collapse::slid(ctx, egui::Id::unique("bar slide").with(bar), collapsed);
+            if let Some(s) = self.bar_slides.get_mut(i) {
+                *s = slid;
+            }
+            if let Some(place) = self.bars.collapse_place(bar)
+                && let Some(slot) = slides.get_mut(i)
+            {
+                *slot = Some((crate::collapse::offset(&place, slid), collapsed && slid >= 1.0));
+            }
+        }
+        slides
+    }
+
+    /// How far `piece`'s window is into its side this frame (Collapse to edge): how far it is moved
+    /// on its way and whether it is gone; none while it can't go in.
+    fn window_slide(&self, ctx: &egui::Context, piece: procraft_core::LayoutPiece) -> Option<(egui::Vec2, bool)> {
+        let layout = &self.floating.layout;
+        let collapsed = layout.piece_collapsed(piece).is_some();
+        let slid = crate::collapse::slid(ctx, egui::Id::unique("window slide").with(piece), collapsed);
+        let place = layout.piece_collapse_place(piece)?;
+        Some((crate::collapse::offset(&place, slid), collapsed && slid >= 1.0))
+    }
+
+    /// Whether any bar or window is collapsed into its side.
+    fn any_collapsed(&self) -> bool {
+        self.bars.any_collapsed() || self.floating.layout.any_collapsed()
+    }
+
+    /// Collapse All (`collapsed`) or Open All: every bar and window against a side, kept.
+    fn collapse_all(&mut self, collapsed: bool) {
+        if self.bars.set_all_collapsed(collapsed) {
+            self.prefs.bar_layout = Some(self.bars.kept());
+            self.prefs.keep();
+        }
+        if self.floating.layout.set_all_collapsed(collapsed) {
+            self.keep_floating();
+        }
+    }
+
+    /// Collapse to edge's buttons and tabs: a button by each bar against a side (none while Edit
+    /// Layout moves them), and the tab of each bar and window collapsed into a side; a tap on a tab, or
+    /// a drag out of the side, brings it back.
+    fn collapse_tabs(&mut self, ctx: &egui::Context) {
+        use procraft_core::{LayoutBar, LayoutPiece};
+        if !self.floating.layout.look().collapse {
+            return;
+        }
+        let belt = self.floating.layout.belt_shown().is_some();
+        let mut bars_changed = false;
+        for (i, bar) in
+            [LayoutBar::TopLeft, LayoutBar::TopRight, LayoutBar::SideBar, LayoutBar::Belt].into_iter().enumerate()
+        {
+            if (bar == LayoutBar::Belt && !belt) || (bar == LayoutBar::SideBar && !self.side_bar_shown) {
+                continue;
+            }
+            let slid = self.bar_slides.get(i).copied().unwrap_or(0.0);
+            let id = egui::Id::unique("bar collapse").with(bar);
+            match self.bars.collapsed(bar) {
+                Some(c) => {
+                    let touch = crate::collapse::tab(ctx, id, &c, slid);
+                    if touch.tapped {
+                        bars_changed |= self.bars.set_collapsed(bar, false);
+                    } else if let Some(d) = touch.pulled {
+                        bars_changed |= self.bars.pull_tab(bar, d.x, d.y);
+                    }
+                }
+                None if !self.editing_layout && slid <= 0.0 => {
+                    let (Some(at), Some(place)) = (self.bars.collapse_button(bar), self.bars.collapse_place(bar))
+                    else {
+                        continue;
+                    };
+                    if crate::collapse::button(ctx, id, crate::collapse::rect(at), place.edge) {
+                        bars_changed |= self.bars.set_collapsed(bar, true);
+                    }
+                }
+                None => {}
+            }
+        }
+        if bars_changed {
+            self.prefs.bar_layout = Some(self.bars.kept());
+            self.prefs.keep();
+        }
+        let layout = Arc::clone(&self.floating.layout);
+        let mut windows_changed = false;
+        for piece in [LayoutPiece::Layers, LayoutPiece::Brushes, LayoutPiece::Actions, LayoutPiece::Adjustments] {
+            let Some(c) = layout.piece_collapsed(piece) else { continue };
+            let slid = crate::collapse::slid(ctx, egui::Id::unique("window slide").with(piece), true);
+            let touch = crate::collapse::tab(ctx, egui::Id::unique("window collapse").with(piece), &c, slid);
+            if touch.tapped {
+                windows_changed |= layout.set_piece_collapsed(piece, false);
+            } else if let Some(d) = touch.pulled {
+                windows_changed |= layout.pull_piece_tab(piece, d.x, d.y);
+            }
+        }
+        if windows_changed {
+            self.keep_floating();
+        }
+    }
+
+    /// Where `piece` (a toolbar or an adjustment's controls) shows while it floats, for it to be drawn
+    /// there: its top-left under its strip (the window's points). The layout is told how big it is.
+    fn bottom_at(&self, ctx: &egui::Context, piece: procraft_core::LayoutPiece) -> Option<egui::Pos2> {
+        let shown = self.floating.layout.shown(piece)?;
+        if let Some(home) = crate::panel::bottom_home(ctx, piece) {
+            let k = shown.scale;
+            self.floating.layout.set_size(piece, home.width() / k, (home.height() + crate::panel::FLOATING_TOP) / k);
+        }
+        (!shown.folded).then(|| egui::pos2(shown.x, shown.y + crate::panel::FLOATING_TOP))
+    }
+
+    /// `piece`'s strip over it while it floats (its grabber, menu, fold and Close), or, where it
+    /// always is, its grabber over it while a plugin lets it float; folded, its tab. Only while it
+    /// was drawn this frame.
+    fn bottom_chrome(&mut self, ctx: &egui::Context, piece: procraft_core::LayoutPiece) {
+        let Some(home) = crate::panel::bottom_home(ctx, piece) else { return };
+        let layout = Arc::clone(&self.floating.layout);
+        match layout.shown(piece) {
+            Some(shown) if shown.folded => {
+                let mut backdrops = Vec::new();
+                let touch = crate::floating_panels::tab(ctx, &mut self.look, shown, piece_title(piece), &mut backdrops);
+                if touch.unfold {
+                    self.floating.fold(piece, false);
+                } else if touch.pressed
+                    && let Some(from) = ctx.input(|i| i.pointer.press_origin())
+                {
+                    self.floating.hold(piece, false, from);
+                }
+            }
+            Some(shown) => {
+                let strip = egui::Rect::from_min_size(
+                    egui::pos2(shown.x, shown.y),
+                    egui::vec2(home.width(), crate::panel::FLOATING_TOP + 20.0),
+                );
+                crate::panel::window_pinned(ctx, layout.is_pinned(piece));
+                let mut chrome = crate::panel::FloatingChrome::default();
+                egui::Area::new(egui::Id::unique("bottom strip").with(piece))
+                    .fixed_pos(strip.min)
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        crate::screen::claim(ui, strip);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(strip.min, egui::vec2(strip.width(), crate::panel::FLOATING_TOP)),
+                            egui::CornerRadius { nw: 12, ne: 12, sw: 0, se: 0 },
+                            crate::look::argb(crate::look::pc::BAR),
+                        );
+                        chrome = crate::panel::strip_chrome(ui, strip);
+                    });
+                self.window_chrome(ctx, piece, chrome);
+            }
+            None if layout.may_float(piece) => {
+                // its grabber over where it always is
+                let handle = egui::Rect::from_center_size(
+                    egui::pos2(home.center().x, home.top() - 15.0),
+                    egui::vec2(100.0, 30.0),
+                );
+                egui::Area::new(egui::Id::unique("bottom grabber").with(piece))
+                    .fixed_pos(handle.min)
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        let pill = egui::Rect::from_center_size(
+                            egui::pos2(handle.center().x, handle.top() + 6.0),
+                            egui::vec2(40.0, 4.0),
+                        );
+                        ui.painter().rect_filled(pill, 2, crate::look::argb(crate::panel::grabber_ink()));
+                        crate::screen::claim(ui, handle);
+                        let held = ui.interact(handle, ui.scope_id().with("tear"), egui::Sense::drag());
+                        if held.dragged()
+                            && let (Some(p), Some(from)) =
+                                (held.interact_pointer_pos(), ctx.input(|i| i.pointer.press_origin()))
+                            && p.distance(from) > 30.0
+                            && layout.holding() != Some(piece)
+                        {
+                            layout.open_at(piece, p.x, p.y, crate::panel::FLOATING_TOP / 2.0);
+                        }
+                    });
+            }
+            None => {}
+        }
+    }
+
+    /// The Tool Belt: a chip for each panel parked on it, at the floating windows' size; a click puts
+    /// one back where it was, and one dragged off floats under the pointer until let go.
+    fn tool_belt(&mut self, ctx: &egui::Context) {
+        let layout = Arc::clone(&self.floating.layout);
+        let Some(belt) = layout.belt_shown() else { return };
+        let k = belt.scale;
+        // where it shows: moved in Edit Layout (a bar), upright against a side; told to the layout
+        let (length, thickness) = (belt.width * k, belt.height * k);
+        let own = procraft_core::BarPlace { x: belt.x, y: belt.y, vertical: false };
+        self.bars.set_bar(procraft_core::LayoutBar::Belt, own, length, thickness);
+        let place = self.bars.shown(procraft_core::LayoutBar::Belt).unwrap_or(own);
+        // sliding into its side or out (Collapse to edge); gone, its tab instead
+        let slide = self.bar_slides.get(3).copied().unwrap_or(0.0);
+        let into = self.bars.collapse_place(procraft_core::LayoutBar::Belt);
+        let gone = slide >= 1.0 && self.bars.collapsed(procraft_core::LayoutBar::Belt).is_some();
+        let off = into.map_or(egui::Vec2::ZERO, |c| crate::collapse::offset(&c, slide));
+        let place = procraft_core::BarPlace { x: place.x + off.x, y: place.y + off.y, ..place };
+        let upright = place.vertical;
+        let size = if upright { egui::vec2(thickness, length) } else { egui::vec2(length, thickness) };
+        let rect = egui::Rect::from_min_size(egui::pos2(place.x, place.y), size);
+        layout.set_belt_place(Some(procraft_core::LayoutRect {
+            x: rect.left() - off.x,
+            y: rect.top() - off.y,
+            width: rect.width(),
+            height: rect.height(),
+        }));
+        if gone {
+            return;
+        }
+        egui::Area::new(egui::Id::unique("tool belt")).fixed_pos(rect.min).order(egui::Order::Middle).show(ctx, |ui| {
+            // round, but square on its sides against the window's edges
+            let sides = self.bars.touching(procraft_core::LayoutBar::Belt).unwrap_or_default();
+            let corners = crate::chrome::bar_corners(ctx, egui::Id::unique("tool belt corners"), sides, 18.0 * k);
+            ui.painter().rect_filled(
+                rect,
+                crate::chrome::corner_radius(corners),
+                crate::look::argb(crate::panel::POPOVER_FROST),
+            );
+            crate::screen::claim(ui, rect);
+            let ink = crate::look::argb(crate::panel::PANEL_TITLE);
+            // a word along the belt, turned to read up it while it stands upright
+            let word = |at: egui::Pos2, word: &str, ink: egui::Color32| {
+                let galley = ui.painter().layout_no_wrap(word.to_owned(), egui::FontId::proportional(13.0 * k), ink);
+                let half = galley.size() / 2.0;
+                let shape = if upright {
+                    egui::epaint::TextShape::new(at + egui::vec2(-half.y, half.x), galley, ink)
+                        .with_angle(-std::f32::consts::FRAC_PI_2)
+                } else {
+                    egui::epaint::TextShape::new(at - half, galley, ink)
+                };
+                ui.painter().add(shape);
+            };
+            if belt.pieces.is_empty() {
+                word(rect.center(), "Tool Belt", ink.gamma_multiply(0.5));
+            }
+            for (i, &piece) in belt.pieces.iter().enumerate() {
+                let along = 120.0 * k * i as f32;
+                let chip = if upright {
+                    egui::Rect::from_min_size(
+                        egui::pos2(rect.left(), rect.top() + along),
+                        egui::vec2(rect.width(), 120.0 * k),
+                    )
+                } else {
+                    egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + along, rect.top()),
+                        egui::vec2(120.0 * k, rect.height()),
+                    )
+                };
+                word(chip.center(), piece_title(piece), ink);
+                let touched = ui.interact(chip, ui.scope_id().with(("belt chip", i)), egui::Sense::click_and_drag());
+                if touched.clicked() {
+                    layout.unpark(piece);
+                    self.floating.changed = true;
+                } else if touched.dragged()
+                    && let (Some(p), Some(from)) =
+                        (touched.interact_pointer_pos(), ctx.input(|i| i.pointer.press_origin()))
+                    && p.distance(from) > 26.0
+                    && layout.holding() != Some(piece)
+                {
+                    layout.unpark_at(piece, p.x, p.y, 12.0);
+                    self.floating.changed = true;
+                }
+            }
+        });
+    }
+
+    /// The named layouts kept with the preferences, as they are now.
+    fn keep_named(&mut self) {
+        self.prefs.named_layouts = Some(self.named_layouts.kept());
+        self.prefs.keep();
+    }
+
     /// The floating panels' windows kept with the preferences, as they are now.
     fn keep_floating(&mut self) {
         self.floating.changed = false;
-        if self.prefs.floating != self.floating.windows {
-            self.prefs.floating = self.floating.windows;
+        let kept = self.floating.layout.kept();
+        if self.prefs.panel_layout.as_deref() != Some(kept.as_str()) {
+            self.prefs.panel_layout = Some(kept);
             self.prefs.keep();
         }
     }
@@ -3075,6 +3887,10 @@ impl Interface {
         info: &CanvasInfo,
         press: &KeyCombo,
     ) -> bool {
+        // a plugin's press with Alt before the app's shortcut taking the key alone
+        if self.prefs.plugins.plugin_press_first(press.clone()) {
+            return self.plugin_press(ctx, session, press);
+        }
         let shortcut = procraft_core::key_shortcut(
             press.key.clone(),
             press.command,
@@ -3381,6 +4197,23 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
     }
 }
 
+/// A floating piece's name, on its tab.
+fn piece_title(piece: procraft_core::LayoutPiece) -> &'static str {
+    use procraft_core::LayoutPiece;
+    match piece {
+        LayoutPiece::Layers => "Layers",
+        LayoutPiece::Brushes => "Brush library",
+        LayoutPiece::Colours => "Colors",
+        LayoutPiece::Actions => "Actions",
+        LayoutPiece::Adjustments => "Adjustments",
+        LayoutPiece::Adjusting => "Adjustment",
+        LayoutPiece::Selection => "Selection",
+        LayoutPiece::Transform => "Transform",
+        LayoutPiece::Liquify => "Liquify",
+        LayoutPiece::Reference => "Reference",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use egui::{Event, Pos2, RawInput, pos2};
@@ -3403,6 +4236,10 @@ mod tests {
         time: f64,
         events: Vec<Event>,
         pointer_touch: Option<u64>,
+        /// The GPU, and the picture the canvas is drawn into after each frame once
+        /// [`Window::draw_canvas`] asks it to be, as the app's window draws it.
+        gpu: procraft_gpu::Gpu,
+        drawn: Option<procraft_gpu::wgpu::Texture>,
     }
 
     impl Window {
@@ -3414,18 +4251,34 @@ mod tests {
 
         /// As [`Window::open`], with `prefs`.
         fn open_with(size: egui::Vec2, prefs: crate::prefs::Prefs) -> Option<Window> {
+            Window::open_canvas(size, (400, 300), prefs)
+        }
+
+        /// As [`Window::open_with`], the canvas `canvas` pixels.
+        fn open_canvas(size: egui::Vec2, canvas: (u32, u32), prefs: crate::prefs::Prefs) -> Option<Window> {
             let gpu = procraft_gpu::Gpu::headless().map_err(|e| eprintln!("skipped: {e}")).ok()?;
-            let session = CanvasSession::new(400, 300);
+            let session = CanvasSession::new(canvas.0, canvas.1);
             session.set_display_scale(1.0);
-            session.use_gpu(gpu);
+            session.use_gpu(gpu.clone());
             session.show_in(size.x as u32, size.y as u32);
             let ctx = egui::Context::default();
             crate::look::install_fonts(&ctx);
             let mut ui = Interface::with_prefs(prefs);
             ui.opened(&session, 1.0);
             let (input, touches) = (Input::default(), Default::default());
-            let mut window =
-                Window { ctx, ui, input, session, touches, size, time: 0.0, events: Vec::new(), pointer_touch: None };
+            let mut window = Window {
+                ctx,
+                ui,
+                input,
+                session,
+                touches,
+                size,
+                time: 0.0,
+                events: Vec::new(),
+                pointer_touch: None,
+                gpu,
+                drawn: None,
+            };
             for _ in 0..3 {
                 window.frame();
             }
@@ -3441,15 +4294,44 @@ mod tests {
                 events: std::mem::take(&mut self.events),
                 ..RawInput::default()
             };
-            let Window { ctx, ui, input, session, .. } = self;
+            let Window { ctx, ui, input, session, .. } = &mut *self;
             let mut output = ctx.clone().run_ui(raw, |egui_ui| ui.show(egui_ui, session, input));
             output.textures_delta.clear();
+            // then the canvas, as the app's window draws it after the interface's pass
+            if let Some(target) = &self.drawn {
+                let view = target.create_view(&Default::default());
+                let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+                let size = (self.size.x as u32, self.size.y as u32);
+                let started = std::time::Instant::now();
+                self.session.draw(&view, format, size, procraft_engine::profile::Profile::Srgb, started);
+                self.gpu.flush();
+            }
+        }
+
+        /// From now on each frame draws the canvas too, as the app's window does: the frames lay
+        /// what they lay (a stroke's end), and the Reference window reads the canvas after them.
+        fn draw_canvas(&mut self) {
+            use procraft_gpu::wgpu;
+            self.drawn = Some(self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("window"),
+                size: wgpu::Extent3d {
+                    width: self.size.x as u32,
+                    height: self.size.y as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            }));
         }
 
         /// A window event to the canvas, which leaves what lands on the interface to it.
         fn canvas_hears(&mut self, event: &WindowEvent) {
             let canvas = self.ui.canvas_rect;
-            let blocked = self.ui.popover_open && !self.ui.panel_lets_through;
+            let blocked = (self.ui.popover_open && !self.ui.panel_lets_through) || self.ui.editing_layout;
             let ctx = &self.ctx;
             self.input
                 .on_event(&self.session, event, false, |p| blocked || crate::screen::on_interface(ctx, p, canvas));
@@ -3532,6 +4414,43 @@ mod tests {
             self.frame();
         }
 
+        /// A pen stroke from `from` to `to` in `moves` moves, a frame after each.
+        fn pen_stroke(&mut self, from: Pos2, to: Pos2, moves: usize) {
+            self.hover(from);
+            self.pen(TouchPhase::Started, from);
+            self.frame();
+            for k in 1..=moves {
+                self.pen(TouchPhase::Moved, from + (to - from) * (k as f32 / moves as f32));
+                self.frame();
+            }
+            self.pen(TouchPhase::Ended, to);
+            self.frame();
+        }
+
+        /// A mouse stroke from `from` to `to` in `moves` moves, its button held.
+        fn mouse_stroke(&mut self, from: Pos2, to: Pos2, moves: usize) {
+            self.hover(from);
+            self.mouse_button(from, true);
+            self.mouse_drag(from, to, moves);
+            self.mouse_button(to, false);
+        }
+
+        /// How many of the current layer's pixels are painted.
+        fn painted(&self) -> usize {
+            let layer = self.session.layers().into_iter().find(|l| l.current);
+            let pixels = layer.and_then(|l| self.session.copy_layer_contents(l.id));
+            pixels.map_or(0, |p| p.rgba.as_chunks::<4>().0.iter().filter(|px| px[3] > 0).count())
+        }
+
+        /// Where the canvas shows in the window (points, a pixel a point here).
+        fn paper(&self) -> Rect {
+            let info = self.session.info();
+            let (w, h) = (info.width as f32, info.height as f32);
+            let m = self.session.view_matrix();
+            let at = |x: f32, y: f32| pos2(m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+            Rect::from_points(&[at(0.0, 0.0), at(w, 0.0), at(0.0, h), at(w, h)])
+        }
+
         /// The pen hovering to `at` and tapping there, sliding a little as it lands.
         fn pen_tap(&mut self, at: Pos2) {
             self.hover(at);
@@ -3546,17 +4465,29 @@ mod tests {
         /// The mouse clicking at `at`.
         fn click(&mut self, at: Pos2) {
             self.hover(at);
-            for (pressed, state) in [(true, ElementState::Pressed), (false, ElementState::Released)] {
-                let button = egui::PointerButton::Primary;
-                self.events.push(Event::PointerButton { pos: at, button, pressed, modifiers: Modifiers::NONE });
-                self.canvas_hears(&WindowEvent::MouseInput {
-                    device_id: DeviceId::dummy(),
-                    state,
-                    button: MouseButton::Left,
-                });
-                self.frame();
-            }
+            self.mouse_button(at, true);
+            self.mouse_button(at, false);
             self.frame();
+        }
+
+        /// The mouse's button pressed, or let go, at `at`.
+        fn mouse_button(&mut self, at: Pos2, pressed: bool) {
+            let state = if pressed { ElementState::Pressed } else { ElementState::Released };
+            let button = egui::PointerButton::Primary;
+            self.events.push(Event::PointerButton { pos: at, button, pressed, modifiers: Modifiers::NONE });
+            self.canvas_hears(&WindowEvent::MouseInput {
+                device_id: DeviceId::dummy(),
+                state,
+                button: MouseButton::Left,
+            });
+            self.frame();
+        }
+
+        /// The mouse dragged from `from` to `to` in `steps` frames, its button held.
+        fn mouse_drag(&mut self, from: Pos2, to: Pos2, steps: usize) {
+            for k in 1..=steps {
+                self.hover(from + (to - from) * (k as f32 / steps as f32));
+            }
         }
 
         /// `key` pressed and let go with Ctrl (and Shift) held, as a keyboard sends it or a tablet's
@@ -3580,7 +4511,8 @@ mod tests {
         /// `scale` times as big under a top bar shown `bar` times as big.
         fn undo_redo(&self, scale: f32, bar: f32) -> (Pos2, Pos2) {
             let window = Rect::from_min_size(Pos2::ZERO, self.size);
-            let fit = crate::chrome::fit_side_bar(window, self.ui.prefs.right_handed, scale, pc::BAR_HEIGHT * bar);
+            let (right, centre) = (self.ui.prefs.right_handed, self.ui.prefs.side_bar_centre);
+            let fit = crate::chrome::fit_side_bar(window, right, scale, pc::BAR_HEIGHT * bar, centre);
             let (laid_out, to_window) = (fit.laid_out(), fit.to_window());
             let shorter = pc::SLIDER_HEIGHT - fit.track;
             let at = |y: f32| to_window * Pos2::new(laid_out.center().x, laid_out.top() + y - shorter * 2.0);
@@ -3617,11 +4549,12 @@ mod tests {
     /// interface separately: `scales` in the parts' order (floating panels, menus, the side bar, the
     /// top bar, the panels).
     fn parts_sized(name: &str, scales: [f32; 5]) -> (Arc<procraft_core::Plugins>, PathBuf) {
-        const INTERFACE: &str = "io.github.artcraftandroid.interface";
+        const INTERFACE: &str = "io.github.artcraftandroid.interface-look";
         let dir = std::env::temp_dir().join(format!("procraft-parts-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
         assert!(plugins.set_on(INTERFACE.to_owned(), true));
+        assert!(plugins.set_switch(format!("{INTERFACE}.interface"), true));
         assert!(plugins.set_switch(format!("{INTERFACE}.size_on"), true));
         assert!(plugins.set_switch(format!("{INTERFACE}.parts"), true));
         for (key, scale) in ["floating", "menus", "side_bar", "top_bar", "panels"].into_iter().zip(scales) {
@@ -3731,6 +4664,87 @@ mod tests {
         }
     }
 
+    /// The brush's outline follows the mouse hovering over the canvas; the middle button held to
+    /// move the view takes it away (it stayed where the pointer was when the button went down),
+    /// and hovering after brings it back where the pointer is.
+    #[test]
+    fn the_brush_outline_goes_while_the_middle_button_moves_the_view() {
+        // drawn in light and dark rings, whatever the brush says
+        let prefs = crate::prefs::Prefs { cursor_style: crate::prefs::CursorStyle::Contrast, ..Default::default() };
+        let Some(mut w) = Window::open_with(vec2(1200.0, 800.0), prefs) else { return };
+        let (from, to) = (pos2(600.0, 400.0), pos2(700.0, 450.0));
+        w.hover(from);
+        w.frame();
+        assert!(w.ui.overlays.outline_shown(), "hovering, the outline shows");
+        let middle = |w: &mut Window, at: Pos2, pressed: bool| {
+            let state = if pressed { ElementState::Pressed } else { ElementState::Released };
+            w.canvas_hears(&WindowEvent::MouseInput {
+                device_id: DeviceId::dummy(),
+                state,
+                button: MouseButton::Middle,
+            });
+            w.hover(at);
+        };
+        let before = w.session.view_matrix();
+        middle(&mut w, from, true);
+        let mut shown = Vec::new();
+        for k in 1..=10 {
+            w.hover(from + (to - from) * (k as f32 / 10.0));
+            shown.push(w.ui.overlays.outline_shown());
+        }
+        middle(&mut w, to, false);
+        let after = w.session.view_matrix();
+        assert_eq!(shown, [false; 10], "no outline while the view moves");
+        assert!((after[4] - before[4] - 100.0).abs() < 1.0 && (after[5] - before[5] - 50.0).abs() < 1.0, "moved");
+        w.hover(to + vec2(5.0, 0.0));
+        w.frame();
+        assert!(w.ui.overlays.outline_shown(), "hovering again, it shows again");
+    }
+
+    #[test]
+    fn the_colour_button_tapped_opens_the_colours_held_goes_back_and_dragged_out_fills() {
+        let Some(mut w) = Window::open(vec2(1200.0, 800.0), false) else { return };
+        let button = w.tool_button(BarButton::Colour, 1.0);
+        let artwork = pos2(600.0, 400.0);
+        // red, then green picked: red is the colour to go back to
+        w.ui.colours.set_rgb(&w.session, 0xFF0000);
+        w.ui.colours.picked(&w.session, 0x00FF00);
+        // tapped: the colours open, and close again
+        w.click(button);
+        assert_eq!(w.ui.open, Some(Popover::Colour));
+        w.click(button);
+        assert_eq!(w.ui.open, None);
+        // held still a third of a second: back to red; dragged onto the artwork afterwards and let
+        // go there, nothing fills
+        w.hover(button);
+        w.mouse_button(button, true);
+        for _ in 0..20 {
+            w.frame();
+        }
+        assert_eq!(to_hex(w.ui.colours.rgb()), 0xFF0000);
+        w.mouse_drag(button, artwork, 12);
+        w.mouse_button(artwork, false);
+        w.frame();
+        assert_eq!(w.steps(), (false, false));
+        assert_eq!(w.ui.open, None);
+        // moved a little (within the hold's reach) and let go: a tap
+        w.hover(button);
+        w.mouse_button(button, true);
+        w.mouse_drag(button, button + vec2(-6.0, 6.0), 3);
+        w.mouse_button(button + vec2(-6.0, 6.0), false);
+        assert_eq!(w.ui.open, Some(Popover::Colour));
+        w.click(button);
+        assert_eq!(w.ui.open, None);
+        // dragged out without stopping: still red, it fills where it is let go
+        w.hover(button);
+        w.mouse_button(button, true);
+        w.mouse_drag(button, artwork, 12);
+        w.mouse_button(artwork, false);
+        w.frame();
+        assert_eq!(to_hex(w.ui.colours.rgb()), 0xFF0000);
+        assert_eq!(w.steps(), (true, false));
+    }
+
     #[test]
     fn keys_go_by_the_names_the_core_knows_and_go_as_they_are_with_no_plugin() {
         let named = [
@@ -3774,5 +4788,365 @@ mod tests {
         // back where it began is still a change to keep (the live changes were sent)
         assert_eq!(pick.follow([0.6, 0.0, 1.0]), Some(0xFFFFFF));
         assert_eq!(pick.kept(), Some(0xFFFFFF));
+    }
+
+    /// Discord (Windows 11, 0.0.7: "can't draw while the Reference window is open"): with the
+    /// window open, strokes on the canvas beside it reach the canvas, the pen's and the mouse's,
+    /// one after another, the window showing the canvas (read again after each stroke) and then a
+    /// picture; one on its picture paints nothing. Each frame's time is printed, the slowest bounded.
+    #[test]
+    fn strokes_beside_a_reference_window_reach_the_canvas() {
+        use std::time::{Duration, Instant};
+        let Some(mut w) = Window::open(vec2(1200.0, 800.0), false) else { return };
+        w.draw_canvas();
+        w.ui.reference.on = true;
+        for _ in 0..10 {
+            w.frame();
+        }
+        let (window, _) = w
+            .area_shown(egui::Order::Middle, egui::Id::unique("reference").with(0u32))
+            .expect("the Reference window shows");
+        // left alone, it changes nothing of the artwork (else it would read the canvas again and
+        // again, and the artwork be saved again and again)
+        let edits = w.session.edits();
+        for _ in 0..30 {
+            w.frame();
+        }
+        assert_eq!(w.session.edits(), edits, "the open window left alone changes nothing");
+        let (side_bar, _) = w.area_shown(egui::Order::Middle, egui::Id::unique("side bar")).expect("the side bar");
+        let paper = w.paper();
+        // rows on the paper left of the window, clear of the side bar
+        let (x0, x1) = (side_bar.right().max(paper.left()) + 40.0, window.left() - 30.0);
+        assert!(x1 - x0 > 100.0, "room beside the window: {paper:?} {window:?} {side_bar:?}");
+        let rows: Vec<(Pos2, Pos2)> = (0..6)
+            .map(|i| {
+                let y = window.top() + 40.0 + 60.0 * i as f32;
+                (pos2(x0, y), pos2(x1, y))
+            })
+            .collect();
+        for &(from, to) in &rows {
+            for p in [from, to] {
+                assert!(paper.contains(p) && !window.contains(p) && !side_bar.contains(p), "{p:?}");
+            }
+        }
+        /// The stroke along `row` (the pen's on even rows, the mouse's on odd ones), then frames as
+        /// time goes by: its end laid over them, and the window reading the canvas once they have
+        /// (at most every 300 ms). The slowest of those frames.
+        fn stroke_on(w: &mut Window, row: usize, (from, to): (Pos2, Pos2)) -> Duration {
+            if row.is_multiple_of(2) {
+                w.pen_stroke(from, to, 12);
+            } else {
+                w.mouse_stroke(from, to, 12);
+            }
+            let mut slowest = Duration::ZERO;
+            for _ in 0..3 {
+                std::thread::sleep(Duration::from_millis(110));
+                let t = Instant::now();
+                w.frame();
+                slowest = slowest.max(t.elapsed());
+            }
+            slowest
+        }
+        let mut painted = w.painted();
+        let mut slowest = Duration::ZERO;
+        for (row, &line) in rows.iter().enumerate() {
+            // the window showing the canvas, then a picture (none imported: its Import button)
+            let case = if row < 4 { "showing the canvas" } else { "showing a picture" };
+            if row == 4 {
+                // a stroke on its picture moves the picture: nothing is painted
+                let middle = window.center();
+                w.pen_stroke(middle - vec2(60.0, 0.0), middle + vec2(60.0, 0.0), 12);
+                w.frame();
+                assert_eq!(w.painted(), painted, "a stroke on the window's picture paints nothing");
+                let state = w.session.reference_window_at(0).expect("the artwork's window");
+                let shows = procraft_core::ReferenceShows::Image;
+                w.session.set_reference_window_at(0, procraft_core::ReferenceWindowState { shows, ..state });
+                w.ui.reference.restore(&w.session);
+                assert!(w.ui.reference.on);
+                w.frame();
+            }
+            slowest = slowest.max(stroke_on(&mut w, row, line));
+            let now = w.painted();
+            let pointer = if row.is_multiple_of(2) { "pen" } else { "mouse" };
+            assert!(now > painted, "{case}: the {pointer}'s stroke {row} reached the canvas ({painted} -> {now})");
+            painted = now;
+        }
+        println!("the slowest frame after a stroke with the Reference window open: {slowest:?}");
+        assert!(slowest < Duration::from_millis(250), "{slowest:?}");
+    }
+
+    /// The frames after a stroke take no longer with the Reference window showing the canvas than
+    /// with it closed, on a 4000 x 3000 canvas: the window's read of the canvas after each stroke
+    /// is made on a thread of its own, not on the thread that takes the pen's input and draws the
+    /// frames (where it took 4.4 ms more, 9.8 against 5.4). Per stroke, the slowest frame in the
+    /// 350 ms after it; their medians either way are printed, the strokes taken in turns, and
+    /// bounded: open within 2 ms of closed.
+    #[test]
+    #[ignore = "timing: run alone, with --ignored --nocapture"]
+    fn the_frames_after_a_stroke_wait_for_no_read_of_the_reference_window() {
+        use std::time::{Duration, Instant};
+        let prefs = crate::prefs::Prefs { right_handed: false, ..Default::default() };
+        let Some(mut w) = Window::open_canvas(vec2(1440.0, 900.0), (4000, 3000), prefs) else { return };
+        w.draw_canvas();
+        w.ui.reference.on = true;
+        for _ in 0..10 {
+            w.frame();
+        }
+        let (window, _) = w
+            .area_shown(egui::Order::Middle, egui::Id::unique("reference").with(0u32))
+            .expect("the Reference window shows");
+        let (side_bar, _) = w.area_shown(egui::Order::Middle, egui::Id::unique("side bar")).expect("the side bar");
+        let paper = w.paper();
+        let (x0, x1) = (side_bar.right().max(paper.left()) + 40.0, window.left() - 30.0);
+        assert!(x1 - x0 > 100.0, "room beside the window: {paper:?} {window:?} {side_bar:?}");
+        let after_stroke = |w: &mut Window, row: usize| {
+            let y = window.top() + 40.0 + 60.0 * (row % 6) as f32;
+            w.pen_stroke(pos2(x0, y), pos2(x1, y), 12);
+            let mut most = Duration::ZERO;
+            let until = Instant::now() + Duration::from_millis(350);
+            while Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(15));
+                let t = Instant::now();
+                w.frame();
+                most = most.max(t.elapsed());
+            }
+            most
+        };
+        let (mut open, mut closed) = (Vec::new(), Vec::new());
+        for round in 0..4 {
+            for shown in [true, false] {
+                // turned on or off and settled (shown again, it reads the canvas first)
+                w.ui.reference.on = shown;
+                for _ in 0..25 {
+                    std::thread::sleep(Duration::from_millis(15));
+                    w.frame();
+                }
+                for k in 0..2 {
+                    let most = after_stroke(&mut w, round * 2 + k);
+                    if shown { open.push(most) } else { closed.push(most) }
+                }
+            }
+        }
+        open.sort();
+        closed.sort();
+        let (open_median, closed_median) = (open[open.len() / 2], closed[closed.len() / 2]);
+        println!(
+            "the slowest frame in the 350 ms after a stroke, median of 8: the Reference window open \
+             {open_median:?}, closed {closed_median:?} (open {open:?}, closed {closed:?})"
+        );
+        assert!(
+            open_median <= closed_median + Duration::from_millis(2),
+            "open {open_median:?}, closed {closed_median:?}"
+        );
+    }
+
+    /// The app's plugins in a folder of their own, Edit layout on with every panel floating.
+    fn edit_layout_on(name: &str) -> (Arc<procraft_core::Plugins>, PathBuf) {
+        edit_layout_with(name, &[])
+    }
+
+    /// As [`edit_layout_on`], its `more` features on too.
+    fn edit_layout_with(name: &str, more: &[&str]) -> (Arc<procraft_core::Plugins>, PathBuf) {
+        const EDIT: &str = "io.github.artcraftandroid.edit-layout";
+        let dir = std::env::temp_dir().join(format!("procraft-edit-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        assert!(plugins.set_on(EDIT.to_owned(), true));
+        for feature in ["movable_panels", "all_panels", "edit_layout"].iter().chain(more) {
+            assert!(plugins.set_switch(format!("{EDIT}.{feature}"), true), "{feature}");
+        }
+        (plugins, dir)
+    }
+
+    /// Collapse to edge: the side bar's collapse button slides it into its side (0.2 seconds), giving
+    /// its room back, and a tap on the tab left there brings it back out; neither press paints.
+    #[test]
+    fn a_bar_s_collapse_button_slides_it_into_its_side_and_its_tab_brings_it_back() {
+        use procraft_core::LayoutBar;
+        let (plugins, dir) = edit_layout_with("collapse", &["collapse_edge"]);
+        let prefs = crate::prefs::Prefs { plugins, ..Default::default() };
+        let Some(mut w) = Window::open_canvas(vec2(1000.0, 750.0), (2000, 1500), prefs) else { return };
+        let bars = Arc::clone(&w.ui.bars);
+        let room = |w: &Window| crate::panel::side_bar_shown_at(&w.ctx);
+        assert!(room(&w).is_some(), "the panels keep clear of the side bar");
+        let button = bars.collapse_button(LayoutBar::SideBar).expect("its collapse button, under its foot");
+        w.click(crate::collapse::rect(button).center());
+        assert!(bars.collapsed(LayoutBar::SideBar).is_some());
+        // a quarter of a second on: in, its room given back
+        for _ in 0..15 {
+            w.frame();
+        }
+        assert!(room(&w).is_none(), "its room given back");
+        untouched(&w, "the collapse button");
+        // its tab tapped: back out
+        let tab = bars.collapsed(LayoutBar::SideBar).unwrap().tab;
+        w.click(crate::collapse::rect(tab).center());
+        assert_eq!(bars.collapsed(LayoutBar::SideBar), None);
+        for _ in 0..15 {
+            w.frame();
+        }
+        assert!(room(&w).is_some());
+        untouched(&w, "its tab");
+        // kept with the preferences as it was left
+        assert!(!w.ui.prefs.bar_layout.as_deref().unwrap_or_default().contains("collapsed"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing reached the canvas: no stroke to undo, nothing painted.
+    fn untouched(w: &Window, what: &str) {
+        assert!(!w.steps().0, "{what}: a stroke to undo");
+        assert_eq!(w.painted(), 0, "{what}: painted");
+    }
+
+    /// A press on a moved bar's glass, on Edit Layout's row and its Layouts list, on Done, and a
+    /// window dragged by its strip: none reaches the canvas, which fills the window under them.
+    /// (Each went through to it and painted, a dot or a stroke along the drag: their areas lay
+    /// nothing out, so they measured no bigger than a point.)
+    #[test]
+    fn presses_on_moved_bars_edit_layout_s_row_and_window_strips_never_reach_the_canvas() {
+        use procraft_core::{LayoutBar, LayoutPiece};
+        let (plugins, dir) = edit_layout_on("presses");
+        let prefs = crate::prefs::Prefs { plugins, ..Default::default() };
+        let Some(mut w) = Window::open_canvas(vec2(1000.0, 750.0), (2000, 1500), prefs) else { return };
+        let paper = w.paper();
+        // the bars where they always are: their glass between their buttons (the side bar's ends, the
+        // top bar's middle between its two groups) is theirs
+        let bars = Arc::clone(&w.ui.bars);
+        let side = bars.rect(LayoutBar::SideBar).unwrap();
+        for at in [
+            pos2(side.x + side.width / 2.0, side.y + 3.0),
+            pos2(side.x + side.width / 2.0, side.y + side.height - 3.0),
+            pos2(500.0, 20.0),
+        ] {
+            w.click(at);
+            w.pen_tap(at);
+        }
+        untouched(&w, "the bars where they always are");
+        // the tools half moved down into the middle
+        let r = bars.rect(LayoutBar::TopRight).unwrap();
+        bars.set_editing(true);
+        assert!(bars.hold(LayoutBar::TopRight, r.x + 10.0, r.y + 10.0));
+        bars.drag(r.x + 10.0 - 300.0, r.y + 10.0 + 300.0);
+        bars.let_go();
+        bars.set_editing(false);
+        w.frame();
+        w.frame();
+        let moved = bars.rect(LayoutBar::TopRight).unwrap();
+        // its glass at its left end, short of its first button
+        let glass = pos2(moved.x + 4.0, moved.y + moved.height / 2.0);
+        assert!(paper.contains(glass), "{paper:?} {glass:?}");
+        w.click(glass);
+        w.pen_tap(glass);
+        untouched(&w, "the moved bar");
+        // Edit Layout: the canvas takes nothing meanwhile, not even a stroke across its middle...
+        w.ui.editing_layout = true;
+        bars.set_editing(true);
+        w.frame();
+        w.pen_stroke(pos2(400.0, 380.0), pos2(600.0, 380.0), 10);
+        w.mouse_stroke(pos2(400.0, 420.0), pos2(600.0, 420.0), 10);
+        untouched(&w, "a stroke while Edit Layout is on");
+        // ...and Layouts on its row (opening the list), a press on the list, then Done
+        let row = 750.0 - 28.0 - 22.0;
+        let layouts = pos2(500.0 - 135.0 + 45.0, row);
+        assert!(paper.contains(layouts), "{paper:?} {layouts:?}");
+        w.click(layouts);
+        w.frame();
+        w.click(pos2(500.0 - 174.0, row - 22.0 - 12.0 - 26.0));
+        untouched(&w, "Edit Layout's row and its list");
+        w.click(pos2(500.0 + 135.0 - 45.0, row));
+        assert!(!w.ui.editing_layout, "Done ends it");
+        untouched(&w, "Done");
+        // the Layers panel in a window of its own, dragged by its strip
+        let layout = Arc::clone(&w.ui.floating.layout);
+        layout.open_at(LayoutPiece::Layers, 500.0, 200.0, 12.0);
+        layout.let_go();
+        w.frame();
+        let before = layout.shown(LayoutPiece::Layers).unwrap();
+        let strip = pos2(before.x + 70.0, before.y + 12.0);
+        assert!(paper.contains(strip), "{paper:?} {strip:?}");
+        w.mouse_stroke(strip, strip + vec2(80.0, 120.0), 8);
+        let after = layout.shown(LayoutPiece::Layers).unwrap();
+        assert_ne!((after.x, after.y), (before.x, before.y), "the window moved");
+        untouched(&w, "a window dragged by its strip");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tab dragged out of a window of four: that tab comes out alone, and the other three stay
+    /// tabs of their window. (Each tab was known by its place across the strip, so the one sliding
+    /// into the place of one torn out was torn out too as the drag went on, and the window fell
+    /// apart.)
+    #[test]
+    fn a_tab_dragged_out_of_a_window_of_four_takes_only_itself() {
+        use procraft_core::LayoutPiece;
+        let (plugins, dir) = edit_layout_on("tabs");
+        let prefs = crate::prefs::Prefs { plugins, ..Default::default() };
+        // (tall enough for the Adjustments menu's rows)
+        let Some(mut w) = Window::open_canvas(vec2(1300.0, 1000.0), (2600, 2000), prefs) else { return };
+        let layout = Arc::clone(&w.ui.floating.layout);
+        layout.open_at(LayoutPiece::Layers, 500.0, 150.0, 0.0);
+        layout.let_go();
+        w.frame();
+        let host = layout.shown(LayoutPiece::Layers).unwrap();
+        let middle = host.x + host.width * host.scale / 2.0;
+        for piece in [LayoutPiece::Brushes, LayoutPiece::Adjustments, LayoutPiece::Actions] {
+            layout.open_at(piece, middle, host.y + 5.0, 0.0);
+            layout.let_go();
+            w.frame();
+        }
+        let four = [LayoutPiece::Layers, LayoutPiece::Brushes, LayoutPiece::Adjustments, LayoutPiece::Actions];
+        assert_eq!(layout.tabs_of(LayoutPiece::Layers), four);
+        // the second tab, the brush library's, dragged down off the strip, Actions showing
+        let shown = layout.shown(LayoutPiece::Actions).unwrap();
+        let window = Rect::from_min_size(pos2(shown.x, shown.y), vec2(shown.width, shown.height) * shown.scale);
+        let cells = crate::panel::tab_cells(window, 4, usize::from(layout.look().fold));
+        let from = cells[1].center();
+        w.mouse_stroke(from, from + vec2(0.0, 200.0), 12);
+        let three = [LayoutPiece::Layers, LayoutPiece::Adjustments, LayoutPiece::Actions];
+        assert_eq!(layout.tabs_of(LayoutPiece::Layers), three);
+        assert!(layout.tabs_of(LayoutPiece::Brushes).is_empty());
+        let torn = layout.shown(LayoutPiece::Brushes).expect("the brush library in a window of its own");
+        assert!(torn.y > shown.y + 100.0, "{torn:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Artworks opened and left one after another in the same interface, as the app goes from one
+    /// to the next through the gallery: each painted on with its panels shown in turn, a picker
+    /// plugin's square drawn from it (the floating colour panel holds its session for that), then
+    /// left as the app leaves one. Nothing of the interface keeps a session left, so all of its
+    /// memory goes with it (once the brushes' sample strokes being drawn from it are done): one
+    /// kept is a whole artwork's state held for as long as the app runs.
+    #[test]
+    fn an_artwork_left_is_held_by_nothing_in_the_interface() {
+        let Some(mut w) = Window::open(vec2(1180.0, 820.0), true) else { return };
+        let dir = std::env::temp_dir().join(format!("procraft-desktop-left-{}", std::process::id()));
+        for round in 0..20 {
+            w.stroke();
+            for open in [Popover::Colour, Popover::Brushes, Popover::Layers, Popover::Actions] {
+                w.ui.open = Some(open);
+                w.frame();
+            }
+            w.ui.open = None;
+            let plugins = Arc::clone(&w.ui.prefs.plugins);
+            w.ui.colours.set_picker(Some((plugins, Arc::clone(&w.session))));
+            w.frame();
+            // left as the app leaves it (saved, the interface told), the next one opened in its place
+            let left = Arc::downgrade(&w.session);
+            w.ui.closing(&w.session);
+            let saved = dir.join(round.to_string()).to_string_lossy().into_owned();
+            assert_eq!(Arc::clone(&w.session).save_to_leave(saved), procraft_core::Leaving::Left);
+            let next = CanvasSession::new(400, 300);
+            next.set_display_scale(1.0);
+            next.use_gpu(w.gpu.clone());
+            next.show_in(w.size.x as u32, w.size.y as u32);
+            w.ui.opened(&next, 1.0);
+            w.session = next;
+            w.frame();
+            let since = std::time::Instant::now();
+            while left.upgrade().is_some() && since.elapsed() < std::time::Duration::from_secs(5) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(left.upgrade().is_none(), "round {round}: the artwork left is still held");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

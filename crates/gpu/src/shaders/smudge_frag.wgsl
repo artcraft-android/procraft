@@ -26,20 +26,43 @@ fn window_texel(p: vec2<i32>) -> vec2<i32> {
     return p - vec2<i32>(st.origin_x, st.origin_y);
 }
 
+// Whether texel `t` is one of a texture `size` texels across: a load past a texture gives nothing
+// (zero), as Vulkan's and the others' do; OpenGL ES's (in wgpu) aren't checked, and one there reads
+// whatever memory lies past the texture
+fn within(t: vec2<i32>, size: vec2<u32>) -> bool {
+    return all(t >= vec2<i32>(0)) && all(t < vec2<i32>(size));
+}
+
 fn work_at(p: vec2<i32>) -> vec4<f32> {
-    return textureLoad(work_tex, window_texel(p), 0);
+    let t = window_texel(p);
+    if (!within(t, textureDimensions(work_tex))) {
+        return vec4<f32>(0.0);
+    }
+    return textureLoad(work_tex, t, 0);
 }
 
 fn grained_at(p: vec2<i32>) -> vec4<f32> {
-    return textureLoad(grained_tex, window_texel(p), 0);
+    let t = window_texel(p);
+    if (!within(t, textureDimensions(grained_tex))) {
+        return vec4<f32>(0.0);
+    }
+    return textureLoad(grained_tex, t, 0);
 }
 
 fn amount_at(p: vec2<i32>) -> f32 {
-    return bitcast<f32>(textureLoad(amount_tex, window_texel(p), 0).r);
+    let t = window_texel(p);
+    if (!within(t, textureDimensions(amount_tex))) {
+        return 0.0;
+    }
+    return bitcast<f32>(textureLoad(amount_tex, t, 0).r);
 }
 
 fn shown_at(p: vec2<i32>) -> f32 {
-    return bitcast<f32>(textureLoad(shown_tex, window_texel(p), 0).r);
+    let t = window_texel(p);
+    if (!within(t, textureDimensions(shown_tex))) {
+        return 0.0;
+    }
+    return bitcast<f32>(textureLoad(shown_tex, t, 0).r);
 }
 
 // where the `k`th texel is in a texture `width` texels a row
@@ -85,7 +108,7 @@ fn fs_carry(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<u32> {
     if (!from_part(i, window_side())) {
         discard;
     }
-    return bitcast<vec4<u32>>(carry_cell(i));
+    return bitcast<vec4<u32>>(kept_paint(carry_cell(i), vec4<f32>(0.0)));
 }
 
 // a dulling stamp's parts' sums: part i's at texel 2i, its weight at 2i + 1
@@ -107,7 +130,7 @@ fn fs_dull(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<u32> {
         total = total + bitcast<vec4<f32>>(textureLoad(plots_tex, vec2<i32>(i32(2u * k), 0), 0));
         weighed = weighed + bitcast<f32>(textureLoad(plots_tex, vec2<i32>(i32(2u * k + 1u), 0), 0).r);
     }
-    return bitcast<vec4<u32>>(dull_colour(total, weighed));
+    return bitcast<vec4<u32>>(kept_paint(dull_colour(total, weighed), vec4<f32>(0.0)));
 }
 
 @fragment
@@ -117,7 +140,7 @@ fn fs_blur_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<u32> {
     if (id.x >= n || id.y >= n) {
         discard;
     }
-    return bitcast<vec4<u32>>(blur_down_cell(id));
+    return bitcast<vec4<u32>>(kept_paint(blur_down_cell(id), vec4<f32>(0.0)));
 }
 
 @fragment
@@ -127,7 +150,7 @@ fn fs_blur_across(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<u32> {
     if (id.x >= n || id.y >= n) {
         discard;
     }
-    return bitcast<vec4<u32>>(blur_across_cell(id));
+    return bitcast<vec4<u32>>(kept_paint(blur_across_cell(id), vec4<f32>(0.0)));
 }
 
 // a fragment of the window's textures: its canvas pixel
@@ -149,8 +172,8 @@ fn fs_deposit(@builtin(position) pos: vec4<f32>) -> Deposited {
     let d = deposit(own_dab(), p, found_at(p));
     var o: Deposited;
     o.pixel = select(work_at(p), grained_at(p), d.into_grained);
-    o.amount = textureLoad(amount_tex, window_texel(p), 0).r;
-    o.shown = textureLoad(shown_tex, window_texel(p), 0).r;
+    o.amount = bitcast<u32>(amount_at(p));
+    o.shown = bitcast<u32>(shown_at(p));
     if (!d.laid) {
         return o;
     }
@@ -197,8 +220,8 @@ fn fs_deposit_run(@builtin(position) pos: vec4<f32>) -> Deposited {
     var found = found_at(p);
     var o: Deposited;
     o.pixel = select(found.work, found.grained, st.laid_apart == 2u);
-    o.amount = textureLoad(amount_tex, window_texel(p), 0).r;
-    o.shown = textureLoad(shown_tex, window_texel(p), 0).r;
+    o.amount = bitcast<u32>(amount_at(p));
+    o.shown = bitcast<u32>(shown_at(p));
     for (var k = st.run.x; k < st.run.y; k++) {
         let bbox = wet_pass.stamps[k].bbox;
         if (any(p < bbox.xy) || any(p >= bbox.zw)) {
@@ -252,7 +275,7 @@ fn fs_wet_plots(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<u32> {
     for (var j = 0u; j <= k; j++) {
         walk = wet_walk_on(walk, j, t);
     }
-    return bitcast<vec4<u32>>(from_mix(walk.out));
+    return bitcast<vec4<u32>>(kept_paint(from_mix(walk.out), vec4<f32>(0.0)));
 }
 
 // the plot the next pass carries over from: the last stamp's, in the mix's space
@@ -269,5 +292,5 @@ fn fs_wet_carried(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<u32> {
     for (var j = 0u; j < st.count; j++) {
         walk = wet_walk_on(walk, j, t);
     }
-    return bitcast<vec4<u32>>(walk.out);
+    return bitcast<vec4<u32>>(kept_paint(walk.out, vec4<f32>(0.0)));
 }

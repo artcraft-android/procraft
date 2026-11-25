@@ -7,11 +7,28 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 /// How many threads work is spread over: one to a core, 8 at most (2 in a 32-bit build, whose
 /// memory and address space each thread's stack takes from are small), and no more than
-/// [`hold_threads_to`] says.
+/// [`hold_threads_to`] says (nor, for work begun on a thread, [`within_threads`]).
 pub fn cores() -> usize {
     let most = if cfg!(target_pointer_width = "32") { 2 } else { 8 };
-    let held = HELD_TO.load(Ordering::Relaxed).max(1);
+    let held = HELD_TO.load(Ordering::Relaxed).max(1).min(HELD_HERE.with(std::cell::Cell::get));
     std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, most).min(held)
+}
+
+std::thread_local! {
+    /// The most threads work begun on this thread is spread over (see [`within_threads`]).
+    // (already const: clippy 1.99 asks for it again when built for Android)
+    #[allow(clippy::missing_const_for_thread_local)]
+    static HELD_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// `f`, the work it begins on this thread done side by side on `threads` threads at the most:
+/// work in the background, leaving the other cores to what is drawn meanwhile. What it works out
+/// is the same however many threads share it.
+pub fn within_threads<R>(threads: usize, f: impl FnOnce() -> R) -> R {
+    let before = HELD_HERE.with(|held| held.replace(threads.max(1)));
+    let out = f();
+    HELD_HERE.with(|held| held.set(before));
+    out
 }
 
 /// The most threads work is spread over, whatever the cores (see [`hold_threads_to`]).
@@ -150,6 +167,19 @@ pub fn each_part<T: Send>(items: &mut [T], part: usize, f: impl Fn(&mut [T]) + S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Work begun within a few threads is spread over no more, on that thread only, and after it as
+    /// before.
+    #[test]
+    fn work_held_to_a_few_threads_is_spread_over_no_more() {
+        let all = cores();
+        assert_eq!(within_threads(1, cores), 1);
+        assert_eq!(within_threads(2, cores), all.min(2));
+        assert_eq!(within_threads(0, cores), 1);
+        // another thread is not held
+        assert_eq!(within_threads(1, || std::thread::spawn(cores).join().unwrap()), all);
+        assert_eq!(cores(), all);
+    }
 
     #[test]
     fn results_come_back_in_order() {

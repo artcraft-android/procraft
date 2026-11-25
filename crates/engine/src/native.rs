@@ -175,6 +175,9 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
     }
     document.profile = profile;
     document.icc = icc.map(|icc| CanvasIcc(Arc::new(icc)));
+    // made with the screen on its side: shown upright here, its brushes' shapes and moving grains
+    // lie as the screen held upright had them
+    document.made_turns = u8::try_from(turns % 4).unwrap_or(0);
     if let Some(mut a) = root.object("animation").and_then(|a| animation(&a, holds)) {
         // the layers are listed top first: the first item is the last frame, the last the first
         a.foreground = root.bool("isFirstItemAnimationForeground").unwrap_or(false);
@@ -664,6 +667,8 @@ fn add_item(
                 adjustment: None,
                 style: None,
                 panel: None,
+                filter: None,
+                marks: Default::default(),
             });
         }
         _ => {
@@ -700,6 +705,8 @@ fn add_item(
                 adjustment: None,
                 style: None,
                 panel: None,
+                filter: None,
+                marks: Default::default(),
             });
             if !uuid.is_empty() {
                 pixels.push((lid, canvas.pixels(&uuid, 4, 0)?));
@@ -728,6 +735,8 @@ fn add_item(
                     adjustment: None,
                     style: None,
                     panel: None,
+                    filter: None,
+                    marks: Default::default(),
                 });
                 if let Some(m) = mask.string("UUID") {
                     // a mask stores only the tiles painted on: the rest shows the layer
@@ -2219,6 +2228,36 @@ mod tests {
         assert_eq!(corner, [1, 0, 0, 0, 0, 0]);
         assert_eq!(parse_size("{1488, 2266}"), Some((1488, 2266)));
         assert_eq!(parse_size("1488x2266"), None);
+    }
+
+    /// A file made with the screen on its side opens shown upright, and keeps how far the screen
+    /// was turned, for its brushes (see `Document::made_turns`).
+    #[test]
+    fn a_canvas_made_on_its_side_keeps_how_it_was_made() {
+        let doc = Document::new(4, 2);
+        let id = doc.layers().first().map(|l| l.id).unwrap();
+        let pixels = HashMap::from([(id, vec![0u8; 4 * 2 * 4])]);
+        for turns in 0..4u32 {
+            let bytes = write(&Export {
+                document: &doc,
+                pixels: &pixels,
+                composite: &[0; 4 * 2 * 4],
+                thumbnail_png: &[],
+                name: "",
+                author: "",
+                strokes: 0,
+                tracked_seconds: 0.0,
+                seed: 1,
+                time_lapse: None,
+                reference: None,
+                reference_picture: None,
+                turns,
+            });
+            let read = read(&bytes).unwrap();
+            assert_eq!(u32::from(read.document.made_turns), turns);
+            let size = (read.document.width(), read.document.height());
+            assert_eq!(size, if turns % 2 == 1 { (2, 4) } else { (4, 2) });
+        }
     }
 
     #[test]

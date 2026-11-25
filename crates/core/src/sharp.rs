@@ -46,7 +46,7 @@ pub(crate) struct Shown {
 
 /// The canvas the sharp picture is made on, kept for the next.
 pub(crate) struct SharpCanvas {
-    canvas: Canvas,
+    canvas: Box<Canvas>,
     /// Its layers, as the artwork's were when it was made.
     layers: Vec<LayerId>,
 }
@@ -55,7 +55,7 @@ pub(crate) struct SharpCanvas {
 /// while items are laid on it) and document, and how far along it is.
 pub(crate) struct Making {
     key: Shown,
-    canvas: Option<Canvas>,
+    canvas: Option<Box<Canvas>>,
     layers: Vec<LayerId>,
     doc: Document,
     /// Canvas pixels to the sharp canvas's, and back.
@@ -219,17 +219,19 @@ impl State {
 
     /// Whether plugins' layers would show sharper through `to_screen` now: zoomed in, one of them
     /// showing, nothing under way that the canvas shows as it goes, and the artwork composited as
-    /// it plainly is (its background shown, no animation's frames).
+    /// it plainly is (its background shown, no animation's frames, no layers dimmed).
     fn sharp_wanted(&self, to_screen: Affine) -> bool {
         let plain = self.doc.background_visible
             && self.doc.animation.is_none()
             && self.doc.timeline.is_none()
+            && self.plugin_dim <= 0.0
             && self.stroke.is_none()
             && self.recording.is_none()
             && self.shape.is_none()
             && self.transform.is_none()
             && !self.adjusting
             && self.reveal.is_none()
+            && self.colour_fill_preview().is_none()
             && self.view_motion.is_none()
             && !self.scene_shown()
             && self.sphere.is_none();
@@ -273,7 +275,7 @@ impl State {
             None => match Canvas::new(&gpu, &doc) {
                 Ok(canvas) => {
                     self.sharp.canvases += 1;
-                    canvas
+                    Box::new(canvas)
                 }
                 Err(e) => {
                     log::warn!("the sharp picture's canvas: {e}");
@@ -319,7 +321,7 @@ impl State {
         let slice = self.sharp.slice();
         let done = self.make_sharp(&mut making, slice);
         // the canvas's layers read for it were brought up to date: as it is now, it goes on
-        let composites = self.canvas.as_ref().map_or(0, Canvas::composites);
+        let composites = self.canvas.as_deref().map_or(0, Canvas::composites);
         making.key.composites = composites;
         match done {
             Some(false) => {

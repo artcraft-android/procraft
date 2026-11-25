@@ -8,12 +8,14 @@ private let toolbarWidth: CGFloat = 728
 private let toolbarHeight: CGFloat = 126
 private let toolbarBottom: CGFloat = 25
 private let toolbarCorner: CGFloat = 33
-private let segmentGap: CGFloat = 11.33
+private let segmentGap: CGFloat = 12
 private let buttonHeight: CGFloat = 60
 /// The space between a roomy toolbar's buttons.
 private let buttonGap: CGFloat = 19
 /// Where a capital's middle sits below the top of its line, as a fraction of the font size.
 private let capMiddle: CGFloat = 0.6056
+/// A line's height, as a fraction of the font size.
+private let lineHeight: CGFloat = 1.193
 
 /// The toolbars' and their popovers' colours: translucent, #282828 to #252525 over white, #212121 to
 /// #1e1e1e over the surround; light, #f2f2f2 with a white track, dark labels, and grey ones for what
@@ -132,7 +134,6 @@ struct ToolbarSegment: View {
                 .frame(width: 30, height: 30)
             Text(verbatim: label)
                 .font(.system(size: 13))
-                .tracking(-0.025 * 13)
                 .foregroundStyle(tint)
                 .lineLimit(1)
                 .fixedSize()
@@ -154,7 +155,7 @@ struct ToolbarButton: View {
     var enabled = true
     var width: CGFloat = 83
     var iconSize: CGFloat = 24
-    var labelSize: CGFloat = 12.5
+    var labelSize: CGFloat = 13
     /// What holding it does instead, if anything.
     var onHold: (() -> Void)?
     let action: () -> Void
@@ -173,7 +174,8 @@ struct ToolbarButton: View {
 
     private var button: some View {
         let tint = !enabled ? ToolbarInk.buttonDimmed : active ? Pc.accent : ToolbarInk.buttonText
-        // icons centred 30 below the top, labels' capitals 50 below it; a long name may run past
+        // icons centred 30 below the top, labels' capitals 50 below it; a name too long for the
+        // button is made smaller to fit it, about its own middle
         return ZStack(alignment: .top) {
             PcIconView(icon, size: iconSize, color: tint)
                 .offset(y: 30 - iconSize / 2)
@@ -181,7 +183,8 @@ struct ToolbarButton: View {
                 .font(.system(size: labelSize))
                 .foregroundStyle(enabled ? ToolbarInk.buttonText : ToolbarInk.buttonDimmed)
                 .lineLimit(1)
-                .fixedSize()
+                .minimumScaleFactor(0.5)
+                .frame(width: width - 1.5, height: labelSize * lineHeight)
                 .offset(y: 50 - labelSize * capMiddle)
         }
         .frame(width: width, height: buttonHeight, alignment: .top)
@@ -205,7 +208,8 @@ struct ToolbarPopover<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        Popover(width: width, arrowX: arrowX, fill: ToolbarInk.menuFill, corner: 26, side: .bottom) {
+        // frosted as the panels are: lighter over the white canvas, darker over the toolbar
+        Popover(width: width, arrowX: arrowX, fill: Look.shared.light ? ToolbarInk.menuFill : nil, corner: 26, side: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
                 content()
             }

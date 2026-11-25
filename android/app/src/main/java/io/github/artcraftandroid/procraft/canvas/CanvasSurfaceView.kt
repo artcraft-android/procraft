@@ -44,6 +44,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** The pen is hovering over the canvas. */
     private var penHovering = false
 
+    /** How the pen hovering was last held (its lean's way; Android tells no barrel), for its cursor. */
+    private var hoverPen: io.github.artcraftandroid.procraft.core.CursorPen? = null
+
     /** The pen's side buttons as its events last said. */
     private val penButtons = PenButtons()
 
@@ -165,18 +168,18 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     // every touch is the shared touches' (crates/core touch.rs): painting, picking, the snapped shape,
     // the gestures and every tool's touch, the same in every app
 
-    /** Contacts too big for a fingertip (a palm, on a screen that says how big a touch is): the shared touches never see them, and one that grows that big is taken back. */
+    /**
+     * Palms (as the screen names them, or contacts too big for a fingertip on a screen that says how
+     * big a touch is): the shared touches never see them, and one that becomes one is taken back.
+     */
     private val palms = mutableSetOf<Int>()
 
     /** When the last pointer landed on the canvas (event time, ms). */
     private var landedAt = 0L
 
-    /** Whether pointer [i] of [e] is a finger's contact [PALM_MM] or more across. */
-    private fun palmSized(e: MotionEvent, i: Int): Boolean {
-        if (kindOf(e, i) != PointerKind.FINGER) return false
-        val dpi = resources.displayMetrics.xdpi.takeIf { it > 0f } ?: return false
-        return e.getTouchMajor(i) / dpi * 25.4f >= PALM_MM
-    }
+    /** Whether pointer [i] of [e] is a palm (see [palmContact]). */
+    private fun isPalm(e: MotionEvent, i: Int): Boolean =
+        palmContact(e.getToolType(i), kindOf(e, i), e.getTouchMajor(i), resources.displayMetrics.xdpi)
 
     /** Hands [e] to the shared touches and does what they ask. */
     private fun route(e: MotionEvent, s: CanvasSession) {
@@ -189,7 +192,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 }
                 landedAt = e.eventTime
                 tellPointer(e, i, "down")
-                if (palmSized(e, i)) {
+                if (isPalm(e, i)) {
                     palms += e.getPointerId(i)
                     emptyList()
                 } else {
@@ -206,7 +209,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             }
             MotionEvent.ACTION_MOVE -> {
                 if (penStrokes.summing) e.findPointerIndex(summedPointer).takeIf { it >= 0 }?.let { sumPressures(e, it) }
-                val grown =(0 until e.pointerCount).filter { i -> e.getPointerId(i) !in palms && palmSized(e, i) }
+                val grown =(0 until e.pointerCount).filter { i -> e.getPointerId(i) !in palms && isPalm(e, i) }
                 val back = grown.flatMap { i -> palms += e.getPointerId(i); s.touchCancelOne(e.getPointerId(i).toULong()) }
                 back + s.touchMoves((0 until e.pointerCount).filter { i -> e.getPointerId(i) !in palms }.map { i -> TouchMove(e.getPointerId(i).toULong(), samples(e, i)) })
             }
@@ -243,6 +246,10 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         for (c in out) when (c) {
             TouchCommand.Undo -> vm.undo()
             TouchCommand.Redo -> vm.redo()
+            // a pen button set to a QuickMenu action in Pen buttons
+            is TouchCommand.Run -> vm.runQuickAction(c.action, Offset(c.x, c.y))
+            // one set to a plugin's action, run where the pen is
+            is TouchCommand.RunPlugin -> vm.runPluginAction(c.key, Offset(c.x, c.y))
             TouchCommand.ClearLayer -> vm.clearCurrentLayer()
             TouchCommand.ToggleBars -> vm.toggleBars()
             TouchCommand.Fit -> vm.settleToFit()
@@ -277,8 +284,11 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             // Recolor's reticle dragged or tapped elsewhere (its fills on the view model's fill thread)
             is TouchCommand.RecolorMoved -> vm.recolorMoveTo(Offset(c.x, c.y))
             is TouchCommand.RecolorTapped -> vm.recolorTap(Offset(c.x, c.y))
-            // Continue filling's threshold slid (redone on the view model's fill thread), and the fill let go
+            // Continue filling: the touch fills where it landed, its threshold slid redoes the fill, and let go (or
+            // taken back by a second finger) it ends, each on the view model's fill thread; and the fill let go
+            is TouchCommand.PourAt -> vm.tapFill(Offset(c.x, c.y), c.fill)
             is TouchCommand.FillThreshold -> vm.pourThreshold(c.threshold)
+            is TouchCommand.PourEnd -> vm.tapFillEnd(c.keep)
             TouchCommand.Filled -> vm.filled()
             // a transform's touch: its popovers close; the box as it now is; the node held, and let go
             // (a rotate or box-turning node springs back); a node tapped types its numbers beside it
@@ -339,11 +349,15 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
         val s = session ?: return true
+        // Edit Layout moves the bars: the canvas takes no touch (no colour picked, nothing painted)
+        if (vm.editingLayout) return true
         if (penButton(e)) return true
         predictor.record(e)
         if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+            // the strokes' sound, resting while none was drawn, wakes for this one
+            vm.canvasTouched()
             // Continue filling on a layer that takes no fill: the dialog says why, and the touch does nothing
-            if (vm.dropBand == CanvasViewModel.DropBand.FILLING && !vm.currentTakesChanges(paint = true)) {
+            if (vm.dropBand == CanvasViewModel.DropBand.FILLING && !vm.tapFillAllowed()) {
                 skipping = true
                 return true
             }
@@ -415,7 +429,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         // by what the event says is held: some pens' drivers send no press of their own, only their
         // hover and touch events with the button in them
         val penIn = (0 until e.pointerCount).any { isPen(e.getToolType(it), e.source) }
-        val (pressed, letGo) = penButtons.next(e.buttonState, penIn, penTouching(e.actionMasked), penLifting(e.actionMasked))
+        val a = e.actionMasked
+        val (pressed, letGo) = penButtons.next(e.buttonState, penIn, penTouching(a), penLifting(a), penLeaving(a))
         val own = e.actionMasked == MotionEvent.ACTION_BUTTON_PRESS || e.actionMasked == MotionEvent.ACTION_BUTTON_RELEASE
         // let go, whatever is open: one held to erase gives the eraser back (before this event's
         // touch, so a stroke that begins as it is let go paints)
@@ -510,6 +525,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
                 // (told each time: a session opened meanwhile knows it too); a hand already down is set aside
                 session?.setTouchPenHovering(true)?.let(::obey)
+                hoverPen = io.github.artcraftandroid.procraft.core.CursorPen(e.getOrientation(0), 0f)
                 hovered(Offset(e.x, e.y))
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
@@ -529,7 +545,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
      */
     private fun mouseHover(e: MotionEvent): Boolean {
         val at = Offset(e.x, e.y)
-        val gone = e.actionMasked == MotionEvent.ACTION_HOVER_EXIT || vm.overBars(at)
+        val gone = e.actionMasked == MotionEvent.ACTION_HOVER_EXIT || vm.overInterface(at)
         if (gone || !painting()) vm.showCursor(null) else vm.showCursor(at, hovering = true)
         if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { gone })
         return true
@@ -540,12 +556,12 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         // a spray can's sound (a plugin's) rattles shaken above the canvas
         if (vm.strokeSoundOn) session?.soundHover(at.x, at.y)
         penHovering = true
-        // not over the bars, where the gaps between their buttons come here and the
-        // buttons don't: it came and went as the pen crossed them
-        val overBars = vm.overBars(at)
-        if (overBars) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true)
+        // not over the bars or an open panel, where the gaps between their buttons and rows come
+        // here and the buttons don't: it came and went as the pen crossed them, drawn under them
+        val over = vm.overInterface(at)
+        if (over) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true, pen = hoverPen)
         // and Liquify's ring where the pen hovers
-        if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { overBars })
+        if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { over })
     }
 
     /** Whether a pen on the canvas now would paint (no tool of another kind open). */
@@ -596,6 +612,11 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         val about = device?.let { "device %04x:%04x%s".format(java.util.Locale.ROOT, it.vendorId, it.productId, named) } ?: "no device"
         val axis = device?.getMotionRange(MotionEvent.AXIS_PRESSURE, e.source)?.let { it.min..it.max }
         AppLog.i(TAG, pointerFacts(what, about, toolType, e.source, kindOf(e, i), e.getPressure(i), axis, e.buttonState, e.getTouchMajor(i)))
+        // every axis a pen's device says it gives (a barrel's turn has no axis of Android's own)
+        if (isPen(toolType, e.source)) {
+            val axes = device?.motionRanges.orEmpty().filter { it.source and e.source != 0 }.map { MotionEvent.axisToString(it.axis) }.distinct()
+            AppLog.i(TAG, "its axes: ${axes.joinToString().ifEmpty { "none said" }}")
+        }
     }
 
     /** The pointer's samples in this event: the batched ones since the last event, then the latest. */
@@ -620,8 +641,5 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
         /** How long a prediction stands with no input after it, milliseconds: a few input intervals. */
         const val PREDICTION_LASTS_MS = 40L
-
-        /** A finger's contact this far across (mm) or more is a palm: a fingertip is 8 to 15, a flat thumb under 20. */
-        const val PALM_MM = 25f
     }
 }

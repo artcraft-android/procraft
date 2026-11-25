@@ -1,4 +1,5 @@
 import AVFoundation
+import Observation
 import os
 import SwiftUI
 import UIKit
@@ -9,6 +10,8 @@ import UniformTypeIdentifiers
 @main
 struct ProCraftApp: App {
     init() {
+        // the log kept in a file too, for Help's Share log
+        AppLog.start()
         // the layers may take half of what the app may use (an iPad app is ended well short of the
         // device's memory, so not half the device's as on Android), their textures a quarter: past
         // that, those not worked on are kept compressed off the GPU until needed. None said (the
@@ -21,11 +24,21 @@ struct ProCraftApp: App {
             // default where none is said)
             setFrameCacheBudget(bytes: UInt64(available / 8))
         }
+        // the layers' pixels may take half the device's memory: it sets how many layers a canvas
+        // holds (set before Custom Canvas asks), more on a bigger iPad
+        setLayerBudget(bytes: ProcessInfo.processInfo.physicalMemory / 2)
+        // colour profiles imported (Custom Canvas's Import) are kept, and read again at each start
+        setProfileFolder(dir: Self.profiles.path)
         TextFonts.prepare()
+        // artworks being opened, noted until they show: one the app ended while opening is asked
+        // about when next picked, not opened at once into the same end
+        setOpenMarksFile(path: Gallery.openMarks.path)
         // the GPU device and the canvases' pipelines made ahead of the first artwork
         DispatchQueue.global(qos: .userInitiated).async { warmGpu() }
-        // and the brushes read (with many imported, reading them took seconds at each open)
-        DispatchQueue.global(qos: .utility).async { prepareBrushes(dir: CanvasModel.brushesDir) }
+        // and the brushes read: with many brought in, reading them as an artwork opened took seconds
+        DispatchQueue.global(qos: .utility).async { onBigStack(qos: .utility) { prepareBrushes(dir: CanvasModel.brushesDir) } }
+        // the home screen's widget shows the artwork worked on last
+        RecentArtwork.start()
     }
 
     var body: some Scene {
@@ -33,38 +46,199 @@ struct ProCraftApp: App {
             RootView()
         }
     }
+
+    /// Where imported colour profiles are kept, in the app's own folder.
+    private static var profiles: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return support.appendingPathComponent("icc")
+    }
 }
 
-/// An artwork open on the canvas, and its folder in the gallery.
+/// An artwork open on the canvas, and its folder in the gallery; opened from the gallery's Share for
+/// an animated export alone, which format.
 struct OpenArtwork {
     let session: CanvasSession
     let dir: String
+    var animated: AnimatedFormat? = nil
+}
+
+/// The artwork open on the canvas (none while the gallery shows), and opening one, kept out of the
+/// views. A closure that captures a view captures its state as it was then: the gallery kept the
+/// root view's open handler, and while it zoomed into an artwork that state held the artwork's
+/// model, so every artwork opened from the gallery was kept, all its memory with it, after it was
+/// left. What the gallery keeps now (`open`) holds this alone.
+@Observable
+final class OpenCanvas {
+    static let shared = OpenCanvas()
+
+    private(set) var model: CanvasModel?
+    /// The artwork open was opened for its animated export alone: when that ends, it closes.
+    var exportOnly = false
+    /// Pixels to the window's point, as the root view has them.
+    @ObservationIgnored var pixels: CGFloat = 2
+    /// What the open artwork's session had done by itself when last logged, and when.
+    @ObservationIgnored private var activityLogged: (at: Date, activity: Activity)?
+
+    /// An artwork opened from the gallery (or made, or brought in): the gallery zooms into it from
+    /// its cell, if it has one showing.
+    func open(_ artwork: OpenArtwork) {
+        let model = CanvasModel(session: artwork.session, dir: artwork.dir)
+        model.onClose = { OpenCanvas.shared.close() }
+        GalleryZoomer.shared.open(artwork.session, dir: artwork.dir, window: Interface.shared.window, pixels: pixels)
+        activityLogged = nil
+        show(model)
+        logActivity(front: true, of: model)
+        if let format = artwork.animated {
+            exportOnly = true
+            startExport(format, on: model)
+        }
+    }
+
+    /// `model` on the canvas in place of the gallery.
+    func show(_ model: CanvasModel) {
+        self.model = model
+    }
+
+    /// Back to the gallery.
+    func close() {
+        model = nil
+        exportOnly = false
+    }
+
+    /// Opens `format`'s export over the artwork in `model` once its canvas is made (the frames are
+    /// read from it): a model's turntable, else its layers.
+    private func startExport(_ format: AnimatedFormat, on model: CanvasModel) {
+        Task { @MainActor [weak model] in
+            while let open = model, OpenCanvas.shared.model === open, !open.session.canvasMade() {
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            guard let model, OpenCanvas.shared.model === model else { return }
+            if model.session.modelInfo() != nil {
+                model.scene.openAnimatedExport(format)
+            } else {
+                model.openAnimatedExport(format)
+            }
+        }
+    }
+
+    /// Puts in the log what the open artwork's session did by itself while the app was in front (now
+    /// going away, not `front`) or away (now back): frames drawn, the render thread's wakeups and
+    /// retries, the autosave's looks. Away, all should be none. An artwork just opened (`model`) is
+    /// only noted, for the next.
+    func logActivity(front: Bool, of model: CanvasModel? = nil) {
+        guard let open = model ?? self.model else {
+            activityLogged = nil
+            return
+        }
+        let session = open.session
+        let now = Date()
+        let before = activityLogged
+        weak var opened = open
+        // off the main thread: the session may be drawing
+        DispatchQueue.global(qos: .utility).async {
+            let after = session.activity()
+            DispatchQueue.main.async {
+                if let before {
+                    let seconds = Int(now.timeIntervalSince(before.at))
+                    let b = before.activity
+                    AppLog.info(
+                        "activity",
+                        "\(front ? "away" : "in front") \(seconds) s: \(after.frames &- b.frames) frames drawn, "
+                            + "\(after.wakeups &- b.wakeups) render wakeups, \(after.retries &- b.retries) retries, "
+                            + "\(after.autosaveLooks &- b.autosaveLooks) autosave looks"
+                    )
+                }
+                if let opened, OpenCanvas.shared.model === opened {
+                    OpenCanvas.shared.activityLogged = (now, after)
+                }
+            }
+        }
+    }
 }
 
 /// The gallery, or the artwork open in place of it.
 struct RootView: View {
-    @State private var open: CanvasModel?
+    /// The artwork open: only read here (see `OpenCanvas`).
+    private var open: CanvasModel? {
+        OpenCanvas.shared.model
+    }
+
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.scenePhase) private var scenePhase
 
     @ViewBuilder private var screens: some View {
-        if let open {
-            CanvasScreen(model: open)
-                .statusBarHidden()
-                .persistentSystemOverlays(.hidden)
-                .defersSystemGestures(on: .all)
-        } else {
-            GalleryView { artwork in
-                let model = CanvasModel(session: artwork.session, dir: artwork.dir)
-                model.onClose = { self.open = nil }
-                self.open = model
-                #if DEBUG
-                ScreenCapture.imported(model)
-                #endif
+        let zoomer = GalleryZoomer.shared
+        ZStack {
+            if open == nil {
+                Pc.galleryBackground.ignoresSafeArea()
+            }
+            if let open {
+                CanvasScreen(model: open)
+                    .statusBarHidden()
+                    .persistentSystemOverlays(.hidden)
+                    .defersSystemGestures(on: .all)
+            }
+            // the gallery, kept over the canvas while it zooms into it; the same gallery all the
+            // while, so it keeps its place
+            if open == nil || zoomer.zoom?.opening == true {
+                // (the holder's, which keeps no view)
+                GalleryView(onOpen: OpenCanvas.shared.open)
+                    .modifier(ZoomedGallery(t: zoomer.at, zoom: zoomer.zoom))
+                    .opacity(zoomer.galleryShown)
+                    .allowsHitTesting(zoomer.zoom == nil)
+                    .ignoresSafeArea(.container)
+            }
+            // a canvas left fading away as it shrinks into its cell
+            if let zoom = zoomer.zoom, !zoom.opening {
+                ClosingPicture(t: zoomer.at, zoom: zoom)
+                    .ignoresSafeArea()
+            }
+        }
+    }
+
+    /// The system short of memory, or the app put away: the canvas lets go of what it keeps only to
+    /// be quicker (made again when next wanted).
+    private func trimMemory() {
+        guard let session = open?.session else { return }
+        DispatchQueue.global(qos: .utility).async { session.trimMemory() }
+    }
+
+    /// Whether `url` is a plugin file, by its name (the old ending still opens).
+    private static func isPluginFile(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        return name.hasSuffix(".procraft-plugin") || name.hasSuffix(".procraftplugin")
+    }
+
+    /// Asks about the plugin file at `url`: nothing in it runs, and nothing is kept until it is
+    /// accepted. What can't be imported says why, on the canvas or the gallery. The system's copy
+    /// is moved where it is cleared away in time.
+    private func offerPlugin(_ url: URL) {
+        var file = url
+        if url.pathComponents.contains("Inbox") {
+            let moved = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-\(url.lastPathComponent)")
+            if (try? FileManager.default.moveItem(at: url, to: moved)) != nil {
+                file = moved
+            }
+        }
+        PluginsModel.shared.offer(file) { said in
+            if let open {
+                open.showNotice(said, warning: true)
+            } else {
+                GalleryModel.shared.message = said
             }
         }
     }
 
     var body: some View {
         screens
+            // an artwork opened from the gallery's Share for its animated export goes back once it ends
+            .onChange(of: open?.animatedExport == nil && open?.scene.animatedExport == nil) { _, ended in
+                if ended, OpenCanvas.shared.exportOnly, let open {
+                    OpenCanvas.shared.exportOnly = false
+                    open.onClose()
+                }
+            }
             .background {
                 GeometryReader { place in
                     Color.clear.onChange(of: place.size, initial: true) { _, size in
@@ -74,14 +248,44 @@ struct RootView: View {
                 .ignoresSafeArea()
             }
             .overlay { PluginAlerts() }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background {
+                    OpenCanvas.shared.logActivity(front: false)
+                    trimMemory()
+                } else if phase == .active {
+                    OpenCanvas.shared.logActivity(front: true)
+                }
+            }
+            .onChange(of: displayScale, initial: true) { _, scale in
+                OpenCanvas.shared.pixels = scale
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+                trimMemory()
+            }
             // a file opened with the app is brought into the gallery, which shows: an open artwork
-            // is saved and closed first
+            // is saved and closed first. A plugin is asked about where the app stands: it needs no
+            // artwork closed
             .onOpenURL { url in
-                open?.onClose()
-                GalleryModel.shared.importOpened(url)
+                // the home screen's widget: straight into the artwork worked on last
+                if RecentArtwork.isOpenRecent(url) {
+                    RecentArtwork.openMostRecent(unlessOpen: open != nil)
+                    return
+                }
+                if Self.isPluginFile(url) {
+                    offerPlugin(url)
+                    return
+                }
+                // the artwork open is left (saved) first; one that can't be saved stays, and the file
+                // comes in only if it is left without saving
+                guard let open else {
+                    GalleryModel.shared.importOpened(url)
+                    return
+                }
+                open.afterLeaving = { GalleryModel.shared.importOpened(url) }
+                open.onClose()
             }
         #if DEBUG
-        .task { ScreenCapture.start { open = $0 } }
+        .task { ScreenCapture.start { OpenCanvas.shared.show($0) } }
         #endif
     }
 }
@@ -277,13 +481,10 @@ enum ScreenCapture {
     private static func recordFrames(_ model: CanvasModel, then: @escaping () -> Void) {
         let session = model.session
         let lapse = model.timeLapse.lapse
-        let side = timeLapseSide(s: lapse.settings)
         DispatchQueue.global(qos: .userInitiated).async {
             for colour: [Float] in [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0]] {
                 _ = session.setBackgroundColor(r: colour[0], g: colour[1], b: colour[2], done: true)
-                if let shot = session.timeLapseFrame(maxSide: side) {
-                    lapse.record(shot)
-                }
+                lapse.record(from: session)
             }
             DispatchQueue.main.async(execute: then)
         }

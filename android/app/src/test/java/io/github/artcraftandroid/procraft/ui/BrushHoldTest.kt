@@ -2,6 +2,7 @@ package io.github.artcraftandroid.procraft.ui
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import io.github.artcraftandroid.procraft.core.BrushDropOver
 import io.github.artcraftandroid.procraft.core.BrushInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -10,9 +11,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BrushHoldTest {
-    // the sets down the left, the shown set's (set 1) brushes beside them, 90 tall each
+    // the sets down the left, the shown set's (set 1) five brushes beside them in its list, 90 tall
+    // and 10 apart
     private val sets = mapOf(0 to Rect(0f, 0f, 200f, 60f), 1 to Rect(0f, 70f, 200f, 130f), 2 to Rect(0f, 140f, 200f, 200f))
-    private val brushes = (0 until 5).map { (1 to it) to Rect(220f, it * 100f, 620f, it * 100f + 90f) }
+    private val list = Rect(210f, 0f, 630f, 800f)
+    private val rows = (0 until 5).map { it to Rect(220f, it * 100f, 620f, it * 100f + 90f) }
+
+    private fun over(x: Float, y: Float) = brushDropOver(Offset(x, y), sets, 1, 5, list, rows)
 
     @Test
     fun aStillHoldShowsTheMenuAndLettingGoKeepsIt() {
@@ -23,20 +28,58 @@ class BrushHoldTest {
     }
 
     @Test
-    fun aHoldMovedOnDragsTheBrushAndLetGoReordersIt() {
+    fun aHoldMovedOnDragsTheBrushAndLetGoIsOverTheHalfOfTheBrushUnderIt() {
         val hold = BrushHold(slop = 8f, movable = true)
-        val took = Offset(400f, 145f)
         // held on the second brush, moved down: the drag starts once (the menu goes then)
         assertTrue(hold.move(Offset(0f, 9f)))
         assertTrue(hold.dragging)
         assertFalse(hold.move(Offset(0f, 200f)))
-        // let go over the fourth brush: it takes that place
-        assertEquals(1 to 3, brushDropPlace(1 to 1, took + Offset(0f, 200f), sets, brushes))
-        // over another set: to its top; over its own set, or its own place, or nothing: stays
-        assertEquals(2 to 0, brushDropPlace(1 to 1, Offset(100f, 150f), sets, brushes))
-        assertNull(brushDropPlace(1 to 1, Offset(100f, 100f), sets, brushes))
-        assertNull(brushDropPlace(1 to 1, took, sets, brushes))
-        assertNull(brushDropPlace(1 to 1, Offset(700f, 145f), sets, brushes))
+        // over the fourth brush (300 to 390): its upper half, its lower half (the core puts it just
+        // above or just below)
+        assertEquals(BrushDropOver.OnBrush(1u, 3u, false), over(400f, 330f))
+        assertEquals(BrushDropOver.OnBrush(1u, 3u, true), over(400f, 370f))
+        // over a set's row, its own too (the core moves nothing there)
+        assertEquals(BrushDropOver.OnSet(2u), over(100f, 150f))
+        assertEquals(BrushDropOver.OnSet(1u), over(100f, 100f))
+        // between the sets, or off the lists: nothing
+        assertNull(over(100f, 65f))
+        assertNull(over(700f, 145f))
+    }
+
+    @Test
+    fun letGoInAGapOrBelowTheLastBrushTheNearestBrushTakesIt() {
+        // the gap under the second brush (190 to 200): nearer it, below it; nearer the third, above it
+        assertEquals(BrushDropOver.OnBrush(1u, 1u, true), over(400f, 193f))
+        assertEquals(BrushDropOver.OnBrush(1u, 2u, false), over(400f, 198f))
+        // the list's room below the last brush: after it
+        assertEquals(BrushDropOver.OnBrush(1u, 4u, true), over(400f, 700f))
+    }
+
+    @Test
+    fun anEmptySetsListTakesThemAndTheRecentSetsListNothing() {
+        // a set opened under them with no brushes: its list itself
+        assertEquals(BrushDropOver.InList(3u, 0u), brushDropOver(Offset(400f, 300f), sets, 3, 0, list, emptyList()))
+        // its rows not laid out yet: the list, after the brushes it holds
+        assertEquals(BrushDropOver.InList(1u, 5u), brushDropOver(Offset(400f, 300f), sets, 1, 5, list, emptyList()))
+        // the Recent set's list (no set shown): nothing, its rows or not
+        assertNull(brushDropOver(Offset(400f, 330f), sets, null, 5, list, rows))
+    }
+
+    /**
+     * Why the drop reads the library afresh as it is let go: a state given a newer reference to the
+     * same local function keeps the first (they are equal), so the drop the gesture held that way
+     * saw the set shown when the library first appeared, not one opened since, and let go on a
+     * brush found nothing there.
+     */
+    @Test
+    fun aStateGivenANewerReferenceToALocalFunctionKeepsTheFirst() {
+        fun dropFor(shown: Int): () -> Int {
+            fun drop() = shown
+            return ::drop
+        }
+        val held = androidx.compose.runtime.mutableStateOf(dropFor(1))
+        held.value = dropFor(2)
+        assertEquals(1, held.value())
     }
 
     @Test
@@ -47,16 +90,13 @@ class BrushHoldTest {
     }
 
     @Test
-    fun brushesDraggedTogetherGoOntoAnotherSetOrAPlaceNotAmongThem() {
-        val moving = listOf(1 to 1, 1 to 2)
-        // over another set: to its top, a set closed or not; over their own: nowhere
-        assertEquals(0 to 0, brushesDropPlace(moving, Offset(100f, 30f), sets, brushes))
-        assertEquals(2 to 0, brushesDropPlace(moving, Offset(100f, 150f), sets, brushes))
-        assertNull(brushesDropPlace(moving, Offset(100f, 100f), sets, brushes))
-        // over a brush of theirs: nowhere; over another: its place
-        assertNull(brushesDropPlace(moving, Offset(400f, 245f), sets, brushes))
-        assertEquals(1 to 4, brushesDropPlace(moving, Offset(400f, 445f), sets, brushes))
-        assertNull(brushesDropPlace(emptyList(), Offset(100f, 150f), sets, brushes))
+    fun brushesHeldOverAnotherSetUntilItOpensAreOverItsBrushes() {
+        // set 2 opened under brushes of set 1: over one of its brushes, that brush of set 2 (the core
+        // copies them there, a different set from theirs)
+        val opened = (0 until 3).map { it to Rect(220f, it * 100f, 620f, it * 100f + 90f) }
+        assertEquals(BrushDropOver.OnBrush(2u, 1u, false), brushDropOver(Offset(400f, 125f), sets, 2, 3, list, opened))
+        // it opens only after a hold as long as the original's (1.76 s measured)
+        assertTrue(SPRING_LOAD_MS in 1600L..2000L)
     }
 
     @Test

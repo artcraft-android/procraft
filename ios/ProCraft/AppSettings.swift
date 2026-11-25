@@ -51,6 +51,11 @@ final class AppSettings {
     var actionsTab: Int { didSet { kept.set(actionsTab, forKey: Key.actionsTab) } }
     /// The colour panel's mode.
     var colorMode: Int { didSet { kept.set(colorMode, forKey: Key.colorMode) } }
+    /// The colour model the colour panel's disc, Classic and Value work in: HSB, the panel's own,
+    /// unless another is chosen on its model button.
+    var colourModel: ColourModel { didSet { kept.set(colourModelKey(model: colourModel), forKey: Key.colourModel) } }
+    /// A selection drawn on a model reaches every surface under it (X-Ray).
+    var selectionXRay: Bool { didSet { kept.set(selectionXRay, forKey: Key.selectionXRay) } }
 
     // pressure and smoothing, for every stroke
     var inputStabilization: Float { didSet { kept.set(inputStabilization, forKey: Key.inputStabilization) } }
@@ -103,6 +108,8 @@ final class AppSettings {
         selectionVisibility = float(Key.selectionVisibility, 0.25)
         actionsTab = d.integer(forKey: Key.actionsTab)
         colorMode = d.integer(forKey: Key.colorMode)
+        colourModel = d.string(forKey: Key.colourModel).flatMap { colourModelOfKey(key: $0) } ?? .hsb
+        selectionXRay = d.bool(forKey: Key.selectionXRay)
         inputStabilization = d.float(forKey: Key.inputStabilization)
         inputMotionFiltering = d.float(forKey: Key.inputMotion)
         inputMotionExpression = d.float(forKey: Key.inputExpression)
@@ -132,6 +139,8 @@ final class AppSettings {
         static let selectionVisibility = "selectionVisibility"
         static let actionsTab = "actionsTab"
         static let colorMode = "colorMode"
+        static let colourModel = "colourModel"
+        static let selectionXRay = "selectionXRay"
         static let inputStabilization = "inputStabilization"
         static let inputMotion = "inputMotion"
         static let inputExpression = "inputExpression"

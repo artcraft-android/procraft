@@ -33,6 +33,30 @@ protocol ColorPick: AnyObject {
     func setRgb(_ rgb: UInt32)
 }
 
+/// `c` in colour model `model` (chosen on the panel's model button; HSB is the panel's own): where
+/// it stands there, which `place` keeps while it is still the colour, so a grey or black keeps its
+/// hue and saturation. The maths are the shared core's.
+struct ModelColor {
+    let c: any ColorPick
+    let model: ColourModel
+    let place: ColourPlace
+
+    /// The colour's hue, saturation and third channel in the model (0..1 each).
+    func coords() -> [Float] {
+        let made = place.coords(model: model, h: c.hue, s: c.saturation, v: c.brightness, rgb: c.rgb())
+        return made.count >= 3 ? made : [c.hue, c.saturation, c.brightness]
+    }
+
+    /// The colour set to `coords` in the model.
+    func set(_ coords: [Float]) {
+        guard coords.count >= 3 else { return }
+        let hsv = colourModelHsv(model: model, h: coords[0], s: coords[1], t: coords[2], hue: c.hue)
+        guard hsv.count >= 3 else { return }
+        c.setHsv(hsv[0], hsv[1], hsv[2])
+        place.keep(model: model, h: coords[0], s: coords[1], t: coords[2], rgb: c.rgb())
+    }
+}
+
 /// The colour painted with.
 final class BrushColor: ColorPick {
     private let model: CanvasModel

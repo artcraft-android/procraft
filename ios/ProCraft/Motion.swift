@@ -46,7 +46,8 @@ enum Motion {
     static let panelPage = Animation.timingCurve(0.25, 0.1, 0.25, 1, duration: 0.45)
     /// A panel fading away as something picked from it takes over.
     static let panelFade = easeInOut(0.25)
-    /// The Actions panel changing tabs.
+    /// The Actions panel changing tabs: the old rows fading out, then the new ones fading in.
+    static let actionsTabOut = easeInOut(0.1)
     static let actionsTabIn = easeInOut(0.2)
     /// An alert coming and going.
     static let alertIn = easeInOut(0.3)
@@ -62,7 +63,8 @@ enum Motion {
     /// The time-lapse replay fading in over everything, and out.
     static let replayFade = easeInOut(0.25)
     /// The reference window fading in where it is, and out when closed.
-    static let referenceFade = easeInOut(0.28)
+    static let referenceFadeIn = easeInOut(0.25)
+    static let referenceFadeOut = easeInOut(0.3)
     /// A dragged artwork's cell fading to what stays behind, and back; held, its thumbnail lifting,
     /// and settling when let go.
     static let artworkLift = easeInOut(0.25)

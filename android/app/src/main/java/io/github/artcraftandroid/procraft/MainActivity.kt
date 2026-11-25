@@ -21,6 +21,8 @@ import io.github.artcraftandroid.procraft.canvas.systemShortcutKeys
 import io.github.artcraftandroid.procraft.canvas.PenKeyAction
 import io.github.artcraftandroid.procraft.canvas.PenDoubleTaps
 import io.github.artcraftandroid.procraft.canvas.keyPress
+import io.github.artcraftandroid.procraft.canvas.KeysTold
+import io.github.artcraftandroid.procraft.canvas.maybePenKeys
 import io.github.artcraftandroid.procraft.canvas.penKeyButton
 import io.github.artcraftandroid.procraft.canvas.pointerKindOf
 import kotlinx.coroutines.launch
@@ -38,6 +40,19 @@ class MainActivity : ComponentActivity() {
     /** Hides the system's bars, as the model asks (let go as this activity goes: the model outlives it). */
     private val barsHider: () -> Unit = { hideSystemBars() }
 
+    /**
+     * The brush library's file picker, registered with the activity rather than the library: what
+     * is picked comes in even if the library closed while the picker was up, or the system ended
+     * the app meanwhile (it is registered again as the activity is made again, and the pick is
+     * handed to it then). Any kind of file can be picked: brush files have no type of their own.
+     */
+    private val brushFilePicker = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(vm::importBrushes)
+    }
+    private val brushPickerOpener: () -> Unit = {
+        runCatching { brushFilePicker.launch(arrayOf("*/*")) }.onFailure { AppLog.e("ProCraft", "opening the brush file picker", it) }
+    }
+
     // Project canvas: the presentation on a second display, and the displays coming and going
     private var projection: ProjectionPresentation? = null
     private val displays by lazy { getSystemService(DisplayManager::class.java) }
@@ -52,16 +67,20 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // the log's file first, so that what follows is in it
         AppLog.start(this)
+        // which graphics backend the app is trying, kept before the model (made at its first use
+        // below) makes the GPU device: a driver that crashes the app then sends the next start to
+        // the next backend (one that drew is trusted until the app or the system is updated); and
+        // how the last runs ended, so that a driver that crashed them while drawing sends this one
+        // to the other backend
+        io.github.artcraftandroid.procraft.core.setGpuRecordFolder(filesDir.path, installedBuild())
+        AppLog.toGpuStart(this)
         // text's fonts given to the core, off the main thread
         io.github.artcraftandroid.procraft.canvas.TextRenderer.prepare(assets, java.io.File(filesDir, "fonts"))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.isNavigationBarContrastEnforced = false
         hideSystemBars()
         // a colour dragged down from the top bar puts back the bars the drag showed
         vm.hideSystemBars = barsHider
-        // which graphics backend the app is trying, kept before the model makes the GPU device: a
-        // driver that crashes the app then sends the next start to the next backend (one that drew
-        // is trusted until the app or the system is updated)
-        io.github.artcraftandroid.procraft.core.setGpuRecordFolder(filesDir.path, installedBuild())
+        vm.pickBrushFile = brushPickerOpener
         // made here, not inside the flow's read-only snapshot, where its setup can't write state
         val model = vm
         // laid out left to right in every language, as the original is: a right-to-left one
@@ -118,8 +137,9 @@ class MainActivity : ComponentActivity() {
             vm.offerPlugin(uri)
             return
         }
-        if (vm.screen == io.github.artcraftandroid.procraft.canvas.Screen.CANVAS) vm.closeArtwork()
-        vm.importFile(uri)
+        // the artwork open is left (saved) first; one that can't be saved stays, and the file comes in
+        // only if it is left without saving
+        if (vm.screen == io.github.artcraftandroid.procraft.canvas.Screen.CANVAS) vm.closeArtwork { vm.importFile(uri) } else vm.importFile(uri)
     }
 
     override fun onStart() {
@@ -144,7 +164,11 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) vm.session?.trimMemory()
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            vm.session?.trimMemory()
+            // the library's sample strokes too: the rows showing draw theirs again from the core's copy
+            vm.letGoOfPreviews()
+        }
     }
 
     /** Project canvas: while it is on, the canvas shows on the first second display there is. */
@@ -193,6 +217,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val penDoubleTaps = PenDoubleTaps()
+    private val keysTold = KeysTold()
 
     /**
      * A hardware keyboard's shortcuts on the canvas, a tablet's express keys' too (keys no text
@@ -207,6 +232,10 @@ class MainActivity : ComponentActivity() {
         // a pen's side button that comes as a key
         val penButton = event.device?.let { penKeyButton(keyCode, it.sources or event.source, it.keyboardType, it.name) }
         if (penButton != null && (event.repeatCount > 0 || vm.penKey(penButton))) return true
+        // any other key a pen sends, told once: what a pen's button gives that isn't taken
+        event.device?.takeIf { penButton == null && maybePenKeys(it.sources or event.source, it.name) && keysTold.isNew(it.id, keyCode) }?.let {
+            AppLog.i("keys", "a key from a pen: ${android.view.KeyEvent.keyCodeToString(keyCode)}, meta 0x%x, from %s (source 0x%x)".format(java.util.Locale.ROOT, event.metaState, it.name, event.source))
+        }
         // typing in a text field (a name, the text tool's words): what the field leaves (Ctrl+J,
         // Alt) is still typing, not the canvas's
         if (typing()) return super.onKeyDown(keyCode, event)
@@ -250,6 +279,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         if (vm.hideSystemBars === barsHider) vm.hideSystemBars = null
+        if (vm.pickBrushFile === brushPickerOpener) vm.pickBrushFile = null
         super.onDestroy()
     }
 

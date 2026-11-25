@@ -201,7 +201,7 @@ private let dynamicsTab = StudioTab(name: "Dynamics", icon: PcIcons.studioDynami
     section("Jitter", [slider("jitter_size", "Size"), slider("jitter_opacity", "Opacity")]),
 ])
 
-private let stylusTab = StudioTab(name: "Stylus", icon: PcIcons.studioStylus, iconSize: 43, sections: [
+private let stylusTab = StudioTab(name: "Apple Pencil", icon: PcIcons.studioStylus, iconSize: 43, sections: [
     section("Pressure", [
         .pressureCurve, slider("pressure_size", "Size", .both), slider("pressure_flow", "Opacity"),
         slider("pressure_opacity", "Flow", .both), slider("pressure_bleed", "Bleed"),

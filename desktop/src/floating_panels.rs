@@ -3,14 +3,20 @@
 //! its top as the colour panel is, then a window over the canvas that stays open while one draws,
 //! moved by the strip at its top, sized from its lower right corner and closed by its Close (its
 //! button then hangs it from the bar again). Inside, the panel is the same as where it hangs. Where
-//! each window is, and how big, is the core's to work out ([`procraft_core::floating_fitted`]), and
-//! is kept with the preferences.
+//! each window is, and how big, is the core's to work out ([`procraft_core::PanelLayout`]): while a
+//! plugin lays the panels out, they snap to the window's edges and to each other, fold to a tab by
+//! a button beside Close, and those docked may make room for the canvas. The layout is kept with
+//! the preferences, a place for each way the window is turned (wider than tall, or not).
+
+use std::sync::Arc;
 
 use egui::emath::TSTransform;
-use egui::{Pos2, Rect, pos2, vec2};
-use procraft_core::{FloatingPanel, FloatingRoom, FloatingWindow, Plugins};
+use egui::{Align2, Pos2, Rect, Sense, pos2, vec2};
+use procraft_core::{FloatingPanel, FloatingRoom, LayoutPiece, PanelLayout, PieceShown, Plugins};
 
-/// The panels that may float, each by its place in [`Floating::windows`].
+use crate::look::{Look, Weight, argb, text};
+
+/// The panels that may float, each by its place in [`Floating::allowed`].
 pub const PANELS: [FloatingPanel; 2] = [FloatingPanel::Layers, FloatingPanel::Brushes];
 
 /// How far a panel's grabber is dragged before it floats, and how far down its window's grabber is
@@ -18,28 +24,20 @@ pub const PANELS: [FloatingPanel; 2] = [FloatingPanel::Layers, FloatingPanel::Br
 const UNDOCK_DRAG: f32 = 30.0;
 const GRAB_Y: f32 = 12.0;
 
-/// A window being moved by its strip or sized from its corner: whose, which, where the pointer was
-/// when it was pressed (the window's points), and the window then.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Held {
-    panel: FloatingPanel,
-    sizing: bool,
-    from: Pos2,
-    start: FloatingWindow,
-}
-
-/// The floating panels' windows, and what is being done to them.
-#[derive(Default)]
+/// The floating panels' places (the core's), and what the plugins let them do.
 pub struct Floating {
-    /// Each panel's window as it was last left, shown or closed (none: it never floated), by its
-    /// place in [`PANELS`].
-    pub windows: [Option<FloatingWindow>; 2],
+    pub layout: Arc<PanelLayout>,
     /// Which the plugins let float now, as they said at their generation.
     allowed: [bool; 2],
     allowed_for: Option<u64>,
-    held: Option<Held>,
     /// Something changed that is kept with the preferences.
     pub changed: bool,
+}
+
+impl Default for Floating {
+    fn default() -> Floating {
+        Floating { layout: PanelLayout::new(), allowed: [false; 2], allowed_for: None, changed: false }
+    }
 }
 
 /// `panel`'s place in [`PANELS`].
@@ -47,19 +45,39 @@ fn at(panel: FloatingPanel) -> usize {
     panel as usize
 }
 
+/// The piece of the layout `panel` is.
+pub fn piece(panel: FloatingPanel) -> LayoutPiece {
+    match panel {
+        FloatingPanel::Layers => LayoutPiece::Layers,
+        FloatingPanel::Brushes => LayoutPiece::Brushes,
+    }
+}
+
 impl Floating {
-    /// The windows as they were kept, each by its place in [`PANELS`].
-    pub fn kept(windows: [Option<FloatingWindow>; 2]) -> Floating {
-        Floating { windows, ..Floating::default() }
+    /// The layout as it was kept (none: as it starts), and the windows kept before there were
+    /// layouts, which a way of turning with nothing kept starts from.
+    pub fn kept(layout: Option<&str>, old: [Option<procraft_core::FloatingWindow>; 2]) -> Floating {
+        let floating = Floating::default();
+        if let Some(kept) = layout {
+            floating.layout.read_kept(procraft_core::panel_layout_key(), kept.to_owned());
+        }
+        for (panel, window) in PANELS.into_iter().zip(old) {
+            if let Some(window) = window {
+                floating.layout.read_kept(procraft_core::floating_key(panel), procraft_core::floating_kept(window));
+            }
+        }
+        floating
     }
 
-    /// Which panels float, as `plugins` say now (asked again only when they change).
-    pub fn follow(&mut self, plugins: &Plugins) {
+    /// Which panels float, and how they are laid out, as `plugins` say now (asked again only when
+    /// they change).
+    pub fn follow(&mut self, plugins: &Arc<Plugins>) {
         let now = plugins.generation();
         if self.allowed_for != Some(now) {
             self.allowed_for = Some(now);
             self.allowed = PANELS.map(|p| plugins.floats(p));
         }
+        self.layout.follow(Arc::clone(plugins));
     }
 
     /// Whether a plugin lets `panel` float.
@@ -68,87 +86,59 @@ impl Floating {
     }
 
     /// `panel`'s window while it shows: torn off and not closed, and a plugin lets it float.
-    pub fn shown(&self, panel: FloatingPanel) -> Option<FloatingWindow> {
-        let window = self.windows.get(at(panel)).copied().flatten()?;
-        (window.open && self.allowed(panel)).then_some(window)
+    pub fn shown(&self, panel: FloatingPanel) -> Option<PieceShown> {
+        self.layout.shown(piece(panel))
     }
 
-    fn set(&mut self, panel: FloatingPanel, window: FloatingWindow) {
-        if let Some(slot) = self.windows.get_mut(at(panel)) {
-            *slot = Some(window);
-        }
+    /// The room the floating windows go in this frame, told to the layout before any shows.
+    pub fn place(&self, ctx: &egui::Context) {
+        let screen = ctx.content_rect();
+        let room = room(ctx);
+        let bar = crate::panel::bar_shown(ctx);
+        self.layout.set_room(room, screen.width(), screen.height(), bar, scale(ctx));
     }
 
     /// `panel`'s grabber, hanging from its button, dragged from `from` to `pointer` (the window's
     /// points): past [`UNDOCK_DRAG`] it floats, its window as big as it was last left, its grabber
     /// under the pointer and following it until let go; true then (the panel that hung closes).
-    pub fn undock(&mut self, ctx: &egui::Context, panel: FloatingPanel, from: Pos2, pointer: Pos2) -> bool {
+    pub fn undock(&mut self, panel: FloatingPanel, from: Pos2, pointer: Pos2) -> bool {
         if !self.allowed(panel) || pointer.distance(from) <= UNDOCK_DRAG {
             return false;
         }
-        let k = scale(ctx);
-        let first = procraft_core::floating_at(panel, pointer.x, pointer.y - GRAB_Y * k, k);
-        let sized = match self.windows.get(at(panel)).copied().flatten() {
-            Some(was) => {
-                FloatingWindow { x: pointer.x - was.width * k / 2.0, width: was.width, height: was.height, ..first }
-            }
-            None => first,
-        };
-        let start = procraft_core::floating_fitted(panel, sized, room(ctx), k);
-        self.set(panel, start);
-        self.held = Some(Held { panel, sizing: false, from: pointer, start });
-        true
+        self.layout.open_at(piece(panel), pointer.x, pointer.y, GRAB_Y).is_some()
     }
 
-    /// `panel`'s window closed: where it was and its size kept for when it floats again.
-    pub fn close(&mut self, panel: FloatingPanel) {
-        if let Some(window) = self.windows.get(at(panel)).copied().flatten() {
-            self.set(panel, FloatingWindow { open: false, ..window });
-            self.changed = true;
-        }
+    /// `piece` folded to its tab, or unfolded.
+    pub fn fold(&mut self, piece: LayoutPiece, folded: bool) {
+        self.layout.set_folded(piece, folded);
+        self.changed = true;
     }
 
-    /// `panel`'s strip (or, `sizing`, its corner) pressed with the pointer at `pointer` (the
-    /// window's points): its window moves (or is sized) with the pointer until let go.
-    pub fn hold(&mut self, panel: FloatingPanel, sizing: bool, pointer: Pos2) {
-        if let Some(start) = self.shown(panel) {
-            self.held = Some(Held { panel, sizing, from: pointer, start });
-        }
+    /// `piece`'s strip or tab (or, `sizing`, its corner) pressed with the pointer at `pointer` (the
+    /// window's points): it moves (or is sized) with the pointer until let go.
+    pub fn hold(&mut self, piece: LayoutPiece, sizing: bool, pointer: Pos2) {
+        self.layout.hold(piece, sizing, pointer.x, pointer.y);
     }
 
-    /// A window held follows the pointer while it is down, kept once let go.
+    /// A piece held follows the pointer while it is down, kept once let go.
     pub fn follow_pointer(&mut self, ctx: &egui::Context) {
-        let Some(held) = self.held else { return };
+        if self.layout.holding().is_none() {
+            return;
+        }
         let (pointer, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
         match pointer {
             Some(p) if down => {
-                let (k, room) = (scale(ctx), room(ctx));
-                let by = p - held.from;
-                let window = if held.sizing {
-                    procraft_core::floating_resized(held.panel, held.start, by.x, by.y, room, k)
-                } else {
-                    procraft_core::floating_moved(held.panel, held.start, by.x, by.y, room, k)
-                };
-                self.set(held.panel, window);
+                self.layout.drag(p.x, p.y);
                 ctx.request_repaint();
             }
-            _ => {
-                self.held = None;
-                self.changed = true;
-            }
+            _ => self.changed |= self.layout.let_go(),
         }
     }
 
-    /// Where `window` shows for `panel` now (inside the room, which may have shrunk since it was
-    /// left), and the space it is drawn in: laid out at its own size from its top-left, shown at the
-    /// floating windows' size. Its rect is in that space.
-    pub fn space(
-        ctx: &egui::Context,
-        panel: FloatingPanel,
-        window: FloatingWindow,
-    ) -> (Rect, crate::panel::PanelSpace) {
-        let k = scale(ctx);
-        let window = procraft_core::floating_fitted(panel, window, room(ctx), k);
+    /// Where `window` shows, and the space it is drawn in: laid out at its own size from its
+    /// top-left, shown at the floating windows' size. Its rect is in that space.
+    pub fn space(ctx: &egui::Context, window: PieceShown) -> (Rect, crate::panel::PanelSpace) {
+        let k = window.scale;
         let corner = pos2(window.x, window.y);
         let rect = Rect::from_min_size(corner, vec2(window.width, window.height));
         let to_window = TSTransform::from_translation(corner.to_vec2())
@@ -156,6 +146,47 @@ impl Floating {
             * TSTransform::from_translation(-corner.to_vec2());
         (rect, crate::panel::PanelSpace { to_window, screen: to_window.inverse().mul_rect(ctx.content_rect()) })
     }
+}
+
+/// A floating panel folded to its tab, `title` and an unfold mark, where `shown` says, at the
+/// floating windows' size: what was done to it this frame (a press on it, to move it with the
+/// pointer from there; a tap, to unfold it).
+pub fn tab(ctx: &egui::Context, look: &mut Look, shown: PieceShown, title: &str, backdrops: &mut Vec<f32>) -> TabTouch {
+    let id = egui::Id::unique("floating tab").with(title);
+    let (window, space) = Floating::space(ctx, shown);
+    crate::panel::drawing_panel(ctx, Some(space));
+    let mut touch = TabTouch::default();
+    egui::Area::new(id).fixed_pos(window.min).order(egui::Order::Middle).show(ctx, |ui| {
+        crate::panel::floating_panel_frame(ui, look, "floating tab", window, backdrops);
+        crate::screen::claim(ui, window);
+        let held = ui.interact(window, ui.scope_id().with("tab"), Sense::click_and_drag());
+        touch.pressed = held.drag_started();
+        touch.unfold = held.clicked();
+        let ink = argb(crate::panel::PANEL_TITLE);
+        text(
+            ui.painter(),
+            pos2(window.left() + 14.0, window.center().y),
+            Align2::LEFT_CENTER,
+            title,
+            15.0,
+            Weight::SemiBold,
+            ink,
+        );
+        // the unfold mark: a chevron opening downward
+        let c = pos2(window.right() - 21.0, window.center().y);
+        let stroke = egui::Stroke::new(1.6, ink);
+        ui.painter().line_segment([c + vec2(-7.0, -3.0), c + vec2(0.0, 3.0)], stroke);
+        ui.painter().line_segment([c + vec2(0.0, 3.0), c + vec2(7.0, -3.0)], stroke);
+    });
+    crate::panel::drawing_panel(ctx, None);
+    touch
+}
+
+/// What was done to a folded panel's tab this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TabTouch {
+    pub pressed: bool,
+    pub unfold: bool,
 }
 
 /// How big the floating windows show next to the rest of the interface, as a plugin says.
@@ -183,24 +214,23 @@ mod tests {
 
     #[test]
     fn a_window_floats_only_while_a_plugin_lets_it_and_it_isn_t_closed() {
-        let mut floating = Floating::default();
-        let window = FloatingWindow { open: true, x: 10.0, y: 20.0, width: 384.0, height: 520.0 };
-        floating.windows = [Some(window), None];
-        assert_eq!(floating.shown(FloatingPanel::Layers), None, "no plugin lets it");
-        floating.allowed = [true, true];
-        assert_eq!(floating.shown(FloatingPanel::Layers), Some(window));
-        assert_eq!(floating.shown(FloatingPanel::Brushes), None, "it never floated");
-        floating.close(FloatingPanel::Layers);
-        assert!(floating.changed);
+        let window = procraft_core::FloatingWindow { open: true, x: 10.0, y: 20.0, width: 384.0, height: 520.0 };
+        let mut floating = Floating::kept(None, [Some(window), None]);
+        let room = FloatingRoom { left: 0.0, top: 0.0, right: 1600.0, bottom: 1000.0 };
+        floating.layout.set_room(room, 1600.0, 1000.0, 48.0, 1.0);
+        // no plugin lets it
         assert_eq!(floating.shown(FloatingPanel::Layers), None);
-        assert_eq!(floating.windows[0], Some(FloatingWindow { open: false, ..window }), "kept where it was");
-        // held, it moves from where it was when pressed
-        floating.windows[0] = Some(window);
-        floating.hold(FloatingPanel::Layers, false, pos2(50.0, 50.0));
-        assert_eq!(floating.held.map(|h| (h.panel, h.sizing, h.start)), Some((FloatingPanel::Layers, false, window)));
-        // one that doesn't show isn't held
-        floating.held = None;
-        floating.hold(FloatingPanel::Brushes, true, pos2(50.0, 50.0));
-        assert_eq!(floating.held, None);
+        floating.allowed = [true, true];
+        let plugins = Plugins::new();
+        // (a list with none on lets none float: the layout asks the list)
+        floating.layout.follow(Arc::clone(&plugins));
+        assert_eq!(floating.shown(FloatingPanel::Layers), None);
+        // kept closed where it was, by its Close
+        floating.layout.close(LayoutPiece::Layers);
+        assert!(!floating.layout.is_open(LayoutPiece::Layers));
+        // what is kept reads back
+        let kept = floating.layout.kept();
+        let again = Floating::kept(Some(&kept), [None, None]);
+        assert_eq!(again.layout.kept(), kept);
     }
 }

@@ -10,9 +10,9 @@ struct AdjustmentsPanel: View {
     let model: CanvasModel
     let arrowX: CGFloat
     private let groups = adjustmentGroups()
-    /// The filters imported: the menu's last group is one row to them, there only with some.
+    /// The filters imported, and the plugins' actions listed here: the menu's last group is one row
+    /// to them, there only with some.
     private let filters = PluginsModel.shared.store.filters()
-    /// The plugins' actions listed here, after the filters.
     private let actions = PluginsModel.shared.store.actionsIn(place: .adjustments)
     /// The menu has turned to them.
     @State private var showFilters = false
@@ -38,11 +38,23 @@ struct AdjustmentsPanel: View {
     }
 
     private var filterRows: some View {
-        group {
-            row("Adjustments") { showFilters = false }
-            ForEach(filters, id: \.id) { filter in
-                Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
-                row(filter.name) { model.startPluginFilter(filter) }
+        VStack(spacing: 10) {
+            group {
+                row("Adjustments") { showFilters = false }
+                ForEach(filters, id: \.id) { filter in
+                    Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
+                    row(filter.name) { model.startPluginFilter(filter) }
+                }
+            }
+            if !actions.isEmpty {
+                group {
+                    ForEach(Array(actions.enumerated()), id: \.offset) { i, action in
+                        if i > 0 {
+                            Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
+                        }
+                        row(action.label) { model.runPluginAction(action.key) }
+                    }
+                }
             }
             ForEach(actions, id: \.key) { action in
                 Rectangle().fill(Pc.actionsSeparator).frame(height: 1)

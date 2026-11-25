@@ -208,7 +208,7 @@ pub fn import_text_font(bytes: Vec<u8>, file_name: String) -> Option<TextTypefac
             Err(_) => break,
         }
     }
-    std::fs::write(&path, bytes).ok()?;
+    crate::storage::write(&path, bytes).ok()?;
     // a file that isn't a font is dropped (only this new one)
     let offered = offer_file(&path);
     if offered.is_none() {

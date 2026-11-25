@@ -1786,9 +1786,9 @@ DRAWINGS.update({f'blend-{k}': draw for k, draw in BLENDS.items()})
 
 # The plugins' own icons: (plugin folder, menu choice key) -> drawing.
 PLUGIN_ICONS = {
-    ('colour-triangle', 'square'): lambda: solid_rect(True),
-    ('colour-triangle', 'triangle'): picker_triangle,
-    ('colour-triangle', 'ring'): triangle_in_ring,
+    ('colour-tools', 'square'): lambda: solid_rect(True),
+    ('colour-tools', 'triangle'): picker_triangle,
+    ('colour-tools', 'ring'): triangle_in_ring,
 }
 
 

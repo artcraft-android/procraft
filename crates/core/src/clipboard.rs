@@ -116,7 +116,7 @@ pub fn picture_png(straight: &ThumbnailImage, icc: &[u8]) -> Option<Vec<u8>> {
 pub fn write_copy_png(image: ThumbnailImage, icc: Vec<u8>, path: String) -> bool {
     let Some(png) = picture_png(&copy_straight(&image), &icc) else { return false };
     let written = crate::project::write_atomically(std::path::Path::new(&path), |p| {
-        std::fs::write(p, &png).map_err(|e| crate::project::file_error("copying", e))
+        crate::storage::write(p, &png).map_err(|e| crate::project::file_error("copying", e))
     });
     written.is_ok()
 }
@@ -337,7 +337,8 @@ impl CanvasSession {
     }
 
     /// Mirrors every layer of the canvas, left to right or (not `horizontal`) top to bottom, as
-    /// one undo step.
+    /// one undo step. The drawing guide is mirrored with them, so it stays where it was on the
+    /// picture.
     pub fn flip_canvas(&self, horizontal: bool) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -361,17 +362,20 @@ impl CanvasSession {
         let moved = st.move_all_items(flip, &mut doc);
         let rasterized =
             doc.layers().iter().zip(before.layers()).any(|(a, b)| a.plugin.is_none() && b.plugin.is_some());
+        // the guide goes with the picture (undone with it)
+        doc.guide.mirror(w, h, horizontal);
+        let guide_moved = doc.guide != before.guide;
         st.doc = doc;
         let Some(canvas) = st.canvas.as_mut() else { return };
         canvas.name_next_step(if horizontal { "flip canvas horizontally" } else { "flip canvas vertically" });
         // mirrored on the GPU, nothing read back
-        if rasterized {
+        if rasterized || guide_moved {
             canvas.flip_layers_and_document(ids, horizontal, before);
         } else {
             canvas.flip_layers(ids, horizontal);
         }
         st.flush();
-        if let Some(made) = st.canvas.as_ref().and_then(procraft_gpu::Canvas::undo_step) {
+        if let Some(made) = st.canvas.as_deref().and_then(procraft_gpu::Canvas::undo_step) {
             st.note_moved_data(made, moved);
         }
         st.revision += 1;

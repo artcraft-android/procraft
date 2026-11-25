@@ -56,10 +56,11 @@ fn grid_line(quarters: u32, width: f32, height: f32, pixels_per_point: f32) -> (
 impl CanvasSession {
     /// The display turned from way up `from` to `to` (quarter turns of what is drawn, clockwise from
     /// the panel's natural way up) with the window `width` × `height` pixels as it was: the view
-    /// turns the other way, so the canvas stays where it was on the glass.
+    /// turns the other way, so the canvas stays where it was on the glass. As the device's own turn,
+    /// it is not counted as a turn of the canvas (Canvas Orientation Memory keeps the fingers' alone).
     pub fn follow_turn(&self, from: u32, to: u32, width: u32, height: u32) {
         let (x, y, angle) = turn_of_view(from, to, width as f32, height as f32);
-        self.view_gesture(0.0, 0.0, x, y, 1.0, angle);
+        self.follow_screen_turn(x, y, angle);
     }
 
     /// Fixes the surround's grid to the glass for a window `width` × `height` pixels at way up
@@ -109,6 +110,35 @@ mod tests {
             let (px, py) = to_panel(to, natural, tall, there.0, there.1);
             assert!(near(from_panel(from, natural, tall, px, py), (120.0, 340.0)), "{from} to {to}");
         }
+    }
+
+    #[test]
+    fn the_device_turning_turns_the_view_but_not_the_artwork_s_kept_turn() {
+        // as measured: an artwork on screen turned only by the device's turn is kept upright
+        let session = CanvasSession::new(80, 40);
+        let s: &CanvasSession = &session;
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 400);
+            st.place_view();
+        }
+        let angle = |s: &CanvasSession| {
+            let m = s.view_matrix();
+            m[1].atan2(m[0])
+        };
+        let before = angle(s);
+        // portrait to landscape and on round: the view turns each time, the kept turn stays 0
+        for (from, to, w, h) in [(0, 1, 200, 400), (1, 2, 400, 200), (2, 3, 200, 400), (3, 0, 400, 200)] {
+            s.follow_turn(from, to, w, h);
+            assert_eq!(s.shown_turns(), 0, "{from} to {to}");
+        }
+        s.follow_turn(0, 1, 200, 400);
+        let turned = (angle(s) - before).rem_euclid(std::f32::consts::TAU);
+        assert!((turned - 3.0 * std::f32::consts::FRAC_PI_2).abs() < 1e-3, "turned {turned}");
+        assert_eq!(s.shown_turns(), 0);
+        // the fingers' turn still counts
+        s.view_gesture(100.0, 100.0, 0.0, 0.0, 1.0, std::f32::consts::FRAC_PI_2);
+        assert_eq!(s.shown_turns(), 1);
     }
 
     #[test]

@@ -465,6 +465,7 @@ struct QuickMenuView: View {
                         menus.choose($0)
                         marked = $0
                     },
+                    onRename: { menus.rename($0, $1) },
                     onDelete: { i in
                         menus.delete(i)
                         fresh = fresh.filter { $0 != i }.map { $0 > i ? $0 - 1 : $0 }
@@ -712,8 +713,9 @@ private struct ActionPicker: View {
 }
 
 /// The QuickMenu's menus, hung from the middle (below it where it fits, else above, else beside): a
-/// plus adds one and shows it, a row tapped makes it the active one, a row swiped left shows Delete
-/// (swiped most of the way, it goes at once). Menus added while it shows are listed first.
+/// plus adds one and shows it, a row tapped makes it the active one (tapped again, it is renamed
+/// in place), a row swiped left shows Delete (swiped most of the way, it goes at once). Menus added
+/// while it shows are listed first.
 private struct MenusPopover: View {
     /// Where the middle is.
     let menu: CGRect
@@ -722,11 +724,14 @@ private struct MenusPopover: View {
     let marked: Int?
     let onAdd: () -> Void
     let onChoose: (Int) -> Void
+    let onRename: (Int, String) -> Void
     let onDelete: (Int) -> Void
 
     /// The row swiped and how far.
     @State private var swiped: Int?
     @State private var offset: CGFloat = 0
+    /// The menu being renamed: its row, the active one, tapped again.
+    @State private var renaming: Int?
 
     /// Where the panel goes, and which of below, above, right, left that is.
     private var place: (at: CGPoint, side: Int) {
@@ -850,24 +855,36 @@ private struct MenusPopover: View {
                     }
                 }
                 .padding(.trailing, deleteIn)
-            rowLabel(name, on: on)
-                .padding(.horizontal, 16)
-                .frame(width: width, height: pickerRowHeight, alignment: .leading)
-                .background(Capsule().fill(on ? Pc.accent : pickerRowFill))
-                .contentShape(Capsule())
-                .offset(x: moved)
-                // a tap closes a row left open, else chooses the menu
-                .onTapGesture {
-                    if swiped != nil {
-                        withAnimation(Motion.swipeSettle) {
-                            swiped = nil
-                            offset = 0
-                        }
-                    } else {
-                        onChoose(i)
+            Group {
+                if renaming == i {
+                    InlineName(name: name, color: .white, fontSize: rowText, weight: .semibold) {
+                        onRename(i, $0)
+                        renaming = nil
                     }
+                    .offset(y: rowTextDrop)
+                } else {
+                    rowLabel(name, on: on)
                 }
-                .simultaneousGesture(swipe(i, width: width, enabled: swipes))
+            }
+            .padding(.horizontal, 16)
+            .frame(width: width, height: pickerRowHeight, alignment: .leading)
+            .background(Capsule().fill(on ? Pc.accent : pickerRowFill))
+            .contentShape(Capsule())
+            .offset(x: moved)
+            // a tap closes a row left open, renames the active menu, else chooses the menu
+            .onTapGesture {
+                if swiped != nil {
+                    withAnimation(Motion.swipeSettle) {
+                        swiped = nil
+                        offset = 0
+                    }
+                } else if marked == i {
+                    renaming = i
+                } else {
+                    onChoose(i)
+                }
+            }
+            .simultaneousGesture(swipe(i, width: width, enabled: swipes))
         }
         .frame(width: width, height: pickerRowHeight)
     }

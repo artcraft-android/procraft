@@ -1,8 +1,10 @@
 import SwiftUI
 
 private let noticeFill = Color(argb: 0xC242_4242)
-private let noticeInk = Color(argb: 0xFFD7_D7D7)
+private let noticeInk = Color(argb: 0xFFC5_C5C5)
 private let noticeHeight: CGFloat = 24
+/// The band's top and bottom edges: a point a little lighter than the rest, as measured.
+private let noticeEdge = Color(argb: 0x0AFF_FFFF)
 
 /// What undo or redo did (and other passing messages), in a band across the screen just under the
 /// top bar: it slides down from behind the bar, stays a moment and slides back up. A new message
@@ -18,9 +20,15 @@ struct NoticeBand: View {
         ZStack {
             // frosted over the canvas, as measured
             Rectangle().fill(.ultraThinMaterial)
+                .environment(\.colorScheme, .dark)
             Rectangle().fill(noticeFill)
+            VStack(spacing: 0) {
+                Rectangle().fill(noticeEdge).frame(height: 1)
+                Spacer(minLength: 0)
+                Rectangle().fill(noticeEdge).frame(height: 1)
+            }
             Text(verbatim: text)
-                .font(.system(size: 13))
+                .font(.system(size: 14))
                 .foregroundStyle(noticeInk)
                 .lineLimit(1)
         }
@@ -29,7 +37,7 @@ struct NoticeBand: View {
         .frame(maxWidth: .infinity)
         .frame(height: noticeHeight)
         .clipped()
-        .offset(y: Pc.barHeight)
+        .offset(y: Pc.barShown)
         .opacity(shown > 0 ? 1 : 0)
         .allowsHitTesting(false)
         .task(id: model.notice?.id) {

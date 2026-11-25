@@ -264,6 +264,11 @@ private struct StudioSlider: View {
     /// follows the drag as far as it travels.
     @State private var lastX: CGFloat?
     @State private var dragged: Float = 0
+    /// Whose the touch is: the slider's at once on the knob, else the first ten points' way decides
+    /// (along, the slider's; across, the list's, which scrolls). Nil while undecided.
+    @State private var owner: Bool?
+    /// A touch is down on the slider (gone again as it lifts or the list takes it).
+    @GestureState private var pressing = false
 
     private var both: Bool {
         shown == .both || shown == .follow || shown == .grade
@@ -293,6 +298,31 @@ private struct StudioSlider: View {
                         }
                 }
             }
+    }
+
+    /// Whose a touch is so far (see `owner`), as the core says: landing near the knob the
+    /// slider's; elsewhere undecided (nil) until it has gone far enough one way, the list's (false)
+    /// if across first, the slider's (true) if along. (A drag tells no pen from a finger: a
+    /// finger's reach.)
+    private func sliderOwns(_ drag: DragGesture.Value, width w: CGFloat, height h: CGFloat) -> Bool? {
+        let t = CGFloat(min(max(both ? (value + 1) / 2 : value, 0), 1))
+        let knob = CGPoint(x: knobInset + (w - 2 * knobInset) * t, y: h / 2)
+        let from = hypot(drag.startLocation.x - knob.x, drag.startLocation.y - knob.y)
+        switch listSliderTouch(fromKnob: Float(from), pen: false, along: Float(drag.translation.width), across: Float(drag.translation.height)) {
+        case .slider:
+            return true
+        case .list:
+            return false
+        case .undecided:
+            return nil
+        }
+    }
+
+    /// The touch has gone: the next one starts afresh, and the list scrolls again.
+    private func letGo() {
+        lastX = nil
+        owner = nil
+        ui.sliding = false
     }
 
     private func track(width w: CGFloat, height h: CGFloat) -> some View {
@@ -350,9 +380,17 @@ private struct StudioSlider: View {
                 let w = g.size.width
                 track(width: w, height: g.size.height)
                     .contentShape(Rectangle())
-                    .gesture(
+                    .simultaneousGesture(
                         DragGesture(minimumDistance: 0)
+                            .updating($pressing) { _, down, _ in down = true }
                             .onChanged { drag in
+                                if owner == nil {
+                                    owner = sliderOwns(drag, width: w, height: g.size.height)
+                                    if owner == true {
+                                        ui.sliding = true
+                                    }
+                                }
+                                guard owner == true else { return }
                                 let last = lastX ?? drag.startLocation.x
                                 let from = lastX == nil ? value : dragged
                                 let span: Float = both ? 2 : 1
@@ -364,8 +402,14 @@ private struct StudioSlider: View {
                                     onChange(next)
                                 }
                             }
-                            .onEnded { _ in lastX = nil }
+                            .onEnded { _ in letGo() }
                     )
+                    // lifted, or taken by the list as it scrolls (no end then): ready for the next
+                    .onChange(of: pressing) { _, down in
+                        if !down {
+                            letGo()
+                        }
+                    }
                     .allowsHitTesting(enabled)
             }
             .frame(height: 20)
@@ -1103,7 +1147,7 @@ struct BlendListAsk {
     let current: Int
     /// Where the row's middle is on the screen.
     let centreY: CGFloat
-    /// How far from the screen's left the list stands; none: 10 from its right.
+    /// Where the list's left edge goes; none puts it 10 from the screen's right.
     var left: CGFloat?
     let onPick: (Int) -> Void
 }
@@ -1150,8 +1194,9 @@ private struct BlendPicker: View {
     }
 }
 
-/// The blend modes in the layer panel's order, as a light list 10 from the screen's right with the
-/// current one over the row it opened from; a tap picks one, a tap outside it closes it.
+/// The blend modes in the layer panel's order, as a light list 10 from the screen's right (or where
+/// the ask puts it) with the current one over the row it opened from; a tap picks one, a tap
+/// outside it closes it.
 struct BlendModeList: View {
     let ask: BlendListAsk
     let height: CGFloat

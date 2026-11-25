@@ -5,6 +5,7 @@ import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import io.github.artcraftandroid.procraft.core.PointerKind
+import io.github.artcraftandroid.procraft.core.QuickAction
 import io.github.artcraftandroid.procraft.core.TouchSettings
 
 /** The key Huawei's M-Pencil gives for a double-tap, twice over for each one. */
@@ -66,6 +67,26 @@ internal fun pointerKind(toolType: Int, source: Int, classification: Int = 0): P
     else -> PointerKind.FINGER
 }
 
+/** A palm's tool type, as a touchscreen that tells a palm from a finger gives it (Android keeps its own name for it hidden). */
+internal const val TOOL_TYPE_PALM = 5
+
+/** A finger's contact this far across (mm) or more is a palm: a fingertip is 8 to 15, a flat thumb under 20. */
+internal const val PALM_MM = 25f
+
+/**
+ * Whether a contact is a hand resting on the screen, never handed to the shared touches (and taken
+ * back from them if it becomes one): one its screen says is a palm ([toolType]), whatever painting
+ * with a finger is set to, or a finger's ([kind]) [touchMajor] pixels across, [PALM_MM] or more on
+ * a screen of [xdpi] pixels an inch (a screen that says nothing of a touch's size, 0, gives none).
+ * A pen's or a mouse's never is.
+ */
+internal fun palmContact(toolType: Int, kind: PointerKind, touchMajor: Float, xdpi: Float): Boolean = when {
+    toolType == TOOL_TYPE_PALM -> true
+    kind != PointerKind.FINGER -> false
+    xdpi <= 0f || !touchMajor.isFinite() -> false
+    else -> touchMajor / xdpi * 25.4f >= PALM_MM
+}
+
 /** What pointer [index] of [e] is to the canvas (see [pointerKind]). */
 internal fun pointerKindOf(e: MotionEvent, index: Int): PointerKind =
     pointerKind(e.getToolType(index), e.source, if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) e.classification else 0)
@@ -74,9 +95,21 @@ internal fun pointerKindOf(e: MotionEvent, index: Int): PointerKind =
  * [settings] as the tablet takes them: a mouse, or a touchpad moving the pointer, does what a finger
  * is set to do. With painting with a finger off it paints nothing (a drag does what a finger's
  * does), and on a model it turns the model; it still has no pressure and is never taken for a hand
- * resting by the pen.
+ * resting by the pen. The pen's buttons do what Pen buttons set them to ([penButtons], the first
+ * and the second; null, what Gesture controls say), or run a plugin's action ([penPlugins], its key;
+ * null for none) before that.
  */
-internal fun tabletTouchSettings(settings: TouchSettings): TouchSettings = settings.copy(pointerFollowsTouch = true)
+internal fun tabletTouchSettings(
+    settings: TouchSettings,
+    penButtons: List<QuickAction?> = emptyList(),
+    penPlugins: List<String?> = emptyList(),
+): TouchSettings = settings.copy(
+    pointerFollowsTouch = true,
+    penButtonDoes = penButtons.getOrNull(0),
+    penSecondButtonDoes = penButtons.getOrNull(1),
+    penButtonRuns = penPlugins.getOrNull(0),
+    penSecondButtonRuns = penPlugins.getOrNull(1),
+)
 
 /**
  * Whether a mouse's press with [buttonState] held paints: its primary button's does (and a press
@@ -100,13 +133,17 @@ internal class PenButtons {
      * begins. As the pen [lifting] lifts it is let go, unless its touches have never shown a button:
      * then the lift leaves it out too, and the next hover says whether it is still held (let go
      * there and pressed again as the pen hovers on, one press would switch to the eraser and
-     * straight back, and the size slider with it).
+     * straight back, and the size slider with it). Nor is it let go as the pen [leaving] leaves
+     * hover, as it does on its way down onto the glass: some pens' hover exit leaves out a button
+     * still held (the Galaxy Tab S6 Lite's), which handed the eraser back just before the stroke,
+     * so a press only switched to the eraser and back. Leaving for good, its next hover or touch
+     * says.
      */
-    fun next(buttonState: Int, penIn: Boolean, touching: Boolean = false, lifting: Boolean = false): Pair<Int, Int> {
+    fun next(buttonState: Int, penIn: Boolean, touching: Boolean = false, lifting: Boolean = false, leaving: Boolean = false): Pair<Int, Int> {
         if (!penIn) return 0 to 0
         val shown = penButtonsIn(buttonState)
         if ((touching || lifting) && shown != 0) touchesShowButtons = true
-        val kept = touching || (lifting && !touchesShowButtons)
+        val kept = touching || leaving || (lifting && !touchesShowButtons)
         val now = shown or (if (kept) held else 0)
         val change = (now and held.inv()) to (held and now.inv())
         held = now
@@ -121,6 +158,9 @@ internal fun penTouching(action: Int): Boolean = when (action) {
 }
 
 internal fun penLifting(action: Int): Boolean = action == MotionEvent.ACTION_UP
+
+/** Whether a motion event of [action] is the pen leaving hover ([PenButtons.next]'s leaving). */
+internal fun penLeaving(action: Int): Boolean = action == MotionEvent.ACTION_HOVER_EXIT
 
 /** Tells a pen's next double-tap from the second press of the one just heard. */
 internal class PenDoubleTaps {
@@ -155,6 +195,21 @@ internal fun penKeyButton(keyCode: Int, sources: Int, keyboardType: Int, name: S
     val stylus = sources and InputDevice.SOURCE_STYLUS == InputDevice.SOURCE_STYLUS
     val pen = stylus || keyboardType != InputDevice.KEYBOARD_TYPE_ALPHABETIC || PEN_NAME.containsMatchIn(name)
     return second.takeIf { pen }
+}
+
+/**
+ * Whether a key from a device with [sources] called [name] may be a pen's: a stylus, or one named
+ * as a pen. What a pen's button sends that the canvas doesn't take goes in the log, once a key.
+ */
+internal fun maybePenKeys(sources: Int, name: String): Boolean =
+    sources and InputDevice.SOURCE_STYLUS == InputDevice.SOURCE_STYLUS || PEN_NAME.containsMatchIn(name)
+
+/** Each key from each device told once in the log. */
+internal class KeysTold {
+    private val told = HashSet<Pair<Int, Int>>()
+
+    /** Whether [keyCode] from device [deviceId] is yet to be told (it counts as told now). */
+    fun isNew(deviceId: Int, keyCode: Int): Boolean = told.add(deviceId to keyCode)
 }
 
 /** Each kind of pointer the canvas has seen from each device, told once in the log. */

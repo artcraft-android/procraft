@@ -13,7 +13,7 @@ private let swipeGap: CGFloat = 5.5
 private let swipeFill = Color(argb: 0xFF3F_3F3F)
 private let swipeInk = Color(argb: 0xFFC5_C5C5)
 private let swipeDelete = Color(argb: 0xFFFF_3A46)
-/// A brush swiped right is picked, this fill over its row; it follows the finger this far.
+/// A brush slid right is picked, this fill over its row; it follows the finger this far.
 private let pickedBrush = Color(argb: 0xFF2C_5281)
 private let pickReach: CGFloat = 72
 private let searchFill = Color(argb: 0x1F76_7680)
@@ -23,6 +23,16 @@ private let resultFill = Color(argb: 0x14FF_FFFF)
 private let searchBlock: CGFloat = 60
 /// Menus stay below the top bar.
 private let menuTop: CGFloat = 57
+/// A brush held for its menu goes on to follow the finger once it has moved this far.
+private let heldSlop: CGFloat = 8
+/// Two fingers pinched on a library and let go at this much of their spread at the start (or less)
+/// go to every library's card; pinched out on a card past this much, that library opens. While they
+/// pinch, a library's lists shrink with them no further than the least here, and grow no further
+/// than the most.
+let pinchToLibraries: CGFloat = 0.66
+let pinchToLibrary: CGFloat = 2
+private let pinchShownLeast: CGFloat = 0.6
+private let pinchShownMost: CGFloat = 1.05
 /// The set icon picker: how many of the icons it offers, its columns, how far left of the set it
 /// starts, and the room it keeps below.
 private let pickedSetIcons = 42
@@ -79,6 +89,14 @@ struct PanelHeader<Action: View>: View {
     }
 }
 
+/// A brush held for its menu: which, whether it is pinned in the Recent set, and whether the Recent
+/// set shows it.
+private struct BrushMenuAsk {
+    let brush: BrushInfo
+    let pinned: Bool
+    let recent: Bool
+}
+
 /// What the library's rows share while it is open: its menus, the search, and a brush or set held
 /// and dragged, with where the rows are.
 @Observable
@@ -88,6 +106,10 @@ private final class LibraryUi {
     var titleMenu = false
     var setMenu: Int?
     var recentMenu = false
+    /// A brush held: its menu.
+    var brushMenu: BrushMenuAsk?
+    /// A brush is held down (its menu up, or about to follow the finger): the lists stay still.
+    var holding = false
     var iconPicker = false
     var importing = false
     var query = ""
@@ -95,60 +117,22 @@ private final class LibraryUi {
     /// when the library opens.
     var searchAway = searchBlock
     var dragged: BrushInfo?
+    /// The brushes going with it (it among them, those picked in its set), in their order.
+    var draggedWith: [BrushInfo] = []
     var draggedSet: Int?
     /// Where the finger is, and where on the row it took hold.
     var dragAt = CGPoint.zero
     var grab = CGPoint.zero
+    /// The dragged brush's cell width (its row may go, as another set opens under the finger).
+    var dragWidth: CGFloat = 0
     var setFrames: [Int: CGRect] = [:]
     var brushFrames: [String: CGRect] = [:]
-    /// The brush a finger is sliding along its row, and how far it has gone.
-    var slid: String?
-    var slidBy: CGFloat = 0
-    /// The two lists' scroll views: a touch on a row is one that went down in them, and not on a
-    /// menu over them.
-    @ObservationIgnored let lists = NSHashTable<UIScrollView>.weakObjects()
-
-    /// The shown set's brushes, which a held one may be dropped among.
-    private func shown(_ model: CanvasModel) -> [BrushInfo] {
-        model.brushSets.indices.contains(model.shownSet) ? model.brushSets[model.shownSet].brushes : []
-    }
-
-    /// A finger held still on a set or a brush (but the Recent set and its brushes, which stay
-    /// where they are) lifts it, to go where it is dragged.
-    func hold(_ model: CanvasModel, at: CGPoint) -> Bool {
-        guard !dragging else { return false }
-        if let set = setFrames.first(where: { $0.key != CanvasModel.recentSet && $0.value.contains(at) }) {
-            setMenu = nil
-            grab = CGPoint(x: at.x - set.value.minX, y: at.y - set.value.minY)
-            dragAt = at
-            draggedSet = set.key
-            return true
-        }
-        guard let brush = shown(model).first(where: { brushFrames[CanvasModel.brushKey($0)]?.contains(at) == true }),
-              let frame = brushFrames[CanvasModel.brushKey(brush)]
-        else { return false }
-        model.swipedBrush = nil
-        grab = CGPoint(x: at.x - frame.minX, y: at.y - frame.minY)
-        dragAt = at
-        dragged = brush
-        return true
-    }
-
-    /// The held brush or set let go of.
-    func drop(_ model: CanvasModel) {
-        if dragged != nil {
-            dropBrush(model, shown: shown(model))
-        } else {
-            dropSet(model)
-        }
-    }
-
-    /// The brush whose row a point of the brushes' column is level with: a slid row is out to the
-    /// side of where it lies, its buttons in its place.
-    func brushRow(at: CGPoint) -> String? {
-        guard at.x >= setsWidth, !dragging else { return nil }
-        return brushFrames.first { $0.value.minY <= at.y && at.y < $0.value.maxY }?.key
-    }
+    /// Where the shown set's brushes list is.
+    var brushListFrame = CGRect.zero
+    /// Follows the finger dragging brushes from the window, once their row has begun the drag.
+    @ObservationIgnored weak var touches: LibraryTouches.Follower?
+    /// Dragged brushes resting on another set's row open it.
+    let spring = BrushSpring()
 
     /// The set the dragged brush or set is over, if any.
     var overSet: Int? {
@@ -160,19 +144,80 @@ private final class LibraryUi {
         dragged != nil || draggedSet != nil
     }
 
-    /// A brush let go of: onto a set, to its top; onto a brush of the shown set, to its place.
-    func dropBrush(_ model: CanvasModel, shown: [BrushInfo]) {
+    /// Whether `b` is being dragged, alone or with others.
+    func isDragged(_ b: BrushInfo) -> Bool {
+        if draggedWith.isEmpty {
+            return dragged == b
+        }
+        return draggedWith.contains { $0.set == b.set && $0.index == b.index }
+    }
+
+    /// What the dragged brushes are over where the finger is: a set's row, or a brush of the set
+    /// shown (which half), or its list; read from the library as it is now.
+    func dropOver(_ model: CanvasModel) -> BrushDropOver? {
+        let shown = model.shownSet
+        let brushes = model.brushSets.indices.contains(shown) ? model.brushSets[shown].brushes : []
+        let rows = brushes.compactMap { b in brushFrames[CanvasModel.brushKey(b)].map { (Int(b.index), $0) } }
+        return brushDropOver(
+            at: dragAt, sets: setFrames, shown: model.brushSets.indices.contains(shown) ? shown : nil,
+            count: brushes.count, list: brushListFrame, rows: rows
+        )
+    }
+
+    /// The places in their set of the brushes dragged (it, and those going with it).
+    private var draggedIndices: [UInt32] {
+        guard let b = dragged else { return [] }
+        return (draggedWith.isEmpty ? [b] : draggedWith).filter { $0.set == b.set }.map(\.index)
+    }
+
+    /// Whether the dragged brush would be copied where the finger is now (onto another set, or a
+    /// brush of another set), as the green plus on it says.
+    func dropCopies(_ model: CanvasModel) -> Bool {
+        guard let b = dragged, let over = dropOver(model) else { return false }
+        return brushDropPlace(from: b.set, indices: draggedIndices, over: over)?.copies == true
+    }
+
+    /// A brush let go of, with those going with it: onto another set, copied to its top; onto a
+    /// brush of the shown set not among them, just above it or just below it as the finger is on
+    /// its upper or lower half (copied there from another set, moved along their own); into the
+    /// list away from its brushes, after the last.
+    func dropBrush(_ model: CanvasModel) {
+        spring.stop()
         guard let b = dragged else { return }
+        let moving = draggedWith.isEmpty ? [b] : draggedWith
+        let over = dropOver(model)
         dragged = nil
-        if let set = setFrames.first(where: { $0.value.contains(dragAt) })?.key {
-            if set != Int(b.set) {
-                model.moveBrush(b, set: set, index: 0)
-            }
+        draggedWith = []
+        if let over {
+            model.dropBrushesOver(moving, over: over)
+        }
+    }
+
+    /// The finger the window follows dragging brushes is at `at`: held a moment over another set's
+    /// row, that set opens, the drag going on, to be let go among its brushes (the row the drag
+    /// began on goes with its set, so only while the window follows the finger).
+    func follow(_ at: CGPoint, _ model: CanvasModel) {
+        dragAt = at
+        let set = dragged == nil ? nil : brushSpringSet(at: at, sets: setFrames, shown: model.shownSet)
+        spring.over(set) { [weak self, weak model] set in
+            guard let self, let model, self.dragged != nil,
+                  brushSpringSet(at: self.dragAt, sets: self.setFrames, shown: model.shownSet) == set else { return }
+            model.showSet(set)
+        }
+    }
+
+    /// The finger the window follows dragging brushes lifted at `at`: they land there. Taken away
+    /// by the system (`cancelled`), they land nowhere.
+    func letGo(_ at: CGPoint, cancelled: Bool, _ model: CanvasModel) {
+        holding = false
+        spring.stop()
+        if cancelled {
+            dragged = nil
+            draggedWith = []
             return
         }
-        if let target = shown.first(where: { brushFrames[CanvasModel.brushKey($0)]?.contains(dragAt) == true }) {
-            model.moveBrush(b, set: Int(target.set), index: Int(target.index))
-        }
+        dragAt = at
+        dropBrush(model)
     }
 
     /// A set dropped onto another takes its place.
@@ -199,10 +244,42 @@ private struct BrushFrames: PreferenceKey {
     }
 }
 
+private struct BrushListFrame: PreferenceKey {
+    static let defaultValue = CGRect.zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next != .zero {
+            value = next
+        }
+    }
+}
+
+/// What brushes dragged in the library are over at `at` (the library's space), for the core to say
+/// where they land (`brushDropPlace`): a set's row of `sets` (by place; not the Recent set's);
+/// else, in the list `list` of the shown set `shown` (none for the Recent set), which holds `count`
+/// brushes, the one of its `rows` (by place in the set) nearest up or down, on its upper or lower
+/// half, or with none there the list itself; else nothing.
+func brushDropOver(
+    at: CGPoint, sets: [Int: CGRect], shown: Int?, count: Int, list: CGRect, rows: [(Int, CGRect)]
+) -> BrushDropOver? {
+    if let set = sets.first(where: { $0.key >= 0 && $0.value.contains(at) })?.key {
+        return .onSet(set: UInt32(set))
+    }
+    guard let shown, shown >= 0, list.contains(at) else { return nil }
+    // how far up or down from a row (none on it)
+    func off(_ r: CGRect) -> CGFloat { max(r.minY - at.y, at.y - r.maxY, 0) }
+    guard let nearest = rows.filter({ $0.0 >= 0 }).min(by: { off($0.1) < off($1.1) }) else {
+        return .inList(set: UInt32(shown), count: UInt32(max(count, 0)))
+    }
+    return .onBrush(set: UInt32(shown), index: UInt32(nearest.0), lower: at.y > nearest.1.midY)
+}
+
 /// The brush library hanging from the tool that opened it: the sets down its left, the shown
 /// set's brushes (each its name over its sample stroke) on its right. Tap the chosen set for its
-/// menu, swipe a brush left to share, duplicate or delete it, hold and drag it onto a set or to
-/// another place in its own, and add brushes and sets with the plus.
+/// menu, swipe a brush left to share, duplicate or delete it, hold it for its menu (and drag it on
+/// from there onto a set or to another place in its own; held a moment over another set, that set
+/// opens to let it go among its brushes), pinch the lists in for every library's card, and add
+/// brushes and sets with the plus.
 struct BrushLibrary: View {
     let model: CanvasModel
     let arrowX: CGFloat
@@ -210,8 +287,13 @@ struct BrushLibrary: View {
     /// menus are kept on it.
     let origin: CGPoint
     let screen: CGSize
+    /// Floating in a window of its own (a plugin lets it): its frame; none while it hangs.
+    var floating: FloatingFrame?
     @State private var ui = LibraryUi()
     @FocusState private var searching: Bool
+    /// Two fingers pinching on the lists: how far (their spread, a part of what it was). The lists
+    /// follow, as far as the pinch can take them, and spring back when it isn't taken.
+    @State private var pinched: CGFloat?
 
     var body: some View {
         let shown = model.shownSet == CanvasModel.recentSet || model.brushSets.indices.contains(model.shownSet)
@@ -220,38 +302,54 @@ struct BrushLibrary: View {
             DrawModeSettings(model: model, arrowX: arrowX)
         // every library's card, or a library with no sets yet: a panel of their own
         } else if model.showingLibraries || model.brushSets.isEmpty || !shown {
-            LibrariesPanel(model: model, arrowX: arrowX, origin: origin, screen: screen)
+            LibrariesPanel(model: model, arrowX: arrowX, origin: origin, screen: screen, floating: floating)
         } else {
             library
         }
     }
 
+    /// A word in the plus's place while brushes are picked.
+    private func pickedAction(_ label: String, width: CGFloat, perform: @escaping () -> Void) -> some View {
+        Text(verbatim: label)
+            .font(.system(size: 15))
+            .foregroundStyle(swipeInk)
+            .lineLimit(1)
+            .frame(width: width, height: 32)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: perform)
+    }
+
     private var library: some View {
         let renaming = model.renamingLibrary == model.libraryPlace
-        return Popover(width: libraryWidth, arrowX: arrowX) {
+        // floating in a window of its own: as wide as the window, no arrow, a strip over it and under it
+        return Popover(width: floating?.width ?? libraryWidth, arrowX: arrowX, side: floating == nil ? .top : .none) {
+            if let floating {
+                FloatingTopStrip(frame: floating)
+            }
             DrawModeBar(model: model)
             PanelHeader(
-                title: model.libraryName, start: 20, end: 12, height: 52, chevronOn: ui.titleMenu,
+                title: model.libraryName, start: 20, end: 12, height: 52,
                 onTitle: { withAnimation(Motion.menuOpen) { ui.titleMenu.toggle() } },
                 rename: renaming ? { model.renameLibrary(model.libraryPlace, name: $0) } : nil
             ) {
-                // brushes picked: Delete in the plus's place, and Combine for one with the current brush
-                if !model.pickedBrushes.isEmpty {
-                    HStack(spacing: 4) {
-                        if model.canCombinePicked {
-                            pickedButton("Combine", width: 80) { model.combinePicked() }
-                        }
-                        pickedButton("Delete", width: 63) {
-                            model.question = Question(title: "Delete these brushes?") { model.deletePickedBrushes() }
-                        }
-                    }
-                    .padding(.top, 16)
-                } else {
+                if model.pickedBrushes.isEmpty {
                     PcIconView(PcIcons.plusMedium, size: 41, color: Pc.panelGlyph)
                         .frame(width: 41, height: 40)
                         .contentShape(Rectangle())
                         .onTapGesture { withAnimation(Motion.menuOpen) { ui.adding = true } }
                         .padding(.top, 12)
+                } else {
+                    // brushes picked: Delete in the plus's place, and Combine beside it for one
+                    // with the current brush
+                    HStack(spacing: 4) {
+                        if model.canCombinePicked {
+                            pickedAction("Combine", width: 80) { model.combinePicked() }
+                        }
+                        pickedAction("Delete", width: 63) {
+                            model.question = Question(title: "Delete these brushes?") { model.deletePickedBrushes() }
+                        }
+                    }
+                    .padding(.top, 16)
                 }
             }
             VStack(spacing: 0) {
@@ -274,24 +372,40 @@ struct BrushLibrary: View {
                 }
             }
             .frame(maxHeight: .infinity)
+            // two fingers pinched in on them shrink them, and let go small enough show every
+            // library's card
+            .scaleEffect(min(max(pinched ?? 1, pinchShownLeast), pinchShownMost))
+            .clipped()
+            .simultaneousGesture(
+                MagnifyGesture()
+                    .onChanged { pinched = $0.magnification }
+                    .onEnded { value in
+                        withAnimation(Motion.swipeSettle) { pinched = nil }
+                        if value.magnification <= pinchToLibraries {
+                            ui.brushMenu = nil
+                            model.renamingBrush = nil
+                            model.showingLibraries = true
+                        }
+                    }
+            )
+            if floating != nil {
+                FloatingBottomStrip()
+            }
         }
-        // behind all of it, in the space its rows report their places in
-        .background(RowTouches(
-            takes: { view in ui.lists.allObjects.contains { view.isDescendant(of: $0) } },
-            held: { ui.hold(model, at: $0) },
-            heldMoved: { ui.dragAt = $0 },
-            heldEnded: { ui.drop(model) },
-            slides: { ui.brushRow(at: $0) != nil },
-            slideBegan: {
-                ui.slidBy = 0
-                ui.slid = ui.brushRow(at: $0)
-            },
-            slid: { ui.slidBy = $0 },
-            slideEnded: { ui.slid = nil }
-        ))
+        // hanging from its button, its grabber tears it off into a window of its own, while a
+        // plugin lets it
+        .overlay(alignment: .top) {
+            if floating == nil, model.floating.allowed(.brushes) {
+                PanelGrabber(model: model, panel: .brushes)
+                    .padding(.top, Pc.arrowHeight)
+            }
+        }
+        // under it all, filling it: where the window follows a finger dragging brushes from
+        .background(LibraryTouches(model: model, ui: ui))
         .coordinateSpace(.named(librarySpace))
         .onPreferenceChange(SetFrames.self) { ui.setFrames = $0 }
         .onPreferenceChange(BrushFrames.self) { ui.brushFrames = $0 }
+        .onPreferenceChange(BrushListFrame.self) { ui.brushListFrame = $0 }
         .overlay(alignment: .topLeading) { LibraryMenus(model: model, ui: ui, origin: origin, screen: screen) }
         .overlay(alignment: .topLeading) { DragGhost(model: model, ui: ui) }
         // brushes picked are let go as the library closes, or another set shows
@@ -302,6 +416,7 @@ struct BrushLibrary: View {
                 model.importBrushes(from: url)
             }
         }
+        .onDisappear { model.renamingBrush = nil }
         #if DEBUG
         .onAppear {
             switch ScreenCapture.libraryShows {
@@ -420,9 +535,10 @@ private struct SearchResults: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else {
             ScrollView {
+                let tints = model.previewTints()
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 2), spacing: 6) {
                     ForEach(found, id: \.self) { b in
-                        ResultCell(model: model, brush: b)
+                        ResultCell(model: model, brush: b, tints: tints)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -438,6 +554,7 @@ private struct SearchResults: View {
 private struct ResultCell: View {
     let model: CanvasModel
     let brush: BrushInfo
+    let tints: PreviewTints
 
     var body: some View {
         let key = CanvasModel.brushKey(brush)
@@ -447,7 +564,7 @@ private struct ResultCell: View {
         ZStack(alignment: .topLeading) {
             shape.fill(selected ? Pc.rowSelected : resultFill)
             if let preview {
-                SampleStroke(image: preview)
+                SampleStroke(image: preview, tint: selected ? tints.chosen : tints.other)
             }
             BrushName(name: brush.name, selected: selected, shaded: model.shadedNames[key] == true)
                 .padding(.leading, 14)
@@ -513,27 +630,211 @@ private struct BrushName: View {
     }
 }
 
-/// The library's sets, the shown one lit, the Recent set above them.
+/// A row's touch held still, then dragged, in the library's own space: `began` hears where it took
+/// hold, and `ended` that it is over, let go or taken away by the system alike (a gesture's state
+/// goes back either way, where its `onEnded` is only told of the first).
+private struct HeldDrag: ViewModifier {
+    let ui: LibraryUi
+    let began: (CGPoint) -> Void
+    let ended: () -> Void
+    @GestureState private var held = false
+
+    func body(content: Content) -> some View {
+        content
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.5)
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(librarySpace)))
+                    .updating($held) { value, state, _ in
+                        if case .second(true, _) = value {
+                            state = true
+                        }
+                    }
+                    .onChanged { value in
+                        if case let .second(true, drag?) = value {
+                            if !ui.dragging {
+                                began(drag.startLocation)
+                            }
+                            ui.dragAt = drag.location
+                        }
+                    }
+            )
+            .onChange(of: held) { _, now in
+                if !now {
+                    ended()
+                }
+            }
+    }
+}
+
+/// A brush's touch held still: its menu shows (`held`, once the hold is made); moved on from there,
+/// the brush follows the finger (`began` hears where it took hold, in the library's own space). From
+/// then on the window follows the finger, past this row's life (another set may open under it), and
+/// lets the brush go; when it can't, the row does, and `ended` hears that the touch is over, let go
+/// or taken away by the system alike.
+private struct HeldBrush: ViewModifier {
+    let ui: LibraryUi
+    let held: () -> Void
+    let began: (CGPoint) -> Void
+    let ended: () -> Void
+    @GestureState private var pressed = false
+
+    func body(content: Content) -> some View {
+        content
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.5)
+                    .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(librarySpace)))
+                    .updating($pressed) { value, state, _ in
+                        if case .second(true, _) = value {
+                            state = true
+                        }
+                    }
+                    .onChanged { value in
+                        guard case let .second(true, drag) = value else { return }
+                        if !ui.holding, !ui.dragging {
+                            ui.holding = true
+                            held()
+                        }
+                        guard let drag else { return }
+                        if !ui.dragging, hypot(drag.translation.width, drag.translation.height) > heldSlop {
+                            began(drag.startLocation)
+                            if ui.dragged != nil {
+                                ui.touches?.take(near: drag.location)
+                            }
+                        }
+                        if ui.touches?.following != true {
+                            ui.dragAt = drag.location
+                        }
+                    }
+            )
+            .onChange(of: pressed) { _, now in
+                if !now {
+                    ui.holding = false
+                    // the window lets go of what it follows
+                    if ui.touches?.following != true {
+                        ended()
+                    }
+                }
+            }
+    }
+}
+
+/// Follows, from the window, the finger dragging brushes in the library: once their row has begun
+/// the drag (`take`), on past the row's own life (as another set opens under the finger, the shown
+/// set's rows give way to its), and lets them go where it lifts. Its view lies under the library,
+/// filling it, so a touch's place in it is its place in the library's space.
+private struct LibraryTouches: UIViewRepresentable {
+    let model: CanvasModel
+    let ui: LibraryUi
+
+    func makeUIView(context: Context) -> Follower {
+        let view = Follower()
+        view.isUserInteractionEnabled = false
+        view.model = model
+        view.ui = ui
+        ui.touches = view
+        return view
+    }
+
+    func updateUIView(_ view: Follower, context: Context) {
+        view.model = model
+        view.ui = ui
+        ui.touches = view
+    }
+
+    final class Follower: UIView, UIGestureRecognizerDelegate {
+        weak var model: CanvasModel?
+        weak var ui: LibraryUi?
+        /// Sees every touch on the window from the time the library is on it, taking none.
+        private var watcher: TouchWatcher?
+        /// The finger dragging brushes, and how far its place in the library's space is from its
+        /// place here (nothing, as they lie one on the other, but measured as it is taken).
+        private var held: UITouch?
+        private var shift = CGSize.zero
+
+        /// Whether a finger dragging brushes is followed.
+        var following: Bool {
+            held != nil
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if let watcher, watcher.view !== window {
+                watcher.view?.removeGestureRecognizer(watcher)
+                self.watcher = nil
+                held = nil
+            }
+            guard let window, watcher == nil else { return }
+            let w = TouchWatcher()
+            w.cancelsTouchesInView = false
+            w.delaysTouchesBegan = false
+            w.delaysTouchesEnded = false
+            w.delegate = self
+            w.onMove = { [weak self] touch in self?.moved(touch) }
+            w.onEnd = { [weak self] touch, cancelled in self?.ended(touch, cancelled: cancelled) }
+            window.addGestureRecognizer(w)
+            watcher = w
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        /// The finger at `at` (the library's space) has begun dragging brushes: followed from now
+        /// on, if the watcher saw it come down.
+        func take(near at: CGPoint) {
+            guard held == nil, let watcher, let touch = watcher.nearest(to: at, in: self) else { return }
+            let here = touch.location(in: self)
+            held = touch
+            shift = CGSize(width: at.x - here.x, height: at.y - here.y)
+        }
+
+        /// Where `touch` is in the library's space.
+        private func place(_ touch: UITouch) -> CGPoint {
+            let here = touch.location(in: self)
+            return CGPoint(x: here.x + shift.width, y: here.y + shift.height)
+        }
+
+        private func moved(_ touch: UITouch) {
+            guard let held, held === touch, let ui, let model else { return }
+            ui.follow(place(touch), model)
+        }
+
+        private func ended(_ touch: UITouch, cancelled: Bool) {
+            guard let held, held === touch else { return }
+            self.held = nil
+            guard let ui, let model else { return }
+            ui.letGo(place(touch), cancelled: cancelled, model)
+        }
+    }
+}
+
+/// The library's sets, the shown one lit, the Recent set above them. It opens scrolled as little as
+/// brings the shown set into sight (the brushes in use may be in a set far down the list).
 private struct SetColumn: View {
     let model: CanvasModel
     let ui: LibraryUi
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                SearchScroll(ui: ui)
-                    .frame(height: 0)
-                LazyVStack(spacing: 12) {
-                    RecentRow(model: model, ui: ui)
-                    ForEach(Array(model.brushSets.enumerated()), id: \.offset) { i, set in
-                        SetRow(model: model, ui: ui, index: i, set: set)
+        ScrollViewReader { reader in
+            ScrollView {
+                VStack(spacing: 0) {
+                    SearchScroll(ui: ui)
+                        .frame(height: 0)
+                    LazyVStack(spacing: 12) {
+                        RecentRow(model: model, ui: ui)
+                            .id(CanvasModel.recentSet)
+                        ForEach(Array(model.brushSets.enumerated()), id: \.offset) { i, set in
+                            SetRow(model: model, ui: ui, index: i, set: set)
+                                .id(i)
+                        }
                     }
+                    .padding(12)
                 }
-                .padding(12)
             }
+            .onAppear { reader.scrollTo(model.shownSet) }
         }
         .scrollIndicators(.hidden)
-        .scrollDisabled(ui.dragging)
+        .scrollDisabled(ui.dragging || ui.holding)
         .frame(width: setsWidth)
         .background(Pc.setColumn)
     }
@@ -720,8 +1021,17 @@ private struct BrushColumn: View {
         return model.brushSets[model.shownSet].brushes.map { ListedBrush(brush: $0, pinned: false) }
     }
 
+    /// Whether `b` is lit as its row shows it: in the Recent set the current brush alone.
+    private func litInList(_ b: BrushInfo) -> Bool {
+        if model.shownSet == CanvasModel.recentSet {
+            return model.currentBrush.map { $0.set == b.set && $0.index == b.index } == true
+        }
+        return model.highlighted(b)
+    }
+
     var body: some View {
         let listed = listed
+        let tints = model.previewTints()
         ScrollViewReader { reader in
             ScrollView {
                 VStack(spacing: 0) {
@@ -729,7 +1039,7 @@ private struct BrushColumn: View {
                         .frame(height: 0)
                     LazyVStack(spacing: brushGap) {
                         ForEach(listed) { item in
-                            BrushRow(model: model, ui: ui, brush: item.brush, pinned: item.pinned)
+                            BrushRow(model: model, ui: ui, brush: item.brush, pinned: item.pinned, tints: tints)
                                 .id(item.id)
                         }
                     }
@@ -739,18 +1049,24 @@ private struct BrushColumn: View {
                     .padding(.bottom, 12)
                 }
             }
-            // a brush found from the Recent set is scrolled to in its own
+            // a brush found from the Recent set is scrolled to in its own; else the set's lit
+            // brush is brought into sight as little as it takes
             .onChange(of: model.foundBrush, initial: true) { _, found in
                 if let found {
                     reader.scrollTo(found, anchor: .center)
                     model.foundBrush = nil
+                } else if let lit = listed.first(where: { litInList($0.brush) }) {
+                    reader.scrollTo(lit.id)
                 }
             }
         }
+        .background(GeometryReader { g in
+            Color.clear.preference(key: BrushListFrame.self, value: g.frame(in: .named(librarySpace)))
+        })
         // another set's brushes replace these at once
         .id(model.shownSet)
         .scrollIndicators(.hidden)
-        .scrollDisabled(ui.dragging)
+        .scrollDisabled(ui.dragging || ui.holding)
         .frame(maxWidth: .infinity)
         .background(Pc.brushColumn)
     }
@@ -768,7 +1084,8 @@ private struct SwipeAction: Identifiable {
 
 /// A brush that slides away to the left, showing its `actions` in its place: Share, Duplicate and
 /// Delete; in the Recent set Find, Pin (or Unpin) and Clear. Slid right past half of `pickReach`
-/// it springs back and is picked or let go (`onPick`).
+/// it is picked (or no longer), if it can be (`onPick`), and slides back. While it is `held` (its
+/// menu up, or it dragged on from there), it stays where it is.
 private struct SwipeRow<Content: View>: View {
     let open: Bool
     /// How far a finger has slid along the row, while one does (the library's `RowTouches` tell).
@@ -776,6 +1093,7 @@ private struct SwipeRow<Content: View>: View {
     let onOpen: (Bool) -> Void
     let actions: [SwipeAction]
     var onPick: (() -> Void)?
+    var held: () -> Bool = { false }
     @ViewBuilder let content: () -> Content
 
     @State private var width: CGFloat = 0
@@ -811,6 +1129,35 @@ private struct SwipeRow<Content: View>: View {
             }
             content()
                 .offset(x: offset)
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 14)
+                        .onChanged { drag in
+                            // a hold has the rest of the touch: no buttons show under a dragged brush
+                            if held() {
+                                return
+                            }
+                            if !sliding, abs(drag.translation.width) > abs(drag.translation.height) {
+                                sliding = true
+                            }
+                            if sliding {
+                                let right: CGFloat = open || onPick == nil ? 0 : pickReach
+                                offset = min(max(rest + drag.translation.width, -width), right)
+                            }
+                        }
+                        .onEnded { _ in
+                            guard sliding else { return }
+                            sliding = false
+                            if offset > pickReach / 2, let onPick {
+                                onPick()
+                            }
+                            let opened = offset < -width / 3
+                            if opened == open {
+                                withAnimation(Motion.swipeSettle) { offset = rest }
+                            } else {
+                                onOpen(opened)
+                            }
+                        }
+                )
         }
         .background(GeometryReader { g in
             Color.clear
@@ -848,6 +1195,7 @@ private struct BrushRow: View {
     let ui: LibraryUi
     let brush: BrushInfo
     let pinned: Bool
+    let tints: PreviewTints
 
     private var actions: [SwipeAction] {
         let b = brush
@@ -878,25 +1226,35 @@ private struct BrushRow: View {
         let selected = recent
             ? model.currentBrush.map { $0.set == brush.set && $0.index == brush.index } == true
             : model.highlighted(brush)
-        let picked = model.pickedBrushes.contains(key)
+        // a plugin may colour the sample strokes by the colour now; the samples are drawn white,
+        // dark on the light interface's cells otherwise
+        let tint = (selected ? tints.chosen : tints.other) ?? (Look.shared.light && !selected ? .black : nil)
         let preview = model.previews[key]
         let shape = RoundedRectangle(cornerRadius: 12, style: .circular)
-        let b = brush
+        let picked = model.pickedBrushes.contains(key)
+        // the current brush counts as picked already
+        let pick: (() -> Void)? = recent || selected ? nil : { model.togglePickedBrush(brush) }
         SwipeRow(
-            open: model.swipedBrush == key, slide: ui.slid == key ? ui.slidBy : nil,
-            onOpen: { model.swipedBrush = $0 ? key : nil }, actions: actions,
-            // the current brush counts as picked already
-            onPick: recent || selected ? nil : { model.togglePickedBrush(b) }
+            open: model.swipedBrush == key, onOpen: { model.swipedBrush = $0 ? key : nil }, actions: actions, onPick: pick,
+            held: { ui.holding || ui.dragging }
         ) {
             ZStack(alignment: .topLeading) {
                 shape.fill(selected ? Pc.rowSelected : picked ? pickedBrush : Color.clear)
                 if let preview {
-                    // the samples are drawn white: dark on the light interface's cells
-                    SampleStroke(image: preview, tint: Look.shared.light && !selected && !picked ? .black : nil)
+                    SampleStroke(image: preview, tint: tint)
                 }
-                BrushName(name: brush.name, selected: selected || picked, shaded: model.shadedNames[key] == true)
+                if model.renamingBrush == key {
+                    InlineName(name: brush.name, color: selected || picked ? Color.white : Pc.panelTitle, fontSize: 14) {
+                        model.renameBrush(brush, name: $0)
+                    }
                     .padding(.leading, 18)
                     .padding(.top, 11.75)
+                    .padding(.trailing, 12)
+                } else {
+                    BrushName(name: brush.name, selected: selected || picked, shaded: model.shadedNames[key] == true)
+                        .padding(.leading, 18)
+                        .padding(.top, 11.75)
+                }
                 // a pinned brush's mark, at the cell's top right
                 if pinned {
                     PcIconView(PcIcons.pinMark, size: 16, color: selected ? .white : Pc.panelTitle)
@@ -907,7 +1265,7 @@ private struct BrushRow: View {
             }
             .frame(maxWidth: .infinity, minHeight: brushHeight, maxHeight: brushHeight, alignment: .topLeading)
             .clipShape(shape)
-            .opacity(ui.dragged == brush ? 0.3 : 1)
+            .opacity(ui.isDragged(brush) ? 0.3 : 1)
             .background(GeometryReader { g in
                 Color.clear.preference(key: BrushFrames.self, value: [key: g.frame(in: .named(librarySpace))])
             })
@@ -920,7 +1278,7 @@ private struct BrushRow: View {
                 }
                 // and with brushes picked, only lets them go
                 if !model.pickedBrushes.isEmpty {
-                    model.pickedBrushes.removeAll()
+                    model.pickedBrushes = []
                     return
                 }
                 model.chooseBrush(brush)
@@ -929,6 +1287,29 @@ private struct BrushRow: View {
                     model.studio.open()
                 }
             }
+            .modifier(HeldBrush(
+                ui: ui,
+                held: {
+                    model.swipedBrush = nil
+                    withAnimation(Motion.menuOpen) { ui.brushMenu = BrushMenuAsk(brush: brush, pinned: pinned, recent: recent) }
+                },
+                began: { at in
+                    // the Recent set's brushes stay where they are
+                    guard !recent else { return }
+                    // the menu goes at once: closing, it would still show while the brush is dragged
+                    var gone = Transaction()
+                    gone.disablesAnimations = true
+                    withTransaction(gone) { ui.brushMenu = nil }
+                    let frame = ui.brushFrames[key] ?? .zero
+                    ui.grab = CGPoint(x: at.x - frame.minX, y: at.y - frame.minY)
+                    ui.dragWidth = frame.width
+                    // the brushes picked in its set go with it, when it is one of them
+                    let set = model.brushSets.indices.contains(Int(brush.set)) ? model.brushSets[Int(brush.set)].brushes : []
+                    ui.draggedWith = draggedTogether(brush, picked: model.pickedBrushes, selected: selected, brushes: set)
+                    ui.dragged = brush
+                },
+                ended: { ui.dropBrush(model) }
+            ))
         }
         // a brush's preview goes by place, and is drawn again when the library changes
         .task(id: preview == nil) {
@@ -937,6 +1318,17 @@ private struct BrushRow: View {
             }
         }
     }
+}
+
+/// The brushes dragged with `held`: those picked (`picked`, by place "set-index") in its set and
+/// it, in their order in its set (`brushes`), when it is one of them (the current brush,
+/// `selected`, counts as picked); else it alone.
+private func draggedTogether(_ held: BrushInfo, picked: [String], selected: Bool, brushes: [BrushInfo]) -> [BrushInfo] {
+    if picked.isEmpty || (!picked.contains(CanvasModel.brushKey(held)) && !selected) {
+        return [held]
+    }
+    let going = brushes.filter { $0.set == held.set && (picked.contains(CanvasModel.brushKey($0)) || $0.index == held.index) }
+    return going.isEmpty ? [held] : going
 }
 
 /// The dragged brush or set, following the finger.
@@ -952,7 +1344,7 @@ private struct DragGhost: View {
             ZStack(alignment: .topLeading) {
                 shape.fill(Pc.rowSelected.opacity(0.9))
                 if let preview = model.previews[key] {
-                    SampleStroke(image: preview)
+                    SampleStroke(image: preview, tint: model.previewTints().chosen)
                 }
                 Text(verbatim: d.name)
                     .font(.system(size: 14, weight: .semibold))
@@ -961,8 +1353,32 @@ private struct DragGhost: View {
                     .padding(.leading, 18)
                     .padding(.top, 11)
             }
-            .frame(width: ui.brushFrames[key]?.width ?? 0, height: brushHeight)
+            .frame(width: ui.dragWidth, height: brushHeight)
             .clipShape(shape)
+            // several going together: how many
+            .overlay(alignment: .topTrailing) {
+                if ui.draggedWith.count > 1 {
+                    Text(verbatim: "\(ui.draggedWith.count)")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Pc.rowSelected)
+                        .lineLimit(1)
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(Color.white))
+                        .padding(.top, 8)
+                        .padding(.trailing, 8)
+                }
+            }
+            // over another set it would be copied into: a green plus on its corner
+            .overlay(alignment: .topTrailing) {
+                if ui.dropCopies(model) {
+                    Text(verbatim: "+")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.white)
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(Color(argb: 0xFF30_D158)))
+                        .offset(x: 12, y: -12)
+                }
+            }
             .offset(x: at.x, y: at.y)
             .allowsHitTesting(false)
         } else if let i = ui.draggedSet, model.brushSets.indices.contains(i) {
@@ -1040,6 +1456,10 @@ private struct LibraryMenus: View {
                 MenuDismissal { closeAll() }
                 setMenu(i, frame: frame)
             }
+            if let ask = ui.brushMenu, let frame = ui.brushFrames[CanvasModel.brushKey(ask.brush)] {
+                MenuDismissal { closeAll() }
+                brushMenu(ask, frame: frame)
+            }
         }
     }
 
@@ -1050,7 +1470,57 @@ private struct LibraryMenus: View {
             ui.recentMenu = false
             ui.setMenu = nil
             ui.iconPicker = false
+            ui.brushMenu = nil
         }
+    }
+
+    /// A brush held: its menu under it, their left edges in line. In a set Rename, Duplicate,
+    /// Share and Delete; in the Recent set Find, Pin or Unpin, Share and Clear.
+    private func brushMenu(_ ask: BrushMenuAsk, frame: CGRect) -> some View {
+        let b = ask.brush
+        // two rows, Share between lines, and Delete or Clear
+        let height: CGFloat = 14 + 80 + 21 + 40 + 21 + 40
+        let at = kept(CGPoint(x: frame.minX, y: frame.maxY), CGSize(width: glassMenuWidth, height: height), below: menuTop)
+        return GlassMenu(overPanel: true) {
+            if ask.recent {
+                MenuRow(icon: PcIcons.swipeFind, label: "Find", iconSize: 26) {
+                    closeAll()
+                    model.findBrush(b)
+                }
+                MenuRow(icon: ask.pinned ? PcIcons.swipeUnpin : PcIcons.swipePin, label: ask.pinned ? "Unpin" : "Pin", iconSize: 26) {
+                    closeAll()
+                    model.pinRecentBrush(b, pinned: !ask.pinned)
+                }
+            } else {
+                MenuRow(icon: PcIcons.menuRename, label: "Rename") {
+                    closeAll()
+                    model.renamingBrush = CanvasModel.brushKey(b)
+                }
+                MenuRow(icon: PcIcons.menuDuplicate, label: "Duplicate") {
+                    closeAll()
+                    model.duplicateBrush(b)
+                }
+            }
+            MenuLine()
+            MenuRow(icon: PcIcons.menuShare, label: "Share") {
+                closeAll()
+                model.shareBrush(b)
+            }
+            MenuLine()
+            if ask.recent {
+                MenuRow(icon: PcIcons.menuClear, label: "Clear") {
+                    closeAll()
+                    model.clearRecentBrush(b)
+                }
+            } else {
+                MenuRow(icon: PcIcons.menuTrash, label: "Delete", ink: Pc.menuDanger) {
+                    closeAll()
+                    model.question = Question(title: "Delete this brush?") { model.deleteBrush(b) }
+                }
+            }
+        }
+        .offset(x: at.x, y: at.y)
+        .menuTransition(.topLeading)
     }
 
     private var addMenu: some View {
@@ -1227,4 +1697,24 @@ private struct DrawModeSettings: View {
             .padding(.top, 14)
         }
     }
+}
+
+extension CanvasModel {
+    /// What the library's sample strokes are tinted with as a plugin colours them by the colour
+    /// now: each brush's (`other`), and the brush in use's on the accent (`chosen`); none, as the
+    /// interface draws them. Read again as the colour or the plugins change.
+    func previewTints() -> PreviewTints {
+        _ = colorRgb()
+        _ = PluginsModel.shared.changes
+        let tint = { (chosen: Bool) -> Color? in
+            self.session.brushPreviewColour(chosen: chosen).map { Color(argb: 0xFF00_0000 | $0) }
+        }
+        return PreviewTints(other: tint(false), chosen: tint(true))
+    }
+}
+
+/// The colours a plugin gives the library's sample strokes: each brush's, and the brush in use's.
+struct PreviewTints {
+    var other: Color?
+    var chosen: Color?
 }

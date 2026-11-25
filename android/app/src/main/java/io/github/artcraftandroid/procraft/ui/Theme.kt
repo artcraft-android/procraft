@@ -22,6 +22,12 @@ object Pc {
     /** A plugin has the colour panel's Classic show a triangle in place of its square. */
     var colourTriangle by mutableStateOf(false)
 
+    /** A plugin has the colour panel's sliders step one unit at a tap on either end. */
+    var colourSteps by mutableStateOf(false)
+
+    /** A plugin has the colour panel's swatch show the colour as the panel opened beside the colour now. */
+    var colourBefore by mutableStateOf(false)
+
     /** A picker plugin's Classic square, while one is on: its picture, and where touches land and the knob sits. */
     var picker by mutableStateOf<ClassicPicker?>(null)
 
@@ -190,7 +196,10 @@ object Pc {
     // over white; light 235 and 244); the thumbs opaque (#a6a6a6 over white and over the dark
     // surround alike; white on the light look), each with a soft shadow a point below it
     val SideBar: Color get() = pick(0xE7171717, 0xCFE5E5E5)
-    val SliderTrack: Color get() = pick(0xC93E3E3E, 0xBFF0F0F0)
+    val SliderTrack: Color get() = pick(0xC93E3E3E, 0xBFF0F0F0).let { c -> sliderLook.trackOpacity?.let { c.copy(alpha = it) } ?: c }
+
+    /** How the side bar's slider tracks look as a plugin says (their opacity, and whether what is behind is frosted). */
+    var sliderLook by mutableStateOf(io.github.artcraftandroid.procraft.core.SliderLook(null, null))
     // a lighter rim round each track, more of what is behind showing through it (#5a5a5a over the
     // dark surround, #969696 over white; light 249 over white)
     val SliderRim: Color get() = pick(0xB96E6E6E, 0xB9F7F7F7)
@@ -213,11 +222,6 @@ object Pc {
     val SideBarWidth = 51.dp
     val SideBarHeight = 519.dp
     val SideBarCorner = 20.dp
-    /** Where the side bar's centre sits, as a fraction of the screen height. */
-    const val SIDE_BAR_CENTRE = 0.5234f
-    /** Left under the side bar in a window too short for its measured tracks, and how short they go. */
-    private val ShortSideBarFoot = 17.dp
-    private val ShortestTrack = 44.dp
     val SliderWidth = 40.dp
     val SliderHeight = 170.dp
     val SliderCorner = 13.dp
@@ -257,7 +261,14 @@ object Pc {
         BarFit(8.dp, 0.dp, 0.dp, BarButtonWidth),
         BarFit(8.dp, 0.dp, 0.dp, 36.dp),
         BarFit(4.dp, 0.dp, 0.dp, 32.dp),
+        // a phone a little narrower than 360 (its display size made larger): the buttons' glyphs
+        // drawn smaller with them, so the tools never cover Selection and Transform
+        BarFit(4.dp, 0.dp, 0.dp, 28.dp),
+        BarFit(2.dp, 0.dp, 0.dp, 26.dp),
     )
+
+    /** How much smaller than drawn a top bar button [width] wide draws its glyph: none down to 32. */
+    fun barGlyphScale(width: Dp): Float = (width / 32.dp).coerceAtMost(1f)
 
     /**
      * The spacing of a top bar [width] wide: the measured step for that width, or where its two
@@ -270,20 +281,6 @@ object Pc {
         return if (measured.needs <= width) measured else NarrowBars.firstOrNull { it.needs <= width } ?: NarrowBars.last()
     }
 
-    /** Where the side bar goes: its top, and how long each of its two tracks is. */
-    data class SideBarFit(val top: Dp, val track: Dp)
-
-    /**
-     * The side bar in a window [height] tall: at [SIDE_BAR_CENTRE] with its measured tracks wherever
-     * that clears the top bar; in a shorter window (split screen) just under the top bar, its tracks
-     * giving up what it is short of, so that all of it can be reached.
-     */
-    fun sideBarFit(height: Dp, barBottom: Dp = BarHeight): SideBarFit {
-        val top = height * SIDE_BAR_CENTRE - SideBarHeight / 2
-        if (top >= barBottom) return SideBarFit(top, SliderHeight)
-        val rest = SideBarHeight - SliderHeight * 2
-        return SideBarFit(barBottom, ((height - barBottom - ShortSideBarFoot - rest) / 2).coerceIn(ShortestTrack, SliderHeight))
-    }
 }
 
 /**

@@ -15,8 +15,9 @@ use std::time::Instant;
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
-    BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, NoticeKind, RowDrop,
-    ShownRow, ThumbnailImage, VectorApply,
+    BlendCoast, BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, NoticeKind,
+    RowDrop, ShownRow, ThumbnailImage, VectorApply, blend_centred, blend_coast, blend_coast_at, blend_pull_for,
+    blend_pulled, blend_tap, blend_tap_at,
 };
 use resvg::tiny_skia;
 
@@ -53,6 +54,8 @@ const PICKED_ROW: u32 = 0xFF2C5281;
 const LOCKED_LETTER: u32 = 0xFF808080;
 const LAYER_ROW: Themed = Themed(0x0DFFFFFF, 0xFFD8D8D8);
 const BACKGROUND_ROW: Themed = Themed(0x0DFFFFFF, 0xFFD8D8D8);
+/// How tall a plugin's action's row under the background's is (as that one is).
+const ACTION_ROW: f32 = 50.0;
 const CHECK_FILL: Themed = Themed(0xFFC7C7C7, 0xFF575757);
 pub(crate) const THUMB_BACKGROUND: Themed = Themed(0xFF4F4F4F, 0xFFC8C8C8);
 /// A text layer's glyph on its thumbnail.
@@ -89,8 +92,8 @@ const SLIDER_REST: Themed = Themed(0xFF5A5A5A, 0xFFBEBEBE);
 /// Opening, the blend editor grows over this long; closing, it goes faster.
 const BLEND_OPEN: f32 = 0.25;
 const BLEND_CLOSE: f32 = 0.1;
-/// A scroll of the modes left alone this long settles on the nearest.
-const BLEND_SETTLE: f32 = 0.12;
+/// A wheel or trackpad left alone this long (seconds) lets the modes go, to settle on a row.
+const BLEND_WHEEL_PAUSE: f64 = 0.12;
 /// A row slid left shows its buttons, each this wide, this far apart; slid right this far, it is
 /// picked.
 const SWIPE_BUTTON: f32 = 82.0;
@@ -135,12 +138,70 @@ struct RowPress {
 }
 
 /// The blend editor open under a layer's row: how far its modes are scrolled (points, the first
-/// in the middle at 0), where a tap sent them, and when they were last moved.
+/// in the band at 0; past an end while stretched) and how they are moving.
 struct Blend {
     id: u64,
     scroll: f32,
-    to: Option<f32>,
-    moved: Option<Instant>,
+    motion: BlendMotion,
+}
+
+/// How a blend editor's modes are moving.
+#[derive(Clone, Copy)]
+enum BlendMotion {
+    /// At rest on a row.
+    Resting,
+    /// Held, pressed with the list where a pull of `start` (points, unstretched) takes it, and
+    /// following the finger from there, last at `y`; `caught` when it was moving as it was
+    /// pressed, for letting go without dragging then only to stop it.
+    Held { start: f32, caught: bool, y: f32 },
+    /// Scrolled by a wheel or trackpad, last at `last` (seconds).
+    Wheel { last: f64 },
+    /// Let go at `since` (seconds), moving on as `coast` says.
+    Coasting { coast: BlendCoast, since: f64 },
+    /// A tapped mode scrolling from `from` to the band at `to` since `since` (seconds): the list
+    /// takes no touches and shows no modes on the way.
+    Tapped { from: f32, to: f32, since: f64 },
+}
+
+impl Blend {
+    /// Moving under a finger or a wheel, or by itself after them: each mode reaching the band
+    /// shows on the layer, the whole movement one undo step.
+    fn moving(&self) -> bool {
+        matches!(self.motion, BlendMotion::Held { .. } | BlendMotion::Wheel { .. } | BlendMotion::Coasting { .. })
+    }
+
+    /// Where a finger or a wheel has to have taken the list (unstretched) for it to be where it is.
+    fn pull(&self, rows: u32) -> f32 {
+        blend_pull_for(self.scroll, BLEND_ROW, rows, BLEND_LIST_HEIGHT)
+    }
+
+    /// Taken to `pull`: there between the ends, stretched past them.
+    fn pull_to(&mut self, pull: f32, rows: u32) {
+        self.scroll = blend_pulled(pull, BLEND_ROW, rows, BLEND_LIST_HEIGHT);
+    }
+
+    /// Let go at `now` (seconds) going `speed` (points a second, down the list).
+    fn let_go(&mut self, speed: f32, now: f64, rows: u32) {
+        self.motion = BlendMotion::Coasting { coast: blend_coast(self.scroll, speed, BLEND_ROW, rows), since: now };
+    }
+
+    /// Moves on to `now` (seconds): a wheel left alone lets go, and what moves by itself goes on.
+    fn advance(&mut self, now: f64, rows: u32) {
+        if let BlendMotion::Wheel { last, .. } = self.motion
+            && now - last >= BLEND_WHEEL_PAUSE
+        {
+            self.let_go(0.0, now, rows);
+        }
+        let step = match self.motion {
+            BlendMotion::Coasting { coast, since } => blend_coast_at(coast, (now - since) as f32),
+            BlendMotion::Tapped { from, to, since } => blend_tap_at(from, to, (now - since) as f32),
+            _ => return,
+        };
+        self.scroll = step.position;
+        if step.done {
+            self.motion = BlendMotion::Resting;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -207,8 +268,15 @@ pub struct Layers {
     pub edit_text: Option<u64>,
     /// The plugins' actions for the current layer's options, and the one tapped there, to run.
     pub plugin_actions: Vec<procraft_core::PluginAction>,
+    /// The plugins' actions for the panel itself: a row each under the background's (interface 12).
+    pub panel_actions: Vec<procraft_core::PluginAction>,
     /// The kinds of layer the plugins on add, which the + offers beside a plain layer.
     pub layer_kinds: Vec<procraft_core::PluginKind>,
+    /// The filter layers the plugins on offer (interface 17): the + offers a Filter Layer that
+    /// lists them; asked to list them, and asked for the current filter layer's settings.
+    pub layer_filters: Vec<procraft_core::PluginLayerFilter>,
+    pub filter_list: bool,
+    pub filter_settings: bool,
     pub run_action: Option<String>,
     /// Layer Opacity asked for the current layer (two fingers tapped on its row).
     pub layer_opacity: bool,
@@ -408,8 +476,12 @@ impl Layers {
             Item::Mesh { .. } => ROW_HEIGHT + ROW_GAP,
             Item::Layer { l, .. } => height_of(l) + ROW_GAP + if tray_for == Some(l.id) { TRAY_HEIGHT } else { 0.0 },
         };
-        // a model has no background row
-        let below = if model.is_some() { 12.0 } else { 10.0 + 50.0 + 12.0 };
+        // a model has no background row; the plugins' actions' rows come under it, each as tall
+        let below = if model.is_some() {
+            12.0
+        } else {
+            10.0 + 50.0 + self.panel_actions.len() as f32 * (10.0 + ACTION_ROW) + 12.0
+        };
         let rows: f32 = items.iter().map(item_height).sum::<f32>() + editors + below;
         // as tall as its rows, up to the window's bottom less a gap
         let most = screen.bottom() - panel::POPOVER_GAP - top;
@@ -417,6 +489,7 @@ impl Layers {
         let (rect, area) = match hang {
             panel::Hang::Button(_) => {
                 let rect = Rect::from_min_size(pos2(left, top), vec2(LAYERS_WIDTH, height));
+                let rect = panel::hung_rect(ctx, rect, panel::ARROW_HEIGHT + HEADER_HEIGHT + rows, panel::POPOVER_GAP);
                 (rect, panel::area(ctx, egui::Id::unique("layers panel"), rect))
             }
             // floating, as big as its window, whatever its rows
@@ -441,7 +514,8 @@ impl Layers {
                 panel::Hang::Button(_) => {
                     ui.allocate_rect(rect, Sense::click());
                     panel::frame(ui, look, "layers frame", rect, arrow_x, backdrops);
-                    self.undock = if self.floats { panel::undock_grabber(ui, panel::body(rect)) } else { None };
+                    let body = panel::body_in(ui.ctx(), rect);
+                    self.undock = if self.floats { panel::undock_grabber(ui, body) } else { None };
                 }
                 panel::Hang::Floating(window) => {
                     ui.allocate_rect(window, Sense::click());
@@ -449,7 +523,7 @@ impl Layers {
                     self.chrome = panel::floating_chrome(ui, window);
                 }
             }
-            let body = panel::body(rect);
+            let body = panel::body_in(ui.ctx(), rect);
             // the chevron turns blue while layers are picked
             let (title_tapped, row) = panel::header_title(ui, look, body, "Layers", 24.0, true, any_picked);
             title = row;
@@ -464,8 +538,8 @@ impl Layers {
             let added = if plus_touch.long_touched() || plus_touch.secondary_clicked() {
                 Some(session.add_vector_layer())
             } else if plus_touch.clicked() {
-                // with plugins' kinds of layer on, it asks which
-                if self.layer_kinds.is_empty() {
+                // with plugins' kinds of layer or filter layers on, it asks which
+                if self.layer_kinds.is_empty() && self.layer_filters.is_empty() {
                     Some(session.add_layer())
                 } else {
                     self.add_menu.open();
@@ -602,6 +676,12 @@ impl Layers {
                         if model.is_none() {
                             ui.add_space(10.0);
                             self.pick_background |= background_row(ui, look, session);
+                            for action in &self.panel_actions {
+                                ui.add_space(10.0);
+                                if action_row(ui, &action.label) {
+                                    self.run_action = Some(action.key.clone());
+                                }
+                            }
                         }
                         ui.add_space(12.0);
                         // the pinched rows over the rest, the upper over the lower
@@ -642,18 +722,23 @@ impl Layers {
             } else {
                 self.options = Some(l.id);
                 self.options_menu.open();
-                self.blend = None;
+                if self.blend.take().is_some() {
+                    session.finish_layer_blend();
+                }
             }
         }
         if let Some(id) = blend_tapped {
             self.options_menu.close();
             let open = self.blend.as_ref().is_some_and(|b| b.id == id);
+            if self.blend.is_some() {
+                session.finish_layer_blend();
+            }
             self.blend = (!open).then(|| {
                 let at = layers
                     .iter()
                     .find(|l| l.id == id)
                     .map_or(0, |l| modes.iter().position(|m| m.id == l.blend).unwrap_or(0));
-                Blend { id, scroll: at as f32 * BLEND_ROW, to: None, moved: None }
+                Blend { id, scroll: at as f32 * BLEND_ROW, motion: BlendMotion::Resting }
             });
         }
         if let Some(l) = self.options.and_then(|id| layers.iter().find(|l| l.id == id)) {
@@ -747,10 +832,10 @@ impl Layers {
         plus: Rect,
         backdrops: &mut Vec<f32>,
     ) {
-        if self.layer_kinds.is_empty() {
+        if self.layer_kinds.is_empty() && self.layer_filters.is_empty() {
             self.add_menu.close();
         }
-        let entries = add_entries(&self.layer_kinds);
+        let entries = add_entries(&self.layer_kinds, !self.layer_filters.is_empty());
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
         let screen = panel::screen(ctx);
         let left = (plus.right() - size.x).clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
@@ -769,6 +854,11 @@ impl Layers {
         );
         let Some(at) = tapped.filter(|i| *i < entries.len()) else { return };
         self.add_menu.close();
+        // the last, with filter layers offered: their list
+        if !self.layer_filters.is_empty() && at + 1 == entries.len() {
+            self.filter_list = true;
+            return;
+        }
         let added = match at.checked_sub(1).and_then(|k| self.layer_kinds.get(k)) {
             Some(kind) => session.add_plugin_layer(kind.key.clone()),
             None => session.add_layer(),
@@ -798,6 +888,12 @@ impl Layers {
             egui::CornerRadius { nw: t as u8, ne: t as u8, sw: b as u8, se: b as u8 },
             looks.fill,
         );
+        // the colour a plugin labels it with, down its left edge
+        if let Some(label) = l.label {
+            let edge = Rect::from_min_size(at.min, vec2(LABEL_WIDTH, at.height()));
+            let corners = egui::CornerRadius { nw: t as u8, sw: b as u8, ..Default::default() };
+            ui.painter().rect_filled(edge, corners, labelled(label));
+        }
         let ink = if looks.chosen || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
         let box_fill = if looks.chosen || l.picked { Color32::WHITE } else { argb(CHECK_FILL) };
         if l.kind == LayerType::Group {
@@ -1283,7 +1379,11 @@ impl Layers {
     }
 
     /// The panel closed: no rows to drop on.
-    pub fn closed(&mut self) {
+    pub fn closed(&mut self, session: &CanvasSession) {
+        if let Some(blend) = self.blend.as_mut().filter(|b| b.moving()) {
+            blend.motion = BlendMotion::Resting;
+            session.finish_layer_blend();
+        }
         self.box_on_window = None;
         self.rows_on_window.clear();
     }
@@ -1554,6 +1654,10 @@ impl Layers {
             LayerOption::DrawingAssist => _ = session.set_guide_assisted(!l.assisted),
             LayerOption::Reference => _ = session.set_layer_reference(l.id, !l.reference),
             LayerOption::EditText => self.edit_text = Some(l.id),
+            LayerOption::FilterSettings => {
+                session.select_layer(l.id);
+                self.filter_settings = true;
+            }
             LayerOption::Rasterize => {
                 session.rasterize_layer(l.id);
                 self.notice =
@@ -1601,6 +1705,10 @@ impl Layers {
         let response = ui.interact(slider, ui.scope_id().with(("opacity", l.id)), Sense::click_and_drag());
         let held = response.is_pointer_button_down_on();
         if let Some(p) = response.interact_pointer_pos().filter(|_| held || response.clicked()) {
+            if let Some(blend) = self.blend.as_mut().filter(|b| b.id == l.id && b.moving()) {
+                blend.motion = BlendMotion::Resting;
+                session.finish_layer_blend();
+            }
             let v = ((p.x - slider.left()) / slider.width()).clamp(0.0, 1.0);
             session.set_layer_opacity(l.id, v, !held);
         } else if response.drag_stopped() {
@@ -1626,59 +1734,77 @@ impl Layers {
         let Some(b) = self.blend.as_mut().filter(|b| b.id == l.id) else {
             // closing: as it was
             let at = modes.iter().position(|m| m.id == l.blend).unwrap_or(0) as f32 * BLEND_ROW;
-            blend_rows(ui, look, list, modes, l.blend, at);
+            blend_rows(ui, look, list, modes, at);
             return;
         };
-        let most = modes.len().saturating_sub(1) as f32 * BLEND_ROW;
+        let rows = modes.len() as u32;
+        let was_moving = b.moving();
         let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
         let response = ui.interact(list, ui.scope_id().with(("modes", l.id)), Sense::click_and_drag());
-        let now = Instant::now();
-        if response.dragged() {
-            b.scroll = (b.scroll - response.drag_delta().y).clamp(0.0, most);
-            b.to = None;
-            b.moved = Some(now);
-        }
-        if response.hovered() {
-            let wheel = ui.input(|i| i.smooth_scroll_delta.y);
-            if wheel != 0.0 {
-                // the list scrolls, not the panel round it
-                ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
-                b.scroll = (b.scroll - wheel).clamp(0.0, most);
-                b.to = None;
-                b.moved = Some(now);
+        let now = ui.input(|i| i.time);
+        let wheel = if response.hovered() {
+            // The picker owns the wheel here, inside the scrollable Layers panel.
+            ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
+        } else {
+            0.0
+        };
+
+        if matches!(b.motion, BlendMotion::Tapped { .. }) {
+            // a tapped mode on its way to the band: touches and the wheel do nothing meanwhile
+        } else if response.is_pointer_button_down_on() {
+            // it follows the finger from where it was pressed
+            let origin = ui.input(|i| i.pointer.press_origin());
+            let (start, caught, mut y) = match b.motion {
+                BlendMotion::Held { start, caught, y } => (start, caught, y),
+                _ => (b.pull(rows), b.moving(), origin.map_or(list.center().y, |o| o.y)),
+            };
+            if let Some((o, p)) = origin.zip(response.interact_pointer_pos()) {
+                b.pull_to(start + o.y - p.y, rows);
+                y = p.y;
             }
-        }
-        if response.clicked()
-            && let Some(p) = response.interact_pointer_pos()
-        {
-            let i = ((p.y - list.top() - pad + b.scroll) / BLEND_ROW).floor();
-            if i >= 0.0 && (i as usize) < modes.len() {
-                b.to = Some(i * BLEND_ROW);
-            }
-        }
-        // left alone, it settles on the nearest mode
-        let settled = b.moved.is_some_and(|t| t.elapsed().as_secs_f32() >= BLEND_SETTLE);
-        if b.to.is_none() && settled && !response.dragged() {
-            b.to = Some((b.scroll / BLEND_ROW).round() * BLEND_ROW);
-        }
-        if let Some(to) = b.to {
-            let dt = ui.input(|i| i.stable_dt).min(0.05);
-            b.scroll += (to - b.scroll) * (dt * 14.0).min(1.0);
-            if (to - b.scroll).abs() < 0.5 {
-                b.scroll = to;
-                b.to = None;
-                b.moved = None;
-                let i = (to / BLEND_ROW).round() as usize;
-                if let Some(m) = modes.get(i).filter(|m| m.id != l.blend) {
+            b.motion = BlendMotion::Held { start, caught, y };
+        } else if wheel != 0.0 {
+            b.pull_to(b.pull(rows) - wheel, rows);
+            b.motion = BlendMotion::Wheel { last: now };
+        } else if let BlendMotion::Held { caught, y, .. } = b.motion {
+            // let go: a tap on a row away from the band makes it the mode at once and scrolls it
+            // there; else the list moves on as it was going (a tap on a moving list only stops it)
+            let row = ((y - list.top() - pad + b.scroll) / BLEND_ROW).floor();
+            let tapped = (response.clicked() && !caught && row >= 0.0)
+                .then(|| Some((row as usize, blend_tap(row as u32, b.scroll, BLEND_ROW, rows)?)))
+                .flatten();
+            if let Some((i, to)) = tapped {
+                if let Some(m) = modes.get(i) {
                     session.set_layer_blend(l.id, m.id);
                 }
+                b.motion = BlendMotion::Tapped { from: b.scroll, to, since: now };
+            } else {
+                let scale = ui.ctx().layer_transform_from_global(ui.layer_id()).map_or(1.0, |t| t.scaling);
+                let speed = if response.clicked() { 0.0 } else { ui.input(|i| -i.pointer.velocity().y) * scale };
+                b.let_go(speed, now, rows);
             }
-            ui.ctx().request_repaint();
-        } else if b.moved.is_some() {
+        } else if matches!(b.motion, BlendMotion::Resting) {
+            // Undo or redo can change the applied mode while the picker is open.
+            b.scroll = modes.iter().position(|m| m.id == l.blend).unwrap_or(0) as f32 * BLEND_ROW;
+        }
+
+        b.advance(now, rows);
+        // while it moves (and as it stops), the mode in the band shows on the layer
+        let tapped = matches!(b.motion, BlendMotion::Tapped { .. });
+        if (was_moving || b.moving()) && !tapped {
+            let centred = blend_centred(b.scroll, BLEND_ROW, rows) as usize;
+            if let Some(m) = modes.get(centred).filter(|m| m.id != l.blend) {
+                session.preview_layer_blend(l.id, m.id);
+                ui.ctx().request_repaint();
+            }
+        }
+        if was_moving && !b.moving() {
+            session.finish_layer_blend();
+        }
+        if !matches!(b.motion, BlendMotion::Resting | BlendMotion::Held { .. }) {
             ui.ctx().request_repaint();
         }
-        let scroll = b.scroll;
-        blend_rows(ui, look, list, modes, l.blend, scroll);
+        blend_rows(ui, look, list, modes, b.scroll);
     }
 
     /// A layer's row: its thumbnail, its name (a padlock before it when locked, what it is under it),
@@ -1905,6 +2031,10 @@ impl Layers {
                 argb(LAYER_ROW)
             };
             mini.painter().rect_filled(row, 0, fill);
+            if let Some(label) = l.label {
+                let edge = Rect::from_min_size(row.min, vec2(LABEL_WIDTH * scale, row.height()));
+                mini.painter().rect_filled(edge, 0, labelled(label));
+            }
             let ink = if l.current || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
             let left = row.left() + (GROUP_INDENT * *depth as f32 + 4.0) * scale;
             let name_left = left + THUMB.0 * scale;
@@ -2034,11 +2164,24 @@ impl Layers {
 
 /// The +'s menu's rows: a plain layer, then each kind of layer, named as its plugin names it, beside
 /// its badge (or a plug, when it draws none).
-fn add_entries(kinds: &[procraft_core::PluginKind]) -> Vec<Entry<'_>> {
+fn add_entries(kinds: &[procraft_core::PluginKind], filters: bool) -> Vec<Entry<'_>> {
     let mut entries = vec![Entry::Item(&icons::MENU_NEW_LAYER, "Layer", menu::INK)];
     let badged = |k: &procraft_core::PluginKind| procraft_core::plugin_kind_badge(k.clone());
     entries.extend(kinds.iter().map(|k| Entry::Badge(badged(k), k.label.as_str(), menu::INK)));
+    // the filter layers the plugins offer, in a list of their own
+    if filters {
+        entries.push(Entry::Badge(procraft_core::PluginBadge::filter(), "Filter Layer", menu::INK));
+    }
     entries
+}
+
+/// How wide the colour a plugin labels a layer with shows, down the left edge of its row.
+const LABEL_WIDTH: f32 = 5.0;
+
+/// A label's colour (0xRRGGBB) to draw.
+fn labelled(label: u32) -> Color32 {
+    let [_, r, g, b] = label.to_be_bytes();
+    Color32::from_rgb(r, g, b)
 }
 
 /// A plugin's layer's badge (its drawing in white over a dark rounded box) in the bottom right
@@ -2184,36 +2327,39 @@ fn swipe_reach(l: &LayerInfo) -> f32 {
     SWIPE_BUTTON * buttons + SWIPE_GAP * (buttons - 1.0) + 6.0
 }
 
-/// The blend modes in `list`, scrolled `scroll` from the first in the middle: each its name and
-/// glyph, the layer's (`chosen`) blue.
-fn blend_rows(ui: &Ui, look: &mut Look, list: Rect, modes: &[BlendModeInfo], chosen: u32, scroll: f32) {
+/// The modes in `list`, scrolled `scroll` from the first in the band: the band fixed in the
+/// middle and the rows sliding under it, each name and glyph white where the band covers it and
+/// grey elsewhere (a row half in it half and half).
+fn blend_rows(ui: &Ui, look: &mut Look, list: Rect, modes: &[BlendModeInfo], scroll: f32) {
     let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
-    let painter = ui.painter_at(list);
+    let band = Rect::from_min_size(list.min + vec2(0.0, pad), vec2(list.width(), BLEND_ROW));
+    ui.painter_at(list).rect_filled(band, 0, argb(pc::ACCENT));
+    let above = Rect::from_min_max(list.min, pos2(list.right(), band.top()));
+    let below = Rect::from_min_max(pos2(list.left(), band.bottom()), list.max);
     for (i, m) in modes.iter().enumerate() {
-        let top = list.top() + pad + i as f32 * BLEND_ROW - scroll;
+        let top = band.top() + i as f32 * BLEND_ROW - scroll;
         let row = Rect::from_min_size(pos2(list.left(), top), vec2(list.width(), BLEND_ROW));
-        if !row.intersects(list) {
-            continue;
-        }
-        let on = m.id == chosen;
-        if on {
-            painter.rect_filled(row, 0, argb(pc::ACCENT));
-        }
-        let ink = if on { Color32::WHITE } else { argb(PANEL_TITLE) };
-        text(
-            &painter,
-            pos2(row.left() + 12.0, row.center().y),
-            Align2::LEFT_CENTER,
-            &m.name,
-            17.0,
-            Weight::Regular,
-            ink,
-        );
-        if let Some((_, glyph)) = icons::BLEND_GLYPHS.iter().find(|(name, _)| *name == m.name) {
-            let tint = if on { Color32::WHITE } else { argb(BLEND_GLYPH_INK) };
-            let centre = pos2(row.right() - 31.5, row.center().y);
-            if list.contains(centre) {
-                look.icon(ui, glyph, centre, 26.0, tint);
+        let glyph = icons::BLEND_GLYPHS.iter().find(|(name, _)| *name == m.name).map(|(_, glyph)| glyph);
+        for (part, on) in [(above, false), (band, true), (below, false)] {
+            // (a sliver of a hundredth of a point, from rounding, is nothing to draw)
+            let shown = row.intersect(part);
+            if shown.width() <= 0.0 || shown.height() < 0.01 {
+                continue;
+            }
+            let painter = ui.painter_at(shown);
+            let (ink, tint) =
+                if on { (Color32::WHITE, Color32::WHITE) } else { (argb(PANEL_TITLE), argb(BLEND_GLYPH_INK)) };
+            text(
+                &painter,
+                pos2(row.left() + 12.0, row.center().y),
+                Align2::LEFT_CENTER,
+                &m.name,
+                17.0,
+                Weight::Regular,
+                ink,
+            );
+            if let Some(glyph) = glyph {
+                look.icon_on(ui, &painter, glyph, pos2(row.right() - 31.5, row.center().y), 26.0, tint);
             }
         }
     }
@@ -2245,6 +2391,17 @@ fn background_row(ui: &mut Ui, look: &mut Look, session: &CanvasSession) -> bool
     }
     let rest = Rect::from_min_max(row.min, pos2(visibility.left(), row.max.y));
     ui.interact(rest, ui.scope_id().with("background colour"), Sense::click()).clicked()
+}
+
+/// A row of a plugin's action under the background's, drawn as that is, its label alone: true when
+/// tapped.
+fn action_row(ui: &mut Ui, label: &str) -> bool {
+    let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), ACTION_ROW), Sense::click());
+    ui.painter().rect_filled(row, 17, argb(BACKGROUND_ROW));
+    let ink = argb(PANEL_TITLE);
+    let g = galley(ui, label, 17.0, Weight::Regular, ink, row.width() - 36.0);
+    ui.painter().galley(pos2(row.left() + 18.0, row.center().y - g.size().y / 2.0), g, ink);
+    response.clicked()
 }
 
 /// A visibility box: filled with a check cut out of it when shown, an outline when hidden.
@@ -2388,6 +2545,308 @@ mod tests {
     use super::*;
     use egui::{Event, Modifiers, PointerButton, RawInput};
 
+    #[test]
+    fn blend_highlight_stays_centered_while_rows_move() {
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let modes = procraft_core::blend_modes();
+        let list = Rect::from_min_size(pos2(12.0, 12.0), vec2(360.0, BLEND_LIST_HEIGHT));
+        for scroll in [0.0, 2.4 * BLEND_ROW, 5.0 * BLEND_ROW] {
+            let mut output = ctx.clone().run_ui(RawInput::default(), |ui| {
+                blend_rows(ui, &mut look, list, &modes, scroll);
+            });
+            output.textures_delta.clear();
+            let mut highlights = output.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.fill == argb(pc::ACCENT) => Some(rect.rect),
+                _ => None,
+            });
+            let highlight = highlights.next().expect("the center highlight is drawn");
+            assert!((highlight.center().y - list.center().y).abs() < 0.01);
+            assert!((highlight.height() - BLEND_ROW).abs() < 0.01);
+            assert!(highlights.next().is_none());
+        }
+    }
+
+    /// A mode's name is white where the band covers it and grey elsewhere: a row half in the band
+    /// is drawn half white, half grey, split at the band's edge.
+    #[test]
+    fn a_blend_name_half_in_the_band_is_white_only_where_the_band_covers_it() {
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let modes = procraft_core::blend_modes();
+        let list = Rect::from_min_size(pos2(12.0, 12.0), vec2(360.0, BLEND_LIST_HEIGHT));
+        let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
+        let band = Rect::from_min_size(list.min + vec2(0.0, pad), vec2(list.width(), BLEND_ROW));
+        for scroll in [2.5 * BLEND_ROW, 2.25 * BLEND_ROW, 3.0 * BLEND_ROW, -20.0] {
+            let mut output = ctx.clone().run_ui(RawInput::default(), |ui| {
+                blend_rows(ui, &mut look, list, &modes, scroll);
+            });
+            output.textures_delta.clear();
+            let mut split = 0;
+            for (i, m) in modes.iter().enumerate() {
+                let row = Rect::from_min_size(
+                    pos2(list.left(), band.top() + i as f32 * BLEND_ROW - scroll),
+                    vec2(list.width(), BLEND_ROW),
+                );
+                // the name's pieces: where each is drawn, and in which colour
+                let pieces: Vec<(Rect, Color32)> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|c| match &c.shape {
+                        egui::Shape::Text(t) if t.galley.text() == m.name => Some((c.clip_rect, t.fallback_color)),
+                        _ => None,
+                    })
+                    .collect();
+                let white: Vec<Rect> = pieces.iter().filter(|(_, c)| *c == Color32::WHITE).map(|(r, _)| *r).collect();
+                let grey: Vec<Rect> = pieces.iter().filter(|(_, c)| *c == argb(PANEL_TITLE)).map(|(r, _)| *r).collect();
+                assert_eq!(white.len() + grey.len(), pieces.len(), "{}: {pieces:?}", m.name);
+                // white just where the band covers the row, grey over the rest of it shown
+                let covered = row.intersect(band);
+                if covered.height() >= 0.01 {
+                    assert_eq!(white, vec![covered], "{} at {scroll}", m.name);
+                } else {
+                    assert!(white.is_empty(), "{} at {scroll}: {white:?}", m.name);
+                }
+                assert!(grey.iter().all(|r| r.intersect(band).height() < 0.01), "{} at {scroll}: {grey:?}", m.name);
+                let shown = row.intersect(list).height().max(0.0);
+                let drawn = grey.iter().chain(&white).map(|r| r.height()).sum::<f32>();
+                assert!((drawn - shown).abs() < 0.02, "{} at {scroll}: {drawn} of {shown}", m.name);
+                if !white.is_empty() && !grey.is_empty() {
+                    split += 1;
+                }
+            }
+            // between two rows both are split, on a row none, stretched past the top the first
+            let expected = match scroll {
+                s if s < 0.0 => 1,
+                s if (s / BLEND_ROW - (s / BLEND_ROW).round()).abs() < 1e-4 => 0,
+                _ => 2,
+            };
+            assert_eq!(split, expected, "at {scroll}");
+        }
+    }
+
+    /// A blend editor open on a new artwork's first layer, drawn a frame at a time, 1/60 s apart.
+    struct BlendEditorRun {
+        ctx: egui::Context,
+        look: Look,
+        session: std::sync::Arc<CanvasSession>,
+        layers: Layers,
+        modes: Vec<BlendModeInfo>,
+        id: u64,
+        frame: u32,
+    }
+
+    impl BlendEditorRun {
+        /// Opened on the first mode in the list.
+        fn new(session: std::sync::Arc<CanvasSession>) -> BlendEditorRun {
+            let (ctx, look) = (egui::Context::default(), Look::default());
+            crate::look::install_fonts(&ctx);
+            let id = session.layers()[0].id;
+            let modes = procraft_core::blend_modes();
+            let mut run = BlendEditorRun { ctx, look, session, layers: Layers::default(), modes, id, frame: 0 };
+            run.put(0);
+            // a frame first, for the editor's parts to be there to touch
+            run.frame(Vec::new());
+            run
+        }
+
+        /// The layer's mode the list's `index`th, there in the band.
+        fn put(&mut self, index: usize) {
+            self.session.set_layer_blend(self.id, self.modes[index].id);
+            let scroll = index as f32 * BLEND_ROW;
+            self.layers.blend = Some(Blend { id: self.id, scroll, motion: BlendMotion::Resting });
+        }
+
+        /// The middle of the band, `rows` rows down from it.
+        fn row(&self, rows: f32) -> Pos2 {
+            // the list's top: under the opacity line and slider, 11 points down
+            pos2(150.0, 22.0 + 23.0 + 18.0 + 2.0 + 11.0 + BLEND_LIST_HEIGHT / 2.0 + rows * BLEND_ROW)
+        }
+
+        /// One frame with `events`: then the layer's mode, and how far the list is scrolled.
+        fn frame(&mut self, events: Vec<Event>) -> (u32, f32) {
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 640.0))),
+                time: Some(f64::from(self.frame) / 60.0),
+                events,
+                ..RawInput::default()
+            };
+            self.frame += 1;
+            let l = self.session.layers().into_iter().find(|l| l.id == self.id).unwrap();
+            let rect = Rect::from_min_size(Pos2::ZERO, vec2(384.0, BLEND_EDITOR_HEIGHT));
+            let (layers, look, session, modes) = (&mut self.layers, &mut self.look, &self.session, &self.modes);
+            let mut output = self.ctx.clone().run_ui(raw, |ui| layers.blend_editor(ui, look, session, &l, rect, modes));
+            output.textures_delta.clear();
+            (self.mode(), self.layers.blend.as_ref().unwrap().scroll)
+        }
+
+        fn mode(&self) -> u32 {
+            self.session.layers().into_iter().find(|l| l.id == self.id).unwrap().blend
+        }
+
+        fn resting(&self) -> bool {
+            matches!(self.layers.blend.as_ref().unwrap().motion, BlendMotion::Resting)
+        }
+
+        fn press(at: Pos2, pressed: bool) -> Event {
+            Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }
+        }
+
+        /// A press at `from`, moved `by` points down in `steps` steps a frame apart, held still
+        /// `still` frames, then let go: each frame's mode and scroll, the last after letting go.
+        fn drag(&mut self, from: Pos2, by: f32, steps: u32, still: u32) -> Vec<(u32, f32)> {
+            let mut seen = vec![self.frame(vec![Event::PointerMoved(from), Self::press(from, true)])];
+            let mut at = from;
+            for _ in 0..steps {
+                at.y += by / steps as f32;
+                seen.push(self.frame(vec![Event::PointerMoved(at)]));
+            }
+            for _ in 0..still {
+                seen.push(self.frame(Vec::new()));
+            }
+            seen.push(self.frame(vec![Self::press(at, false)]));
+            seen
+        }
+
+        /// Frames with nothing done until the list rests (at most `most` of them): each frame's
+        /// mode and scroll.
+        fn settle(&mut self, most: usize) -> Vec<(u32, f32)> {
+            let mut seen = Vec::new();
+            while !self.resting() {
+                assert!(seen.len() < most, "still moving after {most} frames");
+                seen.push(self.frame(Vec::new()));
+            }
+            seen
+        }
+
+        /// A click at `at`: the mode and scroll after it.
+        fn click(&mut self, at: Pos2) -> (u32, f32) {
+            self.frame(vec![Event::PointerMoved(at), Self::press(at, true)]);
+            self.frame(vec![Self::press(at, false)])
+        }
+    }
+
+    /// Flicked at 1000 points a second, the modes coast about 500 points, slowing straight onto a
+    /// row: each frame they move less than the last (the last about a quarter point onto the row
+    /// at most), never turning, with no second move to centre them.
+    #[test]
+    fn a_flicked_blend_list_coasts_about_500_points_straight_onto_a_row() {
+        let rows = procraft_core::blend_modes().len() as u32;
+        let mut blend = Blend { id: 1, scroll: 0.0, motion: BlendMotion::Resting };
+        blend.let_go(1000.0, 0.0, rows);
+        let (mut last, mut last_moved, mut frames) = (0.0f32, f32::MAX, 0);
+        while blend.moving() {
+            frames += 1;
+            assert!(frames < 120 * 10, "still coasting after 10 s");
+            blend.advance(f64::from(frames) / 120.0, rows);
+            let moved = blend.scroll - last;
+            let most = if blend.moving() { last_moved + 5e-4 } else { 0.3 };
+            assert!((0.0..=most).contains(&moved), "sped up or turned at frame {frames}: {moved} after {last_moved}");
+            (last, last_moved) = (blend.scroll, moved);
+        }
+        assert!((blend.scroll - 500.0).abs() <= 50.0, "coasted {} points", blend.scroll);
+        assert_eq!(blend.scroll, (blend.scroll / BLEND_ROW).round() * BLEND_ROW, "between rows");
+        eprintln!("flicked at 1000 pt/s: {} pt, at rest after {:.2} s", blend.scroll, frames as f32 / 120.0);
+    }
+
+    /// Pulled past either end the modes stretch, about 48 points for a 100 point pull and 84 for
+    /// 200 (no hard stop), the end mode staying the layer's; let go, they spring back.
+    #[test]
+    fn the_blend_list_stretches_past_either_end_and_springs_back() {
+        let mut run = BlendEditorRun::new(CanvasSession::new(64, 64));
+        let first = run.mode();
+        // the first mode in the band, pulled down past the top: 100 points, then 100 more
+        let seen = run.drag(run.row(0.0), 100.0, 25, 0);
+        let at_100 = -seen[seen.len() - 2].1;
+        assert!((at_100 - 48.0).abs() < 2.0, "100 points stretched {at_100}");
+        run.settle(120);
+        let seen = run.drag(run.row(0.0), 200.0, 50, 0);
+        let at_200 = -seen[seen.len() - 2].1;
+        assert!((at_200 - 84.0).abs() < 2.5, "200 points stretched {at_200}");
+        assert!(seen.iter().all(|(mode, _)| *mode == first), "the first mode stays");
+        assert_eq!(run.settle(120).last().unwrap().1, 0.0);
+        eprintln!("stretched: 100 pt {at_100:.1} pt, 200 pt {at_200:.1} pt");
+        // the last mode in the band, pulled up past the bottom
+        let last = (run.modes.len() - 1) as f32 * BLEND_ROW;
+        run.put(run.modes.len() - 1);
+        let seen = run.drag(run.row(0.0), -100.0, 25, 0);
+        let stretched = seen[seen.len() - 2].1 - last;
+        assert!((stretched - 48.0).abs() < 2.0, "100 points stretched {stretched}");
+        assert_eq!(run.settle(120).last().unwrap().1, last);
+    }
+
+    /// Dragged slowly through the modes, each shows on the layer as it reaches the band, in turn;
+    /// let go, the list rests on a row and its mode is the layer's.
+    #[test]
+    fn a_dragged_blend_list_shows_each_mode_reaching_the_band() {
+        let mut run = BlendEditorRun::new(CanvasSession::new(64, 64));
+        let mut seen = run.drag(run.row(0.0), -3.3 * BLEND_ROW, 64, 20);
+        seen.extend(run.settle(600));
+        let mut shown: Vec<u32> = Vec::new();
+        for (mode, _) in &seen {
+            if shown.last() != Some(mode) {
+                shown.push(*mode);
+            }
+        }
+        let (mode, scroll) = *seen.last().unwrap();
+        let row = (scroll / BLEND_ROW).round();
+        assert_eq!(scroll, row * BLEND_ROW, "rests between rows");
+        assert!(row >= 3.0, "dragged 3.3 rows, rests on row {row}");
+        let expected: Vec<u32> = run.modes[..=row as usize].iter().map(|m| m.id).collect();
+        assert_eq!(shown, expected, "each mode in turn");
+        assert_eq!(mode, run.modes[row as usize].id);
+    }
+
+    /// A tap on a mode below the band makes it the layer's at once, with none between shown on
+    /// the way; the list takes 0.3 s to bring it to the band, ignoring presses meanwhile. A tap on
+    /// the band's own mode does nothing.
+    #[test]
+    fn a_tapped_blend_mode_applies_at_once_with_none_between_shown() {
+        let mut run = BlendEditorRun::new(CanvasSession::new(64, 64));
+        let target = run.modes[3].id;
+        let (mode, scroll) = run.click(run.row(3.0));
+        assert_eq!((mode, scroll), (target, 0.0), "the mode at once, the list not yet moved");
+        let mut seen = vec![(mode, scroll)];
+        // a drag meanwhile does nothing
+        seen.extend(run.drag(run.row(0.0), 60.0, 6, 0));
+        seen.extend(run.settle(60));
+        let names: Vec<String> =
+            seen.iter().map(|(m, _)| run.modes.iter().find(|i| i.id == *m).unwrap().name.clone()).collect();
+        assert!(seen.iter().all(|(mode, _)| *mode == target), "modes shown: {names:?}");
+        assert_eq!(seen.last().unwrap().1, 3.0 * BLEND_ROW);
+        // 0.3 s: 18 frames after the tap's
+        let arrived = seen.iter().position(|(_, scroll)| *scroll == 3.0 * BLEND_ROW).unwrap();
+        assert!((17..=19).contains(&arrived), "arrived after {arrived} frames");
+        // the band's own mode: nothing
+        assert_eq!(run.click(run.row(0.0)), (target, 3.0 * BLEND_ROW));
+        assert!(run.resting());
+        eprintln!("tapped 3 rows down: shown {:?}, in the band after {arrived} frames", names.first());
+    }
+
+    /// A movement through the modes is one undo step, "blend mode", and a tap after it another.
+    #[test]
+    fn a_blend_movement_is_one_undo_step_and_a_tap_another() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return eprintln!("skipped: no GPU") };
+        // the first mode put before there are steps to undo
+        let mut run = BlendEditorRun::new(CanvasSession::new(64, 64));
+        run.session.use_gpu(gpu);
+        run.session.show_in(200, 200);
+        let first = run.mode();
+        run.drag(run.row(0.0), -2.2 * BLEND_ROW, 40, 20);
+        let (moved, _) = *run.settle(600).last().unwrap();
+        assert_ne!(moved, first);
+        let (tapped, _) = run.click(run.row(2.0));
+        run.settle(60);
+        assert_ne!(tapped, moved);
+        assert_eq!(run.session.undo().as_deref(), Some("blend mode"));
+        assert_eq!(run.mode(), moved);
+        assert_eq!(run.session.undo().as_deref(), Some("blend mode"));
+        assert_eq!(run.mode(), first);
+        // no third step
+        run.session.undo();
+        assert_eq!(run.mode(), first);
+    }
+
     /// A tap on the background's row, on its box or left of it: whether the row asked for its
     /// colour, and whether the background shows after.
     fn tap_background_row(on_box: bool) -> (bool, bool) {
@@ -2514,7 +2973,11 @@ mod tests {
             kind("org.example.curves.curve", "Curves", Some(badge.clone())),
             kind("org.example.plain.plain", "Plain", None),
         ];
-        let entries = add_entries(&kinds);
+        // with filter layers offered, Filter Layer last, beside the filter badge
+        let with_filters = add_entries(&kinds, true);
+        let filter = procraft_core::PluginBadge::filter();
+        assert!(matches!(with_filters.last(), Some(Entry::Badge(b, "Filter Layer", _)) if *b == filter));
+        let entries = add_entries(&kinds, false);
         assert_eq!(entries.len(), 3);
         let first = matches!(&entries[0], Entry::Item(icon, "Layer", _) if icon.name == "menunewlayer");
         assert!(first, "a plain layer first, beside the new layer glyph");
@@ -2552,6 +3015,84 @@ mod tests {
             output.textures_delta.clear();
         }
         assert_eq!(tapped, Some(2), "the plain kind's row");
+    }
+
+    /// The plugins' actions for the Layers panel are rows under the background's, as on the tablet:
+    /// the panel grows to show them (not left below its bottom, to be found only by scrolling), and
+    /// a tap on one runs it.
+    #[test]
+    fn the_plugins_rows_under_the_background_show_in_the_panel_and_run_when_tapped() {
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let session = CanvasSession::new(64, 64);
+        let (mut layers, mut colours) = (Layers::default(), Colours::default());
+        let action = |key: &str, label: &str| procraft_core::PluginAction {
+            key: key.to_owned(),
+            label: label.to_owned(),
+            place: procraft_core::PluginPlace::Layers,
+        };
+        layers.panel_actions = vec![action("p.settings", "Paper"), action("p.views", "Layer view")];
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0));
+        let button = Rect::from_min_size(pos2(1000.0, 10.0), vec2(40.0, 40.0));
+        let mut step = 0;
+        let mut frame = |layers: &mut Layers, events: Vec<Event>| {
+            let raw = RawInput {
+                screen_rect: Some(screen),
+                time: Some(f64::from(step) / 60.0),
+                events,
+                ..RawInput::default()
+            };
+            step += 1;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                layers.show(
+                    ui.ctx(),
+                    &mut look,
+                    &session,
+                    &mut colours,
+                    crate::panel::Hang::Button(button),
+                    &mut Vec::new(),
+                );
+            });
+            output.textures_delta.clear();
+            output.shapes
+        };
+        let mut shapes = Vec::new();
+        for _ in 0..30 {
+            shapes = frame(&mut layers, Vec::new());
+        }
+        let panel = layers.box_on_window.expect("the panel shows");
+        // each row's label drawn whole inside the panel, and not clipped away
+        let shown = |label: &str| {
+            shapes.iter().find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == label => {
+                    let at = Rect::from_min_size(t.pos, t.galley.size());
+                    Some((at, c.clip_rect.contains_rect(at)))
+                }
+                _ => None,
+            })
+        };
+        let mut middles = Vec::new();
+        for label in ["Background color", "Paper", "Layer view"] {
+            let (at, whole) = shown(label).unwrap_or_else(|| panic!("{label} drawn"));
+            assert!(
+                whole && panel.contains_rect(at),
+                "{label} at {at:?}, in the panel {panel:?}, not clipped: {whole}"
+            );
+            middles.push(at.center());
+        }
+        assert!(middles[0].y < middles[1].y && middles[1].y < middles[2].y, "under the background, in order");
+        // Layer view's row tapped: its action runs
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let at = middles[2];
+        frame(&mut layers, vec![Event::PointerMoved(at)]);
+        frame(&mut layers, vec![press(at, true)]);
+        frame(&mut layers, vec![press(at, false)]);
+        assert_eq!(layers.run_action.as_deref(), Some("p.views"));
     }
 
     #[test]

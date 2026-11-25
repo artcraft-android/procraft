@@ -1,8 +1,11 @@
 package io.github.artcraftandroid.procraft.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,10 +24,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -32,9 +41,12 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
@@ -53,6 +65,9 @@ private val FeatherWidth = 250.dp
 private val StartDot = Color(0xFFC7C7C7)
 private val LassoErasePreview = Color(0xFF808080)
 private val SavedThumb = Color(0xFF000000)
+/** A kept selection's row slid left this far shows Delete (59 x 38, 13 in from the right) beside it. */
+private val SavedReveal = 82.dp
+private val SavedDelete = Color(0xFFEE4246)
 
 /** The selection tool's floating toolbar: its four ways, and what can be done with the selection. */
 @Composable
@@ -78,12 +93,14 @@ fun SelectionToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
     ) { w ->
         // a long name smaller only where the buttons are narrow
         val long = if (w < SelectionButtonRoomy) 11.sp else 12.5.sp
-        // selecting by colour always adds: Add shows chosen, and only the other ways can remove
+        // selecting by colour always adds: Add shows chosen, and only the other ways can remove,
+        // and only from a selection there is
         val joins = vm.selectionKind != SelectionKind.AUTOMATIC
-        ToolbarButton(PcIcons.SelectAdd, "Add", active = !joins || !vm.selectionRemoves, width = w, iconSize = 44.dp) {
+        val removable = joins && has
+        ToolbarButton(PcIcons.SelectAdd, "Add", active = !removable || !vm.selectionRemoves, width = w, iconSize = 44.dp) {
             if (joins) vm.chooseSelectionRemoves(false)
         }
-        ToolbarButton(PcIcons.SelectRemove, "Remove", active = joins && vm.selectionRemoves, enabled = joins, width = w, iconSize = 44.dp) { vm.chooseSelectionRemoves(true) }
+        ToolbarButton(PcIcons.SelectRemove, "Remove", active = removable && vm.selectionRemoves, enabled = removable, width = w, iconSize = 44.dp) { vm.chooseSelectionRemoves(true) }
         ToolbarButton(PcIcons.Invert, "Invert", enabled = has, width = w, iconSize = 44.dp) { vm.invertSelection() }
         ToolbarButton(PcIcons.SelectCopyPaste, "Copy & Paste", enabled = has || drawing, width = w, iconSize = 44.dp, labelSize = long) { vm.copySelectionToLayer() }
         // always there to tap: its Pixelated is for the shapes yet to be drawn
@@ -127,7 +144,7 @@ fun SelectionPopover(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
                 val softens = vm.hasSelection || vm.freehand.isNotEmpty()
                 Column(Modifier.fillMaxWidth().alpha(if (softens) 1f else 0.4f).clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup).padding(vertical = 8.dp)) {
                     val amount = vm.featherAmount
-                    SliderRow("Amount", amount, if (amount <= 0f) "None" else "${(amount * 100).roundToInt()}%") { if (softens) vm.featherTo(it) }
+                    SliderRow("Amount", amount, if (amount <= 0f) "None" else "${(amount * 100).roundToInt()}%", onEnd = { vm.featherLetGo() }) { if (softens) vm.featherTo(it) }
                 }
                 Spacer(Modifier.height(10.dp))
                 // the other end of the same thing: no soft edge at all, for pixel art (shapes on
@@ -166,18 +183,65 @@ private fun SavedSelections(vm: CanvasViewModel) {
         }
     }
     Spacer(Modifier.height(8.dp))
+    // one row at a time slid open; a tap on another row, or on it, closes it. The newest is at the
+    // top, each named by its place among them, oldest first
+    var open by remember { mutableStateOf<Int?>(null) }
     LazyColumn(Modifier.fillMaxWidth().height(172.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        items(vm.savedSelections) { i ->
-            Row(
-                Modifier.fillMaxWidth().height(51.dp).clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup).tap { vm.loadSelection(i) },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(Modifier.size(64.dp, 46.dp).clip(RoundedCornerShape(topStart = MenuGroupCorner, bottomStart = MenuGroupCorner)).background(SavedThumb), contentAlignment = Alignment.Center) {
-                    vm.savedThumbnails[i]?.let { Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+        items(vm.savedSelections) { row ->
+            val i = vm.savedSelections - 1 - row
+            SavedSelectionRow(
+                vm, i, open == i,
+                onOpen = { open = if (it) i else null },
+                onTap = { if (open != null) open = null else vm.loadSelection(i) },
+                onDelete = {
+                    open = null
+                    vm.deleteSavedSelection(i)
+                },
+            )
+        }
+    }
+}
+
+/** A kept selection's row: a tap loads it; slid left under a finger, it shows Delete. */
+@Composable
+private fun SavedSelectionRow(vm: CanvasViewModel, i: Int, open: Boolean, onOpen: (Boolean) -> Unit, onTap: () -> Unit, onDelete: () -> Unit) {
+    val reveal = with(LocalDensity.current) { SavedReveal.toPx() }
+    var dragging by remember { mutableStateOf(false) }
+    var dragX by remember { mutableFloatStateOf(0f) }
+    val x by animateFloatAsState(if (dragging) dragX else if (open) -reveal else 0f, if (dragging) snap() else Motion.swipeSettle(), label = "swipe")
+    Box(Modifier.fillMaxWidth().height(51.dp).clipToBounds()) {
+        Box(
+            Modifier.align(Alignment.CenterEnd).padding(end = 13.dp).size(59.dp, 38.dp).clip(RoundedCornerShape(11.dp)).background(SavedDelete).tap(onDelete),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("Delete", color = Color.White, fontSize = 15.sp, maxLines = 1)
+        }
+        Row(
+            Modifier.fillMaxSize().offset { IntOffset(x.roundToInt(), 0) }.clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)
+                .pointerInput(i) {
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            dragX = x
+                            dragging = true
+                        },
+                        onDragEnd = {
+                            dragging = false
+                            onOpen(dragX < -reveal / 2f)
+                        },
+                        onDragCancel = { dragging = false },
+                    ) { change, dx ->
+                        change.consume()
+                        dragX = (dragX + dx).coerceIn(-reveal, 0f)
+                    }
                 }
-                Spacer(Modifier.width(14.dp))
-                MenuLabel("Selection ${i + 1}", modifier = Modifier.weight(1f))
+                .tap(onTap),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(64.dp, 46.dp).clip(RoundedCornerShape(topStart = MenuGroupCorner, bottomStart = MenuGroupCorner)).background(SavedThumb), contentAlignment = Alignment.Center) {
+                vm.savedThumbnails[i]?.let { Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
             }
+            Spacer(Modifier.width(14.dp))
+            MenuLabel("Selection ${i + 1}", modifier = Modifier.weight(1f))
         }
     }
 }
@@ -194,7 +258,8 @@ fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
     val path = vm.freehand
     val threshold = vm.thresholdDrag
     val taken = vm.takenBox
-    if (drag == null && path.isEmpty() && threshold == null && taken.size != 8) return
+    val outlines = vm.selectionOutlines
+    if (drag == null && path.isEmpty() && threshold == null && taken.size != 8 && outlines.isEmpty()) return
     // Lasso Fill: the shape shows as it will fill, at half its strength (the Paint tool's lasso at
     // its opacity slider's; the Erase tool's grey, as what it takes away)
     val preview = when {
@@ -204,6 +269,18 @@ fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
         else -> null
     }
     Canvas(Modifier.fillMaxSize()) {
+        // the shapes joined to the selection while the tool is open: their paths, dashed
+        for (outline in outlines) {
+            if (outline.size < 2) continue
+            val points = outline.map { vm.canvasToWindow(it) }
+            dashed(
+                Path().apply {
+                    moveTo(points[0].x, points[0].y)
+                    for (p in points.drop(1)) lineTo(p.x, p.y)
+                    close()
+                },
+            )
+        }
         // the strokes the selection takes on a plugin's layer: their box, as the transform box shows
         if (taken.size == 8) {
             val m = vm.viewMatrix

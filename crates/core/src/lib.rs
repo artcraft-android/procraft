@@ -12,12 +12,16 @@
 
 uniffi::setup_scaffolding!();
 
+mod activity;
 mod adjust;
 mod adjust_menu;
 mod adjusting;
 mod adjustment_keys;
 mod animation;
 mod app_log;
+mod bars;
+mod big_pictures;
+mod blend_wheel;
 mod brush_files;
 #[cfg(test)]
 mod brush_import_tests;
@@ -32,17 +36,25 @@ mod colour_blob;
 mod colour_drag;
 mod colour_models;
 mod crisp;
+mod colour_press;
 mod crop;
 mod crop_edit;
+mod cursor_turn;
 mod device;
 #[cfg(test)]
 mod effects_tests;
+mod drawn_previews;
+mod filter_layers;
 mod floating;
+mod folders;
 mod frame;
 #[cfg(test)]
 mod frame_cache_tests;
 mod frame_exports;
+mod frame_loop;
 mod gallery;
+#[cfg(test)]
+mod gallery_kept_tests;
 mod gestures;
 mod gradients;
 mod grain_store;
@@ -55,8 +67,11 @@ mod history;
 mod hooks;
 mod host;
 mod hues;
+#[cfg(test)]
+mod import_tests;
 mod interface_size;
 mod keys;
+mod lasso_fill;
 #[cfg(target_os = "ios")]
 mod layer;
 mod layer_bundle;
@@ -64,16 +79,26 @@ mod layer_ops;
 mod layer_store;
 mod layer_style;
 mod layers;
+mod layout;
 mod liquify;
 mod liquify_steps;
 mod media;
+mod list_slider;
+#[cfg(test)]
+mod low_storage_tests;
 mod modes;
+mod named_layouts;
+mod open_marks;
+mod pacing;
 mod palettes;
 mod panels;
 mod pick;
 mod pickers;
 /// A picker plugin's picture compiled: whose it is, its code, the keys it reads its controls by.
 pub(crate) type PickerProgram = (String, Arc<str>, Option<Arc<[String]>>, Arc<procraft_gpu::PictureProgram>);
+#[cfg(test)]
+mod heavy_tests;
+mod paper_picture;
 mod plugin_artwork;
 mod plugin_brushes;
 mod plugin_canvas;
@@ -87,6 +112,7 @@ mod plugin_run;
 mod plugins;
 mod pour;
 mod presets;
+mod pressure;
 mod project;
 mod projection;
 mod psd_adjustments;
@@ -98,17 +124,24 @@ mod reference_window;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod render;
 mod reveal;
+mod run_ends;
 mod scene3d;
 mod selection;
 mod sharp;
+mod side_bar;
 mod side_slider;
 mod sound_file;
+#[cfg(test)]
+mod stack_tests;
+mod stand_ins;
 mod stock_brushes;
 mod stock_library;
 #[cfg(test)]
 mod stroke_lag_tests;
+mod storage;
 mod stroke_sound;
 mod studio;
+mod surround;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -146,6 +179,7 @@ use procraft_engine::stroke::{Stamp, StrokeBuilder};
 use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
 
+pub use activity::{Activity, live_sessions};
 pub use adjust::{
     ChromaticKind, DitherKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, PerspectiveKind,
     SwipeAdjustment, VignetteKind,
@@ -159,14 +193,21 @@ pub use animation::{
     AnimationPlayback, AnimationSettings, FrameRate, PlayStep, animation_next_step, export_fps_at, export_fps_fraction,
     export_fps_label, frame_rate,
 };
+pub use app_log::process_line;
+pub use bars::{BarHang, BarLayout, BarPlace, BarSides, EdgeCollapse, HangSide, LayoutBar, WindowEdge, bar_layout_key};
+pub use big_pictures::{big_pictures_left, wait_for_big_pictures};
+pub use blend_wheel::{
+    BLEND_TAP_SECONDS, BlendCoast, BlendStep, blend_centred, blend_coast, blend_coast_at, blend_pull_for, blend_pulled,
+    blend_stretch, blend_tap, blend_tap_at, blend_unstretch,
+};
 pub use brush_files::BrushEngines;
 pub use brush_files::{
-    BrushFileReading, BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes, read_brushes,
-    read_brushes_file, read_brushes_from,
+    BrushFileBytes, BrushFileReading, BrushFileWriting, BrushesRead, IMPORT_CANCELLED, OTHER_BRUSH_EXTENSIONS,
+    ReadBrushes, is_brush_zip, read_any_brushes, read_brushes, read_brushes_file, read_brushes_from,
 };
 pub use brush_libraries::BrushLibraryInfo;
-pub use brush_library::prepare_brushes;
-pub use brushes::{BrushInfo, BrushSetInfo, RecentBrush};
+pub use brush_library::{BrushDrop, BrushDropOver, brush_drop_copies, brush_drop_place, prepare_brushes};
+pub use brushes::{BrushInfo, BrushSetInfo, HoverFill, RecentBrush, brush_previews_kept};
 pub use clipboard::{COPY_PIXELS_A_METRE, copy_straight, picture_png, write_copy_png};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
@@ -181,12 +222,16 @@ pub use colour_models::{
     colour_model_square_side, colour_model_tracks, colour_models, oklab_of, oklab_of_hsv, oklab_slid, oklab_to_rgb,
     oklab_tracks, oklab_value_slid, oklab_value_tracks,
 };
+pub use colour_press::{ColourPress, PressTurn};
 pub use crop_edit::{CropReadout, CropShown};
+pub use cursor_turn::CursorPen;
 pub use device::keep_device;
+pub use filter_layers::PluginLayerFilter;
 pub use floating::{
     FloatingPanel, FloatingRoom, FloatingSizes, FloatingWindow, floating_at, floating_fitted, floating_kept,
     floating_key, floating_moved, floating_read, floating_resized, floating_sizes,
 };
+pub use folders::{FOLDER_UNREACHABLE, FolderAccess, FolderBroughtIn, FolderEntry, FolderError, PlainFolderAccess};
 pub use frame::{configure, screen_profile};
 pub use gallery::{
     ArtworkStore, DragRest, GALLERY_MORE_ALONE, GALLERY_SPRING_MS, GalleryAction, GalleryArtwork, GalleryButton,
@@ -199,7 +244,7 @@ pub use gestures::{
 };
 pub use gradients::{GradientInfo, GradientStop, Gradients};
 pub use guide::{GuideInfo, GuideType, GuideUnit, SymmetryType};
-pub use history::ColourHistory;
+pub use history::{COLOUR_HOLD_MS, ColourHistory};
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
 pub use keys::{KEY_ZOOM, KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
 pub use layer_bundle::{LayerBundle, LayerDrop};
@@ -209,8 +254,19 @@ pub use layers::{
     ShownRow, ThumbnailImage, blend_modes, brush_blend_modes, combine_blend_modes, empty_layers_for, grain_blend_modes,
     layers_for, row_hold_seconds, set_layer_budget, set_resident_budget,
 };
+pub use layout::{
+    BeltShown, LayoutDock, LayoutInsets, LayoutPiece, LayoutRect, PanelLayout, PanelLayoutLook, PieceShown, PieceSizes,
+    panel_layout_key, piece_sizes,
+};
 pub use liquify::liquify_reach;
+pub use list_slider::{ListSliderTouch, list_slider_touch};
 pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch, mode_switch_deselects};
+pub use named_layouts::{NamedLayouts, named_layouts_key};
+pub use open_marks::{
+    RunEnd, android_run_end, android_run_ended_short_of_memory, keep_desktop_logs_of_ended_runs, opening_ended_app,
+    opening_ended_app_said, opening_ended_app_said_after, opening_ended_app_title, opening_ended_run,
+    set_open_marks_file,
+};
 pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
 pub use pickers::{
@@ -220,40 +276,56 @@ pub use pickers::{
 pub use plugin_canvas::{BadgeLine, PluginBadge, PluginCanvas, PluginExport, PluginKind, plugin_kind_badge};
 pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
-pub use plugin_panel::{PanelRow, PluginPanel};
+pub use plugin_panel::{PanelBrush, PanelPoint, PanelRow, PluginPanel};
+pub use plugin_run::set_memory_available;
 pub use plugins::{
-    InterfacePart, NoticeKind, PluginAction, PluginChoice, PluginControl, PluginInfo, PluginMenuPlace, PluginOffer,
-    PluginPart, PluginPlace, PluginPressed, PluginSlider, PluginSource, PluginSwitch, Plugins, plugin_file_most_bytes,
-    plugin_slider_along, plugin_slider_at, plugin_slider_choice, plugin_slider_choices, plugin_slider_chosen,
-    plugin_slider_shown, plugin_slider_whole,
+    InterfacePart, NoticeKind, PluginAction, PluginChoice, PluginControl, PluginFeature, PluginFileKind, PluginFolder,
+    PluginInfo, PluginMenuPlace, PluginOffer, PluginPart, PluginPicture, PluginPlace, PluginPressed, PluginSlider,
+    PluginSource, PluginSwitch, PluginTexture, Plugins, SliderLook, plugin_file_most_bytes, plugin_slider_along,
+    plugin_slider_at, plugin_slider_choice, plugin_slider_choices, plugin_slider_chosen, plugin_slider_shown,
+    plugin_slider_whole,
 };
 pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
     presets_json, profile_chip, standard_presets,
 };
 pub use project::{
-    ArtworkInfo, PdfBook, export_file_name, read_signature, save_failure_said, write_photo, write_signature,
+    ArtworkInfo, Leaving, PdfBook, export_file_name, read_signature, save_failure_said, write_photo, write_signature,
 };
-pub use project::{PackageTimeLapse, artwork_plays, package_time_lapse};
+pub use project::{PackageTimeLapse, artwork_plays, artwork_preview_png, package_time_lapse, preview_side};
 pub use project::{PagesOutcome, PsdOutcome, import_pages, import_psd};
 pub use quick_menu::{
-    QuickAction, QuickMenuSet, quick_action_adjusts, quick_action_label, quick_actions_listed,
-    quick_adjustments_listed, quick_menu_active_after, quick_menu_added, quick_menu_saved, quick_menu_slots,
-    quick_menus, quick_menus_saved,
+    QuickAction, QuickMenuSet, pen_button_actions, pen_button_actions_saved, pen_button_choices,
+    pen_button_plugin_actions, pen_buttons_saved, quick_action_adjusts, quick_action_label, quick_actions_listed,
+    quick_adjustments_listed, quick_menu_active_after, quick_menu_added, quick_menu_renamed, quick_menu_saved,
+    quick_menu_slots, quick_menus, quick_menus_saved,
 };
 pub use quickshape::{QuickShapeAnchor, QuickShapeInfo, QuickShapeKind};
 pub use reference_view::{
-    ReferenceSizes, ReferenceView, reference_picture_point, reference_picture_rect, reference_view_pinched,
+    REFERENCE_CANVAS_FIRST, ReferenceSizes, ReferenceView, reference_canvas_side, reference_picture_point,
+    reference_picture_rect, reference_view_pinched,
 };
 pub use reference_window::{
-    ReferencePlace, ReferenceShows, ReferenceSize, ReferenceWindowState, reference_window_fitted, reference_window_size,
+    ReferencePictureSize, ReferencePlace, ReferenceShows, ReferenceSize, ReferenceWindowState, reference_picture_size,
+    reference_window_first_size, reference_window_fitted, reference_window_size,
+};
+pub use run_ends::{
+    CRASH_TARGET, CrashLine, Ended, LoggedRun, RUN_CRASHED, RUN_ENDING, RUN_STARTING_AGAIN, RUN_STOPPED,
+    last_runs_in_folder, last_runs_said, log_of_run, run_end_in_folder, runs_in_log,
 };
 pub use scene3d::{
     ModelFile, ModelInfo, ModelLight, ModelTextureFile, ModelWarning, SubmeshInfo, Turntable, model_warning_name,
     unpack_model_artwork, zip_model_name,
 };
 pub use selection::{SelectionDisplay, SelectionJoin};
-pub use side_slider::{ShadowStep, SideSliderTap, side_slider_drag_share, side_slider_tap, side_thumb_shadow};
+pub use side_bar::{
+    SideBarDrag, SideBarDragState, SideBarFit, SideBarShown, side_bar_centre_key, side_bar_first_centre, side_bar_fit,
+    side_bar_kept_centre,
+};
+pub use side_slider::{
+    ShadowStep, SideSliderTap, side_slider_drag_share, side_slider_shown_percent, side_slider_tap, side_thumb_shadow,
+};
+pub use storage::{NO_ROOM, save_failure_to_tell, storage_full_writes, storage_was_full};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
     small_source, source_from_copy, source_from_picture, source_library, source_size,
@@ -271,7 +343,7 @@ pub use timelapse::{
 };
 pub use touch::{
     COMPANION_ZOOM_DISTANCE, CompanionMode, Fill, GestureAction, HoverCursor, LOUPE_LIFT, PenHover, PenPreferred,
-    SelectKind, SelectTouch, SqueezePhase, TouchCommand, TouchSettings, TransformTouch,
+    SelectKind, SelectTouch, SqueezePhase, TouchCommand, TouchMove, TouchSettings, TransformTouch,
 };
 pub use transform::{
     GuideSettings, Interpolation, PuppetSettings, ScreenBox, TransformAction, TransformBox, TransformHandle,
@@ -298,6 +370,16 @@ pub(crate) const GRID_LINE: [f32; 3] = [46.0 / 255.0, 46.0 / 255.0, 46.0 / 255.0
 pub(crate) const GRID_LINE_LIGHT: [f32; 3] = [202.0 / 255.0, 205.0 / 255.0, 206.0 / 255.0];
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const GRID_SPACING_PT: f32 = 16.0;
+/// The longest a read beside the frames waits for them to lay what they lay a share at a time
+/// (see [`Shared::await_frames_laid`]): past it, it lays the rest itself.
+pub(crate) const FRAMES_LAY_MOST: std::time::Duration = std::time::Duration::from_secs(3);
+/// With no frame drawn for this long, frames are taken not to be drawn (the app away, a test
+/// drawing none): nothing waits for them.
+pub(crate) const FRAMES_GONE: std::time::Duration = std::time::Duration::from_millis(250);
+/// A frame drawn this long ago, the app still showing, is taken as frames held up (the GPU behind)
+/// rather than stopped: a time-lapse frame, or a save's snapshot, still leaves their work to them
+/// rather than laying it at once (the frames and touches would wait on that too).
+pub(crate) const FRAMES_HELD_UP: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const GRID_WIDTH_PT: f32 = 4.0 / 3.0;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -385,6 +467,14 @@ impl From<PointerKind> for Pointer {
 /// Whether `s` lies on whole screen pixels.
 fn on_whole_pixels(s: &PenSample) -> bool {
     s.x.fract() == 0.0 && s.y.fract() == 0.0
+}
+
+/// Whether two views put the canvas in the same place, to a hundredth of a pixel.
+fn views_alike(a: &View, b: &View) -> bool {
+    let (a, b) = (a.to_screen(), b.to_screen());
+    [(a.a, b.a), (a.b, b.b), (a.c, b.c), (a.d, b.d)].iter().all(|(x, y)| (x - y).abs() <= 1e-5 * x.abs().max(1.0))
+        && (a.e - b.e).abs() <= 0.01
+        && (a.f - b.f).abs() <= 0.01
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
@@ -579,6 +669,13 @@ impl State {
     }
 }
 
+/// The quarter turns clockwise (0 to 3) nearest a turn of `angle` radians clockwise on screen, as an
+/// artwork is kept turned: halfway (45 degrees off) goes to upright or upside down. None if it is
+/// no angle.
+pub(crate) fn nearest_quarter_turns(angle: f32) -> Option<u8> {
+    angle.is_finite().then(|| ((angle / std::f32::consts::FRAC_PI_2).round_ties_even() as i32).rem_euclid(4) as u8)
+}
+
 pub(crate) struct State {
     pub(crate) doc: Document,
     /// Fitted once the window's size is known.
@@ -672,8 +769,8 @@ pub(crate) struct State {
     pub(crate) sound_hover: Option<(procraft_engine::geom::Vec2, std::time::Instant)>,
     /// Crops kept for undo: the canvas and document from before; and one undone, for redo, with
     /// the steps the canvas then put back had made (redo only while that hasn't changed).
-    crop_undo: Option<(Canvas, Document)>,
-    crop_redo: Option<(Canvas, Document, u64)>,
+    crop_undo: Option<(Box<Canvas>, Document)>,
+    crop_redo: Option<(Box<Canvas>, Document, u64)>,
     /// The text layer being edited, the document as the edit began, and the width changes made
     /// inside it.
     text_edit: Option<text::TextEdit>,
@@ -740,7 +837,9 @@ pub(crate) struct State {
     /// Strokes started, to seed each one's randomness.
     strokes: u32,
     /// The small canvas brush previews are drawn on.
-    preview: Option<(Canvas, Document)>,
+    preview: Option<(Box<Canvas>, Document)>,
+    /// Sample strokes drawn already, kept by what they were drawn from.
+    drawn_previews: drawn_previews::DrawnPreviews,
     color: [f32; 3],
     /// How strongly Color Fill fills, 0..1.
     fill_opacity: f32,
@@ -754,12 +853,14 @@ pub(crate) struct State {
     secondary: [f32; 3],
     /// The app's colour history, which paint strokes add to.
     colour_history: Option<std::sync::Arc<ColourHistory>>,
-    stroke: Option<StrokeBuilder>,
+    stroke: Option<Box<StrokeBuilder>>,
     /// The open stroke's second, a dual brush's (drawn along the same input).
-    second: Option<StrokeBuilder>,
+    second: Option<Box<StrokeBuilder>>,
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) gpu: Option<Gpu>,
-    pub(crate) canvas: Option<Canvas>,
+    /// The canvas, on the heap as everywhere one is kept: a canvas takes some 16 KB, and this
+    /// state, moved whole as a session is made, once took more than a dispatch queue's thread has.
+    pub(crate) canvas: Option<Box<Canvas>>,
     pub(crate) needs_frame: bool,
     /// A frame wanted at this time, not before: the selection's bands drift slowly, so a frame
     /// shows them moved only every so often (a pixel at a time).
@@ -773,11 +874,23 @@ pub(crate) struct State {
     pub(crate) holding_frames: bool,
     pub(crate) frame_held: bool,
     pub(crate) stop: bool,
+    /// The app is away (in the background, or its window out of sight): nothing is drawn, and the
+    /// autosave rests, until it shows again.
+    pub(crate) hidden: bool,
     /// Project canvas: the second display's size, and that its thread should end.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) projection_size: (u32, u32),
     pub(crate) projection_stop: bool,
     pub(crate) frames: u64,
+    /// When a frame was last drawn: a read beside the frames waits for them to lay what they lay a
+    /// share at a time only while they are being drawn (see [`Shared::await_frames_laid`]).
+    pub(crate) frame_drawn_at: Option<std::time::Instant>,
+    /// A time-lapse frame asked for while frames are drawn, for this time-lapse: the frame that
+    /// has laid what the frames lay a share at a time takes its picture (see
+    /// [`State::take_lapse_picture`]).
+    pub(crate) lapse_wanted: Option<Arc<crate::timelapse::TimeLapse>>,
+    /// Keeps the time-lapse frames taken, in order, off the thread that took them.
+    pub(crate) lapse_keeper: crate::timelapse::FrameKeeper,
     /// The drawing pad's strokes as drawn (pointer and input), drawn again when the brush changes;
     /// `None` on a canvas that keeps none.
     pub(crate) pad_strokes: Option<Vec<(PointerKind, Vec<PenSample>)>>,
@@ -789,8 +902,15 @@ pub(crate) struct State {
     /// (`predicting`), as the prediction that follows draws it again; drawn at the next frame if
     /// none came (see [`State::draw_ahead`]).
     pub(crate) ahead: bool,
+    /// The platform's newest prediction of where the input goes next (canvas pixels), drawn ahead
+    /// of the stroke at the next frame (see [`State::draw_ahead`]); none since the samples after it.
+    pub(crate) ahead_of: Vec<Sample>,
     /// The platform sends predicted input after the stroke's samples.
     pub(crate) predicting: bool,
+    /// The open stroke's pressure as plugins give it.
+    pub(crate) pressing: pressure::Pressing,
+    /// The open stroke filling what it encloses, as a plugin said it does.
+    pub(crate) filling: Option<Box<lasso_fill::Filling>>,
     /// The open stroke's brush engine, as it is told the colours under the dabs it asks about.
     pub(crate) engine_asking: plugin_brushes::Asking,
     /// Brush files' grains at their own size.
@@ -802,7 +922,7 @@ pub(crate) struct State {
     /// begins and undo and redo wait, or they would join its step.
     pub(crate) plugin_stepping: u32,
     /// The brush a plugin's brush studio edits (set, index), while it is open; and whether a plugin
-    /// changed a brush since the app last asked.
+    /// changed a brush, or gave the library a set, since the app last asked.
     pub(crate) engine_studio: Option<(usize, usize)>,
     pub(crate) brushes_changed: bool,
     /// The pad shows only its sample scribble: a stroke of one's own takes it away.
@@ -830,8 +950,23 @@ pub(crate) struct State {
     /// The look the plugins on the view look's hook show the canvas through (the window's view
     /// only), as they said when the session last took them up.
     pub(crate) plugin_look: Option<ViewLook>,
+    /// How much the plugins on the dimming hook dim the layers but the current one (the window's
+    /// view only, 0 to 1), as they said then.
+    pub(crate) plugin_dim: f32,
     /// The paper a plugin on the paper's hook gives, as it said then.
     pub(crate) plugin_paper: Option<procraft_gpu::CanvasPaper>,
+    /// The set of brushes each plugin on holds, by its id, as the session last took them up (none
+    /// until it is told the plugins), and the folder the brushes were opened from (none until they
+    /// are): the library is given each set once it is open, and a set given goes again with the
+    /// switch it comes under (see [`CanvasSession::give_plugin_sets`]).
+    pub(crate) plugin_sets: Option<Vec<(String, std::sync::Arc<[u8]>)>>,
+    pub(crate) brushes_dir: Option<std::path::PathBuf>,
+    /// The tile of the picture a plugin's paper is, made again only as its file changes.
+    pub(crate) paper_picture: Option<std::sync::Arc<paper_picture::PaperPicture>>,
+    /// The colour round the canvas a plugin gives (sRGB 0..1), and the picture shown there in place
+    /// of the grid (interface 11), as they said then.
+    pub(crate) plugin_surround: Option<[f32; 3]>,
+    pub(crate) surround_picture: Option<std::sync::Arc<surround::SurroundPicture>>,
     /// The values of plugins' controls kept with the artwork, by their keys, saved with it.
     pub(crate) plugin_values: std::collections::BTreeMap<String, f32>,
     /// The Reference windows opened besides the artwork's own, kept with it as its own is.
@@ -863,6 +998,9 @@ pub(crate) struct State {
     pub(crate) pending_stores: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
     /// The canvas couldn't be made from these pixels (a failure elsewhere doesn't stop the next try).
     pub(crate) canvas_failed: bool,
+    /// The artwork opened from its folder, noted as being opened until it shows, its canvas fails
+    /// (told), or the session goes: one the app ended while opening is told when next picked.
+    pub(crate) open_mark: Option<open_marks::Mark>,
     /// Layers whose saved files couldn't be read (shown empty): a save leaves each file as it is
     /// until the layer is painted on, and then keeps the file aside before writing the new one.
     pub(crate) unreadable: std::collections::HashSet<procraft_engine::document::LayerId>,
@@ -872,11 +1010,14 @@ pub(crate) struct State {
     pub(crate) closed: bool,
     /// A model open to paint on, in place of the flat canvas (the document is its current
     /// texture set's).
-    pub(crate) scene: Option<scene3d::Scene>,
+    pub(crate) scene: Option<Box<scene3d::Scene>>,
     /// A selection drawn on a model reaches every surface under it, not only the nearest.
     pub(crate) x_ray: bool,
     /// What fitting the canvas keeps clear of (left, top, right, bottom, window pixels).
     fit_insets: [f32; 4],
+    /// What the panels docked against the window's edges take from the drawing area (left, top,
+    /// right, bottom, window pixels): fitting keeps clear of it too.
+    room_insets: [f32; 4],
     /// Frosted panels open over the canvas: left, top, right, bottom and corner radius (window
     /// pixels).
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -941,6 +1082,8 @@ pub(crate) struct State {
     /// The adjustment open is an adjustment layer's: what it changes goes into the layer.
     adjust_layer: Option<adjusting::LayerEdit>,
     filters: plugin_filter::Filters,
+    /// Filter layers' filters: what the plugins on offer, and what the canvas was given.
+    filter_layers: filter_layers::FilterLayers,
     /// Crop and Resize as it is edited.
     crop_edit: crop_edit::CropEdit,
     last_filter: Option<procraft_gpu::Filter>,
@@ -967,6 +1110,11 @@ pub(crate) struct State {
     /// The selection before the feather popover softened it, and the room its feathering works
     /// in (kept while the popover is open, so each step doesn't ask the system for it again).
     feather_base: Option<(procraft_engine::selection::Mask, Vec<f32>)>,
+    /// The feather's slider is held: the line where the selection fades out shows.
+    feather_edge: bool,
+    /// The shapes joined to the selection while the selection tool has been open (canvas pixels,
+    /// each a closed path), which it shows dashed; gone as it closes or the selection goes.
+    selection_outlines: Vec<Vec<Vec2>>,
     /// The last drag step on the box (window point, when), for its speed.
     last_drag: Option<(Vec2, std::time::Instant)>,
     /// The stroke being drawn as input (canvas points), for QuickShape,
@@ -977,14 +1125,14 @@ pub(crate) struct State {
     drawn_at: f64,
     /// Its input as the stroke took it, for a shape to go back to.
     drawn_samples: Vec<Sample>,
-    shape: Option<quickshape::ShapeEdit>,
+    shape: Option<Box<quickshape::ShapeEdit>>,
     /// The open stroke as it began, and the last stroke kept, for QuickShape afterwards.
-    began: Option<quickshape::LastStroke>,
-    last_stroke: Option<quickshape::LastStroke>,
+    began: Option<Box<quickshape::LastStroke>>,
+    last_stroke: Option<Box<quickshape::LastStroke>>,
     /// The last shape kept, which undo gives back the stroke it was made of; and the shape whose
     /// stroke that gave back, which redo makes a shape again.
-    kept_shape: Option<quickshape::KeptShape>,
-    unkept_shape: Option<quickshape::KeptShape>,
+    kept_shape: Option<Box<quickshape::KeptShape>>,
+    unkept_shape: Option<Box<quickshape::KeptShape>>,
     /// Strokes follow the drawing guide even where drawing assist is off (□ held down).
     force_assist: bool,
     /// Where the stroke began (canvas pixels), for assisted drawing; the guide and view as the
@@ -999,6 +1147,19 @@ pub(crate) struct State {
 }
 
 impl State {
+    /// Whether frames are being drawn: one was in the last [`FRAMES_HELD_UP`], and the app isn't
+    /// away.
+    pub(crate) fn frames_drawn(&self) -> bool {
+        !self.hidden && self.frame_drawn_at.is_some_and(|at| at.elapsed() < FRAMES_HELD_UP)
+    }
+
+    /// Whether the frames, being drawn, have work to lay a share at a time (see
+    /// [`procraft_gpu::Canvas::lays_over_frames`]).
+    pub(crate) fn frames_laying(&self) -> bool {
+        self.frame_drawn_at.is_some_and(|at| at.elapsed() < FRAMES_GONE)
+            && self.canvas.as_deref().is_some_and(procraft_gpu::Canvas::lays_over_frames)
+    }
+
     /// Window pixels per point of what the interface draws, its handles over the canvas too.
     pub(crate) fn interface_scale(&self) -> f32 {
         self.display_scale * self.interface_size
@@ -1016,13 +1177,16 @@ impl State {
             top: GRID_TOP_PT * self.interface_scale() + by.y,
             width: GRID_WIDTH_PT * s,
             color: if self.light { GRID_LINE_LIGHT } else { GRID_LINE },
+            // a plugin's picture covering the window in place of the lines
+            picture: self.surround_picture.as_ref().map(|p| surround::cover(self.window_size, (p.width, p.height), by)),
         }
     }
 
-    /// The colour around the canvas.
+    /// The colour around the canvas: a plugin's (the colour hook's surround), else the
+    /// interface's own.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn surround(&self) -> [f32; 3] {
-        if self.light { SURROUND_LIGHT } else { SURROUND }
+        self.plugin_surround.unwrap_or(if self.light { SURROUND_LIGHT } else { SURROUND })
     }
 
     /// Places the canvas in the window the first time: fitted, turned as the gallery shows it (its
@@ -1047,13 +1211,7 @@ impl State {
             Some(v) if self.turns_follow_view => {
                 let m = v.to_screen();
                 // its down axis gives its turn whether or not it is mirrored
-                let angle = (-m.c).atan2(m.d) - self.screen_follow;
-                if angle.is_finite() {
-                    // halfway (45 degrees off) goes to upright or upside down
-                    ((angle / std::f32::consts::FRAC_PI_2).round_ties_even() as i32).rem_euclid(4) as u8
-                } else {
-                    self.turns
-                }
+                nearest_quarter_turns((-m.c).atan2(m.d) - self.screen_follow).unwrap_or(self.turns)
             }
             _ => self.turns,
         }
@@ -1065,12 +1223,26 @@ impl State {
     pub(crate) fn fitted_view(&self) -> View {
         let turns = self.view.map_or(i32::from(self.turns), |v| v.quarter_turns());
         // in the guide editor, the whole window (behind its bars)
-        let insets = if self.guide_before.is_some() { [0.0; 4] } else { self.fit_insets };
+        let insets = if self.guide_before.is_some() { [0.0; 4] } else { self.kept_clear() };
         View::fit_turned((self.doc.width(), self.doc.height()), self.window_size, insets, turns)
+    }
+
+    /// What fitting the canvas keeps clear of: the interface's (with Fit Canvas Inside Interface on)
+    /// and the panels' docked against the edges, the more of the two on each side.
+    pub(crate) fn kept_clear(&self) -> [f32; 4] {
+        let mut insets = self.fit_insets;
+        for (inset, room) in insets.iter_mut().zip(self.room_insets) {
+            *inset = inset.max(room);
+        }
+        insets
     }
 
     /// Finishes an open stroke.
     fn finish_stroke(&mut self) {
+        // a stroke filling what it encloses fills it
+        if self.end_fill(&[]) {
+            return;
+        }
         // a shape kept as it shows, moved since the last frame or not
         self.draw_moved_shape();
         let shape = self.shape.take();
@@ -1082,22 +1254,22 @@ impl State {
         // one on a plugin's layer goes to the plugin as it ends (made a shape, as that: its geometry
         // kept, laid along its outline); undo takes it back whole, not to the stroke it was
         if let Some(mut recording) = self.recording.take()
-            && let Some(open) = self.stroke.take()
+            && let Some(open) = self.stroke.take().map(|b| *b)
         {
             if let Some(edit) = &shape {
                 let (kind, nodes) = edit.geometry();
                 recording.made_shape(&edit.samples(), kind, &nodes);
             }
-            let second = self.second.take();
+            let second = self.second.take().map(|b| *b);
             self.end_recorded(recording, open, second);
             return;
         }
-        if let Some(open) = self.stroke.take()
-            && self.canvas.is_some()
-        {
-            let second = self.second.take();
-            self.close_painted(open, second);
-            self.vector_keep();
+            if let Some(open) = self.stroke.take()
+                && self.canvas.is_some()
+            {
+                let second = self.second.take().map(|b| *b);
+                self.close_painted(*open, second);
+                self.vector_keep();
             self.bake_painted_on();
             // (the sharp picture's stroke ends with it)
             self.crisp_echo();
@@ -1128,6 +1300,9 @@ impl State {
         self.end_adjustment(true);
         let name = self.pending_name.take();
         if let (Some(before), Some(canvas)) = (self.pending_doc.take(), self.canvas.as_mut()) {
+            if name.as_deref() == Some(layers::BLEND_MODE_STEP) && before == self.doc {
+                return;
+            }
             if let Some(name) = name {
                 canvas.name_next_step(&name);
             }
@@ -1138,6 +1313,8 @@ impl State {
     /// Runs the queued canvas work now (without drawing), so the document already reflects an
     /// undo or redo when the call returns.
     fn flush(&mut self) {
+        // what filter layers run, before they are drawn
+        self.give_layer_filters();
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.render(gpu, &mut self.doc, None);
         }
@@ -1215,11 +1392,65 @@ impl State {
         // (any picture not drawn ahead drawn now, side by side)
         crate::brushes::draw_pictures(&brush);
         self.use_brush_images(&mut style, &brush);
+            self.use_big_pictures(&mut style, &brush, diameter);
         (brush, style, diameter)
     }
 
+    /// `style` reads `brush`'s shape and grain, ours, from their big pictures for a stamp
+    /// `diameter` canvas pixels across (its grain's tile from that) bigger than brushes hold them,
+    /// if those are made: none is drawn here (see `big_pictures.rs`). A brush file's own big images
+    /// go their own way.
+    fn use_big_pictures(&mut self, style: &mut StrokeStyle, brush: &Brush, diameter: f32) {
+        use crate::big_pictures::{grain_of, grain_tile, past_held, ready, shape_of};
+        if self.canvas.is_none() || self.gpu.is_none() {
+            return;
+        }
+        let shape = (style.full_shape.is_none() && past_held(diameter)).then(|| shape_of(brush)).flatten();
+        let grain = (style.full_grain.is_none() && style.grain.is_some() && past_held(grain_tile(brush, diameter)))
+            .then(|| grain_of(brush))
+            .flatten();
+        let shape = shape.and_then(|big| Some((big.id, ready(&big)?)));
+        let grain = grain.and_then(|big| Some((big.id, ready(&big)?)));
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return };
+        if let Some((id, picture)) = shape {
+            canvas.use_full_shape_levels(gpu, style, id, picture.side, &picture.levels);
+        }
+        if let Some((id, picture)) = grain {
+            canvas.use_full_grain_levels(gpu, style, id, picture.side, &picture.levels);
+        }
+    }
+
+    /// The current tool's brush chosen: its big pictures (and its second's) that it reaches at its
+    /// most size read in, off this thread (made before any other, if they aren't yet), and a brush
+    /// file's own images at their own size read from their files, so that its first stroke has
+    /// them (see `big_pictures.rs`).
+    pub(crate) fn load_brush_pictures(&mut self) {
+        let brush = self.brush(self.tool);
+        crate::big_pictures::load(crate::big_pictures::reached_by(brush), true);
+        let fulls: Vec<procraft_engine::brush::FullGrain> = std::iter::once(brush)
+            .chain(brush.secondary.as_deref())
+            .flat_map(|b| [b.grain_file_now().and_then(|f| f.full.as_ref()), b.shape_file_now().map(|f| &f.full)])
+            .flatten()
+            .cloned()
+            .collect();
+        for full in &fulls {
+            drop(self.grain_store.pixels(full));
+        }
+    }
+
     /// `style` reads `brush`'s shape from its file's image at its own size, if it has one.
-    pub(crate) fn use_full_shape(&mut self, style: &mut StrokeStyle, brush: &Brush) {
+    /// `style` reads a brush file's grain at its own size, fixed to the canvas or moving with each
+    /// stamp, if `brush` has one.
+    fn use_full_grain(&mut self, style: &mut StrokeStyle, brush: &Brush) {
+        if let Some(full) = brush.grain_file_now().and_then(|f| f.full.as_ref())
+            && let Some(pixels) = self.grain_store.pixels(full)
+            && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
+        {
+            canvas.use_full_grain(gpu, style, full.id, full.side, &pixels);
+        }
+    }
+
+    fn use_full_shape(&mut self, style: &mut StrokeStyle, brush: &Brush) {
         if let Some(full) = brush.shape_file_now().map(|f| &f.full)
             && let Some(pixels) = self.grain_store.pixels(full)
             && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
@@ -1277,7 +1508,9 @@ impl State {
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, &mut style, &second);
         }
+        self.use_full_grain(&mut style, &second);
         self.use_full_shape(&mut style, &second);
+        self.use_big_pictures(&mut style, &second, diameter);
         let mode = first.setting("dual_blend").round().max(0.0) as u32;
         let classic = first.setting("classic_combine") >= 0.5;
         Some((second, SecondStroke { style, mode, threshold: style.alpha_threshold, classic }, diameter))
@@ -1367,11 +1600,14 @@ impl State {
                 self.layers_unread(unread);
                 self.canvas = Some(c);
                 self.put_opened_stores(&hashes);
+                // what its filter layers run, as the plugins on offer them
+                self.give_layer_filters();
             }
             Err(e) => {
                 log::error!("canvas: {e}");
                 self.error = Some(e.to_string());
                 self.canvas_failed = true;
+                self.open_mark = None;
                 // what was opened kept
                 self.pending_pixels = pending;
             }
@@ -1481,6 +1717,14 @@ fn draw_samples(
 ) -> bool {
     // a dual brush's second, as its stamps come
     let second_tip = second.map(|second| second_samples(canvas, second, samples, guide));
+    // a smudge shows no tip, and lays its stamps for good as they come, the paint under them
+    // moved: those its end taper may still reach wait until it no longer does, laid tapered if
+    // the stroke ends first
+    if smudge_holds_end(canvas, builder) {
+        let laid = builder.add_short_of_end(samples);
+        canvas.add_stamps(&guide::mirrored(guide, &laid));
+        return !laid.is_empty();
+    }
     if canvas.shows_tip() && builder.shows_tip() {
         let kept = builder.add_kept(samples);
         canvas.add_stamps(&guide::mirrored(guide, &kept));
@@ -1494,7 +1738,8 @@ fn draw_samples(
         }
         return !kept.is_empty() || !tip.is_empty();
     }
-    let stamps = guide::mirrored(guide, &builder.add(samples));
+    let added = builder.add(samples);
+    let stamps = guide::mirrored(guide, &added);
     if builder.take_turned() {
         // its first stamps turned to the way it goes: the few laid so far laid again as they are
         canvas.replace_stamps(&guide::mirrored(guide, &builder.placed_stamps()));
@@ -1510,7 +1755,14 @@ fn draw_samples(
     if let Some(second_tip) = &second_tip {
         canvas.set_second_tip(second_tip);
     }
-    !stamps.is_empty()
+    // (holding its start, what it holds back shows in the tip)
+    !stamps.is_empty() || builder.holds_start()
+}
+
+/// Whether the open stroke is a smudge whose end taper reaches back over what it lays as it goes
+/// (see [`StrokeBuilder::add_short_of_end`]).
+fn smudge_holds_end(canvas: &Canvas, builder: &StrokeBuilder) -> bool {
+    canvas.stroke_tool() == Some(StrokeTool::Smudge) && !canvas.is_pencil() && builder.end_reaches_back()
 }
 
 /// Draws `samples` into a dual brush's second as its stamps come, and returns its tip where the
@@ -1524,21 +1776,34 @@ fn second_samples(
     guide: &procraft_engine::guide::Guide,
 ) -> Vec<Stamp> {
     if !canvas.shows_tip() {
-        canvas.add_second_stamps(&guide::mirrored(guide, &second.add(samples)));
+        add_second(canvas, second, samples, guide);
         // paint laid in place is laid on to the pen: its second reaches as far, or what is put
         // together with it there shows only once the second's own stamps arrive
         if canvas.lays_ahead() {
-            return guide::mirrored(guide, &second.preview_to_input(&[]));
+            return guide::mirrored(guide, &second.preview_to_input(&[])).into_owned();
         }
         return Vec::new();
     }
     if second.shows_tip() {
         let (kept, tip) = second.add_tipped(samples);
         canvas.add_second_stamps(&guide::mirrored(guide, &kept));
-        return guide::mirrored(guide, &tip);
+        return guide::mirrored(guide, &tip).into_owned();
     }
-    canvas.add_second_stamps(&guide::mirrored(guide, &second.add(samples)));
-    guide::mirrored(guide, &second.preview_to_input(&[]))
+    add_second(canvas, second, samples, guide);
+    guide::mirrored(guide, &second.preview_to_input(&[])).into_owned()
+}
+
+/// Adds `samples` to a dual brush's second, laying its stamps; laid again once its first stamps
+/// turn to the way it goes, or (holding its start) once that is known, as the stroke's own are:
+/// else its end found them changed and laid all of it again, a second or more after a long
+/// stroke's lift on a tablet.
+fn add_second(canvas: &mut Canvas, second: &mut StrokeBuilder, samples: &[Sample], guide: &procraft_engine::guide::Guide) {
+    let added = second.add(samples);
+    if second.take_turned() {
+        canvas.replace_second_stamps(&guide::mirrored(guide, &second.placed_stamps()));
+    } else {
+        canvas.add_second_stamps(&guide::mirrored(guide, &added));
+    }
 }
 
 /// A dual brush's second's tip with `samples` (predicted input) ahead of it, the second left as it
@@ -1551,10 +1816,10 @@ fn second_ahead(
 ) -> Option<Vec<Stamp>> {
     if !canvas.shows_tip() {
         // (its stamps come as they are placed there, never held back for a tip)
-        return canvas.lays_ahead().then(|| guide::mirrored(guide, &second.preview_to_input(samples)));
+        return canvas.lays_ahead().then(|| guide::mirrored(guide, &second.preview_to_input(samples)).into_owned());
     }
     let tip = if second.shows_tip() { second.preview_tip(samples) } else { second.preview_to_input(samples) };
-    Some(guide::mirrored(guide, &tip))
+    Some(guide::mirrored(guide, &tip).into_owned())
 }
 
 /// Draws `samples`, the last of the open stroke's, as the pen lifts: their stamps, unless the stroke
@@ -1567,7 +1832,9 @@ fn lift_samples(
     guide: &procraft_engine::guide::Guide,
 ) {
     let stamps = builder.add(samples);
-    if !(canvas.shows_tip() && builder.shows_tip()) {
+    if builder.holds_start() && builder.take_turned() {
+        canvas.replace_stamps(&guide::mirrored(guide, &builder.placed_stamps()));
+    } else if !(canvas.shows_tip() && builder.shows_tip()) && builder.laid_short_of_end().is_none() {
         canvas.add_stamps(&guide::mirrored(guide, &stamps));
     }
     if let Some(second) = second {
@@ -1587,7 +1854,10 @@ fn show_ahead(
     guide: &procraft_engine::guide::Guide,
 ) {
     if canvas.shows_tip() {
-        canvas.set_tip(&guide::mirrored(guide, &builder.preview_to_input(samples)));
+        // (with the stamps it holds back until they no longer change, see `hold_start`)
+        let mut tip = builder.held_back();
+        tip.extend(builder.preview_to_input(samples));
+        canvas.set_tip(&guide::mirrored(guide, &tip));
     } else if canvas.lays_ahead() {
         // paint laid in place: laid on to the pen for now, as it will be
         canvas.set_ahead(&guide::mirrored(guide, &builder.preview_to_input(samples)));
@@ -1597,20 +1867,30 @@ fn show_ahead(
 }
 
 impl State {
-    /// Draws what runs ahead of the open stroke as its last samples left it, if no prediction drew
-    /// it since (see [`State::ahead`]).
+    /// Draws what runs ahead of the open stroke, as its last samples left it or on to where the
+    /// newest prediction since says the input goes (see [`State::ahead`]): once a frame, however
+    /// many pen events came, not on the thread the input comes on.
     pub(crate) fn draw_ahead(&mut self) {
         if !std::mem::take(&mut self.ahead) {
             return;
         }
+        let predicted = std::mem::take(&mut self.ahead_of);
         let (Some(builder), Some(canvas)) = (self.stroke.as_mut(), self.canvas.as_mut()) else { return };
         let guide = self.doc.stroke_guide();
+        // a dual brush's second runs ahead with it
+        let second_tip =
+            self.second.as_deref_mut().and_then(|second| second_ahead(canvas, second, &predicted, &guide));
+        if let Some(second_tip) = &second_tip {
+            canvas.set_second_tip(second_tip);
+        }
         // a dual brush's second runs ahead with it (after the stroke's own: that takes this off)
         let second_tip = self.second.as_mut().and_then(|second| second_ahead(canvas, second, &[], &guide));
         if canvas.shows_tip() && builder.shows_tip() {
-            canvas.set_tip(&guide::mirrored(&guide, &builder.tip_now()));
+            // a stroke shown with its tip ends it where the input is predicted to go
+            let tip = if predicted.is_empty() { builder.tip_now() } else { builder.preview_tip(&predicted) };
+            canvas.set_tip(&guide::mirrored(&guide, &tip));
         } else {
-            show_ahead(canvas, builder, &[], &guide);
+            show_ahead(canvas, builder, &predicted, &guide);
         }
         if let Some(second_tip) = &second_tip {
             canvas.set_second_tip(second_tip);
@@ -1649,24 +1929,38 @@ fn lay_stroke(
     // end took a while to work out whole, and longer to lay); not with a symmetry guide's copies,
     // which come after each lot of stamps rather than in the stroke's order
     let in_order = guide.copies(Vec2::ZERO).is_empty();
+    // (where its end changes what was laid, it is laid again from the first changed, from a mark
+    // before it, made only from there)
     if let Some(mut second) = second {
-        match canvas.laid_second_count().filter(|_| in_order).and_then(|n| second.finish_after(n)) {
-            Some(rest) => canvas.end_second_with(&rest),
-            None => canvas.replace_second_stamps(&guide::mirrored(guide, &second.finish())),
+        let laid = canvas.laid_second_count().filter(|_| in_order);
+        match laid.and_then(|n| Some((n, second.finish_changed(n)?))) {
+            Some((n, (from, rest))) if from == n => canvas.end_second_with(&rest),
+            Some((_, (from, rest))) if canvas.replace_second_stamps_after(from, &rest) => {}
+            _ => canvas.replace_second_stamps(&guide::mirrored(guide, &second.finish())),
         }
     }
-    // a smudge, or an adjustment painted on, has laid its stamps for good as they came
+    // a smudge, or an adjustment painted on, has laid its stamps for good as they came (a smudge
+    // whose end taper reaches back, those it no longer reaches: the rest are laid now, tapered,
+    // their spacing walked again as the taper thins them)
     if canvas.stroke_tool() == Some(StrokeTool::Smudge) || canvas.is_pencil() {
-        let drawn = builder.stamp_count();
-        builder.hold_laid();
+        let drawn = match builder.laid_short_of_end() {
+            Some(laid) => laid,
+            None => {
+                builder.hold_laid();
+                builder.stamp_count()
+            }
+        };
         canvas.add_stamps(&guide::mirrored(guide, &builder.finish_from(drawn)));
     } else {
         // (a stroke shown with its tip keeps what it drew for good, as it stood before it ended,
-        // for when that can't be told without it; a brush engine's stamps stay as they came)
-        let before = (canvas.shows_tip() && !builder.is_outside()).then(|| builder.clone());
-        match canvas.laid_count().filter(|_| in_order).and_then(|n| builder.finish_after(n)) {
-            Some(rest) => canvas.end_with(&rest),
-            None => {
+        // for when that can't be told without it: the canvas no longer keeps what it laid, the
+        // stroke being very long; a brush engine's stamps stay as they came)
+        let before = (canvas.shows_tip() && !builder.is_outside() && !canvas.keeps_laid()).then(|| builder.clone());
+        let laid = canvas.laid_count().filter(|_| in_order);
+        match laid.and_then(|n| Some((n, builder.finish_changed(n)?))) {
+            Some((n, (from, rest))) if from == n => canvas.end_with(&rest),
+            Some((_, (from, rest))) if canvas.replace_stamps_after(from, &rest) => {}
+            _ => {
                 let for_good = before.and_then(|b| b.drawn_for_good());
                 let all = builder.finish();
                 match for_good.as_deref().and_then(|stamps| all.strip_prefix(stamps)) {
@@ -1697,13 +1991,46 @@ pub(crate) struct Shared {
     /// Why the autosave failed, not yet asked for, and whether it is failing (told once until a
     /// save works again); a lock of its own, never held through a save.
     pub(crate) save_failure: Mutex<(Option<String>, bool)>,
+    /// A save of the artwork, or its time-lapse, found the storage full since its saves last worked:
+    /// the next that works says there is room again (see `storage.rs`).
+    pub(crate) found_full: std::sync::atomic::AtomicBool,
     /// The canvas's touches (they call into the session, so they keep their own lock).
     pub(crate) touches: touch::TouchState,
     /// The brush studio's pad being drawn again off the caller's thread (see
     /// [`CanvasSession::sync_pad`]).
     pub(crate) pad_sync: Mutex<studio::PadSync>,
+    /// How many times the brush studio has asked for its brush's sample stroke: the newest ask
+    /// is the one drawn (see [`CanvasSession::studio_preview`]).
+    pub(crate) studio_previews: std::sync::atomic::AtomicU64,
     /// Where `state` was last taken, for the log when a wait on it is long.
     holder: held::Holder,
+    /// What the session's own threads have done (see [`CanvasSession::activity`]).
+    pub(crate) counts: activity::Counts,
+    /// Changes told to the autosave, which waits for one (shared with its thread, which mustn't
+    /// keep the rest alive).
+    pub(crate) nudge: Arc<activity::Nudge>,
+    /// Pen input that came while something held the canvas (a frame laying a stroke's paint), and
+    /// whether there is any: taken by the next frame or the next input, never waited for (see
+    /// [`CanvasSession::stroke_add`]).
+    queued: parking_lot::Mutex<QueuedInput>,
+    input_queued: std::sync::atomic::AtomicBool,
+    /// How the brush cursor's outline turns, read without waiting on the canvas.
+    pub(crate) cursor: cursor_turn::CursorTurns,
+    /// Where the artwork is on the screen as last seen, for a dragged colour's rest.
+    pub(crate) lands_on: pour::LandsOn,
+    /// Counts this session among those alive until all of it goes (see [`live_sessions`]).
+    _alive: activity::Alive,
+    /// The folders the plugins name, told of each save (interface 22); none until the plugins are
+    /// taken up ([`CanvasSession::use_plugins`]).
+    pub(crate) folders: Mutex<Option<Arc<folders::Folders>>>,
+}
+
+/// Pen input waiting for the canvas (see [`Shared::queued`]): the stroke's samples in order (those
+/// of several events together, taken as one), and the newest prediction (older ones dropped).
+#[derive(Default)]
+struct QueuedInput {
+    samples: Vec<PenSample>,
+    predicted: Option<Vec<PenSample>>,
 }
 
 impl Shared {
@@ -1713,6 +2040,62 @@ impl Shared {
         let guard = self.state.try_lock().unwrap_or_else(|| self.wait_for(at));
         self.holder.took(at);
         guard
+    }
+
+    /// The lock, if it is free now.
+    #[track_caller]
+    fn try_lock(&self) -> Option<parking_lot::MutexGuard<'_, State>> {
+        let at = std::panic::Location::caller();
+        let guard = self.state.try_lock()?;
+        self.holder.took(at);
+        Some(guard)
+    }
+
+    /// Pen input for later (the canvas held): samples after those waiting, or (`predicted`) where the
+    /// input is predicted to go, in place of any prediction waiting. A frame is asked for, to take it.
+    fn queue_input(&self, samples: Vec<PenSample>, predicted: bool) {
+        let mut queued = self.queued.lock();
+        if predicted {
+            queued.predicted = Some(samples);
+        } else {
+            queued.samples.extend(samples);
+            // (a prediction made before these samples no longer runs ahead of them)
+            queued.predicted = None;
+        }
+        self.input_queued.store(true, std::sync::atomic::Ordering::Release);
+        drop(queued);
+        self.wake.notify_all();
+    }
+
+    /// Whether pen input is waiting for the canvas.
+    pub(crate) fn input_waiting(&self) -> bool {
+        self.input_queued.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Takes the pen input waiting for the canvas (held as `st`): its samples, then its prediction.
+    pub(crate) fn take_queued_input(&self, st: &mut State) {
+        if !self.input_waiting() {
+            return;
+        }
+        let QueuedInput { samples, predicted } = {
+            let mut queued = self.queued.lock();
+            self.input_queued.store(false, std::sync::atomic::Ordering::Release);
+            std::mem::take(&mut *queued)
+        };
+        if !samples.is_empty() {
+            self.add_samples(st, samples);
+        }
+        if let Some(predicted) = predicted {
+            self.predict_samples(st, predicted);
+        }
+    }
+
+    /// Drops the pen input waiting for the canvas (the stroke it was for has gone).
+    fn drop_queued_input(&self) {
+        if self.input_waiting() {
+            *self.queued.lock() = QueuedInput::default();
+            self.input_queued.store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// The lock, for a call at `at` that found it held: a wait past [`held::LONG_WAIT`] goes in
@@ -1767,6 +2150,37 @@ impl Shared {
         }
     }
 
+    /// Waits, the state let go meanwhile, while the frames being drawn lay work a share at a time
+    /// (see [`procraft_gpu::Canvas::lays_over_frames`]), for at most [`FRAMES_LAY_MOST`]: a read
+    /// made beside them from a thread of its own (the Reference window's picture after each
+    /// stroke) started then lays all of that at once, and the app's thread and the frames wait
+    /// behind it (a third of a second after a heavy brush's stroke on a large canvas). With no
+    /// frame drawn in the last [`FRAMES_GONE`] it doesn't wait: no frame would lay it. Never from
+    /// the thread that draws. Whether the frames have nothing more to lay (false: still laying it
+    /// when the wait ran out).
+    pub(crate) fn await_frames_laid(&self) -> bool {
+        let until = std::time::Instant::now() + FRAMES_LAY_MOST;
+        loop {
+            let waiting = self.lock().frames_laying();
+            if !waiting {
+                return true;
+            }
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(4));
+        }
+    }
+
+    /// Whether nothing is under way that a save would cut short ([`State::idle`]) and the frames,
+    /// while they are drawn, have nothing to lay a share at a time (which a render that shows
+    /// nothing, as a save's does, would lay at once, the frames and touches waiting on it). A
+    /// short hold.
+    pub(crate) fn quiet(&self) -> bool {
+        let st = self.lock();
+        st.idle() && !(st.frames_drawn() && st.canvas.as_deref().is_some_and(procraft_gpu::Canvas::lays_over_frames))
+    }
+
     /// The lock, taken once the canvas has finished remaking its caches (made a render at a
     /// time, the lock let go between): what is read under it is the picture as it is, and
     /// nothing waits on a whole remake.
@@ -1794,6 +2208,7 @@ impl Shared {
         }
         st.needs_frame = true;
         self.wake.notify_all();
+        self.nudge.nudge();
     }
 
     /// Creates the canvas once there is a GPU, as [`State::ensure_canvas`] does, but with the
@@ -1840,6 +2255,7 @@ impl Shared {
                 log::error!("canvas: {e}");
                 st.error = Some(e.to_string());
                 st.canvas_failed = true;
+                st.open_mark = None;
             }
         }
     }
@@ -1847,7 +2263,8 @@ impl Shared {
 
 /// What [`canvas_of_opened`] makes: the canvas, each layer's hash as read, and the layers that
 /// couldn't be read (they show empty).
-type MadeCanvas = (Canvas, HashMap<procraft_engine::document::LayerId, u64>, Vec<procraft_engine::document::LayerId>);
+type MadeCanvas =
+    (Box<Canvas>, HashMap<procraft_engine::document::LayerId, u64>, Vec<procraft_engine::document::LayerId>);
 
 /// A canvas for `doc` made with the opened layers `ids` put on it, `opened(i)` giving layer `i`'s
 /// pixels as they were opened (none: the artwork changed meanwhile, and nothing is put). The
@@ -1918,7 +2335,7 @@ fn canvas_of_opened(
         };
         // the canvas made as the first layer comes (its textures take a while, and the next
         // layers are read meanwhile)
-        let mut canvas: Option<Canvas> = None;
+        let mut canvas: Option<Box<Canvas>> = None;
         let mut failed = None;
         let mut hashes = HashMap::new();
         let mut unread = Vec::new();
@@ -1926,7 +2343,8 @@ fn canvas_of_opened(
             let Some(id) = ids.get(i) else { return true };
             if canvas.is_none() {
                 match Canvas::unfilled(gpu, doc) {
-                    Ok(mut c) => {
+                    Ok(c) => {
+                        let mut c = Box::new(c);
                         c.set_resident_budget(budget);
                         canvas = Some(c);
                     }
@@ -1973,7 +2391,7 @@ fn canvas_of_opened(
         let mut c = match canvas {
             Some(c) => c,
             None => {
-                let mut c = Canvas::unfilled(gpu, doc)?;
+                let mut c = Box::new(Canvas::unfilled(gpu, doc)?);
                 c.set_resident_budget(budget);
                 c
             }
@@ -2105,6 +2523,8 @@ impl CanvasSession {
         name: String,
         pixels: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
     ) -> Arc<CanvasSession> {
+        #[cfg(test)]
+        open_marks::tests::while_building();
         device::start_log();
         let shipped = stock_library::shipped();
         let shelf = brush_library::LibrarySet::shipped(&shipped);
@@ -2190,6 +2610,7 @@ impl CanvasSession {
             sliders: HashMap::new(),
             strokes: 0,
             preview: None,
+            drawn_previews: Default::default(),
             color: [0.0, 0.0, 0.0],
             fill_opacity: 1.0,
             stroke_fill: None,
@@ -2208,13 +2629,20 @@ impl CanvasSession {
             holding_frames: false,
             frame_held: false,
             stop: false,
+            hidden: false,
             projection_size: (1, 1),
             projection_stop: false,
             frames: 0,
+            frame_drawn_at: None,
+            lapse_wanted: None,
+            lapse_keeper: crate::timelapse::FrameKeeper::default(),
             pad_strokes: None,
             airbrush: None,
             ahead: false,
+            ahead_of: Vec::new(),
             predicting: false,
+            pressing: pressure::Pressing::default(),
+            filling: None,
             engine_asking: plugin_brushes::Asking::default(),
             grain_store: grain_store::GrainStore::default(),
             library_kept: None,
@@ -2233,7 +2661,13 @@ impl CanvasSession {
             timeline_copied: None,
             timeline_solo: None,
             plugin_look: None,
+            plugin_dim: 0.0,
             plugin_paper: None,
+            plugin_sets: None,
+            brushes_dir: None,
+            paper_picture: None,
+            plugin_surround: None,
+            surround_picture: None,
             plugin_values: std::collections::BTreeMap::new(),
             more_references: Vec::new(),
             reference_canvas: None,
@@ -2268,10 +2702,13 @@ impl CanvasSession {
             selection_before: None,
             colour_source: None,
             feather_base: None,
+            feather_edge: false,
+            selection_outlines: Vec::new(),
             adjusting: false,
             adjust: adjusting::Adjusting::default(),
             adjust_layer: None,
             filters: plugin_filter::Filters::default(),
+            filter_layers: filter_layers::FilterLayers::default(),
             crop_edit: crop_edit::CropEdit::default(),
             last_filter: None,
             liquify: liquify::LiquifyRun::default(),
@@ -2304,10 +2741,12 @@ impl CanvasSession {
             name,
             pending_pixels: project::opened(pixels),
             canvas_failed: false,
+            open_mark: None,
             unreadable: std::collections::HashSet::new(),
             unreadable_untold: Vec::new(),
             closed: false,
             fit_insets: [0.0; 4],
+            room_insets: [0.0; 4],
             backdrops: Vec::new(),
             backdrop_windows: Vec::new(),
             turns: 0,
@@ -2329,9 +2768,19 @@ impl CanvasSession {
                 edits_saved: std::sync::atomic::AtomicU64::new(project::NOT_SAVED),
                 export_progress: std::sync::atomic::AtomicU32::new(0),
                 save_failure: Mutex::new((None, false)),
+                found_full: std::sync::atomic::AtomicBool::new(false),
                 touches: Mutex::new(touch::Touches::default()),
                 pad_sync: Mutex::new(studio::PadSync::default()),
+                studio_previews: std::sync::atomic::AtomicU64::new(0),
                 holder: held::Holder::default(),
+                counts: activity::Counts::default(),
+                nudge: Arc::new(activity::Nudge::default()),
+                queued: parking_lot::Mutex::new(QueuedInput::default()),
+                input_queued: std::sync::atomic::AtomicBool::new(false),
+                cursor: cursor_turn::CursorTurns::default(),
+                lands_on: pour::LandsOn::default(),
+                _alive: activity::Alive::new(),
+                folders: Mutex::new(None),
             }),
         })
     }
@@ -2414,8 +2863,22 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         // on a timeline, painting where the track has no drawing makes one
         self.drawing_for_stroke();
+        // the brush's pictures still to be drawn (it was chosen just now) drawn before the canvas is
+        // held, so that the frames go on meanwhile
+        let pictures = {
+            let st = self.shared.lock();
+            let tool = if pointer == PointerKind::StylusEraser { ToolKind::Erase } else { st.tool };
+            crate::brushes::pictures_to_draw(st.brush(tool))
+        };
+        crate::brushes::draw_these(&pictures);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        self.shared.forget_painted_turn();
+        // (input left waiting by a stroke that has gone is for no stroke now)
+        self.shared.drop_queued_input();
+        // pressed as plugins say, before anything takes them
+        let mut samples = samples;
+        st.press(Some(pointer), &mut samples);
         // a plugin's own artwork takes its strokes itself
         if st.plugin_touch(plugin_artwork::Phase::Down, &samples) {
             self.shared.frame(st);
@@ -2462,7 +2925,10 @@ impl CanvasSession {
             || st.plugin_layer_off(current)
             || st.doc.unseen(current).is_some()
             || st.doc.layer(current).is_none_or(|l| {
-                l.kind == procraft_engine::document::LayerKind::Group || l.text.is_some() || l.is_adjustment()
+                l.kind == procraft_engine::document::LayerKind::Group
+                    || l.text.is_some()
+                    || l.is_adjustment()
+                    || l.filter.is_some()
             })
         {
             return;
@@ -2489,14 +2955,26 @@ impl CanvasSession {
             }
             return;
         }
-        let (brush, style, diameter) = st.stroke_brush(tool, current);
-        let second = st.second_brush(tool, current, &brush, &style);
+            let (brush, mut style, diameter) = st.stroke_brush(tool, current);
+            // one a plugin says fills what it encloses is laid as a plain stroke's paint, alone, at
+            // the brush's opacity times the slider's (not on a vector layer, which keeps its strokes)
+            let fill = st.fill_asked(tool, pointer, current).filter(|_| !vector);
+            if fill.is_some() {
+                style = style.as_fill();
+                style.opacity = st.brush(tool).opacity(st.sliders(tool).opacity);
+            }
+            let second = st.second_brush(tool, current, &brush, &style).filter(|_| fill.is_none());
         let diameter = diameter * st.brush_scale();
         st.strokes = st.strokes.wrapping_add(1);
         // the tool's brush is one of the Recent set's now (unless pinned there)
         st.note_recent(st.brush_ref(tool));
         st.info.strokes = st.info.strokes.saturating_add(1);
         let seed = st.strokes.wrapping_mul(0x9e37_79b9);
+        // a fill whose brush starts its grain somewhere new each stroke (Offset jitter) starts it
+        // at a place of this stroke's own
+        if fill.is_some() && brush.setting("grain_offset_jitter") >= 0.5 {
+            style.grain_start = grain_start(seed);
+        }
         // input read in whole pixels is evened out over the steps a slow line goes in, which keeps
         // what is laid for good a stretch behind the pen: only for a stroke the canvas shows on to
         // the pen meanwhile (its tip), not for paint laid in place (a smudge, wet paint) or a dual
@@ -2518,7 +2996,8 @@ impl CanvasSession {
         };
         let make = |st: &State, setup: &procraft_engine::vector::Setup| {
             let preview_tilt = setup.brush.setting("preview_tilt") >= 0.5;
-            let mut builder = setup.builder();
+                let builder = setup.builder().on_canvas_made_turned(st.doc.made_turns);
+                let mut builder = st.pressing.applied(builder, st.canvas_per_point());
             if let Some(zoom) = whole_pixels {
                 builder = builder.read_in_whole_pixels(zoom);
             }
@@ -2543,8 +3022,11 @@ impl CanvasSession {
         // are laid and its second stroke are the engine's (not on a vector layer, whose strokes are
         // drawn again from what is kept of them, by the app's own engine)
         let first = st.to_canvas(samples.get(..1).unwrap_or_default()).first().map(|s| (s.pos.x, s.pos.y));
-        let outside =
-            if vector { None } else { st.outside_stroke(&brush, tool, current, pointer, diameter, seed, first) };
+            let outside = if vector || fill.is_some() {
+                None
+            } else {
+                st.outside_stroke(&brush, tool, current, pointer, diameter, seed, first)
+            };
         st.airbrush = outside.as_ref().and_then(|o| o.airbrush).zip(samples.last()).map(|(ms, last)| {
             let every = f64::from(ms) * 0.5;
             (every, *last, last.time_ms + every)
@@ -2583,10 +3065,18 @@ impl CanvasSession {
         st.last_stroke = None;
         st.kept_shape = None;
         st.unkept_shape = None;
+        // a dual brush's second, to draw again with it (not a brush engine's, which draws its own)
+        let second_again = match (&laid, &second, &second_builder) {
+            (None, Some((_, stroke, _)), Some(fresh)) => {
+                Some(quickshape::SecondAgain { stroke: *stroke, fresh: fresh.clone() })
+            }
+            _ => None,
+        };
         // (a stroke kept as a stroke isn't made a shape: what is kept of it would no longer be
         // what it drew)
-        st.began = (matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) && !vector).then(|| {
-            quickshape::LastStroke {
+            st.began = (matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) && fill.is_none() && !vector)
+                .then(|| {
+                    Box::new(quickshape::LastStroke {
                 layer: current,
                 // as it was laid: a brush engine's, its tips
                 style: laid.as_ref().map_or(style, |(laid, _)| *laid),
@@ -2596,14 +3086,20 @@ impl CanvasSession {
                 drawn: Vec::new(),
                 pace: quickshape::SAMPLE_PACE,
                 stroke: 0,
-                fresh: second.is_none().then(|| builder.clone()),
+                fresh: (second.is_none() || second_again.is_some()).then(|| builder.clone()),
+                second: second_again,
                 samples: Vec::new(),
                 line: builder.clone(),
                 seed,
-            }
+            })
         });
         // zoomed in with vector layers showing, the stroke is drawn on the sharp picture as well
         let sharp = st.pad_strokes.is_none() && st.crisp_stroke_begin(current, tool, &brush, style, second.as_ref());
+        // a fill's path goes on with the stroke's
+        match fill {
+            Some(shown) => st.begin_fill(shown, &builder, &canvas_samples),
+            None => st.filling = None,
+        }
         let Some(canvas) = st.canvas.as_mut() else { return };
         // a kept stroke's pixels and what is kept of it are one undo step, made from here
         if vector {
@@ -2624,73 +3120,65 @@ impl CanvasSession {
         let shown = st.stroke_shown();
         let Some(canvas) = st.canvas.as_mut() else { return };
         canvas.set_stroke_shown(shown);
-        draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &st.doc.stroke_guide(), false);
-        st.stroke = Some(builder);
-        st.second = second_builder;
+        canvas.brush_across(diameter);
+        // paint laid in place lays its stamps for good as they come: those its start taper changes
+        // are laid once they no longer change, so that its end lays again only what that changes
+        if style.paints_in_place() && !canvas.shows_tip() && !canvas.is_pencil() {
+            builder.hold_start();
+            if let Some(second) = second_builder.as_mut() {
+                second.hold_start();
+            }
+        }
+        // and so does a stroke shown with a tip whose start taper doesn't show in one (a classic
+        // one, eased over the points around), those held back shown in its tip meanwhile: its end
+        // laid all of it again, for a big brush a tenth of a second or more
+        if canvas.shows_tip() && !builder.shows_tip() {
+            builder.hold_start();
+        }
+        // (paint laid in place keeps marks to go back to only if its end may lay it again)
+        canvas.may_lay_again(builder.end_may_change_laid());
+        // (and a dual brush's second keeps marks to go back to only if its end may lay it again)
+        if let Some(second) = second_builder.as_ref() {
+            canvas.second_may_lay_again(second.end_may_change_laid());
+        }
+        // (a fill shown as it grows lays no stamps: the next frame shows its region)
+        if fill != Some(lasso_fill::FillShown::Growing) {
+            draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &st.doc.stroke_guide(), false);
+        }
+        st.stroke = Some(Box::new(builder));
+        st.second = second_builder.map(Box::new);
         st.ahead = false;
+        st.ahead_of.clear();
+        self.shared.note_painted_turn(st);
         self.shared.frame(st);
     }
 
-    /// More input for the stroke (including the samples batched in between).
+    /// More input for the stroke (including the samples batched in between). While something holds
+    /// the canvas (a frame laying a stroke's paint, which on a slow GPU takes a while) the samples
+    /// wait in a queue of their own, taken all together by the next frame or the next input: the
+    /// pen is never held up by the GPU's work, nor does each event's work pile up behind it.
     pub fn stroke_add(&self, samples: Vec<PenSample>) {
-        let mut guard = self.shared.lock();
+        let Some(mut guard) = self.shared.try_lock() else {
+            self.shared.queue_input(samples, false);
+            return;
+        };
         let st = &mut *guard;
-        if st.plugin_touch(plugin_artwork::Phase::Moved, &samples) {
-            self.shared.frame(st);
+        let samples = self.shared.with_queued(samples);
+        self.shared.add_samples(st, samples);
+    }
+
+    /// Where the input is predicted to go next: drawn ahead of the stroke until the next input,
+    /// never kept. Waiting for the canvas, only the newest is kept (see
+    /// [`CanvasSession::stroke_add`]).
+    pub fn stroke_predict(&self, samples: Vec<PenSample>) {
+        let samples = self.pen_predicted(samples);
+        let Some(mut guard) = self.shared.try_lock() else {
+            self.shared.queue_input(samples, true);
             return;
-        }
-        if st.plugin_stepping > 0 {
-            return;
-        }
-        if st.scene_shown() {
-            st.scene_stroke_add(&samples, false);
-            self.shared.frame(st);
-            return;
-        }
-        if let Some(took) = st.vector_erase_on(&samples) {
-            if took {
-                self.shared.frame(st);
-            }
-            return;
-        }
-        st.keep_pad_input(&samples);
-        if let (Some(airbrush), Some(last)) = (st.airbrush.as_mut(), samples.last()) {
-            airbrush.1 = *last;
-        }
-        let canvas_samples = st.assisted(st.to_canvas(&samples));
-        // a snapped shape turns and grows with the pen still holding it
-        if st.shape.is_some() {
-            if let Some(to) = canvas_samples.iter().rev().find(|s| s.is_finite()).map(|s| s.pos)
-                && st.follow_shape(to)
-            {
-                self.shared.frame(st);
-            }
-            return;
-        }
-        st.remember_input(&canvas_samples);
-        if st.stroke.is_some() {
-            st.vector_record(&canvas_samples);
-        }
-        st.read_finer(&samples);
-        if let Some(recording) = st.recording.as_mut().filter(|_| st.stroke.is_some()) {
-            recording.add(&canvas_samples);
-        }
-        // (how strongly it shows while drawn follows a plugin's control as it moves)
-        let shown = if st.stroke.is_some() { st.stroke_shown() } else { 1.0 };
-        // a brush engine told the colours under the dabs it asked about before its next samples
-        st.tell_under();
-        let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
-        canvas.set_stroke_shown(shown);
-        // while the platform predicts input, what runs ahead waits for the frame (its prediction
-        // follows these samples): on to the input, until a prediction comes
-        let later = st.predicting;
-        if draw_samples(canvas, builder, st.second.as_mut(), &canvas_samples, &st.doc.stroke_guide(), later) {
-            st.ahead = later;
-            // Lasso Fill's Outline: what it goes round shown filled under it as it goes
-            st.preview_stroke_fill(&[]);
-            st.redraw_painted_on();
-            self.shared.frame(st);
-        }
+        };
+        let st = &mut *guard;
+        self.shared.take_queued_input(st);
+        self.shared.predict_samples(st, samples);
     }
 
     /// Input that comes in pieces shown as one: while held (`hold`), no frame is drawn, and one
@@ -2712,46 +3200,131 @@ impl CanvasSession {
         // (a frame waiting on the hold goes on, changed or not)
         self.shared.wake.notify_all();
     }
+}
 
-    /// Where the input is predicted to go next: drawn ahead of the stroke until the next input,
-    /// never kept.
-    pub fn stroke_predict(&self, samples: Vec<PenSample>) {
-        let samples = self.pen_predicted(samples);
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
+impl Shared {
+    /// `samples` after the samples waiting for the canvas (taken with them, their prediction
+    /// dropped).
+    fn with_queued(&self, samples: Vec<PenSample>) -> Vec<PenSample> {
+        if !self.input_waiting() {
+            return samples;
+        }
+        let mut queued = self.queued.lock();
+        self.input_queued.store(false, std::sync::atomic::Ordering::Release);
+        let mut all = std::mem::take(&mut queued.samples);
+        queued.predicted = None;
+        all.extend(samples);
+        all
+    }
+
+    /// More input for the stroke, the canvas held (see [`CanvasSession::stroke_add`]).
+    fn add_samples(&self, st: &mut State, samples: Vec<PenSample>) {
+        let mut samples = samples;
+        st.press(None, &mut samples);
+        if st.plugin_touch(plugin_artwork::Phase::Moved, &samples) {
+            self.frame(st);
+            return;
+        }
+        if st.plugin_stepping > 0 {
+            return;
+        }
+        if st.scene_shown() {
+            st.scene_stroke_add(&samples, false);
+            self.frame(st);
+            return;
+        }
+        if let Some(took) = st.vector_erase_on(&samples) {
+            if took {
+                self.frame(st);
+            }
+            return;
+        }
+        st.keep_pad_input(&samples);
+        if let (Some(airbrush), Some(last)) = (st.airbrush.as_mut(), samples.last()) {
+            airbrush.1 = *last;
+        }
+        let canvas_samples = st.assisted(st.to_canvas(&samples));
+        // a snapped shape turns and grows with the pen still holding it
+        if st.shape.is_some() {
+            if let Some(to) = canvas_samples.iter().rev().find(|s| s.is_finite()).map(|s| s.pos)
+                && st.follow_shape(to)
+            {
+                self.frame(st);
+            }
+            return;
+        }
+        st.remember_input(&canvas_samples);
+        if st.stroke.is_some() {
+            st.vector_record(&canvas_samples);
+        }
+        st.read_finer(&samples);
+        if let Some(recording) = st.recording.as_mut().filter(|_| st.stroke.is_some()) {
+            recording.add(&canvas_samples);
+        }
+        // (how strongly it shows while drawn follows a plugin's control as it moves)
+        let shown = if st.stroke.is_some() { st.stroke_shown() } else { 1.0 };
+        // a brush engine told the colours under the dabs it asked about before its next samples
+        st.tell_under();
+        // a fill shown as it grows: the next frame shows its region
+        if st.fill_add(&canvas_samples) {
+            self.frame(st);
+            return;
+        }
+        let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
+        canvas.set_stroke_shown(shown);
+        // while the platform predicts input, what runs ahead waits for the frame (its prediction
+        // follows these samples): on to the input, until a prediction comes
+        let later = st.predicting;
+        if draw_samples(canvas, builder, st.second.as_deref_mut(), &canvas_samples, &st.doc.stroke_guide(), later) {
+            st.ahead = later;
+            // Lasso Fill's Outline: what it goes round shown filled under it as it goes
+            st.preview_stroke_fill(&[]);
+            // (a prediction made before these samples no longer runs ahead of them)
+            st.ahead_of.clear();
+            st.redraw_painted_on();
+            self.frame(st);
+        }
+        self.note_painted_turn(st);
+    }
+
+    /// Where the input is predicted to go next, the canvas held (see
+    /// [`CanvasSession::stroke_predict`]).
+    fn predict_samples(&self, st: &mut State, samples: Vec<PenSample>) {
+        let mut samples = samples;
+        st.press_predicted(&mut samples);
         if st.scene_shown() {
             return;
         }
-        // a snapped shape is drawn whole: nothing runs ahead of it
-        if st.shape.is_some() {
+        // a snapped shape is drawn whole: nothing runs ahead of it, nor of a fill as it grows
+        if st.shape.is_some() || st.filling.as_ref().is_some_and(|f| f.shown == lasso_fill::FillShown::Growing) {
             return;
         }
         let canvas_samples = st.to_canvas(&samples);
-        // (what the samples before left to run ahead is drawn again here)
         st.predicting = !canvas_samples.is_empty();
-        st.ahead = false;
-        let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
-        let guide = st.doc.stroke_guide();
-        // a dual brush's second runs ahead with it
-        let second_tip = st.second.as_mut().and_then(|second| second_ahead(canvas, second, &canvas_samples, &guide));
-        // a stroke shown with its tip ends it where the input is predicted to go
-        if canvas.shows_tip() && builder.shows_tip() {
-            canvas.set_tip(&guide::mirrored(&guide, &builder.preview_tip(&canvas_samples)));
-        } else {
-            show_ahead(canvas, builder, &canvas_samples, &guide);
+        if st.stroke.is_none() || st.canvas.is_none() {
+            return;
         }
-        if let Some(second_tip) = &second_tip {
-            canvas.set_second_tip(second_tip);
-        }
-        // Lasso Fill's Outline reaches on with it
-        st.preview_stroke_fill(&canvas_samples);
-        self.shared.frame(st);
+            // Lasso Fill's Outline reaches on with it
+            st.preview_stroke_fill(&canvas_samples);
+        // what runs ahead is worked out at the next frame, on to the newest prediction (and what
+        // the samples before left to run ahead with it): a pen's events come faster than frames
+        st.ahead_of = canvas_samples;
+        st.ahead = true;
+        self.frame(st);
     }
+}
 
+#[uniffi::export]
+impl CanvasSession {
     /// The stroke ends (the pen or finger lifted) after `samples`.
     pub fn stroke_end(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        self.shared.forget_painted_turn();
+        // (the input waiting for the canvas came before)
+        self.shared.take_queued_input(st);
+        let mut samples = samples;
+        st.press(None, &mut samples);
         st.airbrush = None;
         if st.plugin_touch(plugin_artwork::Phase::Up, &samples) {
             self.shared.frame(st);
@@ -2797,16 +3370,20 @@ impl CanvasSession {
         st.engine_asking = plugin_brushes::Asking::default();
         st.read_finer(&samples);
         st.ahead = false;
-        let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
-        let mut second = st.second.take();
-        lift_samples(canvas, &mut builder, second.as_mut(), &canvas_samples, &st.doc.stroke_guide());
-        match st.recording.take() {
-            // on a plugin's layer, handed to the plugin
-            Some(mut recording) => {
-                recording.lift(&canvas_samples);
-                st.end_recorded(recording, builder, second);
+        st.ahead_of.clear();
+        // a stroke filling what it encloses fills it
+        if !st.end_fill(&canvas_samples) {
+            let (Some(mut builder), Some(canvas)) = (st.stroke.take().map(|b| *b), st.canvas.as_mut()) else { return };
+            let mut second = st.second.take().map(|b| *b);
+            lift_samples(canvas, &mut builder, second.as_mut(), &canvas_samples, &st.doc.stroke_guide());
+            match st.recording.take() {
+                // on a plugin's layer, handed to the plugin
+                Some(mut recording) => {
+                    recording.lift(&canvas_samples);
+                    st.end_recorded(recording, builder, second);
+                }
+                None => st.close_painted(builder, second),
             }
-            None => st.close_painted(builder, second),
         }
         st.vector_keep();
         st.redraw_painted_on();
@@ -2826,6 +3403,8 @@ impl CanvasSession {
     pub fn stroke_cancel(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        self.shared.forget_painted_turn();
+        self.shared.drop_queued_input();
         st.airbrush = None;
         if st.plugin_touch(plugin_artwork::Phase::Off, &[]) {
             self.shared.frame(st);
@@ -2841,6 +3420,7 @@ impl CanvasSession {
         }
         st.stroke = None;
         st.ahead = false;
+        st.ahead_of.clear();
         st.second = None;
         st.shape = None;
         st.began = None;
@@ -2848,6 +3428,7 @@ impl CanvasSession {
         st.vector_open = None;
         st.vector_erase_cancel();
         st.recording = None;
+        st.filling = None;
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.cancel_stroke();
             // what it painted on is in the adjustment's mask: start that again
@@ -2902,6 +3483,27 @@ impl CanvasSession {
     /// no more often than that (a little more, so none is missed), however fast input comes.
     pub fn set_refresh_rate(&self, hertz: f32) {
         self.shared.lock().frame_spacing = crate::frame::frame_spacing(hertz);
+    }
+
+    /// The app shows (`shown`), or has gone away (into the background, its window out of sight):
+    /// while away nothing is drawn, even if the window lingers, and the autosave rests (the app
+    /// saves as it goes); shown again, a frame is drawn at once.
+    pub fn set_shown(&self, shown: bool) {
+        let mut st = self.shared.lock();
+        if st.hidden == !shown {
+            return;
+        }
+        st.hidden = !shown;
+        if shown {
+            self.shared.frame(&mut st);
+        }
+    }
+
+    /// What the session has done by itself since it began: frames drawn, the render thread's
+    /// wakeups and retries, and the autosave's looks for changes. Unchanged over a time nothing
+    /// changed on screen, or the app was away, means it did nothing meanwhile.
+    pub fn activity(&self) -> Activity {
+        self.shared.counts.now()
     }
 
     /// How many window pixels make one interface point (the screen's density).
@@ -3153,6 +3755,34 @@ impl CanvasSession {
         self.shared.lock().fit_insets = [left, top, right, bottom];
     }
 
+    /// What the panels docked against the window's edges take from the drawing area from now on
+    /// (left, top, right, bottom, window pixels; see [`crate::PanelLayout::canvas_insets`]): fitting
+    /// keeps clear of it as of the fit insets, and as it changes the canvas goes with the drawing
+    /// area, moved by half the change of each side so that what was in its middle stays in its
+    /// middle; a canvas fitted as it was is fitted again. All 0, as with no plugin docking panels,
+    /// changes nothing.
+    pub fn set_room_insets(&self, left: f32, top: f32, right: f32, bottom: f32) {
+        let mut st = self.shared.lock();
+        let now = [left, top, right, bottom].map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 });
+        if st.room_insets == now {
+            return;
+        }
+        let before = st.kept_clear();
+        let fitted = st.view.is_some_and(|v| views_alike(&v, &st.fitted_view()));
+        st.room_insets = now;
+        let after = st.kept_clear();
+        let Some(view) = st.view else { return };
+        st.view_motion = None;
+        st.view = Some(if fitted {
+            st.fitted_view()
+        } else {
+            let dx = ((after[0] - before[0]) - (after[2] - before[2])) / 2.0;
+            let dy = ((after[1] - before[1]) - (after[3] - before[3])) / 2.0;
+            View::from_affine(view.to_screen().then(procraft_engine::geom::Affine::translate(Vec2::new(dx, dy))))
+        });
+        self.shared.frame(&mut st);
+    }
+
     /// Lets go of the canvas and everything it holds, on the GPU and off it (its layers, parked
     /// or not, and a model's), once the artwork is saved and left: a large artwork's memory is
     /// free at once rather than whenever this object is collected. Nothing is drawn after.
@@ -3168,6 +3798,21 @@ impl CanvasSession {
     /// at, and the gallery shows it at) follows its canvas's; off, it stays as it is. On at first.
     pub fn set_orientation_memory(&self, on: bool) {
         self.shared.lock().turns_follow_view = on;
+    }
+
+    /// A new artwork's canvas was made with the screen turned `turns` quarter turns clockwise from
+    /// upright (held as a portrait screen is): one made with the screen on its side lays its
+    /// brushes' shapes and moving grains as the upright screen would, turned with it (see
+    /// `Document::made_turns`). Told as it is made, before anything is drawn.
+    pub fn made_with_screen_turned(&self, turns: u32) {
+        let mut st = self.shared.lock();
+        st.doc.made_turns = u8::try_from(turns % 4).unwrap_or(0);
+    }
+
+    /// How far (quarter turns clockwise) the screen was turned from upright when the artwork's
+    /// canvas was made (see [`CanvasSession::made_with_screen_turned`]).
+    pub fn made_turns(&self) -> u32 {
+        u32::from(self.shared.lock().doc.made_turns)
     }
 
     /// How many quarter turns clockwise the gallery shows the artwork turned by, as it would be
@@ -3198,6 +3843,7 @@ impl CanvasSession {
         }
         st.tool = tool;
         crate::brushes::warm_pictures([st.brush(tool)]);
+        st.load_brush_pictures();
     }
 
     /// What the light tool does, and how strongly (strength kept to 0..1).
@@ -3317,7 +3963,7 @@ impl CanvasSession {
         // cloning, the source goes back to where it was before the stroke
         self.shared.lock().adjust.puck_step(true);
         self.edit(Canvas::undo);
-        self.shared.lock().canvas.as_ref().and_then(Canvas::redo_name)
+        self.shared.lock().canvas.as_deref().and_then(Canvas::redo_name)
     }
 
     /// Redoes the last step undone; returns what it was called, if it was named.
@@ -3367,7 +4013,7 @@ impl CanvasSession {
     fn redo_step(&self) -> Option<String> {
         self.shared.lock().adjust.puck_step(false);
         self.edit(Canvas::redo);
-        self.shared.lock().canvas.as_ref().and_then(Canvas::undo_name)
+        self.shared.lock().canvas.as_deref().and_then(Canvas::undo_name)
     }
 
     pub fn clear_layer(&self) {
@@ -3444,7 +4090,7 @@ impl CanvasSession {
             // Liquify open: its first step undone closes it
             can_undo: st.plugin_steps().is_some_and(|(undo, _)| undo)
                 || st.liquify_open()
-                || st.canvas.as_ref().is_some_and(Canvas::can_undo)
+                || st.canvas.as_deref().is_some_and(Canvas::can_undo)
                 || st.crop_undo.is_some()
                 || st.shape.is_some()
                 || st.adjust.touched()
@@ -3455,9 +4101,9 @@ impl CanvasSession {
             can_redo: if st.liquify_open() {
                 st.liquify_can_redo()
             } else {
-                st.shape.as_ref().map_or_else(
+                st.shape.as_deref().map_or_else(
                     || {
-                        st.canvas.as_ref().is_some_and(Canvas::can_redo)
+                        st.canvas.as_deref().is_some_and(Canvas::can_redo)
                             || st.crop_redo_ready()
                             || st.shape_to_redo()
                             || st.liquify_redo_ready()
@@ -3516,5 +4162,24 @@ impl CanvasSession {
 impl Drop for CanvasSession {
     fn drop(&mut self) {
         self.detach_window();
+        // a second display's thread too: it holds the state, which would stay with it, drawing
+        self.detach_projection();
+        // the autosave's thread, waiting for a change, ends
+        self.shared.nudge.close();
     }
+}
+
+/// A place for a stroke's grain fixed to the canvas to start at, in tiles each way (0 to 1), of the
+/// stroke's `seed`: spread evenly over the tile by the seed's bits.
+pub(crate) fn grain_start(seed: u32) -> [f32; 2] {
+    let mix = |mut x: u32| {
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7feb_352d);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846c_a68b);
+        x ^ (x >> 16)
+    };
+    let a = mix(seed);
+    let b = mix(a ^ 0x9e37_79b9);
+    [(a >> 8) as f32 / (1 << 24) as f32, (b >> 8) as f32 / (1 << 24) as f32]
 }

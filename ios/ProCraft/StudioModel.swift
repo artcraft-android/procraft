@@ -62,6 +62,18 @@ final class StudioModel {
     /// The colour the pad paints in, a place in `padColors`.
     private(set) var padColor = padWhite
 
+    /// The brush is a dual brush, and its second part shows.
+    private(set) var dual = false
+    private(set) var second = false
+    /// Its two parts' sample strokes, the first's then the second's.
+    private(set) var parts: [UIImage?] = [nil, nil]
+    /// How the two parts combine, by the engine's number for the mode.
+    private(set) var combineMode = 0
+    /// The parts open as cards, Combine Mode between (the part shown tapped again).
+    var partsOpen = false
+    /// Uncombine is being asked.
+    var uncombineAsking = false
+
     /// The drawing pad's canvas, while the studio is open and the pad has been laid out.
     @ObservationIgnored private(set) var pad: CanvasSession?
     /// The pad is shown as a sphere with the brush's materials.
@@ -69,21 +81,14 @@ final class StudioModel {
     /// The studio is open on a brush just made: cancelling throws it away.
     @ObservationIgnored var brandNew = false
     @ObservationIgnored private var previewJob: DispatchWorkItem?
-
-    /// The brush is a dual brush, and its second part shows.
-    private(set) var isDual = false
-    private(set) var showsSecond = false
-    /// Its two parts' sample strokes, and how they combine (a mode of `combineModes`).
-    private(set) var parts: [UIImage?] = [nil, nil]
-    private(set) var combineMode = 0
+    @ObservationIgnored private var partsJob: DispatchWorkItem?
     /// The page the part not shown was left on.
     @ObservationIgnored private var otherPartTab = 0
-    @ObservationIgnored private var partsJob: DispatchWorkItem?
 
-    /// The modes a brush and its burnt edges blend by, and those a brush's grain does.
+    /// The modes a brush and its burnt edges blend by, those a brush's grain does, and those a dual
+    /// brush's two parts combine by.
     @ObservationIgnored let brushModes = brushBlendModes()
     @ObservationIgnored let grainModes = grainBlendModes()
-    /// The modes a dual brush's two parts combine by.
     @ObservationIgnored let combineModes = combineBlendModes()
 
     init(model: CanvasModel) {
@@ -99,12 +104,17 @@ final class StudioModel {
     /// Opens on the current tool's brush. The brush library stays open under it, so Cancel and Done
     /// go back to it.
     func open() {
+        // a brush a plugin's brush engine draws opens in that plugin's own studio
+        if let action = session.brushStudioAction() {
+            model.runPluginAction(action)
+            return
+        }
         if model.panel != .brushes {
             model.closePanels()
         }
         name = session.studioBegin()
-        isDual = session.studioIsDual()
-        showsSecond = false
+        dual = session.studioIsDual()
+        second = false
         otherPartTab = 0
         parts = [nil, nil]
         combineMode = Int(session.studioCombineMode())
@@ -117,8 +127,7 @@ final class StudioModel {
     }
 
     private func read() {
-        // and the rows the plugins that are on add (a brush's own sound), kept with each brush
-        let keys = studioKeys + pluginBrushControls().map(\.key)
+        let keys = studioKeys + pluginControls.map(\.key)
         for (key, value) in zip(keys, session.studioSettings(keys: keys)) {
             values[key] = value
         }
@@ -142,6 +151,16 @@ final class StudioModel {
         padShown = false
         padMenuOpen = false
         sourceEditing = nil
+        // the next visit opens on the first part's page
+        if second {
+            AppSettings.shared.studioTab = otherPartTab
+        }
+        dual = false
+        second = false
+        partsOpen = false
+        uncombineAsking = false
+        partsJob?.cancel()
+        parts = [nil, nil]
         // the pad's canvas goes with the studio
         pad?.detachWindow()
         pad = nil
@@ -187,12 +206,18 @@ final class StudioModel {
         syncPad()
     }
 
-    /// Every control back to how the brush ships.
-    func reset() {
-        session.studioReset()
-        read()
-        syncPad()
-        padMenuOpen = false
+    // MARK: what plugins add
+
+    /// The rows the plugins that are on add to the studio's Properties, kept with each brush.
+    var pluginControls: [PluginBrushControl] {
+        PluginsModel.shared.plugins.filter { $0.on && $0.problem == nil }.flatMap(\.brushControls)
+    }
+
+    /// Whether a plugin sets brushes at random: the studio shows Randomise.
+    var randomises: Bool {
+        // asked again as the plugins change
+        _ = PluginsModel.shared.changes
+        return PluginsModel.shared.store.randomisesBrushes()
     }
 
     /// The brush set at random, as a plugin says.
@@ -201,6 +226,15 @@ final class StudioModel {
         read()
         syncPad()
     }
+
+    /// Every control back to how the brush ships.
+    func reset() {
+        session.studioReset()
+        read()
+        syncPad()
+        padMenuOpen = false
+    }
+
 
     /// Asks first, then resets: it can't be undone.
     func askReset() {
@@ -226,22 +260,17 @@ final class StudioModel {
         readAbout()
     }
 
-    private func readAbout() {
-        let a = session.studioAbout()
-        about = BrushAbout(
-            author: a.author,
-            picture: a.picture.flatMap { UIImage(data: $0) },
-            signature: a.signature.flatMap { UIImage(data: $0) },
-            resetMade: a.resetMade
-        )
+    /// Names the brush as it is typed: Done keeps the name, Cancel puts the old one back.
+    func rename(_ typed: String) {
+        name = session.setStudioName(name: typed)
     }
 
     // MARK: a dual brush's parts
 
     /// Shows a dual brush's first or `second` part, each on the page it was left on.
     func showPart(second: Bool) {
-        guard isDual, second != showsSecond else { return }
-        showsSecond = second
+        guard dual, second != self.second else { return }
+        self.second = second
         session.studioShowSecond(second: second)
         let settings = AppSettings.shared
         let left = settings.studioTab
@@ -250,24 +279,16 @@ final class StudioModel {
         read()
     }
 
-    func changeCombineMode(_ mode: Int) {
-        session.setStudioCombineMode(mode: UInt32(mode))
+    func setCombineMode(_ mode: Int) {
+        session.setStudioCombineMode(mode: UInt32(max(mode, 0)))
         combineMode = mode
         refreshPreview()
         syncPad()
     }
 
-    /// Asks first, then parts the dual brush into its two brushes: the studio closes keeping its
-    /// edits, and the second follows the first in the set.
-    func askUncombine() {
-        model.question = Question(
-            title: "Uncombine these brushes?",
-            message: "The pair becomes two brushes again, side by side in the set. It can't be undone.",
-            action: "Uncombine", icon: PcIcons.alertQuestion, destructive: false
-        ) { [weak self] in self?.uncombine() }
-    }
-
-    private func uncombine() {
+    /// The dual brush parted into its two brushes: the studio closes keeping its edits, and the
+    /// second follows the first in the set.
+    func uncombine() {
         guard let b = model.currentBrush else { return }
         close(keep: true)
         if session.uncombineBrush(set: b.set, index: b.index) {
@@ -277,7 +298,7 @@ final class StudioModel {
 
     /// Draws the parts' sample strokes again, a moment after the last change.
     private func refreshParts() {
-        guard isDual else { return }
+        guard dual else { return }
         partsJob?.cancel()
         let session = session
         let job = DispatchWorkItem { [weak self] in
@@ -286,13 +307,23 @@ final class StudioModel {
                     session.studioPartPreview(second: second, width: 680, height: 222).flatMap { CanvasModel.image($0) }
                 }
                 DispatchQueue.main.async {
-                    guard let self, self.isOpen else { return }
+                    guard let self, self.isOpen, self.dual else { return }
                     self.parts = made
                 }
             }
         }
         partsJob = job
         DispatchQueue.main.asyncAfter(deadline: .now() + previewDelay, execute: job)
+    }
+
+    private func readAbout() {
+        let a = session.studioAbout()
+        about = BrushAbout(
+            author: a.author,
+            picture: a.picture.flatMap { UIImage(data: $0) },
+            signature: a.signature.flatMap { UIImage(data: $0) },
+            resetMade: a.resetMade
+        )
     }
 
     /// Draws the brush's sample stroke again, a moment after the last change.
@@ -329,7 +360,9 @@ final class StudioModel {
         var row: [SourceKind: UIImage] = [:]
         var big: [SourceKind: UIImage] = [:]
         for kind in SourceImages.kinds {
-            guard let image = SourceImages.image(session.studioSource(kind: kind), shape: kind == .shape) else { continue }
+            // at all the size it has (a brush file's shape or grain may hold more than a brush
+            // paints with), so the bigger picture shows sharp
+            guard let image = SourceImages.image(session.studioSourcePicture(kind: kind), shape: kind == .shape) else { continue }
             row[kind] = SourceImages.small(image, side: sourceRowPixels)
             big[kind] = SourceImages.small(image, side: sourceBoxPixels)
         }
@@ -337,10 +370,11 @@ final class StudioModel {
         sourcesBig = big
     }
 
-    /// The image the brush's `kind` of source uses now: square greyscale, white = paint; empty for
-    /// the round tip, no grain or the amount all over.
+    /// The image the brush's `kind` of source uses now, at all the size it has: square greyscale,
+    /// white = paint; empty for the round tip, no grain or the amount all over. Kept as it is, it
+    /// stays as big as it came.
     func sourcePixels(_ kind: SourceKind) -> Data {
-        session.studioSource(kind: kind)
+        session.studioSourcePicture(kind: kind)
     }
 
     /// The editor's tick: the brush's `kind` of source becomes `pixels`, or shipped image `shipped`.
@@ -368,7 +402,8 @@ final class StudioModel {
         return made
     }
 
-    /// A picture on the clipboard as a source image; none if there isn't one.
+    /// What was cut or copied in the app (only where it is painted), or else a picture on the
+    /// clipboard, as a source image; none if there isn't one.
     func pastedSource() -> Data? {
         // what was cut or copied here first, cut to its drawing
         if let own = model.copySource() {
