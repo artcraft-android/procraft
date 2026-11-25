@@ -27,16 +27,24 @@
 //!   is tapped), and Add new (`+` held).
 //! - **Groups** (`rows.rs`): an expanded group's tracks share rows under its track, inside an
 //!   outline; collapsed, each of its frames shows the drawings in it.
+//! - **Keys** (`keys.rs`): a keyed track's rows of keys under its row (rows of the same
+//!   [`rows::GridRows`], a shared row's tracks sharing them), their marks picked, dragged,
+//!   stretched and eased; a block's Keys card (`keys_card.rs`), which a frame's or a group's
+//!   menu's **Keys** opens through [`TimelineGrid::keys_card_for`]; Animate in the header, keying
+//!   with the transform tool, and Perform (`animate.rs`); the motion path over the canvas
+//!   (`motion_path.rs`).
 //!
-//! A frame's or a group's menu's **Keys** sets [`TimelineGrid::keys_card_for`]: the keys' card is
-//! not the grid's. Not here (the iPad has them): Animate, the rows of keys, zoom, and what only
-//! sounds and videos have.
+//! Not here (the iPad has them): zoom, and what only sounds and videos have.
 
 mod actions;
+mod animate;
 mod edges;
 mod grid;
 mod grid_icons;
+mod keys;
+mod keys_card;
 mod menus;
+mod motion_path;
 mod moving;
 mod rows;
 
@@ -63,6 +71,13 @@ pub struct TimelineGrid {
     pub settings_asked: bool,
     /// Where the settings button was last drawn (window points): the card stands over it.
     pub settings_button: Option<egui::Rect>,
+    /// The block (a clip id) whose Keys card is open: a frame's menu's Keys sets it.
+    pub keys_card_for: Option<u64>,
+    /// Animate tapped (or the autokey badge's Turn Off): autokey wanted on or off. The app takes
+    /// it, since it opens and ends the transform tool.
+    pub animate_asked: Option<bool>,
+    /// Settings → Timeline → Perform smoothing (0..1), for a take's keys.
+    pub perform_smoothing: f32,
     /// The canvas it read (its address), the number of the panel's last reading, and the edits
     /// and timeline it was read at.
     session: usize,
@@ -74,9 +89,6 @@ pub struct TimelineGrid {
     pictures: HashMap<u64, (u64, Option<TextureHandle>)>,
     motion: grid::Motion,
     playing: Option<Playing>,
-    /// A frame's or a block's menu asked for its keys: the clip whose keys' card is wanted (the
-    /// playhead brought onto it). The keys' card takes it.
-    pub keys_card_for: Option<u64>,
     /// The rows as last read, top first.
     rows: Arc<rows::GridRows>,
     /// The frame under the playhead tapped: its handles out.
@@ -94,6 +106,10 @@ pub struct TimelineGrid {
     length_draft: Option<u32>,
     /// What to tell (a warning, or not).
     said: Option<(String, bool)>,
+    pub(crate) keys: keys::Keys,
+    pub(crate) animate: animate::Animate,
+    card: keys_card::Card,
+    path: motion_path::PathDrag,
 }
 
 /// Playing: round the frames `first..end` (those the grid showed as it began), the frame showing,
@@ -115,6 +131,14 @@ pub fn lift(ctx: &egui::Context) -> f32 {
     ctx.data(|d| d.get_temp::<(f32, u64)>(egui::Id::unique("timeline grid lift")))
         .filter(|(_, at)| at + 1 >= frame)
         .map_or(0.0, |(lift, _)| lift)
+}
+
+/// The top of the timeline's bar (window points), where it showed this frame or the last: what
+/// stands at the window's foot stands over it (see [`lift`]).
+#[cfg(test)]
+pub fn bar_top(ctx: &egui::Context) -> Option<f32> {
+    let lift = lift(ctx);
+    (lift > 0.0).then(|| ctx.content_rect().bottom() - lift)
 }
 
 /// Whether layer `l` is listed in the layers panel: off a timeline (`root` none), every layer; on
@@ -156,6 +180,9 @@ impl TimelineGrid {
         self.stop(session, false);
         self.motion.let_go();
         self.let_go_edits();
+        self.keys.cancel_drag();
+        self.keys.menu = None;
+        self.animate.armed = false;
     }
 
     /// Its menu's keypad or a name being typed takes the keyboard's keys.
@@ -171,6 +198,14 @@ impl TimelineGrid {
         self.stroke = grid::Lasso::default();
         self.moving = None;
         self.length_draft = None;
+    }
+
+    /// The rows laid from the panel as last read, with the tracks' rows of keys out now.
+    fn lay_rows(&mut self) {
+        self.rows = Arc::new(match self.panel.as_ref() {
+            Some(panel) => rows::GridRows::new(panel, &self.keys.out),
+            None => rows::GridRows::default(),
+        });
     }
 
     /// What is picked, or has a menu, that the timeline no longer has, let go.
@@ -216,8 +251,15 @@ impl TimelineGrid {
     fn read(&mut self, ctx: &egui::Context, session: &CanvasSession) -> bool {
         let address = std::ptr::from_ref(session) as usize;
         if address != self.session {
+            let curves = self.keys.curves.take();
             // another canvas: nothing read of the last one holds
-            *self = TimelineGrid { settings_asked: self.settings_asked, session: address, ..TimelineGrid::default() };
+            *self = TimelineGrid {
+                settings_asked: self.settings_asked,
+                session: address,
+                perform_smoothing: self.perform_smoothing,
+                ..TimelineGrid::default()
+            };
+            self.keys.curves = curves;
         }
         let Some(info) = session.timeline_info() else {
             if self.panel.is_some() || self.playing.is_some() {
@@ -228,6 +270,11 @@ impl TimelineGrid {
                 self.let_go_edits();
                 self.read_at = None;
                 self.motion.let_go();
+                self.keys.picks.clear();
+                self.keys.cancel_drag();
+                self.keys.menu = None;
+                self.keys_card_for = None;
+                self.animate.armed = false;
             }
             return false;
         };
@@ -235,11 +282,16 @@ impl TimelineGrid {
         if self.read_at.as_ref().is_none_or(|(e, i)| *e != edits || *i != info) {
             if let Some(panel) = session.timeline_panel(self.known) {
                 self.known = panel.generation;
-                self.rows = Arc::new(rows::GridRows::new(&panel.rows));
+                self.keys.refreshed(&panel);
                 self.panel = Some(panel);
+                self.lay_rows();
                 self.forget_gone();
             }
             self.read_at = Some((edits, info));
+        }
+        // (a track's rows of keys put out or away: the rows laid again)
+        if self.rows.keys_out != self.keys.out {
+            self.lay_rows();
         }
         self.read_pictures(ctx, session);
         self.panel.as_ref().is_some_and(|p| p.info.is_some())

@@ -52,6 +52,8 @@ mod timing;
 
 /// The rows the panel reads, for the apps that name them in Rust (see the crate's re-exports).
 pub use groups_inline::{TimelineRepeat, TimelineRow};
+/// The keys' lanes and their edits, for the apps that name them in Rust.
+pub use key_lanes::{TimelineKeyEdit, TimelineKeyLane, TimelineKeyPick, TimelineKeysEdited, TimelineLaneKey};
 
 /// For the media tests, which trim a sound's start as any clip's.
 #[cfg(test)]

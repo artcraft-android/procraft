@@ -157,6 +157,13 @@ pub use timeline::{
     TimelineTrackInfo,
     panel::{TimelineClipKeys, TimelinePanel, TimelinePicture},
 };
+/// The keys on the desktop's grid: their lanes, edits, easings, poses, motion paths and an
+/// adjustment clip's values.
+pub use adjustment_keys::{AdjustmentUnit, AdjustmentValue};
+pub use timeline::{
+    MotionPath, PathKey, TimelineChannel, TimelineEasing, TimelineKeyEdit, TimelineKeyLane, TimelineKeyPick,
+    TimelineKeysEdited, TimelineLaneKey, TimelinePose,
+};
 mod touch;
 mod transform;
 mod turn;

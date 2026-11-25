@@ -5,11 +5,17 @@
 //! the frames its group lasts. The grid doesn't zoom on desktop, so every row is as tall as a
 //! row starts on the iPad.
 //!
-//! (Rows of keys under a track's row are the keys' to add: a [`GridRow`] is a row of frames.)
+//! Under a row whose tracks have their rows of keys out stand those rows of keys (as the iPad's
+//! `GridRows` lays them): one for each kind of key any of those tracks' blocks has, in the kinds'
+//! order, the tracks sharing a row of frames sharing them. A row of keys is a [`GridRow`] too (its
+//! `keys` says what it holds), with its row of frames' tracks, at its own height; it has no frames.
 
-use procraft_core::{TimelineRow, TimelineTrackInfo};
+use std::collections::HashSet;
+
+use procraft_core::{TimelinePanel, TimelineRow, TimelineTrackInfo};
 
 use super::grid::ROW_HEIGHT;
+use super::keys::{KEYS_HEIGHT, KINDS, Kind, kinds};
 
 /// A track's frames on a row, and the frames of the timeline it has: a track of the level shown,
 /// all of them; a track inside a group, the frames the group lasts.
@@ -32,13 +38,24 @@ impl Segment {
     }
 }
 
+/// What a row of keys holds: one kind of key, of each of the tracks on its row of frames whose
+/// rows of keys are out and whose blocks have that kind (top first).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct KeyRow {
+    pub kind: Kind,
+    pub tracks: Vec<u64>,
+}
+
 /// One row of the grid, and where it stands among the rows.
 #[derive(Clone, Debug)]
 pub(super) struct GridRow {
-    /// The tracks on it, in time order (one, but under a track holding several expanded groups).
+    /// The tracks on it, in time order (one, but under a track holding several expanded groups);
+    /// a row of keys, those of the row of frames it stands under.
     pub segments: Vec<Segment>,
     /// How many groups its tracks are inside.
     pub depth: u32,
+    /// A row of keys under its tracks' row, not of frames: what it holds. None: a row of frames.
+    pub keys: Option<KeyRow>,
     /// Its top edge among all the rows, and its height.
     pub y: f32,
     pub height: f32,
@@ -57,9 +74,14 @@ impl GridRow {
         self.segment(frame).map(Segment::track)
     }
 
-    /// Whether `frame` is one of a track's on it.
+    /// Whether `frame` is one of a track's on it (a row of keys has no frames).
     pub fn has(&self, frame: u32) -> bool {
-        self.segments.iter().any(|s| s.has(frame))
+        self.keys.is_none() && self.segments.iter().any(|s| s.has(frame))
+    }
+
+    /// Whether it is a row of frames (not of keys).
+    pub fn frames(&self) -> bool {
+        self.keys.is_none()
     }
 }
 
@@ -69,21 +91,51 @@ pub(super) struct GridRows {
     pub list: Vec<GridRow>,
     /// How tall they all are together.
     pub height: f32,
+    /// The tracks whose rows of keys were out as they were laid.
+    pub keys_out: HashSet<u64>,
 }
 
 impl GridRows {
-    /// Rows for the panel's `rows` (bottom first, as the core reads them: each unfolded group's
-    /// own tracks just before the track holding it), top first, one under the other.
-    pub fn new(rows: &[TimelineRow]) -> GridRows {
-        let top_first: Vec<TimelineRow> = rows.iter().rev().cloned().collect();
-        let mut list = level(&top_first, 0, &[]);
+    /// Rows for the panel's rows (bottom first, as the core reads them: each unfolded group's
+    /// own tracks just before the track holding it), top first, one under the other; under each,
+    /// the rows of keys of its tracks in `out` (those whose rows of keys are out).
+    pub fn new(panel: &TimelinePanel, out: &HashSet<u64>) -> GridRows {
+        let top_first: Vec<TimelineRow> = panel.rows.iter().rev().cloned().collect();
+        let mut list = Vec::new();
         let mut y = 0.0;
-        for row in &mut list {
+        for mut row in level(&top_first, 0, &[]) {
             row.y = y;
             row.height = ROW_HEIGHT;
             y += row.height;
+            // its tracks' rows of keys: one for each kind any of them has (the tracks of several
+            // groups sharing the row share those too)
+            let keyed: Vec<(u64, Vec<Kind>)> = row
+                .segments
+                .iter()
+                .filter(|s| out.contains(&s.track().id))
+                .map(|s| (s.track().id, kinds(panel, &s.row)))
+                .collect();
+            let under: Vec<GridRow> = KINDS
+                .into_iter()
+                .filter_map(|kind| {
+                    let tracks: Vec<u64> = keyed.iter().filter(|(_, k)| k.contains(&kind)).map(|(id, _)| *id).collect();
+                    (!tracks.is_empty()).then(|| GridRow {
+                        segments: row.segments.clone(),
+                        depth: row.depth,
+                        keys: Some(KeyRow { kind, tracks }),
+                        y: 0.0,
+                        height: KEYS_HEIGHT,
+                    })
+                })
+                .collect();
+            list.push(row);
+            for mut keys in under {
+                keys.y = y;
+                y += keys.height;
+                list.push(keys);
+            }
         }
-        GridRows { list, height: y }
+        GridRows { list, height: y, keys_out: out.clone() }
     }
 
     #[cfg(test)]
@@ -100,23 +152,30 @@ impl GridRows {
         (y >= 0.0).then(|| self.list.iter().position(|r| y >= r.y && y < r.y + r.height)).flatten()
     }
 
-    /// The row track `id` is on.
+    /// The row (of frames) track `id` is on.
     pub fn index_of(&self, id: Option<u64>) -> Option<usize> {
         let id = id?;
-        self.list.iter().position(|r| r.segments.iter().any(|s| s.track().id == id))
+        self.list.iter().position(|r| r.frames() && r.segments.iter().any(|s| s.track().id == id))
     }
 
-    /// The segment of track `id`, with its row.
+    /// The segment of track `id`, with its row (of frames).
     pub fn segment_of(&self, id: u64) -> Option<(usize, &Segment)> {
+        self.tracks().find(|(_, s)| s.track().id == id)
+    }
+
+    /// Every track on the rows of frames, with its row, top first.
+    pub fn tracks(&self) -> impl Iterator<Item = (usize, &Segment)> {
         self.list
             .iter()
             .enumerate()
-            .find_map(|(r, row)| row.segments.iter().find(|s| s.track().id == id).map(|s| (r, s)))
+            .filter(|(_, row)| row.frames())
+            .flat_map(|(r, row)| row.segments.iter().map(move |s| (r, s)))
     }
 
-    /// Every track on the rows, with its row, top first.
-    pub fn tracks(&self) -> impl Iterator<Item = (usize, &Segment)> {
-        self.list.iter().enumerate().flat_map(|(r, row)| row.segments.iter().map(move |s| (r, s)))
+    /// The row of frames that row `r` stands under (itself, for a row of frames).
+    #[cfg(test)]
+    pub fn frames_row(&self, r: usize) -> usize {
+        self.list.get(..=r).and_then(|above| above.iter().rposition(GridRow::frames)).unwrap_or(r)
     }
 
     /// The bottom of the last row that has a track inside group `id`: how far down the group's
@@ -149,7 +208,7 @@ fn level(rows: &[TimelineRow], depth: u32, groups: &[u64]) -> Vec<GridRow> {
     let mut out = Vec::new();
     let mut left = rows;
     while let Some((row, inside, rest)) = cut(left) {
-        out.push(GridRow { segments: vec![segment(row, groups)], depth, y: 0.0, height: 0.0 });
+        out.push(GridRow { segments: vec![segment(row, groups)], depth, keys: None, y: 0.0, height: 0.0 });
         out.extend(shared(inside, depth + 1, groups));
         left = rest;
     }
@@ -176,7 +235,7 @@ fn shared(rows: &[TimelineRow], depth: u32, groups: &[u64]) -> Vec<GridRow> {
         let mut segments: Vec<Segment> =
             there.iter().map(|(g, (row, _))| segment(row, &[groups, &[*g]].concat())).collect();
         segments.sort_by_key(|s| s.row.start);
-        out.push(GridRow { segments, depth, y: 0.0, height: 0.0 });
+        out.push(GridRow { segments, depth, keys: None, y: 0.0, height: 0.0 });
         for (g, (_, inside)) in there {
             out.extend(shared(inside, depth + 1, &[groups, &[g]].concat()));
         }

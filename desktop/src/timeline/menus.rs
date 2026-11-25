@@ -287,9 +287,12 @@ enum Hit {
 }
 
 impl TimelineGrid {
-    /// Menu `kind` opened over `x` (window points), whatever else was open closed.
+    /// Menu `kind` opened over `x` (window points), whatever else was open closed (a key's menu
+    /// and the Keys card among them).
     pub(super) fn open_menu(&mut self, kind: Kind, x: f32) {
         self.settings_asked = false;
+        self.keys.menu = None;
+        self.keys_card_for = None;
         self.menu = Some(Menu::new(kind, x));
     }
 
@@ -322,7 +325,7 @@ impl TimelineGrid {
             self.close_menu();
             return;
         }
-        if ctx.input(|i| i.key_pressed(Key::Escape)) && menu.renaming.is_none() {
+        if menu.renaming.is_none() && crate::ui::escape_first(ctx) {
             match self.menu.as_mut() {
                 Some(m) if m.sub.is_some() => m.sub = None,
                 Some(m) if m.beside.is_some() => m.set_beside(None),

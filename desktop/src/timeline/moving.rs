@@ -97,6 +97,7 @@ impl TimelineGrid {
             .list
             .iter()
             .skip(1)
+            .filter(|r| r.frames())
             .find(|r| (y - r.y).abs() <= near)
             .and_then(|r| Some(Between { beside: r.track(frame)?.id, below: false, y: r.y }))
     }

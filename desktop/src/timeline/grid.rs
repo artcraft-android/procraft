@@ -4,12 +4,18 @@
 //! (ios/ProCraft/TimelineGrid.swift): a tap, a hold (its menu; dragged on from there, the block
 //! moves), a drag sideways (scrub), up or down (more tracks than show), a lasso's stroke, a
 //! handle. A right-click is a hold that doesn't move anything.
+//!
+//! The keys' presses go through it too, asked first where they apply (keys.rs): on the grips
+//! beside the keys picked (a stretch), on a row of keys (a mark tapped, held for its menu,
+//! dragged along; a row's name, its keys picked), on the chevron after a keyed track's name.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use egui::{Align2, Color32, CornerRadius, Id, Order, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
-use procraft_core::{CanvasSession, TimelineClipInfo, TimelineClipKind, TimelinePanel, TimelineTrackInfo};
+use procraft_core::{
+    CanvasSession, TimelineClipInfo, TimelineClipKind, TimelineKeyPick, TimelinePanel, TimelineTrackInfo,
+};
 
 use super::menus::{CARD_WIDTH, Kind};
 use super::rows::{GridRow, GridRows};
@@ -42,7 +48,7 @@ pub(super) const LABELS_WIDTH: f32 = 176.0;
 /// How far in from the bar's ends the frames show (its rounded corners stand there).
 const ROWS_INSET: f32 = 8.0;
 /// How far a name steps in for each group its track is inside.
-const INDENT: f32 = 14.0;
+pub(super) const INDENT: f32 = 14.0;
 /// A frame tapped or stepped to slides under the playhead in this long (seconds).
 const SLIDE: f64 = 0.35;
 /// How long a header button is held for what holding it does, `+` for Add new, a frame for its
@@ -78,17 +84,21 @@ const ON_LABEL: u32 = 0xE6000000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Button {
     Play,
+    /// With Animate on: a take armed or let go (Perform).
+    Record,
     Back,
     On,
     Settings,
     Lasso,
+    /// Animate: autokey on or off.
+    Animate,
     Track,
     Add,
 }
 
 /// What a press on the frames (or the ruler) is doing.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-enum Touch {
+pub(super) enum Touch {
     #[default]
     None,
     /// On the frames, not yet told apart: a tap, a hold, or the start of a drag.
@@ -111,6 +121,14 @@ enum Touch {
     Held,
     /// Dragged on from a hold on a block: the block goes with the pointer.
     Move,
+    /// On the chevron after a keyed track's name: a tap puts its rows of keys out or away.
+    Chevron { track: u64 },
+    /// On a row of keys' name: a tap picks all its keys, or none.
+    KeyName,
+    /// A key's mark dragged: it and the keys picked with it go along by frames.
+    Keys { key: TimelineKeyPick },
+    /// A grip beside the keys picked dragged from frame `from`: they stretch about `anchor`.
+    Stretch { anchor: u32, from: u32 },
     /// Nothing of the frames' (it stopped them playing, or closed a menu).
     Ignore,
 }
@@ -124,10 +142,12 @@ pub(super) struct Motion {
     focus: Option<f32>,
     slide: Option<(f32, f32, f64)>,
     touch: Touch,
-    /// Where and when the press under way came down; the block it held, if it held one.
+    /// Where and when the press under way came down; the block it held, if it held one; the key
+    /// whose mark it came down on, if it did.
     origin: Pos2,
     since: f64,
     held_clip: Option<u64>,
+    key: Option<TimelineKeyPick>,
     /// The press began with a menu open: a tap only closes it.
     closing: bool,
     /// The frame last shown while scrubbing.
@@ -150,6 +170,7 @@ impl Motion {
         self.scrubbed = None;
         self.press = None;
         self.held_clip = None;
+        self.key = None;
     }
 
     /// Playing stopped, the grid having held still at frame `held`: the playhead's frame slides
@@ -188,6 +209,8 @@ pub(super) struct Lasso {
     faded: Vec<Pos2>,
     faded_at: f64,
     touched: HashSet<u64>,
+    /// The keys it has crossed (on the rows of keys), each taken in or out once.
+    touched_keys: Vec<TimelineKeyPick>,
     before: Option<BTreeSet<u64>>,
 }
 
@@ -211,18 +234,18 @@ pub(super) struct Place {
 
 impl Place {
     /// Frame `f`'s cell's left edge.
-    fn x(&self, f: f32) -> f32 {
+    pub fn x(&self, f: f32) -> f32 {
         self.origin + f * PITCH
     }
 
     /// The frame whose cell (and the gap after it) `x` is over, if there is one.
-    fn frame_at(&self, x: f32) -> Option<u32> {
+    pub fn frame_at(&self, x: f32) -> Option<u32> {
         let f = ((x - self.origin) / PITCH).floor();
         (f >= 0.0 && f <= self.last as f32).then_some(f as u32)
     }
 
-    /// The row (top first) at height `y`.
-    fn row_at(&self, y: f32) -> Option<usize> {
+    /// The row (top first, a row of keys among them) at height `y`.
+    pub fn row_at(&self, y: f32) -> Option<usize> {
         if !self.rows_rect.y_range().contains(y) {
             return None;
         }
@@ -341,8 +364,21 @@ impl TimelineGrid {
             let place = self.place(ui.ctx());
             self.draw(ui, look, session, &place, prefs, now);
         });
+        // what stands over the bar and the canvas, the frontmost first (Escape closes only it):
+        // a key's menu, the frames' menu, the Keys card; the motion path, a take, autokey's badge
         let place = self.place(ctx);
+        if let Some(said) = self.key_menu(ctx, look, session) {
+            self.tell(said, true);
+        }
         self.show_menu(ctx, look, session, &place);
+        if let Some(said) = self.keys_card(ctx, look, session, &place) {
+            self.tell(said, true);
+        }
+        self.motion_path(ctx, session, &place);
+        if let Some(said) = self.perform(ctx, session, &place) {
+            self.tell(said, true);
+        }
+        self.autokey_badge(ctx, session);
         self.said.take()
     }
 
@@ -413,8 +449,8 @@ impl TimelineGrid {
 
     // MARK: The header
 
-    /// The header: Play, a frame back and on; then the settings, the lasso, a new track and a new
-    /// frame.
+    /// The header: Play, with Animate on the record button, a frame back and on; then the
+    /// settings, the lasso, Animate, a new track and a new frame.
     fn header(
         &mut self,
         ui: &Ui,
@@ -427,20 +463,27 @@ impl TimelineGrid {
         let ink = argb(INK);
         let painter = ui.painter();
         let word = if self.playing.is_some() { "Pause" } else { "Play" };
-        let buttons = header_buttons(place, text_width(painter, word, 17.0, Weight::Bold));
-        let [(_, play), (_, back), (_, on), (_, settings), (_, lasso), (_, track), (_, add)] = buttons;
-        text(painter, pos2(play.left(), y), Align2::LEFT_CENTER, word, 17.0, Weight::Bold, ink);
+        let autokey = self.animate.autokey;
+        let buttons = header_buttons(place, text_width(painter, word, 17.0, Weight::Bold), autokey);
+        let at = |b: Button| buttons.iter().find(|(x, _)| *x == b).map_or(Rect::NOTHING, |(_, r)| *r);
+        text(painter, pos2(at(Button::Play).left(), y), Align2::LEFT_CENTER, word, 17.0, Weight::Bold, ink);
         let lit = |b: Button| self.motion.flash.is_some_and(|(f, at)| f == b && now - at < FLASH);
         let tint = |b: Button| if lit(b) { argb(pc::ACCENT) } else { ink };
-        look.icon(ui, &icons::CHEVRON_LEFT, back.center(), 21.0, tint(Button::Back));
-        look.icon(ui, &icons::CHEVRON_RIGHT, on.center(), 21.0, tint(Button::On));
-        settings_glyph(painter, settings.center(), tint(Button::Settings));
-        self.settings_button = Some(settings);
+        if autokey {
+            super::animate::record_glyph(painter, at(Button::Record).center(), self.animate.armed);
+        }
+        look.icon(ui, &icons::CHEVRON_LEFT, at(Button::Back).center(), 21.0, tint(Button::Back));
+        look.icon(ui, &icons::CHEVRON_RIGHT, at(Button::On).center(), 21.0, tint(Button::On));
+        settings_glyph(painter, at(Button::Settings).center(), tint(Button::Settings));
+        self.settings_button = Some(at(Button::Settings));
         let lasso_ink = if self.selecting.is_some() { argb(pc::ACCENT) } else { tint(Button::Lasso) };
-        look.icon(ui, &grid_icons::GRID_LASSO, lasso.center(), 27.0, lasso_ink);
-        track_glyph(painter, track.center(), tint(Button::Track));
+        look.icon(ui, &grid_icons::GRID_LASSO, at(Button::Lasso).center(), 27.0, lasso_ink);
+        let animate = if autokey { super::animate::RED } else { tint(Button::Animate) };
+        super::animate::animate_glyph(painter, at(Button::Animate).center(), animate, autokey);
+        track_glyph(painter, at(Button::Track).center(), tint(Button::Track));
         let adding = matches!(self.menu.as_ref().map(|m| m.kind), Some(Kind::Add));
-        look.icon(ui, &icons::ADD, add.center(), 38.0, if adding { argb(pc::ACCENT) } else { tint(Button::Add) });
+        let add_ink = if adding { argb(pc::ACCENT) } else { tint(Button::Add) };
+        look.icon(ui, &icons::ADD, at(Button::Add).center(), 38.0, add_ink);
         let mut said = None;
         for (button, rect) in buttons {
             let response = ui.interact(rect, ui.scope_id().with(("timeline header", button as u8)), Sense::click());
@@ -493,7 +536,7 @@ impl TimelineGrid {
         place: &Place,
     ) -> Option<&'static str> {
         self.close_menu();
-        if button != Button::Lasso && button != Button::Settings {
+        if !matches!(button, Button::Lasso | Button::Settings | Button::Animate | Button::Record) {
             self.picked = None;
         }
         match button {
@@ -509,6 +552,14 @@ impl TimelineGrid {
             Button::Settings => {
                 self.stop(session, false);
                 self.settings_asked = true;
+            }
+            Button::Animate => {
+                self.stop(session, false);
+                self.animate_asked = Some(!self.animate.autokey);
+            }
+            Button::Record => {
+                self.stop(session, false);
+                self.animate.armed = !self.animate.armed;
             }
             Button::Lasso => {
                 // on, the picked frame first; off, what was picked let go
@@ -560,9 +611,8 @@ impl TimelineGrid {
                 i.stable_dt.clamp(0.0, 0.1),
             )
         });
-        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
         // a second press, or Escape, drops the stroke under way and what it picked
-        if self.motion.touch == Touch::Stroke && (secondary || escape) {
+        if self.motion.touch == Touch::Stroke && (secondary || crate::ui::escape_first(ui.ctx())) {
             if let Some(before) = self.stroke.before.take() {
                 self.selecting = Some(before);
             }
@@ -570,12 +620,14 @@ impl TimelineGrid {
             self.motion.touch = Touch::Ignore;
         }
         let Some(at) = at else { return };
-        if secondary && area.contains(at) && !self.on_cards(at) && self.motion.touch == Touch::None {
+        // (a key's menu open takes the press over everything, and closes)
+        let key_menu = self.keys.menu.is_some();
+        if secondary && area.contains(at) && !self.on_cards(at) && self.motion.touch == Touch::None && !key_menu {
             self.right_clicked(session, place, at);
             return;
         }
         if pressed && area.contains(at) && !self.on_cards(at) {
-            self.began(session, place, at, now);
+            self.began(ui, session, place, at, now);
         }
         if self.motion.touch == Touch::None {
             return;
@@ -590,14 +642,21 @@ impl TimelineGrid {
         }
     }
 
-    /// A press coming down at `at`.
-    fn began(&mut self, session: &CanvasSession, place: &Place, at: Pos2, now: f64) {
+    /// A press coming down at `at`. The keys' are asked first where they apply: a key's menu
+    /// open (its own press, closing it), a keyed track's chevron, a row of keys' name, a grip
+    /// beside the keys picked, a mark (told apart as a frame is, below).
+    fn began(&mut self, ui: &Ui, session: &CanvasSession, place: &Place, at: Pos2, now: f64) {
         self.motion.origin = at;
         self.motion.since = now;
         self.motion.held_clip = None;
+        self.motion.key = None;
         self.motion.closing = self.menu.is_some();
-        self.motion.touch = if place.on_names(at) {
-            Touch::Name
+        self.motion.touch = if self.keys.menu.is_some() {
+            Touch::Ignore
+        } else if let Some(track) = self.chevron_at(ui.painter(), place, at) {
+            Touch::Chevron { track }
+        } else if place.on_names(at) {
+            if self.on_key_row(place, at) { Touch::KeyName } else { Touch::Name }
         } else if self.playing.is_some() {
             // a press on the frames while they play stops them there, and does nothing more
             self.stop(session, true);
@@ -607,9 +666,13 @@ impl TimelineGrid {
             let duration = self.info().map_or(1, |i| i.duration);
             let flap = place.flap_x(duration);
             if at.x >= flap - 8.0 && at.x <= flap + 22.0 { Touch::Flap { from: duration } } else { Touch::Ruler }
+        } else if let Some((anchor, from)) = self.grip_at(place, at) {
+            self.close_menu();
+            Touch::Stretch { anchor, from }
         } else if let Some(leading) = self.handle_at(place, at) {
             Touch::Handle { leading }
         } else {
+            self.motion.key = self.mark_at(place, at);
             Touch::Undecided
         };
     }
@@ -626,6 +689,15 @@ impl TimelineGrid {
         };
         let touch = self.motion.touch;
         match touch {
+            // a mark dragged: it (and the keys picked with it) along by frames (with the lasso on,
+            // a stroke from it takes it in)
+            Touch::Undecided if far > TAP_SLOP && self.motion.key.is_some() && self.selecting.is_none() => {
+                self.close_menu();
+                if let Some(key) = self.motion.key {
+                    self.motion.touch = Touch::Keys { key };
+                    self.keys_dragged(session, key, (moved.x / PITCH).round() as i32);
+                }
+            }
             Touch::Undecided if far > TAP_SLOP => {
                 self.close_menu();
                 if self.selecting.is_some() {
@@ -681,6 +753,14 @@ impl TimelineGrid {
                     self.edge_dragged(session, leading, moved.x);
                 }
             }
+            // a mark held for its menu, dragged on: the menu goes, the mark goes along
+            Touch::Held if far > PICK_UP && self.motion.key.is_some() => {
+                self.keys.menu = None;
+                if let Some(key) = self.motion.key {
+                    self.motion.touch = Touch::Keys { key };
+                    self.keys_dragged(session, key, (moved.x / PITCH).round() as i32);
+                }
+            }
             // dragged on from the hold: the block held is picked up, and its menu goes
             Touch::Held if far > PICK_UP => {
                 if self.move_began(self.motion.held_clip) {
@@ -689,6 +769,10 @@ impl TimelineGrid {
                 }
             }
             Touch::Move if self.moved(session, place, at, self.motion.origin, dt) => ui.ctx().request_repaint(),
+            Touch::Keys { key } => self.keys_dragged(session, key, (moved.x / PITCH).round() as i32),
+            Touch::Stretch { anchor, from } => self.keys_stretched(session, anchor, from, moved.x),
+            // (dragged off them: nothing)
+            Touch::Chevron { .. } | Touch::KeyName if far > TAP_SLOP => self.motion.touch = Touch::Ignore,
             _ => {}
         }
     }
@@ -748,6 +832,23 @@ impl TimelineGrid {
             Touch::Stroke => self.end_stroke(now),
             Touch::Handle { .. } => self.edge_ended(session),
             Touch::Move => self.move_ended(session),
+            Touch::Keys { .. } | Touch::Stretch { .. } => self.keys_let_go(session),
+            Touch::Chevron { track } => {
+                self.close_menu();
+                if !closing {
+                    // its rows of keys out under it, or away
+                    if !self.keys.out.remove(&track) {
+                        self.keys.out.insert(track);
+                    }
+                    self.lay_rows();
+                }
+            }
+            Touch::KeyName => {
+                self.close_menu();
+                if !closing {
+                    self.keys_tapped(session, place, self.motion.origin);
+                }
+            }
             _ => {}
         }
         self.read_at = None;
@@ -777,8 +878,24 @@ impl TimelineGrid {
 
     /// The track whose name is at `p`.
     fn name_at(&self, place: &Place, p: Pos2) -> Option<TimelineTrackInfo> {
-        let row = self.rows.get(place.row_at(p.y)?)?;
+        let row = self.rows.get(place.row_at(p.y)?).filter(|row| row.frames())?;
         row.track(self.frame()).cloned()
+    }
+
+    /// The track whose name's chevron (its rows of keys out or away) is at `p`, where its blocks
+    /// have keys.
+    fn chevron_at(&self, painter: &egui::Painter, place: &Place, p: Pos2) -> Option<u64> {
+        if !place.on_names(p) {
+            return None;
+        }
+        let r = place.row_at(p.y)?;
+        let row = self.rows.get(r).filter(|row| row.frames())?;
+        let t = row.track(self.frame())?;
+        let segment = row.segments.iter().find(|s| s.track().id == t.id)?;
+        let panel = self.panel.as_ref()?;
+        let keyed = super::keys::keyed(panel, &segment.row);
+        let chevron = label_place(painter, place, r, row, t, keyed).chevron?;
+        chevron.expand(4.0).contains(p).then_some(t.id)
     }
 
     /// A tap on a track's name: it is chosen (its box: hidden or shown).
@@ -808,6 +925,10 @@ impl TimelineGrid {
     /// the playhead goes to it on its track, or, there already, the frame's handles come out or
     /// go. A group's chevron expands it or puts its tracks away.
     fn tapped(&mut self, session: &CanvasSession, place: &Place, at: Pos2) {
+        // a row of keys: its mark picked or let go; elsewhere on it, every key let go
+        if self.keys_tapped(session, place, at) {
+            return;
+        }
         let Some((r, f)) = place.cell(at) else {
             self.picked = None;
             return;
@@ -854,6 +975,13 @@ impl TimelineGrid {
         if self.playing.is_some() {
             return;
         }
+        // a key: its menu (with the keys picked, if it is one of them)
+        if self.on_key_row(place, at) {
+            if let Some(key) = self.mark_at(place, at) {
+                self.open_key_menu(place, key, at);
+            }
+            return;
+        }
         let Some((_, c)) = self.clip_at(place, at) else {
             // an empty frame: its own menu
             if self.selecting.is_none()
@@ -889,6 +1017,7 @@ impl TimelineGrid {
         }
         self.close_menu();
         if place.on_names(at) {
+            // (a row of keys' name has no menu)
             if let Some(t) = self.name_at(place, at) {
                 self.open_menu(Kind::Track { track: t.id }, place.bar.left() + 14.0 + CARD_WIDTH / 2.0);
             }
@@ -917,6 +1046,13 @@ impl TimelineGrid {
     }
 
     fn take(&mut self, place: &Place, p: Pos2) {
+        // (across a row of keys, each key it crosses)
+        let mut touched = std::mem::take(&mut self.stroke.touched_keys);
+        let keys = self.keys_stroked(place, p, &mut touched);
+        self.stroke.touched_keys = touched;
+        if keys {
+            return;
+        }
         let Some((t, c)) = self.clip_at(place, p) else { return };
         if self.held(&t) || !self.stroke.touched.insert(c.id) {
             return;
@@ -933,6 +1069,7 @@ impl TimelineGrid {
         self.stroke.faded = std::mem::take(&mut self.stroke.points);
         self.stroke.faded_at = now;
         self.stroke.touched.clear();
+        self.stroke.touched_keys.clear();
         self.stroke.before = None;
     }
 
@@ -962,9 +1099,10 @@ impl TimelineGrid {
             let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             if b.visible { Color32::from_rgb(c(b.r), c(b.g), c(b.b)) } else { Color32::WHITE }
         };
-        for (r, row) in self.rows.list.iter().enumerate() {
+        for (r, row) in self.rows.list.iter().enumerate().filter(|(_, row)| row.frames()) {
             self.row(&cells, place, r, row, panel, lo, hi, paper);
         }
+        self.draw_keys(&cells, place, lo, hi);
         // past the timeline's end: shaded, since nothing there plays
         let end = place.flap_x(self.length_draft.unwrap_or(info.duration));
         if end < place.rows_rect.right() {
@@ -1010,13 +1148,20 @@ impl TimelineGrid {
         let names = Rect::from_x_y_ranges(inside.left()..=bar.left() + LABELS_WIDTH, place.rows_rect.y_range());
         fade(&cells, names, argb(PANEL));
         let frame = self.frame();
-        for (r, row) in self.rows.list.iter().enumerate() {
+        for (r, row) in self.rows.list.iter().enumerate().filter(|(_, row)| row.frames()) {
             // (a row several groups' tracks share is named for the group the playhead is in)
             if let Some(t) = row.track(frame) {
                 let chosen = Some(t.id) == info.track;
-                track_label(ui, look, &cells, place, r, row, t, chosen);
+                let keyed = row
+                    .segments
+                    .iter()
+                    .find(|s| s.track().id == t.id)
+                    .filter(|s| super::keys::keyed(panel, &s.row))
+                    .map(|_| self.keys.out.contains(&t.id));
+                track_label(ui, look, &cells, place, r, row, t, chosen, keyed);
             }
         }
+        self.draw_key_names(&cells, place);
         // the end flap, over the ruler
         self.flap(&ruler, place, info.duration);
         // where the playhead is in time, over the bar's corner
@@ -1290,22 +1435,34 @@ impl TimelineGrid {
     }
 }
 
-/// Where the header's buttons are: Play (its word `words` wide), a frame back and on; then the
-/// settings, the lasso, a new track and a new frame.
-fn header_buttons(place: &Place, words: f32) -> [(Button, Rect); 7] {
+/// Where the header's buttons are: Play (its word `words` wide), with Animate on (`autokey`) the
+/// record button, a frame back and on; then on the right the settings, the lasso, Animate, a new
+/// track and a new frame, 50 points apart, or closer where the bar is too narrow for that.
+fn header_buttons(place: &Place, words: f32, autokey: bool) -> Vec<(Button, Rect)> {
     let y = place.header.top() + 4.0 + 20.0;
     let play = Rect::from_min_size(pos2(place.bar.left() + 26.0, y - 20.0), vec2(words.max(54.0), 40.0));
-    let back = Rect::from_min_size(pos2(play.right() + 18.0, y - 20.0), vec2(50.0, 40.0));
+    let record = Rect::from_min_size(pos2(play.right(), y - 20.0), vec2(40.0, 40.0));
+    let after = if autokey { record.right() } else { play.right() };
+    let back = Rect::from_min_size(pos2(after + 18.0, y - 20.0), vec2(50.0, 40.0));
+    let on = back.translate(vec2(50.0, 0.0));
     let add = Rect::from_min_size(pos2(place.bar.right() - 16.0 - 50.0, y - 20.0), vec2(50.0, 40.0));
-    [
-        (Button::Play, play),
+    // (the four before `+` stand clear of ›)
+    let step = ((add.left() - on.right() - 4.0) / 4.0).clamp(36.0, 50.0);
+    let slot = |k: f32| Rect::from_min_size(pos2(add.left() - k * step, y - 20.0), vec2(step, 40.0));
+    let mut all = vec![(Button::Play, play)];
+    if autokey {
+        all.push((Button::Record, record));
+    }
+    all.extend([
         (Button::Back, back),
-        (Button::On, back.translate(vec2(50.0, 0.0))),
-        (Button::Settings, add.translate(vec2(-150.0, 0.0))),
-        (Button::Lasso, add.translate(vec2(-100.0, 0.0))),
-        (Button::Track, add.translate(vec2(-50.0, 0.0))),
+        (Button::On, on),
+        (Button::Settings, slot(4.0)),
+        (Button::Lasso, slot(3.0)),
+        (Button::Animate, slot(2.0)),
+        (Button::Track, slot(1.0)),
         (Button::Add, add),
-    ]
+    ]);
+    all
 }
 
 #[cfg(test)]
@@ -1322,10 +1479,12 @@ impl TimelineGrid {
         pos2(place.x(f as f32) + CELL_WIDTH / 2.0, place.ruler.center().y)
     }
 
-    /// The middle of the header's button `name`: Play, Back, On, Settings, Lasso, Track or Add.
+    /// The middle of the header's button `name`: Play, Record, Back, On, Settings, Lasso, Animate,
+    /// Track or Add.
     pub(crate) fn button_centre(&self, ctx: &egui::Context, name: &str) -> Pos2 {
         let place = self.place(ctx);
-        let found = header_buttons(&place, 0.0).into_iter().find(|(b, _)| format!("{b:?}") == name);
+        let found =
+            header_buttons(&place, 0.0, self.animate.autokey).into_iter().find(|(b, _)| format!("{b:?}") == name);
         found.map_or(Pos2::ZERO, |(_, r)| r.center())
     }
 
@@ -1351,6 +1510,49 @@ impl TimelineGrid {
         let place = self.place(ctx);
         let x = place.flap_x(self.info().map_or(1, |i| i.duration));
         pos2(x + 7.0, place.ruler.top() + 8.0)
+    }
+
+    /// The middle of row `r`'s chevron after its track's name (its rows of keys out or away),
+    /// where its blocks have keys.
+    pub(crate) fn chevron_centre(&self, ctx: &egui::Context, r: usize) -> Option<Pos2> {
+        let place = self.place(ctx);
+        let panel = self.panel.as_ref()?;
+        let row = self.rows.get(r).filter(|row| row.frames())?;
+        let t = row.track(self.frame())?;
+        let segment = row.segments.iter().find(|s| s.track().id == t.id)?;
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        let keyed = super::keys::keyed(panel, &segment.row);
+        label_place(&painter, &place, r, row, t, keyed).chevron.map(|c| c.center())
+    }
+
+    /// The rows of keys out, top first: the row of frames each stands under, and its name.
+    pub(crate) fn key_rows(&self, _ctx: &egui::Context) -> Vec<(usize, &'static str)> {
+        let rows = &self.rows;
+        let under = |r: usize| rows.frames_row(r);
+        rows.list
+            .iter()
+            .enumerate()
+            .filter_map(|(r, row)| row.keys.as_ref().map(|k| (under(r), k.kind.said())))
+            .collect()
+    }
+
+    /// The middle of the row of keys `name` under row (of frames) `r`, over frame `f` (on its
+    /// name, `f` none).
+    pub(crate) fn key_centre(&self, ctx: &egui::Context, r: usize, name: &str, f: Option<u32>) -> Option<Pos2> {
+        let place = self.place(ctx);
+        let (k, row) = self.rows.list.iter().enumerate().find(|(k, row)| {
+            row.keys.as_ref().is_some_and(|keys| keys.kind.said() == name) && self.rows.frames_row(*k) == r
+        })?;
+        let x = f.map_or(place.bar.left() + 70.0, |f| place.x(f as f32) + CELL_WIDTH / 2.0);
+        Some(pos2(x, place.row_top(k) + row.height / 2.0))
+    }
+
+    /// The middle of the grip before the keys picked (`leading`) or after them, where they span
+    /// two frames or more.
+    pub(crate) fn grip_centre(&self, ctx: &egui::Context, leading: bool) -> Option<Pos2> {
+        let place = self.place(ctx);
+        let g = self.grips(&place)?;
+        Some(g.rect(&place, leading).center())
     }
 
     /// Whether it has a timeline to show.
@@ -1426,9 +1628,41 @@ fn chevron(painter: &egui::Painter, at: Pos2, open: bool, ink: Color32) {
     painter.add(Shape::line(points, Stroke::new(1.6, ink)));
 }
 
+/// Where row `r`'s track `t`'s name stands: its capsule (stepped in for each group it is
+/// inside), its name (as it fits), and where its blocks have keys (`keyed`), the chevron after it.
+struct LabelPlace {
+    capsule: Rect,
+    name: String,
+    chevron: Option<Rect>,
+}
+
+fn label_place(
+    painter: &egui::Painter,
+    place: &Place,
+    r: usize,
+    row: &GridRow,
+    t: &TimelineTrackInfo,
+    keyed: bool,
+) -> LabelPlace {
+    let indent = row.depth as f32 * INDENT;
+    let lock = if t.locked { 20.0 } else { 0.0 };
+    let chevron = if keyed { 22.0 } else { 0.0 };
+    let most = LABELS_WIDTH - 34.0 - 6.0 - 26.0 - 6.0 - 14.0 - indent - lock - chevron;
+    let name = fitted(painter, &t.name, most.max(20.0));
+    let words = text_width(painter, &name, 14.0, Weight::Medium);
+    let left = place.bar.left() + 12.0 + indent;
+    let end = if keyed { 6.0 } else { 14.0 };
+    let width = 6.0 + 26.0 + 6.0 + words + lock + chevron + end;
+    let middle = place.row_top(r) + row.height / 2.0;
+    let capsule = Rect::from_min_size(pos2(left, middle - 16.0), vec2(width, 32.0));
+    let chevron =
+        keyed.then(|| Rect::from_min_size(pos2(capsule.right() - end - chevron, middle - 15.0), vec2(chevron, 30.0)));
+    LabelPlace { capsule, name, chevron }
+}
+
 /// Row `r`'s track `t`'s name in its capsule (the chosen track's lit), with its box, standing
-/// still over the frames, stepped in for each group it is inside. (Room is left after the name:
-/// what more a track's row holds there is the keys'.)
+/// still over the frames, stepped in for each group it is inside; where its blocks have keys, a
+/// chevron after it (down while its rows of keys are out: `keyed` says whether they are).
 #[allow(clippy::too_many_arguments)]
 fn track_label(
     ui: &Ui,
@@ -1439,6 +1673,7 @@ fn track_label(
     row: &GridRow,
     t: &TimelineTrackInfo,
     chosen: bool,
+    keyed: Option<bool>,
 ) {
     let label = t.label.map(label_colour);
     let ink = match (label, chosen) {
@@ -1447,14 +1682,8 @@ fn track_label(
         (None, false) => argb(INK),
     };
     let alpha = if t.hidden { 0.6 } else { 1.0 };
-    let indent = row.depth as f32 * INDENT;
-    let most = LABELS_WIDTH - 34.0 - 6.0 - 26.0 - 6.0 - 14.0 - indent - if t.locked { 20.0 } else { 0.0 };
-    let name = fitted(painter, &t.name, most.max(20.0));
-    let words = text_width(painter, &name, 14.0, Weight::Medium);
-    let left = place.bar.left() + 12.0 + indent;
-    let width = 6.0 + 26.0 + 6.0 + words + if t.locked { 20.0 } else { 0.0 } + 14.0;
-    let middle = place.row_top(r) + row.height / 2.0;
-    let capsule = Rect::from_min_size(pos2(left, middle - 16.0), vec2(width, 32.0));
+    let LabelPlace { capsule, name, chevron } = label_place(painter, place, r, row, t, keyed.is_some());
+    let (left, middle) = (capsule.left(), capsule.center().y);
     if let Some(fill) = label.or(chosen.then(|| argb(CAPSULE))) {
         painter.rect_filled(capsule, 16, faded(fill, alpha));
     }
@@ -1484,6 +1713,13 @@ fn track_label(
     let shown = text(painter, at, Align2::LEFT_CENTER, &name, 14.0, Weight::Medium, faded(ink, alpha));
     if t.locked && painter.clip_rect().contains(pos2(shown.right() + 13.0, middle)) {
         look.icon_on(ui, painter, &icons::LOCK, pos2(shown.right() + 13.0, middle), 14.0, faded(ink, alpha));
+    }
+    if let (Some(c), Some(out)) = (chevron, keyed) {
+        let icon = if out { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT };
+        let tint = if out { argb(pc::ACCENT) } else { faded(ink, alpha) };
+        if painter.clip_rect().contains(c.center()) {
+            look.icon_on(ui, painter, icon, c.center(), 13.0, tint);
+        }
     }
 }
 
