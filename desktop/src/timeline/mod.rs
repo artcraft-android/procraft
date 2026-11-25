@@ -108,6 +108,15 @@ struct Playing {
     held: f32,
 }
 
+/// How far over the window's foot the grid's bar reaches this frame (0 while none shows): the
+/// toolbars and the adjustments' panels at the foot stand over it, as on the iPad.
+pub fn lift(ctx: &egui::Context) -> f32 {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data(|d| d.get_temp::<(f32, u64)>(egui::Id::unique("timeline grid lift")))
+        .filter(|(_, at)| at + 1 >= frame)
+        .map_or(0.0, |(lift, _)| lift)
+}
+
 /// Whether layer `l` is listed in the layers panel: off a timeline (`root` none), every layer; on
 /// one, those of drawing `root` (itself and everything inside it), the drawing at the playhead on
 /// the chosen track (the core's `timeline_drawing_shown`).

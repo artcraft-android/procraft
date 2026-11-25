@@ -304,6 +304,10 @@ impl TimelineGrid {
         }
         let place = self.place(ctx);
         let now = ctx.input(|i| i.time);
+        // (what stands at the window's foot stands over it)
+        let lift = ctx.content_rect().bottom() - place.bar.top();
+        let frame = ctx.cumulative_frame_nr();
+        ctx.data_mut(|d| d.insert_temp(Id::unique("timeline grid lift"), (lift, frame)));
         egui::Area::new(Id::unique("timeline grid")).fixed_pos(place.bar.min).order(Order::Middle).show(ctx, |ui| {
             // the whole bar takes its presses: none reach the canvas under it
             ui.allocate_rect(place.bar, Sense::click_and_drag());
@@ -652,6 +656,8 @@ impl TimelineGrid {
                     wait(NAME_HOLD);
                 }
             }
+            // (dragged off it: nothing)
+            Touch::Name => self.motion.touch = Touch::Ignore,
             Touch::Flap { from } if far >= 4.0 || self.length_draft.is_some() => {
                 if self.length_draft.is_none() {
                     self.stop(session, false);

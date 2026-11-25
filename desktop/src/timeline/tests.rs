@@ -621,3 +621,54 @@ fn groups_are_made_expanded_into_shared_rows_and_cycled() {
     settle(&mut w);
     assert_eq!(all_clips(&w).iter().map(Vec::len).sum::<usize>(), count + 1, "a new frame");
 }
+
+/// A repeating group's end handle sets how long it plays, a tag saying how many times as it is
+/// dragged; its start has no handle.
+#[test]
+fn a_repeating_group_s_end_handle_sets_how_long_it_plays() {
+    let Some(mut w) = open() else { return };
+    timeline_on(&mut w);
+    button(&mut w, "Lasso");
+    let at = w.ui.timeline.cell_centre(&w.ctx, 0, 0);
+    w.mouse_stroke(at - vec2(12.0, 0.0), at + vec2(12.0, 0.0), 6);
+    settle(&mut w);
+    hold(&mut w, at);
+    menu_row(&mut w, "Group frames");
+    let group = clip_ids(&w)[0];
+    assert_eq!(w.ui.timeline.picked_now(), Some(group), "the group made is picked");
+    // (its tracks' row under it: the bar is taller)
+    let at = w.ui.timeline.cell_centre(&w.ctx, 0, 0);
+    right_click(&mut w, at + vec2(10.0, 0.0));
+    menu_row(&mut w, "Cycle");
+    menu_row(&mut w, "Repeat");
+    w.click(pos2(40.0, 40.0));
+    settle(&mut w);
+    assert_eq!(w.session.timeline_tracks()[0].clips[0].cycle, 1);
+    let end = w.ui.timeline.handle_centre(&w.ctx, false).expect("its end's handle");
+    w.hover(end);
+    w.mouse_button(end, true);
+    w.mouse_drag(end, end + vec2(2.0 * 44.0, 0.0), 10);
+    assert!(label_at(&mut w, "×3").is_some(), "the tag says three times");
+    w.mouse_button(end + vec2(2.0 * 44.0, 0.0), false);
+    settle(&mut w);
+    assert_eq!(clips(&w), vec![(0, 3)]);
+}
+
+/// The frames picked together have the handles on the last of them: its end dragged two columns
+/// on (a column for each picked frame on its track) makes every one of them a frame longer.
+#[test]
+fn the_picked_frames_handles_lengthen_them_all() {
+    let Some(mut w) = open() else { return };
+    timeline_on(&mut w);
+    button(&mut w, "Add");
+    button(&mut w, "Lasso");
+    let (a, b) = (w.ui.timeline.cell_centre(&w.ctx, 0, 0), w.ui.timeline.cell_centre(&w.ctx, 0, 1));
+    w.mouse_stroke(a, b, 8);
+    settle(&mut w);
+    assert_eq!(w.ui.timeline.chosen_now().map(|c| c.len()), Some(2));
+    let end = w.ui.timeline.handle_centre(&w.ctx, false).expect("the last one's end handle");
+    assert!((end.x - b.x) > 0.0, "on the last of them");
+    drag(&mut w, end, end + vec2(2.0 * 44.0, 0.0));
+    assert_eq!(clips(&w), vec![(0, 2), (2, 2)]);
+    assert_eq!(w.ui.timeline.chosen_now().map(|c| c.len()), Some(2), "still picked");
+}
