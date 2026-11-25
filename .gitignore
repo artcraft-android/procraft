@@ -14,3 +14,5 @@ replay_pid*.log
 /ios/build-sim/
 # Python bytecode from the tools
 __pycache__/
+# macOS Finder files
+.DS_Store

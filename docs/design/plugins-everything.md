@@ -2,7 +2,7 @@ Status: steps 1 to 3 built, on branch `plugins/builtin-plugins`: built-in plugin
 (`crates/core/src/builtin_plugins.rs`, 2026-11-23), and Pixelate, Dither and Vignette moved into
 plugin files (2026-11-24). Put onto the second upstream merge (branch
 `plugins/on-upstream-2026-11-24`), step 3's live filters gave way to upstream's filter layers
-(interface 17, Soren's call): Dither and Vignette are filter layers in the `pixel-effects` plugin,
+(interface 17, as decided): Dither and Vignette are filter layers in the `pixel-effects` plugin,
 and Pixelate is Infinite Plugins'. Exports took interface 23 there, and mesh warps and tools 24.
 Step 4 built too (2026-11-24, `crates/core/src/plugin_exports.rs`): exports of the animation, with
 the sprite sheet and the Harmony scene moved into the `frame-exports` plugin. Step 5 built
@@ -15,14 +15,14 @@ Turn on and Turn off, and as much of its code as can really move into a plugin f
 every plugin off the app is a canvas, brushes, layers, selection, transform, colour, the gallery
 and export.
 
-Decided with Soren:
+Decided:
 
 - **Extend the plugin system** so more of the code really moves out of the app, rather than only
   gating features with switches.
-- **About ten plugins** for Soren's features, one per area, smaller parts as switches inside.
+- **About ten plugins** for this fork's features, one per area, smaller parts as switches inside.
 - **An artwork opens fully with a plugin off.** It shows and plays as it was saved; only the tools
   and panels that edit that feature are hidden.
-- **Upstream's features too**, not only Soren's.
+- **Upstream's features too**, not only this fork's.
 
 ## What can move and what can't
 
@@ -83,9 +83,9 @@ The `.procraft-plugin` files there are today, given more reach so real feature c
 | 24 | **Tools:** a tool on the bar whose touches go to the plugin, which answers with edits to the layers (new group, polygon frame, clip) through a `layers.edit` permission | Comic Panels' cutting and gutters |
 
 With a file plugin off, what it already made stays: comic panels stay groups, a warp is already
-pixels. A filter layer shows nothing until its plugin is on again (upstream's way, Soren's call).
+pixels. A filter layer shows nothing until its plugin is on again (upstream's way, as decided).
 
-## Soren's features, as plugins
+## This fork's features, as plugins
 
 | Plugin | Kind | Switches inside | Moves to a file later |
 |---|---|---|---|
@@ -148,8 +148,8 @@ is the brush's, as an artwork's content is.
 
 Upstream keeps adding features as code in the app, so each one gated here is a seam to keep
 through every merge from `procraft-upstream`. The gate calls are small and sit at the UI edges, but
-merges will touch them. Thirteen built-ins, listed after Soren's (`UPSTREAM` in
-`builtin_plugins.rs`), confirmed with Soren on 2026-11-24:
+merges will touch them. Thirteen built-ins, listed after this fork's (`UPSTREAM` in
+`builtin_plugins.rs`), confirmed on 2026-11-24:
 
 | Plugin | Id | Switches inside |
 |---|---|---|
@@ -175,7 +175,7 @@ way in belongs to, so the apps filter with one call: `quick_action_feature`, `ad
 `layer_option_feature` and `gesture_purpose_feature`.
 
 Two of them pause what an artwork has on rather than leave it running with no way to change it
-(Soren's call): with Drawing guides off the guide is neither drawn nor followed
+(as decided): with Drawing guides off the guide is neither drawn nor followed
 (`CanvasSession::set_guide_paused`, the artwork keeping its guide as saved), and with Time-lapse
 off nothing is recorded.
 
@@ -191,19 +191,19 @@ selection, transform, colour, undo, the gallery, PNG/JPEG export, and the Plugin
 
 1. **Built-in plugins:** the registry, `holds: ["builtin"]`, the gate call in core and its bindings,
    the card (Remove hidden), Plugins page grouping, tests. Lasso Fill's hook left as it is.
-2. **Soren's features behind the ten built-ins:** iPad first, then Android and desktop. Each feature's
+2. **This fork's features behind the ten built-ins:** iPad first, then Android and desktop. Each feature's
    entry points (bar buttons, Actions rows, panel tabs, Share entries, new-canvas choices) asking
    its gate. Opening artworks untouched.
 3. **Filter layers:** done. Dither and Vignette are filter layers (upstream's interface 17) in the
    bundled `pixel-effects` plugin (off until turned on, as bundled files are); Pixelate is Infinite
    Plugins' filter layer. Their native code is gone. An artwork with a native Pixelate, Dither or
-   Vignette layer no longer opens (Soren's call: there are none). (Built first as live filters,
+   Vignette layer no longer opens (decided: there are none). (Built first as live filters,
    interface 9, a kind of adjustment layer; upstream's filter layers took their place.)
 4. **Interface 23, exporters:** done. Sprite Sheet and Harmony Scene are the bundled
    `frame-exports` plugin (off until turned on); their native code is gone. The app draws the
    frames (or each track alone) and puts pictures together; the plugin lays them out and writes
    every file's text. Share's sheet for an export is built from the plugin's controls. Texture
-   Packer stays built in (Soren's call): it is an on-canvas tool, not an export, and is the
+   Packer stays built in (as decided): it is an on-canvas tool, not an export, and is the
    built-in `procraft.texture-packer`. Desktop and Android have the iPad's screen for a plugin's
    export (`desktop/src/plugin_share.rs`, `ui/PluginShareUi.kt`) in place of the native Sprite
    Sheet and Harmony screens the upstream merge's ports had.

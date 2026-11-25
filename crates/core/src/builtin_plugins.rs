@@ -195,7 +195,7 @@ const BUILTINS: &[Builtin] = &[
     },
 ];
 
-/// Upstream ProCraft's features, listed after Soren's own. Each is a seam kept through merges from
+/// Upstream ProCraft's features, listed after the fork's own. Each is a seam kept through merges from
 /// upstream: the apps ask about these at the edges of upstream's code, where its ways in are.
 const UPSTREAM: &[Builtin] = &[
     Builtin {
@@ -297,7 +297,7 @@ const UPSTREAM: &[Builtin] = &[
     },
 ];
 
-/// Every built-in plugin, in the order the page lists them: Soren's, then upstream's.
+/// Every built-in plugin, in the order the page lists them: the fork's, then upstream's.
 fn builtins() -> impl Iterator<Item = &'static Builtin> {
     BUILTINS.iter().chain(UPSTREAM)
 }
@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn upstreams_features_come_after_sorens_and_start_on() {
+    fn upstreams_features_come_after_the_forks_and_start_on() {
         let plugins = app("upstream");
         let ids: Vec<String> = plugins.plugins().into_iter().map(|p| p.id).collect();
         let first = ids.iter().position(|id| id == "procraft.text").unwrap();
