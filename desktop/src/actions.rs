@@ -86,9 +86,9 @@ pub enum Act {
     },
     Share(Format),
     AnimatedExport(Animated),
-    /// The frames as a sprite sheet (its screen), or as a Harmony scene, zipped.
-    SpriteSheet,
-    HarmonyScene,
+    /// A file a plugin makes of the animation (a sprite sheet, a Harmony scene), by its place in
+    /// [`Showing::plugin_shares`].
+    PluginShare(u8),
     /// The Texture Packer: the canvas's drawings, each shared as a PNG of its own.
     TexturePacker,
     /// A model's turntable as an animation.
@@ -125,7 +125,8 @@ pub enum Act {
     DrawingGuide,
     EditGuide,
     Crop,
-    ComicPanels,
+    /// A plugin's tool (Comic Panels), by its place in [`Showing::plugin_tools`].
+    PluginTool(u8),
     Cut,
     Copy,
     CopyCanvas,
@@ -242,12 +243,11 @@ fn model_groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             ]
             .into_iter()
             // while the 3D painting plugin is on
-            .chain(
-                prefs
-                    .plugins
-                    .has(procraft_core::Feature::ModelPainting)
-                    .then_some(Button("Edit lighting & environment", None, shown.then_some(Act::LightingStudio))),
-            )
+            .chain(prefs.plugins.has(procraft_core::Feature::ModelPainting).then_some(Button(
+                "Edit lighting & environment",
+                None,
+                shown.then_some(Act::LightingStudio),
+            )))
             .collect(),
             vec![Button("View in AR", None, None)],
         ],
@@ -293,8 +293,8 @@ pub struct Showing {
     pub guide: bool,
     /// The canvas has a timeline: Timeline Settings opens its settings.
     pub timeline: bool,
-    /// The Comic Panels plugin is on: Comic panels shows (on the iPad, the plugin's tool).
-    pub comic_panels: bool,
+    /// What Actions › Canvas calls the tools of the plugins that are on (Comic panels).
+    pub plugin_tools: Vec<String>,
     pub side_bar: bool,
     /// The artwork paints on a model: whether its 2D texture shows flat, and strokes reach
     /// through it.
@@ -307,6 +307,9 @@ pub struct Showing {
     pub vectors: bool,
     /// What Share Image calls the files plugins make of the artwork's layers of kinds they add.
     pub plugin_exports: Vec<String>,
+    /// What Share Layers calls the files plugins make of the animation (a sprite sheet, a Harmony
+    /// scene).
+    pub plugin_shares: Vec<String>,
     /// The controls and actions plugins put in the Canvas tab, after its own rows.
     pub plugin_controls: Vec<PluginControl>,
     pub plugin_actions: Vec<PluginAction>,
@@ -388,9 +391,11 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             ]
             .into_iter()
             // while the Text plugin is on
-            .chain(
-                prefs.plugins.has(procraft_core::Feature::Text).then_some(Button("Add text", None, Some(Act::AddText))),
-            )
+            .chain(prefs.plugins.has(procraft_core::Feature::Text).then_some(Button(
+                "Add text",
+                None,
+                Some(Act::AddText),
+            )))
             .collect(),
             vec![
                 Button("Cut", None, Some(Act::Cut)),
@@ -405,39 +410,59 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             ],
         ],
         1 => vec![
-            [
-                Some(Button("Crop & Resize", None, Some(Act::Crop))),
-                // while the Comic Panels plugin is on (the canvas made a comic page the first time)
-                showing.comic_panels.then_some(Button("Comic panels", None, Some(Act::ComicPanels))),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
+            [Button("Crop & Resize", None, Some(Act::Crop))]
+                .into_iter()
+                // the plugins' tools (Comic Panels makes the canvas a page the first time)
+                .chain(
+                    showing
+                        .plugin_tools
+                        .iter()
+                        .enumerate()
+                        .take(usize::from(u8::MAX))
+                        .map(|(i, label)| Button(kept_label(label), None, Some(Act::PluginTool(i as u8)))),
+                )
+                .collect(),
             [
                 // while the Animation Assist plugin (and its Page Assist) is on
-                prefs
-                    .plugins
-                    .has(procraft_core::Feature::AnimationAssist)
-                    .then_some(Switch("Animation Assist", showing.animation, Some(Act::AnimationAssist))),
-                prefs
-                    .plugins
-                    .has(procraft_core::Feature::PageAssist)
-                    .then_some(Switch("Page Assist", showing.pages, Some(Act::PageAssist))),
+                prefs.plugins.has(procraft_core::Feature::AnimationAssist).then_some(Switch(
+                    "Animation Assist",
+                    showing.animation,
+                    Some(Act::AnimationAssist),
+                )),
+                prefs.plugins.has(procraft_core::Feature::PageAssist).then_some(Switch(
+                    "Page Assist",
+                    showing.pages,
+                    Some(Act::PageAssist),
+                )),
             ]
             .into_iter()
             .flatten()
             // while the Timeline plugin is on; Timeline Settings only on a timeline: its frame rate,
             // playback, onion skins and length, on a card
-            .chain(prefs.plugins.has(procraft_core::Feature::Timeline).then_some([
-                Switch("Timeline", showing.timeline, Some(Act::Timeline)),
-                Button("Timeline Settings", None, showing.timeline.then_some(Act::TimelineSettings)),
-            ]).into_iter().flatten())
+            .chain(
+                prefs
+                    .plugins
+                    .has(procraft_core::Feature::Timeline)
+                    .then_some([
+                        Switch("Timeline", showing.timeline, Some(Act::Timeline)),
+                        Button("Timeline Settings", None, showing.timeline.then_some(Act::TimelineSettings)),
+                    ])
+                    .into_iter()
+                    .flatten(),
+            )
             // while the Drawing guides plugin is on
-            .chain(prefs.plugins.has(procraft_core::Feature::DrawingGuides).then_some([
-                Switch("Drawing Guide", showing.guide, Some(Act::DrawingGuide)),
-                // greyed until the guide is on
-                Button("Edit Drawing Guide", None, showing.guide.then_some(Act::EditGuide)),
-            ]).into_iter().flatten())
+            .chain(
+                prefs
+                    .plugins
+                    .has(procraft_core::Feature::DrawingGuides)
+                    .then_some([
+                        Switch("Drawing Guide", showing.guide, Some(Act::DrawingGuide)),
+                        // greyed until the guide is on
+                        Button("Edit Drawing Guide", None, showing.guide.then_some(Act::EditGuide)),
+                    ])
+                    .into_iter()
+                    .flatten(),
+            )
             .collect(),
             vec![Switch("Reference", showing.reference, Some(Act::Reference))],
             vec![
@@ -460,12 +485,11 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             ]
             .into_iter()
             // while the PSD plugin's export is on
-            .chain(
-                prefs
-                    .plugins
-                    .has(procraft_core::Feature::PsdExport)
-                    .then_some(Button("PSD", None, Some(Act::Share(Format::Psd)))),
-            )
+            .chain(prefs.plugins.has(procraft_core::Feature::PsdExport).then_some(Button(
+                "PSD",
+                None,
+                Some(Act::Share(Format::Psd)),
+            )))
             .chain([
                 Button("PDF", None, Some(Act::Share(Format::Pdf))),
                 Button("JPEG", None, Some(Act::Share(Format::Jpeg))),
@@ -484,7 +508,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     .map(|(i, label)| Button(kept_label(label), None, Some(Act::PluginExport(i as u8)))),
             )
             .collect(),
-            vec![
+            [
                 Heading("Share Layers"),
                 Button("PDF", None, Some(Act::Share(Format::LayersPdf))),
                 Button("PNG Files", None, Some(Act::Share(Format::LayerPngs))),
@@ -492,10 +516,24 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 Button("Animated PNG", None, Some(Act::AnimatedExport(Animated::Png))),
                 Button("Animated MP4", None, Some(Act::AnimatedExport(Animated::Mp4))),
                 Button("Animated HEVC", None, Some(Act::AnimatedExport(Animated::Hevc))),
-                Button("Sprite Sheet", None, Some(Act::SpriteSheet)),
-                Button("Texture Packer", None, Some(Act::TexturePacker)),
-                Button("Harmony Scene", None, Some(Act::HarmonyScene)),
-            ],
+            ]
+            .into_iter()
+            // the files plugins make of the animation (a sprite sheet, a Harmony scene)
+            .chain(
+                showing
+                    .plugin_shares
+                    .iter()
+                    .enumerate()
+                    .take(usize::from(u8::MAX))
+                    .map(|(i, label)| Button(kept_label(label), None, Some(Act::PluginShare(i as u8)))),
+            )
+            // while the Texture Packer plugin is on
+            .chain(prefs.plugins.has(procraft_core::Feature::TexturePacker).then_some(Button(
+                "Texture Packer",
+                None,
+                Some(Act::TexturePacker),
+            )))
+            .collect(),
         ],
         3 => vec![
             vec![

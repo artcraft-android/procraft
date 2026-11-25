@@ -199,8 +199,8 @@ pub struct Interface {
     crop: crate::crop::Crop,
     /// The Texture Packer, while it is open.
     texture_packer: Option<crate::texture_packer::TexturePacker>,
-    /// Comic Panels.
-    comic_panels: crate::comic_panels::ComicPanels,
+    /// A plugin's tool (Comic Panels), while it is open.
+    plugin_tool: crate::plugin_tool::PluginToolWindow,
     /// The drawing guide's editor.
     guide_editor: crate::guide_editor::GuideEditor,
     /// The artwork's folder in the gallery.
@@ -252,8 +252,8 @@ pub struct Interface {
     /// The export screen just ended, kept a frame: its preview's textures were drawn in the frame
     /// it ended in, and a texture let go of is gone before that frame is.
     ended_export: Option<crate::animated_export::AnimatedExport>,
-    /// Sharing the frames as a sprite sheet: its screen, while it is up.
-    sprite_sheet: crate::sprite_export::SpriteSheet,
+    /// Sharing what a plugin makes of the animation (a sprite sheet): its screen, while it is up.
+    plugin_shares: crate::plugin_share::PluginShares,
     /// The artwork was opened from the gallery's Share only to be shared as an animation: when
     /// that ends, the gallery comes back.
     exporting_from_gallery: bool,
@@ -345,7 +345,7 @@ impl Interface {
             more_references: Vec::new(),
             crop: crate::crop::Crop::default(),
             texture_packer: None,
-            comic_panels: crate::comic_panels::ComicPanels::default(),
+            plugin_tool: crate::plugin_tool::PluginToolWindow::default(),
             guide_editor: crate::guide_editor::GuideEditor::default(),
             artwork_dir: None,
             held: None,
@@ -377,7 +377,7 @@ impl Interface {
             timeline: crate::timeline::TimelineGrid::default(),
             animated_export: None,
             ended_export: None,
-            sprite_sheet: Default::default(),
+            plugin_shares: Default::default(),
             exporting_from_gallery: false,
             time_lapse: crate::timelapse::TimeLapseUi::default(),
             studio: crate::studio::Studio::default(),
@@ -613,7 +613,7 @@ impl Interface {
         self.floating.place(&ctx);
         crate::panel::set_panels_fold(&ctx, self.floating.layout.look().fold);
         self.ended_export = None;
-        self.sprite_sheet.frame_started();
+        self.plugin_shares.frame_started();
         self.canvas_pressed = std::mem::take(&mut input.canvas_pressed);
         // looked at again soon while an insert is read, or brushes made
         let brushes_coming = self.brushes_added(session);
@@ -776,11 +776,11 @@ impl Interface {
             self.popover_open = false;
             return;
         }
-        // sharing as a sprite sheet: its screen over everything
-        if self.sprite_sheet.is_open() {
+        // sharing what a plugin makes of the animation (a sprite sheet): its screen over everything
+        if self.plugin_shares.is_open() {
             self.canvas_rect = Rect::NOTHING;
             self.animation.reset(session);
-            self.sprite_sheet.show(&ctx, &mut self.look, session);
+            self.plugin_shares.show(&ctx, &mut self.look, session, &self.prefs.plugins);
             session.set_backdrops(Vec::new());
             self.popover_open = false;
             return;
@@ -820,11 +820,16 @@ impl Interface {
             self.popover_open = false;
             return;
         }
-        // Comic Panels: the page, its panels outlined and the header alone
-        if self.comic_panels.open {
+        // a plugin's tool (Comic Panels): the canvas, what the tool shows and its header alone
+        if self.plugin_tool.open.is_some() {
             self.canvas_rect = Rect::EVERYTHING;
-            if self.comic_panels.show(&ctx, &mut self.look, session) == Some(crate::comic_panels::Asked::Undo) {
-                self.undo(session);
+            match self.plugin_tool.show(&ctx, &mut self.look, session) {
+                Some(crate::plugin_tool::Asked::Undo) => {
+                    self.undo(session);
+                    self.plugin_tool.again(session);
+                }
+                Some(crate::plugin_tool::Asked::Said(said, warning)) => self.overlays.notice(&said, warning),
+                None => {}
             }
             self.overlays.show(ui, &mut self.look, colour, false);
             session.set_backdrops(Vec::new());
@@ -2362,7 +2367,7 @@ impl Interface {
         self.open = None;
         session.set_pick_next(false);
         // nothing there to move: it says so and stays out of transform
-        if let Err(said) = self.transform.begin(session) {
+        if let Err(said) = self.transform.begin(session, &self.prefs.plugins) {
             self.overlays.notice(said, false);
         }
     }
@@ -3400,8 +3405,17 @@ impl Interface {
         let turned = self.adjustments.showing_filters && (!filters.is_empty() || !actions.is_empty());
         let as_layer = self.adjustments.as_layer;
         let hidden = self.prefs.plugins.hidden_features();
-        let (shown, tapped) =
-            crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, &actions, turned, as_layer, &hidden);
+        let (shown, tapped) = crate::adjustments::menu(
+            ctx,
+            &mut self.look,
+            button,
+            backdrops,
+            &filters,
+            &actions,
+            turned,
+            as_layer,
+            &hidden,
+        );
         match tapped {
             Some(MenuRow::AsLayer) => self.adjustments.as_layer = !as_layer,
             // as an adjustment layer (those that can't be one do nothing)
@@ -3441,7 +3455,7 @@ impl Interface {
             reference: self.reference.on,
             guide: session.guide().on,
             timeline: session.timeline_info().is_some(),
-            comic_panels: self.prefs.plugins.tools().iter().any(|t| t.key == crate::comic_panels::TOOL),
+            plugin_tools: self.prefs.plugins.tools().into_iter().map(|t| t.label).collect(),
             side_bar: self.side_bar_shown,
             model: self.model,
             model_flat: self.model && session.model_flat(),
@@ -3449,6 +3463,7 @@ impl Interface {
             svg: session.exports_svg(),
             vectors: session.exports_vectors() && self.prefs.plugins.has(procraft_core::Feature::VectorShare),
             plugin_exports: session.plugin_exports().into_iter().map(|e| e.label).collect(),
+            plugin_shares: self.prefs.plugins.shares().into_iter().map(|e| e.label).collect(),
             plugin_controls: self.prefs.plugins.controls_in(procraft_core::PluginPlace::Canvas),
             plugin_actions: self.prefs.plugins.actions_in(procraft_core::PluginPlace::Canvas),
             edit_layout: self.floating.layout.look().edit,
@@ -3489,13 +3504,11 @@ impl Interface {
                 self.open = None;
                 self.animated_export = Some(crate::animated_export::AnimatedExport::new(format));
             }
-            Some(Act::SpriteSheet) => {
+            Some(Act::PluginShare(i)) => {
                 self.open = None;
-                self.sprite_sheet.open();
-            }
-            Some(Act::HarmonyScene) => {
-                self.open = None;
-                crate::harmony_export::share(session, &mut self.export_card);
+                if let Some(share) = self.prefs.plugins.shares().into_iter().nth(usize::from(i)) {
+                    self.plugin_shares.open(share, session, &self.prefs.plugins, &mut self.export_card);
+                }
             }
             Some(act @ (Act::AnimationAssist | Act::PageAssist)) => {
                 self.animation.reset(session);
@@ -3575,10 +3588,12 @@ impl Interface {
                     self.overlays.notice(crate::texture_packer::NOTHING_TO_PACK, true);
                 }
             }
-            Some(Act::ComicPanels) => {
+            Some(Act::PluginTool(i)) => {
                 self.open = None;
-                if !self.comic_panels.begin(session) {
-                    self.overlays.notice(crate::comic_panels::CANNOT, true);
+                if let Some(tool) = self.prefs.plugins.tools().into_iter().nth(usize::from(i))
+                    && let Some((said, warning)) = self.plugin_tool.begin(session, &self.prefs.plugins, tool)
+                {
+                    self.overlays.notice(&said, warning);
                 }
             }
             Some(Act::TimelineSettings) => {
@@ -4008,10 +4023,10 @@ impl Interface {
         !(self.studio.open
             || self.time_lapse.replaying()
             || self.animated_export.is_some()
-            || self.sprite_sheet.is_open()
+            || self.plugin_shares.is_open()
             || self.lighting.open
             || self.crop.open
-            || self.comic_panels.open
+            || self.plugin_tool.open.is_some()
             || self.guide_editor.open
             || self.gesture_controls.open
             || self.canvas_info.is_some()
@@ -4488,8 +4503,17 @@ mod tests {
         }
 
         /// As [`Window::open_with`], the canvas `canvas` pixels.
-        fn open_canvas(size: egui::Vec2, canvas: (u32, u32), prefs: crate::prefs::Prefs) -> Option<Window> {
+        fn open_canvas(size: egui::Vec2, canvas: (u32, u32), mut prefs: crate::prefs::Prefs) -> Option<Window> {
             let gpu = procraft_gpu::Gpu::headless().map_err(|e| eprintln!("skipped: {e}")).ok()?;
+            // the app's own features as the app has them, on (a bare store has none, so none would
+            // show), with what it comes with added off, each window a folder of its own
+            if prefs.plugins.features().is_empty() {
+                static WINDOWS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let n = WINDOWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let dir = std::env::temp_dir().join(format!("procraft-desktop-window-{}-{n}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&dir);
+                prefs.plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+            }
             let session = CanvasSession::new(canvas.0, canvas.1);
             session.set_display_scale(1.0);
             session.use_gpu(gpu.clone());
@@ -5444,6 +5468,12 @@ mod tests {
     #[test]
     fn puppet_pins_put_and_dragged_with_the_mouse_bend_the_layer() {
         let Some(mut w) = Window::open(vec2(1180.0, 1100.0), true) else { return };
+        // Puppet's mesh is the Puppet Warp plugin's
+        let dir = std::env::temp_dir().join(format!("procraft-desktop-puppet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        assert!(plugins.set_on("io.github.artcraftandroid.puppet-warp".to_owned(), true));
+        w.ui.prefs.plugins = plugins;
         w.session.set_brush_size(0.3);
         w.stroke();
         // the lowest painted row of the current layer
@@ -5508,18 +5538,29 @@ mod tests {
         assert!(w.steps().0, "one step to undo");
     }
 
-    /// Comic Panels: the canvas made a page, fitted whole under the header; a line dragged down it
-    /// cuts its panel in two (nothing painted), one step the header's Undo takes back; with Move
-    /// chosen, a press inside a panel takes nothing and the gutter dragged moves both panels' edges;
-    /// Done fits the canvas to the window again.
+    /// Comic Panels, the plugin's tool: the canvas made a page, fitted whole under the header; a
+    /// line dragged down it cuts its panel in two (nothing painted), one step the header's Undo
+    /// takes back; with Move chosen, a press inside a panel takes nothing and the gutter dragged
+    /// moves both panels' edges; Done fits the canvas to the window again.
     #[test]
     fn comic_panels_cut_the_page_and_move_its_gutter() {
         let Some(mut w) = Window::open(vec2(1000.0, 800.0), true) else { return };
+        let dir = std::env::temp_dir().join(format!("procraft-desktop-comic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugins = procraft_core::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+        assert!(plugins.set_on("io.github.artcraftandroid.comic-panels".to_owned(), true));
+        w.ui.prefs.plugins = plugins;
         let fitted = w.paper();
-        assert!(w.ui.comic_panels.begin(&w.session));
+        let tool = w.ui.prefs.plugins.tools().into_iter().find(|t| t.label == "Comic panels").unwrap();
+        let plugins = Arc::clone(&w.ui.prefs.plugins);
+        assert_eq!(w.ui.plugin_tool.begin(&w.session, &plugins, tool), None);
         w.frame();
         w.frame();
-        assert_eq!(w.session.comic_panels().len(), 1);
+        // the panels, as the tool outlines them (canvas pixels)
+        let panels = |w: &Window| -> Vec<Vec<f32>> {
+            w.ui.plugin_tool.shapes.iter().filter(|s| s.look == 0).map(|s| s.points.clone()).collect()
+        };
+        assert_eq!(panels(&w).len(), 1);
         // the 400 x 300 page under the header, 24 in from the sides and foot
         let paper = w.paper();
         let top = crate::tool_header::HEIGHT + 16.0;
@@ -5539,36 +5580,36 @@ mod tests {
         let painted = w.painted();
         let middle = paper.center().x;
         w.mouse_stroke(pos2(middle, paper.top() - 8.0), pos2(middle + 4.0, paper.bottom() + 8.0), 12);
-        assert_eq!(w.session.comic_panels().len(), 2);
+        assert_eq!(panels(&w).len(), 2);
         assert_eq!(w.painted(), painted, "the canvas took no stroke");
         w.click(undo);
-        assert_eq!(w.session.comic_panels().len(), 1);
+        assert_eq!(panels(&w).len(), 1);
         w.mouse_stroke(pos2(middle, paper.top() - 8.0), pos2(middle, paper.bottom() + 8.0), 12);
-        assert_eq!(w.session.comic_panels().len(), 2);
+        assert_eq!(panels(&w).len(), 2);
         // the left panel's right edge, canvas pixels
         let left_edge = |w: &Window| {
-            let panels = w.session.comic_panels();
             let right = |points: &[f32]| points.as_chunks::<2>().0.iter().map(|[x, _]| *x).fold(f32::MIN, f32::max);
-            panels.iter().map(|p| right(&p.points)).fold(f32::MAX, f32::min)
+            panels(w).iter().map(|p| right(p)).fold(f32::MAX, f32::min)
         };
         let before = left_edge(&w);
         w.click(moving);
         // inside a panel nothing is taken, nor cut
         let inside = pos2(paper.left() + 80.0 * scale, paper.center().y);
         w.mouse_stroke(inside, inside + vec2(0.0, 120.0), 8);
-        assert_eq!(w.session.comic_panels().len(), 2);
+        assert_eq!(panels(&w).len(), 2);
         assert!((left_edge(&w) - before).abs() < 0.01);
         // the gutter dragged 20 canvas pixels to the right
         let gutter = pos2(paper.left() + 200.0 * scale, paper.center().y);
         w.mouse_stroke(gutter, gutter + vec2(20.0 * scale, 0.0), 8);
-        assert_eq!(w.session.comic_panels().len(), 2);
+        assert_eq!(panels(&w).len(), 2);
         let moved = left_edge(&w) - before;
         assert!((moved - 20.0).abs() < 1.0, "moved {moved}");
         assert!(w.steps().0);
         w.click(done);
-        assert!(!w.ui.comic_panels.open);
+        assert!(w.ui.plugin_tool.open.is_none());
         let after = w.paper();
         assert!((after.center() - fitted.center()).length() < 1.0, "{after:?} {fitted:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The timeline's keys' tests (kept beside them), with this window.
@@ -5627,8 +5668,10 @@ mod tests {
         let Some(mut w) = Window::open(vec2(1180.0, 900.0), false) else { return };
         w.stroke();
         w.ui.prefs.actions_tab = 1;
-        // the Canvas tab's rows: Crop & Resize and Comic panels (89), 20 apart from Animation
-        // Assist, Page Assist and Timeline (135), then Timeline Settings
+        // the Canvas tab's rows, with the Comic Panels plugin on: Crop & Resize and Comic panels
+        // (89), 20 apart from Animation Assist, Page Assist and Timeline (135), then Timeline
+        // Settings
+        assert!(w.ui.prefs.plugins.set_on("io.github.artcraftandroid.comic-panels".to_owned(), true));
         let row = |w: &mut Window| {
             w.ui.open = Some(Popover::Actions);
             for _ in 0..30 {

@@ -229,6 +229,7 @@ pub use builtin_plugins::{
     Feature, adjustment_feature, gesture_purpose_feature, layer_option_feature, quick_action_feature,
 };
 pub use plugin_exports::PluginShared;
+pub use plugin_tools::{PluginToolShape, PluginToolShown, PluginToolTouch};
 pub use clipboard::{COPY_PIXELS_A_METRE, copy_straight, picture_png, write_copy_png};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
@@ -254,7 +255,6 @@ pub use floating::{
 };
 pub use folders::{FOLDER_UNREACHABLE, FolderAccess, FolderBroughtIn, FolderEntry, FolderError, PlainFolderAccess};
 pub use frame::{configure, screen_profile};
-pub use frame_exports::{HarmonyMade, SheetLayout, SpriteSheetChoices, SpriteSheetMade};
 pub use gallery::{
     ArtworkStore, DragRest, GALLERY_MORE_ALONE, GALLERY_SPRING_MS, GalleryAction, GalleryArtwork, GalleryButton,
     GalleryEntry, GalleryHeaderFit, GalleryPick, ZipKind, gallery_columns, gallery_header_fit, gallery_pick,

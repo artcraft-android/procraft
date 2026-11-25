@@ -86,7 +86,7 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
         when {
             vm.guideEditing -> vm.closeGuideEditor(keep = false)
             vm.cropRect != null -> vm.endCrop(false)
-            vm.comicPanels.open -> vm.closeComicPanels()
+            vm.pluginTool.tool != null -> vm.closePluginTool()
             vm.timelineSettingsOpen -> vm.closeTimelineSettings()
             vm.lightingStudioOpen -> vm.closeLightingStudio(keep = false)
             vm.studioOpen -> vm.closeStudio(keep = false)
@@ -276,7 +276,7 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
                     }
                 }
                 androidx.compose.animation.AnimatedVisibility(
-                    vm.showSideBar && !sideGone && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && !vm.comicPanels.open && vm.textInfo == null &&
+                    vm.showSideBar && !sideGone && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.pluginTool.tool == null && vm.textInfo == null &&
                         vm.opacityLayer == null &&
                         (vm.adjustment == null || vm.adjustPencil),
                     if (sideMoved != null) {
@@ -340,8 +340,8 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             NoticeBand(vm)
             DropBandUi(vm)
             // a full-screen page covers the timeline, as it covers the canvas; the panels open over it
-            val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.comicPanels.open || vm.timeLapseReplaying ||
-                vm.animatedExport != null || vm.modelAnimatedExport != null || vm.spriteSheetExport
+            val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.pluginTool.tool != null || vm.timeLapseReplaying ||
+                vm.animatedExport != null || vm.modelAnimatedExport != null || vm.pluginShare != null
             // while their plugins are on (on a timeline there is no Animation Assist: the core takes its frames over)
             val timelineShown = vm.has(io.github.artcraftandroid.procraft.core.Feature.TIMELINE)
             if (!vm.barsHidden && !pageOver) {
@@ -514,12 +514,12 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             TouchCompanion(vm)
             CropOverlay(vm)
             vm.texturePacker?.let { TexturePackerOverlay(vm, it) }
-            ComicPanelsOverlay(vm)
+            PluginToolOverlay(vm)
             if (vm.textInfo != null) TextEditor(vm)
             RasterizePrompt(vm)
             vm.animatedExport?.let { AnimatedExport(vm, it) }
             vm.modelAnimatedExport?.let { ModelAnimatedExport(vm, it) }
-            if (vm.spriteSheetExport) SpriteSheetExport(vm)
+            vm.pluginShare?.let { PluginShareExport(vm, it) }
             // full-screen pages slide up over everything, and back down
             androidx.compose.animation.AnimatedVisibility(
                 vm.canvasInfoOpen,

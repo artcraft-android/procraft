@@ -1,5 +1,6 @@
 package io.github.artcraftandroid.procraft.canvas
 
+import io.github.artcraftandroid.procraft.ui.readPluginTool
 import io.github.artcraftandroid.procraft.AppLog
 import io.github.artcraftandroid.procraft.ui.CanvasSpace
 import android.app.Application
@@ -105,9 +106,6 @@ const val RECENT_SET = -1
 
 /** How near (dp) a bar moved by Edit layout snaps, at least: to an edge, to turn against it. */
 private const val EDIT_SNAP = 16f
-
-/** The Comic Panels plugin's tool, as the plugins list it (`<plugin id>.<tool key>`). */
-private const val COMIC_PANELS_TOOL = "io.github.artcraftandroid.comic-panels.panels"
 
 /** Where the set at place [set] is once the set at [from] has moved to place [to]. */
 internal fun placeAfterSetMove(set: Int, from: Int, to: Int): Int = when (set) {
@@ -1222,6 +1220,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private val brushLibraryWrites = Mutex()
     var transformKind by mutableStateOf(enumPref(TRANSFORM_KIND, TransformKind.FREEFORM))
         private set
+    /** A plugin lays and bends Puppet's mesh (Puppet Warp): Transform offers Puppet. */
+    var transformHasPuppet by mutableStateOf(false)
+        private set
     var interpolation by mutableStateOf(enumPref(INTERPOLATION, Interpolation.BILINEAR))
         private set
 
@@ -1311,12 +1312,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return plugins.has(feature)
     }
 
-    /** Whether the Comic Panels plugin is on, which Actions › Canvas › Comic panels comes with (as on the iPad, where it is the plugin's tool). */
-    val comicPanelsOn: Boolean
+    /** The tools of the plugins that are on (Comic Panels), as Actions › Canvas lists them. */
+    val pluginTools: List<io.github.artcraftandroid.procraft.core.PluginTool>
         get() {
             // read again as the plugins change
             pluginList
-            return plugins.tools().any { it.key == COMIC_PANELS_TOOL }
+            return plugins.tools()
+        }
+
+    /** The files the plugins that are on make of the animation (a sprite sheet, a Harmony scene), as Share lists them. */
+    val pluginShares: List<io.github.artcraftandroid.procraft.core.PluginShare>
+        get() {
+            // read again as the plugins change
+            pluginList
+            return plugins.shares()
         }
 
     /** Whether QuickMenu action [a] shows: none of the app's own features, or one that shows. */
@@ -5746,8 +5755,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Comic Panels (ui/ComicPanelsUi.kt): open or not, and the panels it outlines. */
-    val comicPanels = io.github.artcraftandroid.procraft.ui.ComicPanels()
+    /** A plugin's tool (ui/PluginToolUi.kt): the one open, if any, and what it shows. */
+    val pluginTool = io.github.artcraftandroid.procraft.ui.PluginToolState()
 
     // ---- crop and resize: the shared core edits it (crates/core crop_edit.rs); these show it ----
 
@@ -8265,8 +8274,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The animated export being set up, if any. */
     var animatedExport by mutableStateOf<Animated?>(null)
 
-    /** Share's sprite sheet export, while its screen is up (ui/SpriteSheetUi.kt). */
-    var spriteSheetExport by mutableStateOf(false)
+    /** Share's export of a plugin's with settings (a sprite sheet), while its screen is up (ui/PluginShareUi.kt). */
+    var pluginShare by mutableStateOf<io.github.artcraftandroid.procraft.core.PluginShare?>(null)
 
     /** The artwork was opened from the gallery's Share only for [animatedExport]: closing it goes back. */
     private var exportingFromGallery = false
@@ -9970,6 +9979,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.transformSetPixelated(transformPixelated)
         s.transformSetGuides(guides)
         s.transformPuppetSettings(puppet.settings)
+        // Puppet's mesh is a plugin's (Puppet Warp), as on the iPad: none on, no Puppet
+        transformHasPuppet = s.transformMeshWarp(plugins, plugins.warps().firstOrNull()?.key)
+        if (!transformHasPuppet && transformKind == TransformKind.PUPPET) transformKind = TransformKind.FREEFORM
         transformBox = s.transformBegin()
         // nothing there to move: it says so and stays out of transform
         if (transformBox == null) {
@@ -10997,8 +11009,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // undoing may put the canvas back in another profile
         refreshCanvasSpace(s)
         refreshFlags()
-        // an undo or a cut changes the panels Comic Panels outlines
-        if (comicPanels.open) comicPanels.read(s)
+        // an undo changes what a plugin's tool shows (Comic Panels' panels)
+        readPluginTool()
         refreshAnimation()
         timeline.refresh()
         followAutokeyBox()

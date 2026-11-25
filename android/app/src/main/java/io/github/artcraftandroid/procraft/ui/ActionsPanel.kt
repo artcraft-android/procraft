@@ -258,11 +258,9 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             ),
         )
         1 -> listOf(
-            listOfNotNull(
-                Act("Crop & Resize") { vm.beginCrop() },
-                // while the Comic Panels plugin is on (the canvas made a comic page the first time)
-                Act("Comic panels") { vm.openComicPanels() }.takeIf { vm.comicPanelsOn },
-            ),
+            listOf(Act("Crop & Resize") { vm.beginCrop() }) +
+                // the plugins' tools (Comic Panels makes the canvas a page the first time)
+                vm.pluginTools.map { tool -> Act(tool.label) { vm.openPluginTool(tool) } },
             listOfNotNull(
                 // while the Animation Assist plugin (and its Page Assist) is on
                 Toggle("Animation Assist", vm.animation?.pages == false) { vm.changeAnimationAssist(it) }
@@ -302,7 +300,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 // files plugins make of the artwork's layers of kinds they add, under their own names
                 *vm.session?.pluginExports().orEmpty().map { e -> Act(e.label) { share(e) } }.toTypedArray(),
             ),
-            listOf(
+            listOfNotNull(
                 Heading("Share Layers"),
                 Act("PDF") { pdfAsking = CanvasViewModel.Export.LAYERS_PDF },
                 Act("PNG Files") { share(CanvasViewModel.Export.LAYER_PNGS) },
@@ -310,9 +308,10 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("Animated PNG") { vm.animatedExport = CanvasViewModel.Animated.PNG },
                 Act("Animated MP4") { vm.animatedExport = CanvasViewModel.Animated.MP4 },
                 Act("Animated HEVC") { vm.animatedExport = CanvasViewModel.Animated.HEVC },
-                Act("Sprite Sheet") { vm.openSpriteSheetExport() },
-                Act("Texture Packer") { vm.openTexturePacker() },
-                Act("Harmony Scene") { shareHarmonyScene(vm, context) },
+                // the files plugins make of the animation (a sprite sheet, a Harmony scene)
+                *vm.pluginShares.map { share -> Act(share.label) { vm.openPluginShare(share, context) } }.toTypedArray(),
+                // while the Texture Packer plugin is on
+                Act("Texture Packer") { vm.openTexturePacker() }.takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.TEXTURE_PACKER) },
             ),
         )
         3 -> listOf(

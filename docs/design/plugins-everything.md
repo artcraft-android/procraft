@@ -122,7 +122,7 @@ Lasso Fill and Stroke preview opacity are already plugins.
 | QuickShape | a stroke held still snapping (draw and hold off) and a gesture set to QuickShape; Gesture controls' QuickShape page; QuickShape and QuickShape stroke in the QuickMenu | the same | the same |
 | Gradients | Adjustments' Gradient Map (as an adjustment layer too); its QuickMenu action | the same | the same |
 | Recolor | its QuickMenu action, its only way in | the same | the same |
-| Timeline | Actions › Canvas › Timeline and its settings; the timeline bar and the motion path on the canvas (an artwork on a timeline still opens on its frame) | none there | none there |
+| Timeline | Actions › Canvas › Timeline and its settings; the timeline bar and the motion path on the canvas (an artwork on a timeline still opens on its frame) | Actions › Canvas › Timeline and Timeline Settings; the timeline grid's bar and its settings card | the same |
 | Performed moves | the grid's Perform button and an armed take | | |
 | My curves | My curves in the curve editor | | |
 | Sounds, Videos | the Add card's Video tile; sounds and videos in its file picker | | |
@@ -204,7 +204,9 @@ selection, transform, colour, undo, the gallery, PNG/JPEG export, and the Plugin
    frames (or each track alone) and puts pictures together; the plugin lays them out and writes
    every file's text. Share's sheet for an export is built from the plugin's controls. Texture
    Packer stays built in (Soren's call): it is an on-canvas tool, not an export, and is the
-   built-in `procraft.texture-packer`.
+   built-in `procraft.texture-packer`. Desktop and Android have the iPad's screen for a plugin's
+   export (`desktop/src/plugin_share.rs`, `ui/PluginShareUi.kt`) in place of the native Sprite
+   Sheet and Harmony screens the upstream merge's ports had.
 5. **Interface 24, mesh warps and tools:** done. Puppet Warp and Comic Panels are the bundled
    `puppet-warp` and `comic-panels` plugins (off until turned on); their built-ins and native code
    are gone. Puppet Warp: the app hands over what is painted as cells (at most 262,144), the
@@ -217,7 +219,9 @@ selection, transform, colour, undo, the gallery, PNG/JPEG export, and the Plugin
    touches go to the plugin, answering with shapes to show and edits (a panel's shape, a new
    panel) the app makes as one step through the `layers.edit` permission; the frames, their
    drawing and the clipping stay the app's (`procraft_engine::panels`), so a page opens and shows
-   as saved with the plugin off.
+   as saved with the plugin off. Desktop and Android have the iPad's window for a plugin's tool
+   (`desktop/src/plugin_tool.rs`, `ui/PluginToolUi.kt`) in place of their native Comic Panels,
+   and their Transform offers Puppet only while a plugin lays its mesh.
 6. **Upstream's features behind built-ins**, one area at a time.
 
 Steps 1 and 2 give the whole page of plugins with every feature switchable. Steps 3 to 5 each move
@@ -225,5 +229,7 @@ real code out and can be done in any order. Step 6 is independent of 3 to 5.
 
 ## Open questions
 
-- Built-in plugins on Android and desktop: those apps lack parts of the timeline, media and HDR
-  interfaces today; their cards would show only what each app has.
+- Built-in plugins on Android and desktop: the upstream merge ported many iPad features there
+  (the timeline grid and its keys, sounds and videos, My curves, Perform, adjustment layers, layer
+  styles, workspaces, the Light tool). Timeline and Texture Packer ask their built-ins there; the
+  rest don't yet, so turning their plugin off hides them only on the iPad.

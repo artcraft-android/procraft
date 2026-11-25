@@ -141,6 +141,8 @@ pub struct Transform {
     /// How a puppet's mesh is laid and its pins turn, and whether its mesh is shown.
     puppet: PuppetSettings,
     puppet_mesh: bool,
+    /// A plugin lays and bends Puppet's mesh (Puppet Warp): Puppet is offered.
+    has_puppet: bool,
     popup: Popup,
     /// The node held and where (window pixels); a rotate or box-turning node let go, where, and when.
     held: Option<(TransformHandle, Pos2)>,
@@ -161,6 +163,7 @@ impl Default for Transform {
             advanced: false,
             puppet: PuppetSettings::default(),
             puppet_mesh: true,
+            has_puppet: false,
             popup: Popup::None,
             held: None,
             let_go: None,
@@ -172,11 +175,21 @@ impl Default for Transform {
 impl Transform {
     /// Starts transforming the current layer (the caller has checked it takes changes). Returns
     /// what to say when there is nothing there to move.
-    pub fn begin(&mut self, session: &CanvasSession) -> Result<(), String> {
+    pub fn begin(
+        &mut self,
+        session: &CanvasSession,
+        plugins: &std::sync::Arc<procraft_core::Plugins>,
+    ) -> Result<(), String> {
         session.transform_set_interpolation(self.interpolation);
         session.transform_set_pixelated(self.pixelated);
         session.transform_set_guides(self.guides);
         session.transform_puppet_settings(self.puppet);
+        // Puppet's mesh is a plugin's (Puppet Warp), as on the iPad: none on, no Puppet
+        let warp = plugins.warps().into_iter().next().map(|w| w.key);
+        self.has_puppet = session.transform_mesh_warp(std::sync::Arc::clone(plugins), warp);
+        if !self.has_puppet && self.kind == TransformKind::Puppet {
+            self.kind = TransformKind::Freeform;
+        }
         let Some(shown) = session.transform_begin() else { return Err(session.transform_refusal()) };
         // a warp lays its mesh over what began
         self.shown = session.transform_set_kind(self.kind).or(Some(shown));
@@ -416,7 +429,8 @@ impl Transform {
         painter.add(Shape::convex_polygon(square(8.0 * k), argb(TURN_ORANGE), Stroke::NONE));
     }
 
-    /// The floating toolbar: the five kinds in a pill over the buttons. Returns what was asked.
+    /// The floating toolbar: the kinds in a pill over the buttons (Puppet while a plugin lays its
+    /// mesh). Returns what was asked.
     fn toolbar(&mut self, ctx: &egui::Context, look: &mut Look) -> Option<Asked> {
         let kinds = [
             (&icons::FREEFORM, "Freeform", self.kind == TransformKind::Freeform),
@@ -460,7 +474,8 @@ impl Transform {
             .active(self.popup == Popup::Interpolation),
             Button::new(&icons::TRANSFORM_RESET, "Reset", 44.0),
         ];
-        let tapped = floating_toolbar(ctx, look, "transform toolbar", BUTTON_ROOMY, &kinds, &buttons, 43.0)?;
+        let kinds = kinds.split_last().filter(|_| !self.has_puppet).map_or(&kinds[..], |(_, rest)| rest);
+        let tapped = floating_toolbar(ctx, look, "transform toolbar", BUTTON_ROOMY, kinds, &buttons, 43.0)?;
         Some(match tapped {
             Tapped::Background => Asked::Background,
             Tapped::Segment(k) => Asked::Kind(all.get(k).copied().unwrap_or(TransformKind::Freeform)),

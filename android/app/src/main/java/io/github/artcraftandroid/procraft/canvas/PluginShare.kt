@@ -7,10 +7,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import io.github.artcraftandroid.procraft.AppLog
 import io.github.artcraftandroid.procraft.core.MobileException
-import io.github.artcraftandroid.procraft.core.SheetLayout
-import io.github.artcraftandroid.procraft.core.SpriteSheetChoices
-import io.github.artcraftandroid.procraft.core.SpriteSheetMade
-import io.github.artcraftandroid.procraft.core.exportFileName
+import io.github.artcraftandroid.procraft.core.PluginShare
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -21,75 +18,48 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.roundToInt
 
-// The animation's frames for other apps, as the iPad's (AnimatedExport.swift, CanvasActions.swift,
-// HarmonyExport.swift): a sprite sheet (a PNG of the frames laid out, and the JSON a game engine
-// reads to cut them out), and a Toon Boom Harmony scene folder, zipped. The core makes both; a
-// Harmony scene's sounds Harmony can't read (an m4a, an mp3) are copied as WAV here first.
+// What a plugin makes of the animation for Share (interface 23), as the iPad's
+// (AnimatedExport.swift `exportPluginShare`): Sprite Sheet and Harmony Scene come from the Sprite
+// Sheet and Harmony plugin. The core draws and writes what the plugin asks; a sound the export takes
+// that it can't read as it is (an m4a, an mp3) is copied as WAV here first.
+
+/** One plugin's export made at a time: the preview's and Done's go through the same renderer. */
+private val shareMaking = Mutex()
 
 /**
- * The frames on one picture for a game engine: as the screen starts, a near-square grid of the
- * frames full size, each held frame once, with its JSON and no background.
+ * The files [share] makes of the animation, in a folder of its own in the exports folder, and what
+ * the plugin says of them; null if they couldn't be made. Off the main thread.
  */
-val SpriteSheetStart = SpriteSheetChoices(
-    layout = SheetLayout.GRID, columns = 0u, rows = 0u, padding = 0u, trim = false, heldOnce = true, json = true, maxSide = 0u, transparent = true,
-)
-
-/** One sprite sheet made at a time: they write the same file. */
-private val sheetMaking = Mutex()
-
-/**
- * The sprite sheet as [choices] ask, in the exports folder: its picture, then its JSON if asked
- * for, and what was made; null if it couldn't be. Off the main thread.
- */
-suspend fun CanvasViewModel.exportSpriteSheet(choices: SpriteSheetChoices): Pair<List<File>, SpriteSheetMade>? {
+suspend fun CanvasViewModel.exportPluginShare(share: PluginShare): Pair<List<File>, String?>? {
     val s = session ?: return null
-    return sheetMaking.withLock {
-        withContext(Dispatchers.IO) {
-            val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-            val file = File(dir, exportFileName(s.name(), false) + " Sprite Sheet.png")
-            try {
-                val made = s.exportSpriteSheet(file.path, choices)
-                (listOf(file) + listOfNotNull(made.jsonPath?.let(::File))) to made
-            } catch (e: MobileException) {
-                AppLog.e("ProCraft", "making a sprite sheet", e)
-                null
-            }
-        }
-    }
-}
-
-/** [exportSpriteSheet] with the export card, to share: the sheet and its JSON, none if it was cancelled or couldn't be made (that is told). */
-suspend fun CanvasViewModel.shareSpriteSheet(choices: SpriteSheetChoices): List<File> =
-    withExportCard("The sprite sheet couldn't be made.") { exportSpriteSheet(choices)?.first }.orEmpty()
-
-/**
- * The animation as a Toon Boom Harmony scene folder, zipped in the exports folder, with the export
- * card: null if it was cancelled or couldn't be made (that is told). Each sound Harmony can't read
- * is copied as WAV first; one that can't be is left out, the scene whole without it.
- */
-suspend fun CanvasViewModel.exportHarmonyScene(): File? =
-    withExportCard("The Harmony scene couldn't be made.") { s ->
+    val plugins = plugins
+    return shareMaking.withLock {
         withContext(Dispatchers.IO) {
             val cache = getApplication<Application>().cacheDir
-            val exports = File(cache, "exports").apply { mkdirs() }
-            val out = File(exports, exportFileName(s.name(), false) + " Harmony.zip")
-            val sounds = File(cache, "harmony-sounds-" + java.util.UUID.randomUUID())
+            val dir = File(File(cache, "exports"), java.util.UUID.randomUUID().toString())
+            val sounds = File(cache, "share-sounds-" + java.util.UUID.randomUUID())
             try {
                 val wav = mutableMapOf<String, String>()
-                for (path in s.harmonySoundsToConvert()) {
+                for (path in s.pluginShareSounds(plugins, share.key)) {
                     val copy = File(sounds, "${wav.size}.wav")
                     if (wavCopy(File(path), copy)) wav[path] = copy.path
                 }
-                s.exportHarmony(out.path, wav)
-                out
+                val made = s.pluginShare(plugins, share.key, dir.path, wav)
+                made.files.map(::File) to made.said
             } catch (e: MobileException) {
-                AppLog.e("ProCraft", "making a Harmony scene", e)
+                AppLog.e("ProCraft", "making ${share.label}", e)
+                dir.deleteRecursively()
                 null
             } finally {
                 sounds.deleteRecursively()
             }
         }
     }
+}
+
+/** [exportPluginShare] with the export card, to share: its files, none if it was cancelled or couldn't be made (that is told). */
+suspend fun CanvasViewModel.sharePluginExport(share: PluginShare): List<File> =
+    withExportCard("${share.label} couldn't be made.") { exportPluginShare(share)?.first }.orEmpty()
 
 /** How long a sound's decoder may give nothing before the copy is given up on. */
 private const val STALLED_NS = 10_000_000_000L
@@ -177,7 +147,7 @@ internal fun wavCopy(source: File, out: File): Boolean {
         copied = true
         return true
     } catch (e: Exception) {
-        AppLog.w("ProCraft", "a sound couldn't be copied as WAV for a Harmony scene", e)
+        AppLog.w("ProCraft", "a sound couldn't be copied as WAV for a plugin's export", e)
         return false
     } finally {
         runCatching { codec?.stop() }

@@ -348,7 +348,10 @@ fun TransformToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
             Segment(PcIcons.Uniform, "Uniform", vm.transformKind == TransformKind.UNIFORM, iconSize = 43.dp) { choose(TransformKind.UNIFORM) }
             Segment(PcIcons.Distort, "Distort", vm.transformKind == TransformKind.DISTORT, iconSize = 43.dp) { choose(TransformKind.DISTORT) }
             Segment(PcIcons.Warp, "Warp", vm.transformKind == TransformKind.WARP, iconSize = 43.dp) { choose(TransformKind.WARP) }
-            Segment(PcIcons.Puppet, "Puppet", vm.transformKind == TransformKind.PUPPET, iconSize = 43.dp) { choose(TransformKind.PUPPET) }
+            // while a plugin lays its mesh (Puppet Warp)
+            if (vm.transformHasPuppet) {
+                Segment(PcIcons.Puppet, "Puppet", vm.transformKind == TransformKind.PUPPET, iconSize = 43.dp) { choose(TransformKind.PUPPET) }
+            }
         },
     ) { w ->
             val popup = vm.transformPopup
