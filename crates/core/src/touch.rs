@@ -1395,10 +1395,15 @@ impl CanvasSession {
     fn canvas_to_window_flat(&self, points: &[procraft_engine::geom::Vec2]) -> Option<Vec<f32>> {
         let view = self.shared.lock().view?;
         let to_screen = view.to_screen();
-        Some(points.iter().flat_map(|&p| {
-            let w = to_screen.apply(p);
-            [w.x, w.y]
-        }).collect())
+        Some(
+            points
+                .iter()
+                .flat_map(|&p| {
+                    let w = to_screen.apply(p);
+                    [w.x, w.y]
+                })
+                .collect(),
+        )
     }
 
     /// A tool's own lasso's fill shown on the canvas as it is drawn: what its line (or its
@@ -2499,14 +2504,14 @@ impl CanvasSession {
                     out.push(TouchCommand::TextLayer);
                     Mode::Idle
                 }
-                    // Continuous: it fills here if nothing is filled here yet, and wherever it goes
-                    PourTarget::Layer if fill.continuous => {
-                        self.pour_trail_begin();
-                        t.pour_trail = at;
-                        let step = self.pour_trail_at(at.0, at.1, [fill.r, fill.g, fill.b], fill.threshold);
-                        t.pour_filled = step == TrailStep::Filled;
-                        Mode::Pour
-                    }
+                // Continuous: it fills here if nothing is filled here yet, and wherever it goes
+                PourTarget::Layer if fill.continuous => {
+                    self.pour_trail_begin();
+                    t.pour_trail = at;
+                    let step = self.pour_trail_at(at.0, at.1, [fill.r, fill.g, fill.b], fill.threshold);
+                    t.pour_filled = step == TrailStep::Filled;
+                    Mode::Pour
+                }
                 PourTarget::Layer => {
                     out.push(TouchCommand::PourAt { x: at.0, y: at.1, fill });
                     Mode::Pour
@@ -3205,7 +3210,9 @@ impl CanvasSession {
                     let view = st.view;
                     (
                         st.window_to_canvas(at.0, at.1).map(|p| (p.x, p.y)),
-                        last.and_then(|(x, y)| view.map(|v| v.to_screen().apply(procraft_engine::geom::Vec2::new(x, y)))),
+                        last.and_then(|(x, y)| {
+                            view.map(|v| v.to_screen().apply(procraft_engine::geom::Vec2::new(x, y)))
+                        }),
                     )
                 };
                 let first_canvas = self.shared.lock().window_to_canvas(start.0, start.1).map(|p| (p.x, p.y));

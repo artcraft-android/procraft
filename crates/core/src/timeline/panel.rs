@@ -215,7 +215,9 @@ impl CanvasSession {
                     let items: Vec<TimelineShotItem> = shown
                         .iter()
                         .map(|s| match s {
-                            GroupShown::Drawing(root) => TimelineShotItem { root: root.0, path: String::new(), seconds: 0.0 },
+                            GroupShown::Drawing(root) => {
+                                TimelineShotItem { root: root.0, path: String::new(), seconds: 0.0 }
+                            }
                             GroupShown::Video { media, seconds } => TimelineShotItem {
                                 root: 0,
                                 path: tl

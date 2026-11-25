@@ -726,7 +726,11 @@ impl Layer {
     /// changes them, so edits to its pixels alone (a fill, an adjustment, a transform) wait until it
     /// is rasterized.
     pub fn drawn_from_data(&self) -> bool {
-        self.text.is_some() || self.vector.is_some() || self.plugin.is_some() || self.adjustment.is_some() || self.filter.is_some()
+        self.text.is_some()
+            || self.vector.is_some()
+            || self.plugin.is_some()
+            || self.adjustment.is_some()
+            || self.filter.is_some()
     }
 
     /// Whether it is an adjustment layer: no pixels of its own, it redraws what is below it.
@@ -980,7 +984,6 @@ impl DynamicRange {
         }
     }
 }
-
 
 /// Whether a canvas was made with the screen upright (see [`Document::made_turns`]).
 fn is_upright(turns: &u8) -> bool {
@@ -2531,11 +2534,11 @@ impl Document {
             self.layer(id).is_some_and(|l| l.kind == LayerKind::Paint && l.filter.is_none() && !l.is_adjustment())
         };
         match self.layer(id)?.kind {
-                // an adjustment layer merges what it does into the layer below; none takes pixels
-                LayerKind::Paint => self.below(id).filter(|b| paint(*b)),
-                LayerKind::Group => {
-                    self.group_merge_pair(id).filter(|(top, into)| paint(*top) && paint(*into)).map(|(_, into)| into)
-                }
+            // an adjustment layer merges what it does into the layer below; none takes pixels
+            LayerKind::Paint => self.below(id).filter(|b| paint(*b)),
+            LayerKind::Group => {
+                self.group_merge_pair(id).filter(|(top, into)| paint(*top) && paint(*into)).map(|(_, into)| into)
+            }
             LayerKind::Mask => None,
         }
     }
@@ -2601,7 +2604,7 @@ impl Document {
             && self
                 .below(id)
                 .and_then(|b| self.layer(b))
-                    .is_some_and(|b| b.kind == LayerKind::Paint && !b.is_adjustment() && (b.filter.is_none() || b.clipped))
+                .is_some_and(|b| b.kind == LayerKind::Paint && !b.is_adjustment() && (b.filter.is_none() || b.clipped))
     }
 
     /// The layer `id` is clipped to: the nearest unclipped paint layer below it in its group.

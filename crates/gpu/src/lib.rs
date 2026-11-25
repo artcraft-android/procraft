@@ -27,12 +27,12 @@ pub use canvas::plugin_filter::{
 pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture, read_picture_given};
 pub use canvas::video::{VideoPicture, VideoSource};
 pub use canvas::{
-        Backdrop, Canvas, CanvasPaper, DisplayLut, FillPreview, Filter, FineThumbnail, FrameCacheStats, LassoPreview,
-        Lay, LayerStore, LayerThumbnailStep, LightMode, LightTool, LiquifyMode, LiquifyStamp, MOST_TIPS, PendingAlphas,
-        PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, STORE_LIT, SecondStroke, SelectionLook,
-        SharedStroke, SmallScene, Stripes, StrokeEcho, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail,
-        TipKind, VEIL_GRID, VeilCell, VeilCells, frame_cache_budget, grey_levels, most_resident, read_texture,
-        set_frame_cache_budget, start_reading, textures_bytes,
+    Backdrop, Canvas, CanvasPaper, DisplayLut, FillPreview, Filter, FineThumbnail, FrameCacheStats, LassoPreview, Lay,
+    LayerStore, LayerThumbnailStep, LightMode, LightTool, LiquifyMode, LiquifyStamp, MOST_TIPS, PendingAlphas,
+    PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, STORE_LIT, SecondStroke, SelectionLook,
+    SharedStroke, SmallScene, Stripes, StrokeEcho, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, TipKind,
+    VEIL_GRID, VeilCell, VeilCells, frame_cache_budget, grey_levels, most_resident, read_texture,
+    set_frame_cache_budget, start_reading, textures_bytes,
 };
 pub use canvas::{CarryFault, GREY_LOOK, ViewLook};
 pub use kept::keep_pipelines_in;

@@ -105,7 +105,15 @@ mod tests {
     }
 
     fn track(id: u64, clips: Vec<Clip>) -> Track {
-        Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
+        Track {
+            id: TrackId(id),
+            name: format!("T{id}"),
+            hidden: false,
+            locked: false,
+            opacity: 1.0,
+            look: Default::default(),
+            clips,
+        }
     }
 
     /// A group of one two-frame drawing at frame 2, cycling every `cycle` frames over `duration`,

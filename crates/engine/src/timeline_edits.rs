@@ -276,7 +276,9 @@ impl Timeline {
             let mut shown = Vec::new();
             drawings_at(g, i64::from(f), self.fps, &mut shown);
             match out.last_mut() {
-                Some(last) if last.2.len() == shown.len() && last.2.iter().zip(&shown).all(|(a, b)| a.same(b)) => last.1 += 1,
+                Some(last) if last.2.len() == shown.len() && last.2.iter().zip(&shown).all(|(a, b)| a.same(b)) => {
+                    last.1 += 1
+                }
                 _ => out.push((f, 1, shown)),
             }
         }

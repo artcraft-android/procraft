@@ -604,7 +604,8 @@ impl CanvasSession {
                 layers.push(layer);
             }
             let tl = d.timeline.as_mut()?;
-            let track = timing_track(tl, video_track, &format!("{name} Timing"), &name, start, duration, &holds, &layers)?;
+            let track =
+                timing_track(tl, video_track, &format!("{name} Timing"), &name, start, duration, &holds, &layers)?;
             // each a group with its layer in it, as a new drawing is
             for layer in &layers {
                 d.drawing_group(*layer);

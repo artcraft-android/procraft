@@ -349,7 +349,15 @@ mod tests {
     }
 
     fn track(id: u64, clips: Vec<Clip>) -> Track {
-        Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
+        Track {
+            id: TrackId(id),
+            name: format!("T{id}"),
+            hidden: false,
+            locked: false,
+            opacity: 1.0,
+            look: Default::default(),
+            clips,
+        }
     }
 
     fn timeline(tracks: Vec<Track>) -> Timeline {
@@ -546,7 +554,8 @@ mod tests {
     #[test]
     fn room_is_made_before_a_clip_by_closing_the_gaps_nearest_it_first() {
         let spans = |tl: &Timeline| tl.tracks[0].clips.iter().map(|c| (c.start, c.duration)).collect::<Vec<_>>();
-        let made = || timeline(vec![track(1, vec![drawing(1, 1, 2), drawing(2, 5, 1), drawing(3, 8, 2), drawing(4, 10, 1)])]);
+        let made =
+            || timeline(vec![track(1, vec![drawing(1, 1, 2), drawing(2, 5, 1), drawing(3, 8, 2), drawing(4, 10, 1)])]);
         // a frame of room wanted before the clip at 8: the gap just before it has two
         let mut tl = made();
         assert_eq!(tl.close_up_before(ClipId(3), 7), Some(7));
@@ -570,7 +579,8 @@ mod tests {
     #[test]
     fn room_is_made_after_a_clip_by_taking_up_the_gaps_nearest_it_first() {
         let spans = |tl: &Timeline| tl.tracks[0].clips.iter().map(|c| (c.start, c.duration)).collect::<Vec<_>>();
-        let made = || timeline(vec![track(1, vec![drawing(1, 0, 2), drawing(2, 4, 1), drawing(3, 5, 2), drawing(4, 10, 1)])]);
+        let made =
+            || timeline(vec![track(1, vec![drawing(1, 0, 2), drawing(2, 4, 1), drawing(3, 5, 2), drawing(4, 10, 1)])]);
         // two frames more: the gap after it has them, and nothing moves
         let mut tl = made();
         assert_eq!(tl.open_up_after(ClipId(1), 4), Some(4));

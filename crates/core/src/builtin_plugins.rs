@@ -12,8 +12,8 @@
 //! always had, so with none touched it is as it was. Its on or off and its switches are kept as any
 //! plugin's are, under their keys, by the app.
 
-use crate::plugins::{PluginControl, PluginInfo, PluginSource, PluginSwitch};
 use crate::Plugins;
+use crate::plugins::{PluginControl, PluginInfo, PluginSource, PluginSwitch};
 
 /// What a built-in plugin hides while it, or the switch the part comes under, is off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]

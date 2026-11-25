@@ -410,7 +410,13 @@ impl State {
 
     /// A lasso's fill shown as it is drawn on layer `layer`: what `line` (canvas pixels) goes
     /// round, in `colour` at `strength` (as it will fill) times the preview's opacity.
-    pub(crate) fn preview_lasso(&mut self, layer: procraft_engine::document::LayerId, line: &[Vec2], colour: [f32; 3], strength: f32) {
+    pub(crate) fn preview_lasso(
+        &mut self,
+        layer: procraft_engine::document::LayerId,
+        line: &[Vec2],
+        colour: [f32; 3],
+        strength: f32,
+    ) {
         let a = (strength * self.lasso_preview).clamp(0.0, 1.0);
         let [r, g, b] = colour.map(|c| c.clamp(0.0, 1.0) * a);
         let preview = (a > 0.0 && line.len() >= 3).then(|| procraft_gpu::LassoPreview {

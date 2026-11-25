@@ -192,7 +192,8 @@ impl<T: Clone> Channel<T> {
     /// done to its keys on `frames` within `span`. The frames they ended on (none once taken
     /// away); None if nothing changed.
     pub fn edit_picked(&mut self, frames: &[i32], edit: &KeyEdit, span: (i32, i32)) -> Option<Vec<i32>> {
-        let picked: BTreeSet<i32> = frames.iter().copied().filter(|f| self.keys.iter().any(|k| k.frame == *f)).collect();
+        let picked: BTreeSet<i32> =
+            frames.iter().copied().filter(|f| self.keys.iter().any(|k| k.frame == *f)).collect();
         match mapping(&picked, edit, span)? {
             Mapping::To(to) => {
                 if picked.iter().all(|&f| to(f) == f) {
@@ -322,10 +323,8 @@ impl Timeline {
                 KeyEdit::Move(i32::try_from(by).ok()?)
             }
             KeyEdit::Stretch { anchor, factor } => {
-                let bounded: Vec<(i64, (i64, i64))> = held
-                    .values()
-                    .flat_map(|(place, keys)| keys.iter().map(move |&(_, f)| (f, place.span)))
-                    .collect();
+                let bounded: Vec<(i64, (i64, i64))> =
+                    held.values().flat_map(|(place, keys)| keys.iter().map(move |&(_, f)| (f, place.span))).collect();
                 KeyEdit::Stretch { anchor: *anchor, factor: stretch_factor(&bounded, i64::from(*anchor), *factor)? }
             }
             other => other.clone(),
@@ -485,10 +484,10 @@ mod tests {
         assert_eq!(k.frames(Opacity), [0, 6, 8]);
         assert_eq!(k.frames(Rotation), [4, 6]);
         // past the clip's last frame: as far as it goes
-        assert_eq!(k.edit_keys(&[(Opacity, 6), (Rotation, 6)], &KeyEdit::Move(20), (0, 9)), Some(vec![
-            (Rotation, 9),
-            (Opacity, 9)
-        ]));
+        assert_eq!(
+            k.edit_keys(&[(Opacity, 6), (Rotation, 6)], &KeyEdit::Move(20), (0, 9)),
+            Some(vec![(Rotation, 9), (Opacity, 9)])
+        );
         // already at the end: nothing
         assert_eq!(k.edit_keys(&[(Opacity, 9)], &KeyEdit::Move(1), (0, 9)), None);
         // a key that isn't there is left out
@@ -638,7 +637,12 @@ mod tests {
                 }),
             });
         }
-        tl.camera = Channel { keys: vec![key(3, CameraPose::still(10.0, 10.0), Easing::Linear), key(12, CameraPose::still(10.0, 10.0), Easing::Smooth)] };
+        tl.camera = Channel {
+            keys: vec![
+                key(3, CameraPose::still(10.0, 10.0), Easing::Linear),
+                key(12, CameraPose::still(10.0, 10.0), Easing::Smooth),
+            ],
+        };
         (tl, a, b, s)
     }
 
@@ -659,12 +663,15 @@ mod tests {
         ];
         // two frames on: each moves in its own clip (or the timeline), the rest stay
         let ended = tl.edit_lane_keys(&picks, &KeyEdit::Move(2));
-        assert_eq!(ended, Some(vec![
-            (KeyLane::Clip(a, Opacity), 6),
-            (KeyLane::Clip(b, Rotation), 18),
-            (KeyLane::Volume(s), 9),
-            (KeyLane::Camera, 14),
-        ]));
+        assert_eq!(
+            ended,
+            Some(vec![
+                (KeyLane::Clip(a, Opacity), 6),
+                (KeyLane::Clip(b, Rotation), 18),
+                (KeyLane::Volume(s), 9),
+                (KeyLane::Camera, 14),
+            ])
+        );
         assert_eq!(frames_of(&tl, KeyLane::Clip(a, Opacity)), [0, 6, 8]);
         assert_eq!(frames_of(&tl, KeyLane::Clip(b, Rotation)), [14, 18]);
         assert_eq!(frames_of(&tl, KeyLane::Clip(b, Opacity)), [10, 14, 18]);
@@ -685,11 +692,21 @@ mod tests {
         let (mut tl, a, b, _) = two_clips_a_sound_and_the_camera();
         // a's opacity 0, 4, 8 and the camera's 12, about 0, twice as far: the camera's 12 would go
         // to 24 (room up to 29), a's 8 to 16 (room up to 9): no farther than 9/8
-        let picks = [(KeyLane::Clip(a, Opacity), 0), (KeyLane::Clip(a, Opacity), 4), (KeyLane::Clip(a, Opacity), 8), (KeyLane::Camera, 12)];
+        let picks = [
+            (KeyLane::Clip(a, Opacity), 0),
+            (KeyLane::Clip(a, Opacity), 4),
+            (KeyLane::Clip(a, Opacity), 8),
+            (KeyLane::Camera, 12),
+        ];
         let ended = tl.edit_lane_keys(&picks, &KeyEdit::Stretch { anchor: 0, factor: 2.0 }).unwrap_or_default();
         assert_eq!(ended.iter().map(|&(_, f)| f).collect::<Vec<_>>(), [0, 5, 9, 14]);
         // reversed: a's across 0–9 and b's across its own 14–16, apart
-        let picks = [(KeyLane::Clip(a, Opacity), 0), (KeyLane::Clip(a, Opacity), 9), (KeyLane::Clip(b, Rotation), 14), (KeyLane::Clip(b, Rotation), 16)];
+        let picks = [
+            (KeyLane::Clip(a, Opacity), 0),
+            (KeyLane::Clip(a, Opacity), 9),
+            (KeyLane::Clip(b, Rotation), 14),
+            (KeyLane::Clip(b, Rotation), 16),
+        ];
         assert!(tl.edit_lane_keys(&picks, &KeyEdit::Reverse).is_some());
         let values = |id: ClipId, ch: KeyChannel| -> Vec<(i32, f32)> {
             tl.clip(id)

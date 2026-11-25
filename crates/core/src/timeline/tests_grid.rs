@@ -294,7 +294,10 @@ fn picked_frames_starts_each_take_the_room_nearest_them_then_grow_at_their_ends(
     // only by the one frame it reaches into it
     let shown = s.timeline_lengthens_preview(vec![clips[2], last], true, -2);
     assert_eq!(shown.len(), 1);
-    assert_eq!(shown[0].clips.iter().map(|c| (c.start, c.duration)).collect::<Vec<_>>(), [(0, 1), (1, 1), (2, 3), (5, 3)]);
+    assert_eq!(
+        shown[0].clips.iter().map(|c| (c.start, c.duration)).collect::<Vec<_>>(),
+        [(0, 1), (1, 1), (2, 3), (5, 3)]
+    );
     assert_eq!(spans(&s, 0), [(0, 1), (1, 1), (2, 1), (6, 1)], "a preview changes nothing");
     assert!(s.lengthen_timeline_clips(vec![clips[2], last], true, -2));
     assert_eq!(spans(&s, 0), [(0, 1), (1, 1), (2, 3), (5, 3)]);

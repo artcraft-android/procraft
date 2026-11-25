@@ -13,7 +13,15 @@ impl CanvasSession {
     /// (canvas pixels, as its Position keys count), and, where given, scaled `scale` times and
     /// turned `rotation` degrees: shown at once. Part of the take's one undo step (see
     /// `perform_timeline_end`). False if the frame isn't one of the clip's, or its track is locked.
-    pub fn perform_timeline_pose(&self, id: u64, frame: u32, x: f32, y: f32, scale: Option<f32>, rotation: Option<f32>) -> bool {
+    pub fn perform_timeline_pose(
+        &self,
+        id: u64,
+        frame: u32,
+        x: f32,
+        y: f32,
+        scale: Option<f32>,
+        rotation: Option<f32>,
+    ) -> bool {
         if !(x.is_finite() && y.is_finite()) {
             return false;
         }

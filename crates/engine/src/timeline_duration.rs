@@ -59,7 +59,15 @@ mod tests {
     }
 
     fn track(id: u64, clips: Vec<Clip>) -> Track {
-        Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
+        Track {
+            id: TrackId(id),
+            name: format!("T{id}"),
+            hidden: false,
+            locked: false,
+            opacity: 1.0,
+            look: Default::default(),
+            clips,
+        }
     }
 
     /// Two tracks: drawings at 2..5 and 8..12 on one, 0..6 on the other; 20 frames long.

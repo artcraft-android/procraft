@@ -209,7 +209,10 @@ fn read_answer(bytes: &[u8]) -> Option<(Vec<PluginToolShape>, Vec<Edit>, u32, Op
                     }
                 }
                 let corners = shape.points.len() / 2;
-                if !shape.points.len().is_multiple_of(2) || !(2..=MOST_CORNERS).contains(&corners) || shapes.len() >= MOST_SHOWN {
+                if !shape.points.len().is_multiple_of(2)
+                    || !(2..=MOST_CORNERS).contains(&corners)
+                    || shapes.len() >= MOST_SHOWN
+                {
                     return None;
                 }
                 shapes.push(shape);

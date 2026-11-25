@@ -138,7 +138,10 @@ fn add_and_lighten_fade_a_see_through_layer_to_black() {
         canvas.invalidate();
         let got = composite_at(&gpu, &mut doc, &mut canvas, 8, 8);
         for c in 0..4 {
-            assert!((i32::from(got[c]) - i32::from(normal[c])).abs() <= 1, "{mode:?} over clear: {got:?} vs {normal:?}");
+            assert!(
+                (i32::from(got[c]) - i32::from(normal[c])).abs() <= 1,
+                "{mode:?} over clear: {got:?} vs {normal:?}"
+            );
         }
     }
 }

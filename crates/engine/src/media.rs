@@ -370,7 +370,8 @@ impl Timeline {
     /// Video clip `id`'s own sound at `volume` (0 to 1), `muted` or not. False if it has none, or
     /// nothing changes.
     pub fn set_video_volume(&mut self, id: ClipId, volume: f32, muted: bool) -> bool {
-        let Some(ClipContent::Video(VideoClip { sound: Some(s), .. })) = self.clip_mut(id).map(|c| &mut c.content) else {
+        let Some(ClipContent::Video(VideoClip { sound: Some(s), .. })) = self.clip_mut(id).map(|c| &mut c.content)
+        else {
             return false;
         };
         let volume = if volume.is_finite() { volume.clamp(0.0, MAX_VOLUME) } else { MAX_VOLUME };

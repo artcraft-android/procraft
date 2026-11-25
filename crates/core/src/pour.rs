@@ -1004,8 +1004,7 @@ impl CanvasSession {
             }
         };
         let within = st.reach_selection();
-        let measured =
-            st.pour_trail.as_ref().filter(|t| !all_layers || t.kept == 0).and_then(|t| t.measured.clone());
+        let measured = st.pour_trail.as_ref().filter(|t| !all_layers || t.kept == 0).and_then(|t| t.measured.clone());
         let elsewhere = match (measured, all_layers, elsewhere) {
             (Some(measured), ..) => measured,
             (None, true, _) => st.pour_measured_on(current),

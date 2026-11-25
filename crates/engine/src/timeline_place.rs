@@ -240,8 +240,7 @@ impl Timeline {
             }
         }
         for dest in &dests {
-            let spans: Vec<(u32, u32)> =
-                goes.iter().filter(|g| g.2 == *dest).map(|g| (g.3, g.3 + g.4)).collect();
+            let spans: Vec<(u32, u32)> = goes.iter().filter(|g| g.2 == *dest).map(|g| (g.3, g.3 + g.4)).collect();
             let staying: Vec<Clip> =
                 next.track(*dest)?.clips.iter().filter(|c| !picked.contains(&c.id)).cloned().collect();
             let refs: Vec<&Clip> = staying.iter().collect();
@@ -273,7 +272,8 @@ impl Timeline {
         if ids.contains(&group) {
             return None;
         }
-        let mut order: Vec<(u32, ClipId)> = ids.iter().map(|id| Some((self.origin(*id)?, *id))).collect::<Option<_>>()?;
+        let mut order: Vec<(u32, ClipId)> =
+            ids.iter().map(|id| Some((self.origin(*id)?, *id))).collect::<Option<_>>()?;
         order.sort();
         let mut next = self.clone();
         let mut onto = Vec::new();
@@ -381,7 +381,15 @@ mod tests {
     }
 
     fn track(id: u64, clips: Vec<Clip>) -> Track {
-        Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
+        Track {
+            id: TrackId(id),
+            name: format!("T{id}"),
+            hidden: false,
+            locked: false,
+            opacity: 1.0,
+            look: Default::default(),
+            clips,
+        }
     }
 
     fn timeline(tracks: Vec<Track>) -> Timeline {
@@ -469,10 +477,7 @@ mod tests {
 
     #[test]
     fn picked_clips_trim_together() {
-        let base = timeline(vec![
-            track(1, vec![drawing(1, 0, 4), drawing(2, 4, 4)]),
-            track(2, vec![drawing(3, 2, 3)]),
-        ]);
+        let base = timeline(vec![track(1, vec![drawing(1, 0, 4), drawing(2, 4, 4)]), track(2, vec![drawing(3, 2, 3)])]);
         let ids = [ClipId(1), ClipId(2), ClipId(3)];
         // ends two later, pushing: 1's push moves 2 along, which then grows too
         let mut tl = base.clone();
@@ -536,7 +541,8 @@ mod tests {
             }),
             ..drawing(8, 0, 4)
         };
-        let base = timeline(vec![track(1, vec![group]), track(2, vec![drawing(1, 1, 2)]), track(3, vec![drawing(2, 2, 3)])]);
+        let base =
+            timeline(vec![track(1, vec![group]), track(2, vec![drawing(1, 1, 2)]), track(3, vec![drawing(2, 2, 3)])]);
         let mut tl = base.clone();
         let onto = tl.move_clips_into_group(&[ClipId(2), ClipId(1)], ClipId(8), 0).unwrap();
         assert_eq!(onto.len(), 2);
@@ -622,17 +628,16 @@ mod tests {
     #[test]
     fn reversed_clips_turn_their_gaps_round_and_leave_the_others() {
         // a gap of two after the first picked clip becomes a gap of two before the last
-        let mut tl = timeline(vec![track(1, vec![drawing(9, 0, 1), drawing(1, 1, 1), drawing(2, 4, 2), drawing(8, 10, 1)])]);
+        let mut tl =
+            timeline(vec![track(1, vec![drawing(9, 0, 1), drawing(1, 1, 1), drawing(2, 4, 2), drawing(8, 10, 1)])]);
         assert!(tl.reverse_clips(&[ClipId(1), ClipId(2)]));
         assert_eq!(starts(&tl, 0), [(9, 0, 1), (2, 1, 2), (1, 5, 1), (8, 10, 1)]);
     }
 
     #[test]
     fn clips_reversed_on_several_tracks_mirror_across_all_they_span() {
-        let mut tl = timeline(vec![
-            track(1, vec![drawing(1, 0, 2), drawing(2, 2, 1)]),
-            track(2, vec![drawing(3, 4, 2)]),
-        ]);
+        let mut tl =
+            timeline(vec![track(1, vec![drawing(1, 0, 2), drawing(2, 2, 1)]), track(2, vec![drawing(3, 4, 2)])]);
         assert!(tl.reverse_clips(&[ClipId(1), ClipId(2), ClipId(3)]));
         // they span frames 0 to 6: what ended last now starts first
         assert_eq!(starts(&tl, 0), [(2, 3, 1), (1, 4, 2)]);

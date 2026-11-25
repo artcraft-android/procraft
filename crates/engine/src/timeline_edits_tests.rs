@@ -11,7 +11,15 @@ fn drawing(id: u64, start: u32, duration: u32, root: u64) -> Clip {
 }
 
 fn track(id: u64, clips: Vec<Clip>) -> Track {
-    Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
+    Track {
+        id: TrackId(id),
+        name: format!("T{id}"),
+        hidden: false,
+        locked: false,
+        opacity: 1.0,
+        look: Default::default(),
+        clips,
+    }
 }
 
 fn group(id: u64, start: u32, duration: u32, tracks: Vec<Track>, cycle: Option<Cycle>) -> Clip {
@@ -204,7 +212,12 @@ fn sound_clip(id: u64, start: u32, duration: u32) -> Clip {
 #[test]
 fn sounds_and_videos_split_and_duplicate() {
     let video = Clip {
-        content: ClipContent::Video(VideoClip { media: MediaId(2), trim_start: 0.5, rect: [0.0, 0.0, 4.0, 4.0], sound: None }),
+        content: ClipContent::Video(VideoClip {
+            media: MediaId(2),
+            trim_start: 0.5,
+            rect: [0.0, 0.0, 4.0, 4.0],
+            sound: None,
+        }),
         ..drawing(2, 0, 6, 0)
     };
     let mut tl = timeline(vec![track(1, vec![sound_clip(1, 2, 8)]), track(2, vec![video, drawing(3, 6, 2, 9)])]);
@@ -337,34 +350,34 @@ fn clips_fill_out_the_empty_frames_after_them() {
 #[test]
 fn a_groups_frames_are_told_as_runs_showing_the_same_drawings() {
     // two tracks: a drawing held 3 then another for 2 under one from frame 2 on; cycling 4
-    let inner = vec![
-        track(10, vec![drawing(1, 0, 3, 101), drawing(2, 3, 2, 102)]),
-        track(11, vec![drawing(3, 2, 2, 103)]),
-    ];
+    let inner =
+        vec![track(10, vec![drawing(1, 0, 3, 101), drawing(2, 3, 2, 102)]), track(11, vec![drawing(3, 2, 2, 103)])];
     let tl = timeline(vec![track(1, vec![group(9, 5, 6, inner.clone(), None)])]);
     let roots = |r: &[u64]| r.iter().map(|x| GroupShown::Drawing(LayerId(*x))).collect::<Vec<_>>();
     assert_eq!(
         tl.group_shots(ClipId(9)),
-        [(0, 2, roots(&[101])), (2, 1, roots(&[101, 103])), (3, 1, roots(&[102, 103])), (4, 1, roots(&[102])), (5, 1, roots(&[]))]
+        [
+            (0, 2, roots(&[101])),
+            (2, 1, roots(&[101, 103])),
+            (3, 1, roots(&[102, 103])),
+            (4, 1, roots(&[102])),
+            (5, 1, roots(&[]))
+        ]
     );
     // its cycle played round; a hidden track's drawings left out
     let mut cycling = inner;
     cycling[1].hidden = true;
-    let tl = timeline(vec![track(1, vec![group(9, 0, 7, cycling, Some(Cycle { length: 4, keys: CycleKeys::Repeat }))])]);
-    assert_eq!(
-        tl.group_shots(ClipId(9)),
-        [(0, 3, roots(&[101])), (3, 1, roots(&[102])), (4, 3, roots(&[101]))]
-    );
+    let tl =
+        timeline(vec![track(1, vec![group(9, 0, 7, cycling, Some(Cycle { length: 4, keys: CycleKeys::Repeat }))])]);
+    assert_eq!(tl.group_shots(ClipId(9)), [(0, 3, roots(&[101])), (3, 1, roots(&[102])), (4, 3, roots(&[101]))]);
     assert!(tl.group_shots(ClipId(1)).is_empty(), "not a group");
 }
 
 #[test]
 fn a_group_is_cut_in_two_with_the_clips_the_cut_goes_through() {
     // inside: a drawing over frames 0–3, one over 4–5, and on a second track one over 2–4
-    let inner = vec![
-        track(10, vec![drawing(1, 0, 4, 101), drawing(2, 4, 2, 102)]),
-        track(11, vec![drawing(3, 2, 3, 103)]),
-    ];
+    let inner =
+        vec![track(10, vec![drawing(1, 0, 4, 101), drawing(2, 4, 2, 102)]), track(11, vec![drawing(3, 2, 3, 103)])];
     let mut tl = timeline(vec![track(1, vec![group(9, 10, 6, inner, None), drawing(4, 16, 1, 104)])]);
     // cut on its third frame: through drawings 1 and 3
     let through = tl.group_cut_drawings(ClipId(9), 13);

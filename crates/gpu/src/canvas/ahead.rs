@@ -98,7 +98,12 @@ impl Canvas {
         let Some(layer) = self.layers.get(&smudge.into) else { return };
         let size = extent(changed.width(), changed.height());
         if let Some(keep) = &smudge.keep.layer {
-            gpu.copy_texture_to_texture(encoder, copy_at(&layer.texture, changed.x0, changed.y0), copy_at(keep, 0, 0), size);
+            gpu.copy_texture_to_texture(
+                encoder,
+                copy_at(&layer.texture, changed.x0, changed.y0),
+                copy_at(keep, 0, 0),
+                size,
+            );
         }
         for at in tiles_of(changed, smudge.tile) {
             let Some(tile) = smudge.tiles.get(&at) else { continue };

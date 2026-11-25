@@ -798,8 +798,7 @@ impl Canvas {
                 let most = room / keeps.halves().max(u64::from(wide));
                 let bytes = bytes.next_multiple_of(1 << 20).min(most).max(bytes);
                 let side = |n: u32, of: u32| n.next_multiple_of(256).min(of).max(n);
-                let before =
-                    texture(gpu, "smudge window", side(width, self.width), side(height, self.height), format);
+                let before = texture(gpu, "smudge window", side(width, self.width), side(height, self.height), format);
                 let layer_bytes = bytes * u64::from(wide);
                 let amounts = (format != LAYER_FORMAT && (keeps.amount || keeps.shown)).then(|| {
                     let t = texture(
@@ -945,14 +944,14 @@ impl Canvas {
                 }
             }
             for (kept, r, (x, y)) in theirs {
-                gpu.copy_texture_to_texture(encoder, copy_at(kept, x, y), at_window(into, r, reach), extent(r.width(), r.height()));
+                gpu.copy_texture_to_texture(
+                    encoder,
+                    copy_at(kept, x, y),
+                    at_window(into, r, reach),
+                    extent(r.width(), r.height()),
+                );
             }
-            gpu.copy_texture_to_buffer(
-                encoder,
-                copy_at(into, 0, 0),
-                in_buffer(buffer, start, row, height),
-                size,
-            );
+            gpu.copy_texture_to_buffer(encoder, copy_at(into, 0, 0), in_buffer(buffer, start, row, height), size);
         }
         if before {
             if parts.iter().map(|p| area(p.1)).sum::<u64>() < whole {

@@ -89,7 +89,14 @@ fn span_of(tl: &Timeline, ids: &[ClipId]) -> Option<u32> {
 /// Clips `ids` put down `by` frames along on the tracks as many places up or down as track
 /// `track` is from clip `primary`'s, pushing aside what they cover, in `tl`: the tracks that
 /// changed. None if they can't go there.
-pub(super) fn placed_together(tl: &mut Timeline, ids: &[ClipId], primary: u64, track: u64, by: i32, later: bool) -> Option<Vec<TrackId>> {
+pub(super) fn placed_together(
+    tl: &mut Timeline,
+    ids: &[ClipId],
+    primary: u64,
+    track: u64,
+    by: i32,
+    later: bool,
+) -> Option<Vec<TrackId>> {
     tl.place_clips(ids, ClipId(primary), TrackId(track), i64::from(by), later)
 }
 
@@ -349,8 +356,7 @@ impl CanvasSession {
             let Some(first) = level.iter().filter_map(|id| tl.clip(*id).map(|c| c.start)).min() else {
                 return Vec::new();
             };
-            let layers: Vec<_> =
-                copied.roots().into_iter().filter_map(|r| Some((r, st.doc.unit_layers(r)?))).collect();
+            let layers: Vec<_> = copied.roots().into_iter().filter_map(|r| Some((r, st.doc.unit_layers(r)?))).collect();
             plans.push((copied, track, first + span, layers));
         }
         let units = plans

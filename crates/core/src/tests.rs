@@ -6581,7 +6581,11 @@ fn a_lasso_s_fill_shows_on_the_canvas_as_it_is_drawn() {
         round(s, ms);
         let path = s.freehand_path();
         s.set_touch_selecting(None);
-        path.as_chunks::<2>().0.iter().map(|&[x, y]| ((x - 80.0).powi(2) + (y - 20.0).powi(2)).sqrt()).fold(f32::MAX, f32::min)
+        path.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[x, y]| ((x - 80.0).powi(2) + (y - 20.0).powi(2)).sqrt())
+            .fold(f32::MAX, f32::min)
     };
     s.set_input_settings(0.0, 0.0, 0.0, 0.0, true, Vec::new());
     let plain = corner_cut(&s, 5000.0);
@@ -24123,8 +24127,16 @@ fn clips_are_keyed_through_the_session() {
     // it turns about the middle of what is painted, not the canvas's
     {
         let st = s.shared.lock();
-        let pivot =
-            st.doc.timeline.as_ref().unwrap().clip(procraft_engine::timeline::ClipId(clip)).unwrap().keys.pivot.unwrap();
+        let pivot = st
+            .doc
+            .timeline
+            .as_ref()
+            .unwrap()
+            .clip(procraft_engine::timeline::ClipId(clip))
+            .unwrap()
+            .keys
+            .pivot
+            .unwrap();
         assert!((pivot[0] - 20.0).abs() < 4.0 && (pivot[1] - 30.0).abs() < 4.0, "{pivot:?}");
     }
     // undo takes the last key away; the live drag before it was one step
@@ -25397,7 +25409,7 @@ fn a_puppet_bends_the_layer_by_its_pins_as_one_undo_step() {
     s.undo();
     assert_eq!(pixel(&s, 165, 100), [0, 0, 0, 255]);
     assert_eq!(pixel(&s, 160, 160), [255, 255, 255, 255]);
-    }
+}
 
 /// A stand-in for the window the render loop draws into: an offscreen texture of the session's
 /// window size, giving images as `mode` says ([`READY`], [`NO_IMAGE`], [`OUTDATED`],

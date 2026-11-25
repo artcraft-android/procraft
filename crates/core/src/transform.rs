@@ -993,10 +993,7 @@ impl CanvasSession {
             st.show_transform();
             self.shared.frame(st);
         }
-        if kind == TransformKind::Puppet
-            && !st.posing()
-            && st.transform.as_ref().is_some_and(|t| !t.has_puppet())
-        {
+        if kind == TransformKind::Puppet && !st.posing() && st.transform.as_ref().is_some_and(|t| !t.has_puppet()) {
             st.lay_puppet();
             st.show_transform();
             self.shared.frame(st);

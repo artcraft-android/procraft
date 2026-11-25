@@ -47,29 +47,30 @@ fn a_lane_moves_one_channel_previewed_then_as_one_step() {
     assert_eq!(shown.keys.iter().map(|k| k.frame).collect::<Vec<_>>(), [0, 3, 4]);
     assert_eq!(frames(&s, c, TimelineChannel::Opacity), [0, 2, 4]);
     // let go: the opacity key moves, the rotation key on its frame stays
-    assert_eq!(s.edit_timeline_keys(picks, TimelineKeyEdit::Move { by: 1 }), Some(vec![pick(
-        c,
-        TimelineChannel::Opacity,
-        3
-    )]));
+    assert_eq!(
+        s.edit_timeline_keys(picks, TimelineKeyEdit::Move { by: 1 }),
+        Some(vec![pick(c, TimelineChannel::Opacity, 3)])
+    );
     assert_eq!(frames(&s, c, TimelineChannel::Opacity), [0, 3, 4]);
     assert_eq!(frames(&s, c, TimelineChannel::Rotation), [2]);
     assert_eq!(s.undo().as_deref(), Some("Move Keys"));
     assert_eq!(frames(&s, c, TimelineChannel::Opacity), [0, 2, 4]);
     // no farther than the clip's last frame
     let last = vec![pick(c, TimelineChannel::Opacity, 4)];
-    assert_eq!(s.edit_timeline_keys(last, TimelineKeyEdit::Move { by: 9 }), Some(vec![pick(
-        c,
-        TimelineChannel::Opacity,
-        5
-    )]));
+    assert_eq!(
+        s.edit_timeline_keys(last, TimelineKeyEdit::Move { by: 9 }),
+        Some(vec![pick(c, TimelineChannel::Opacity, 5)])
+    );
 }
 
 #[test]
 fn a_lane_removes_one_channels_key() {
     let Some(s) = three_drawings() else { return };
     let c = keyed(&s);
-    assert_eq!(s.edit_timeline_keys(vec![pick(c, TimelineChannel::Rotation, 2)], TimelineKeyEdit::Remove), Some(vec![]));
+    assert_eq!(
+        s.edit_timeline_keys(vec![pick(c, TimelineChannel::Rotation, 2)], TimelineKeyEdit::Remove),
+        Some(vec![])
+    );
     assert!(frames(&s, c, TimelineChannel::Rotation).is_empty());
     assert_eq!(frames(&s, c, TimelineChannel::Opacity), [0, 2, 4]);
     assert_eq!(s.undo().as_deref(), Some("Remove Keys"));
@@ -79,8 +80,11 @@ fn a_lane_removes_one_channels_key() {
 fn lanes_stretch_reverse_and_ease() {
     let Some(s) = three_drawings() else { return };
     let c = keyed(&s);
-    let all =
-        vec![pick(c, TimelineChannel::Opacity, 0), pick(c, TimelineChannel::Opacity, 2), pick(c, TimelineChannel::Opacity, 4)];
+    let all = vec![
+        pick(c, TimelineChannel::Opacity, 0),
+        pick(c, TimelineChannel::Opacity, 2),
+        pick(c, TimelineChannel::Opacity, 4),
+    ];
     let stretched = s.edit_timeline_keys(all, TimelineKeyEdit::Stretch { anchor: 0, factor: 1.25 }).unwrap();
     assert_eq!(stretched.iter().map(|p| p.frame).collect::<Vec<_>>(), [0, 3, 5]);
     assert_eq!(frames(&s, c, TimelineChannel::Opacity), [0, 3, 5]);
@@ -91,16 +95,15 @@ fn lanes_stretch_reverse_and_ease() {
     assert_eq!(s.undo().as_deref(), Some("Reverse Keys"));
     assert!(s.timeline_pose(c).unwrap().opacity.abs() < 1e-4);
     // eased: only the picked key's easing changes
-    assert!(s.edit_timeline_keys(vec![pick(c, TimelineChannel::Opacity, 3)], TimelineKeyEdit::Ease {
-        easing: TimelineEasing::Hold
-    })
-    .is_some());
-    let easings: Vec<TimelineEasing> = s
-        .timeline_keys(c)
-        .into_iter()
-        .filter(|k| k.channel == TimelineChannel::Opacity)
-        .map(|k| k.easing)
-        .collect();
+    assert!(
+        s.edit_timeline_keys(
+            vec![pick(c, TimelineChannel::Opacity, 3)],
+            TimelineKeyEdit::Ease { easing: TimelineEasing::Hold }
+        )
+        .is_some()
+    );
+    let easings: Vec<TimelineEasing> =
+        s.timeline_keys(c).into_iter().filter(|k| k.channel == TimelineChannel::Opacity).map(|k| k.easing).collect();
     assert_eq!(easings, [TimelineEasing::Linear, TimelineEasing::Hold, TimelineEasing::Linear]);
 }
 
@@ -163,10 +166,10 @@ fn keys_on_two_clips_and_the_camera_go_together_as_one_step() {
     let t = s.timeline_tracks()[0].clone();
     assert!(s.set_timeline_track(t.id, t.hidden, true));
     let picks = vec![pick(c, TimelineChannel::Opacity, 4), TimelineKeyPick { lane: TimelineKeyLane::Camera, frame: 7 }];
-    assert_eq!(s.edit_timeline_keys(picks, TimelineKeyEdit::Move { by: -1 }), Some(vec![TimelineKeyPick {
-        lane: TimelineKeyLane::Camera,
-        frame: 6
-    }]));
+    assert_eq!(
+        s.edit_timeline_keys(picks, TimelineKeyEdit::Move { by: -1 }),
+        Some(vec![TimelineKeyPick { lane: TimelineKeyLane::Camera, frame: 6 }])
+    );
     assert_eq!(frames(&s, c, TimelineChannel::Opacity), [0, 2, 4]);
 }
 
@@ -200,10 +203,10 @@ fn a_sounds_volume_keys_are_a_lane() {
     assert_eq!(lane_frames(&s, volume), [0, 4]);
     // the later key two frames sooner: the level reaches 1 at frame 2
     let picks = vec![TimelineKeyPick { lane: volume, frame: 4 }];
-    assert_eq!(s.edit_timeline_keys(picks, TimelineKeyEdit::Move { by: -2 }), Some(vec![TimelineKeyPick {
-        lane: volume,
-        frame: 2
-    }]));
+    assert_eq!(
+        s.edit_timeline_keys(picks, TimelineKeyEdit::Move { by: -2 }),
+        Some(vec![TimelineKeyPick { lane: volume, frame: 2 }])
+    );
     assert_eq!(s.timeline_media_clip(sound).unwrap().volume_keys, [0, 2]);
     s.set_timeline_frame(1);
     assert!((s.timeline_media_clip(sound).unwrap().level - 0.5).abs() < 1e-4);

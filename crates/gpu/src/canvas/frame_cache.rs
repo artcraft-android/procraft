@@ -197,13 +197,7 @@ impl FrameCache {
 
     /// Keeps a copy of `composite`, just composited as `wanted`: in a new texture while the
     /// budget has room, else in the one of the frame used least lately.
-    pub fn keep(
-        &mut self,
-        gpu: &Gpu,
-        encoder: &mut wgpu::CommandEncoder,
-        wanted: Wanted,
-        composite: &wgpu::Texture,
-    ) {
+    pub fn keep(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, wanted: Wanted, composite: &wgpu::Texture) {
         let shape = shape_of(composite);
         let (width, height, format) = shape;
         let per = frame_bytes(width, height, format);

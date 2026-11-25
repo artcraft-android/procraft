@@ -2187,8 +2187,7 @@ mod tests {
     /// Where brush `origin` of ours from before the stock library (its set and place as they
     /// shipped) is in the library now.
     fn ours(s: &CanvasSession, origin: (u32, u32)) -> (u32, u32) {
-        let (set, i) =
-            crate::brush_library::place_of(&s.shared.lock().library, (origin.0 as usize, origin.1 as usize));
+        let (set, i) = crate::brush_library::place_of(&s.shared.lock().library, (origin.0 as usize, origin.1 as usize));
         (set as u32, i as u32)
     }
 
@@ -4244,8 +4243,9 @@ mod tests {
         let before = pixels(&s, layer);
         assert!(s.transform_begin().is_some(), "{}", s.transform_refusal());
         s.transform_set_kind(crate::TransformKind::Warp);
-        let shown =
-            |s: &CanvasSession| s.shared.lock().vector_warp.as_ref().and_then(|w| w.shown.as_ref().map(|(_, exact)| *exact));
+        let shown = |s: &CanvasSession| {
+            s.shared.lock().vector_warp.as_ref().and_then(|w| w.shown.as_ref().map(|(_, exact)| *exact))
+        };
         // the mesh up and nothing held: drawn exactly (and no differently yet: nothing has moved,
         // but for how a stroke's input is spaced once it is bent)
         warp_frame(&s);
@@ -4299,7 +4299,10 @@ mod tests {
         // shown as its strokes bent, as wide as they were
         let shown = warp_frame(&s);
         assert!(!shown.is_empty());
-        assert_eq!(s.shared.lock().vector_warp.as_ref().and_then(|w| w.shown.as_ref().map(|(_, exact)| *exact)), Some(true));
+        assert_eq!(
+            s.shared.lock().vector_warp.as_ref().and_then(|w| w.shown.as_ref().map(|(_, exact)| *exact)),
+            Some(true)
+        );
         s.transform_end(true);
         let after = pixels(&s, layer);
         let ink = |rgba: &[u8], x: usize, y: usize| pixel(rgba, x, y)[3] > 128;

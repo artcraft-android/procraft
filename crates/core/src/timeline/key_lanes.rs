@@ -98,7 +98,9 @@ fn lane_keys(tl: &Timeline, l: TimelineKeyLane) -> Vec<TimelineLaneKey> {
     tl.lane_keys(lane(l))
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|(f, e)| Some(TimelineLaneKey { lane: l, frame: u32::try_from(f).ok()?, easing: TimelineEasing::of(&e) }))
+        .filter_map(|(f, e)| {
+            Some(TimelineLaneKey { lane: l, frame: u32::try_from(f).ok()?, easing: TimelineEasing::of(&e) })
+        })
         .collect()
 }
 
@@ -148,7 +150,11 @@ impl CanvasSession {
     /// undo step named for it. A key moved onto another of its lane's takes its place. Where the
     /// picked keys ended up (none once taken away); None if nothing changed (a locked track, keys
     /// already as far as they go).
-    pub fn edit_timeline_keys(&self, picks: Vec<TimelineKeyPick>, edit: TimelineKeyEdit) -> Option<Vec<TimelineKeyPick>> {
+    pub fn edit_timeline_keys(
+        &self,
+        picks: Vec<TimelineKeyPick>,
+        edit: TimelineKeyEdit,
+    ) -> Option<Vec<TimelineKeyPick>> {
         let name = match edit {
             TimelineKeyEdit::Move { .. } => "Move Keys",
             TimelineKeyEdit::Stretch { .. } => "Stretch Keys",

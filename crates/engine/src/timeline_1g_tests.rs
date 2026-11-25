@@ -9,7 +9,15 @@ fn drawing(id: u64, start: u32, duration: u32, root: u64) -> Clip {
 }
 
 fn track(id: u64, clips: Vec<Clip>) -> Track {
-    Track { id: TrackId(id), name: format!("T{id}"), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
+    Track {
+        id: TrackId(id),
+        name: format!("T{id}"),
+        hidden: false,
+        locked: false,
+        opacity: 1.0,
+        look: Default::default(),
+        clips,
+    }
 }
 
 fn spans(t: &Track) -> Vec<(u32, u32)> {

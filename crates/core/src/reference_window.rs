@@ -198,7 +198,8 @@ pub struct ReferenceSize {
 /// and 230 to 650 tall with its bars, and no bigger than the screen while that leaves it that.
 #[uniffi::export]
 pub fn reference_window_size(width: f32, height: f32, screen_width: f32, screen_height: f32) -> ReferenceSize {
-    let [width, height] = procraft_engine::reference_window::fitted_size([width, height], [screen_width, screen_height]);
+    let [width, height] =
+        procraft_engine::reference_window::fitted_size([width, height], [screen_width, screen_height]);
     ReferenceSize { width, height }
 }
 

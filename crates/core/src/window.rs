@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use jni_sys::{JNIEnv, jclass, jlong, jobject};
-use procraft_gpu::wgpu;
 use ndk::native_window::NativeWindow;
+use procraft_gpu::wgpu;
 use raw_window_handle::{AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle};
 
 use crate::pacing::Timeline;

@@ -554,7 +554,6 @@ impl CanvasSession {
         })
         .is_some()
     }
-
 }
 
 impl CanvasSession {
@@ -706,11 +705,8 @@ impl CanvasSession {
     fn go_to_timeline_frame(&self, frame: u32, past: u32) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(last) = st
-            .doc
-            .timeline
-            .as_ref()
-            .map(|t| (t.duration.saturating_sub(1) + past).min(MOST_FRAMES.saturating_sub(1)))
+        let Some(last) =
+            st.doc.timeline.as_ref().map(|t| (t.duration.saturating_sub(1) + past).min(MOST_FRAMES.saturating_sub(1)))
         else {
             return;
         };

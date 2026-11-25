@@ -444,17 +444,19 @@ impl State {
         }
         crisp.lasso = shown.cloned();
         let by = crisp.to_crisp;
-        crisp.canvas.set_lasso_preview(shown.map(|preview| LassoPreview {
-            layer: preview.layer,
-            points: preview
-                .points
-                .iter()
-                .map(|&[x, y]| {
-                    let p = by.apply(Vec2::new(x, y));
-                    [p.x, p.y]
-                })
-                .collect(),
-            color: preview.color,
+        crisp.canvas.set_lasso_preview(shown.map(|preview| {
+            LassoPreview {
+                layer: preview.layer,
+                points: preview
+                    .points
+                    .iter()
+                    .map(|&[x, y]| {
+                        let p = by.apply(Vec2::new(x, y));
+                        [p.x, p.y]
+                    })
+                    .collect(),
+                color: preview.color,
+            }
         }));
     }
 

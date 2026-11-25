@@ -2076,7 +2076,11 @@ impl Plugins {
             tools.iter().map(|t| PluginTool {
                 key: format!("{}.{}", plugin.id, t.key),
                 label: t.label.clone(),
-                modes: t.modes.iter().map(|(label, hint)| PluginToolMode { label: label.clone(), hint: hint.clone() }).collect(),
+                modes: t
+                    .modes
+                    .iter()
+                    .map(|(label, hint)| PluginToolMode { label: label.clone(), hint: hint.clone() })
+                    .collect(),
                 fit: t.fit,
             })
         })

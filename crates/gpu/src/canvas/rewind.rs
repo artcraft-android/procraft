@@ -371,7 +371,9 @@ impl Canvas {
             match op {
                 // laid again from the mark
                 _ if k < from && is_own(&op) => {}
-                Op::Stamps { second, instances, wet, picks, times, ribbon, style, layer, pencil, carry, .. } if k == from => {
+                Op::Stamps { second, instances, wet, picks, times, ribbon, style, layer, pencil, carry, .. }
+                    if k == from =>
+                {
                     out.push(Op::Stamps {
                         second,
                         instances: instances.into_iter().skip(at).collect(),

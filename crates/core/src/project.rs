@@ -3072,8 +3072,8 @@ pub enum PsdOutcome {
 #[uniffi::export]
 pub fn package_time_lapse(path: String, dir: String) -> Result<Option<PackageTimeLapse>, MobileError> {
     let bytes = fs::read(&path).map_err(|e| file_error("opening the file", e))?;
-    let Some(t) =
-        procraft_engine::native::read_time_lapse(&bytes).map_err(|e| file_error("opening the file", format!("{e:?}")))?
+    let Some(t) = procraft_engine::native::read_time_lapse(&bytes)
+        .map_err(|e| file_error("opening the file", format!("{e:?}")))?
     else {
         return Ok(None);
     };

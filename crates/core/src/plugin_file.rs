@@ -672,7 +672,10 @@ fn warps_of(raw: &[RawWarp]) -> Result<Vec<Warp>, Refusal> {
     let mut keys = HashSet::new();
     let fits = raw.len() <= MOST_WARPS
         && raw.iter().all(|w| {
-            valid_key(&w.key) && !w.label.trim().is_empty() && shows_plainly(&w.label, 20) && keys.insert(w.key.as_str())
+            valid_key(&w.key)
+                && !w.label.trim().is_empty()
+                && shows_plainly(&w.label, 20)
+                && keys.insert(w.key.as_str())
         });
     if !fits {
         return Err(Refusal::Described);

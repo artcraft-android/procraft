@@ -250,7 +250,9 @@ impl Canvas {
         let mut out = Vec::with_capacity(ops.len() + 1);
         for (k, op) in ops.into_iter().enumerate() {
             match op {
-                Op::Stamps { second, instances, wet, picks, times, ribbon, style, layer, pencil, carry, .. } if k == from => {
+                Op::Stamps { second, instances, wet, picks, times, ribbon, style, layer, pencil, carry, .. }
+                    if k == from =>
+                {
                     out.push(Op::RewindSecond(at));
                     out.push(Op::Stamps {
                         second,

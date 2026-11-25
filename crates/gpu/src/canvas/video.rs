@@ -253,7 +253,8 @@ impl Canvas {
             }
         };
         // a picture with see-through parts is premultiplied as the layers are
-        let rgba = if p.rgba.as_chunks::<4>().0.iter().all(|&[.., a]| a == 255) { p.rgba } else { premultiplied(&p.rgba) };
+        let rgba =
+            if p.rgba.as_chunks::<4>().0.iter().all(|&[.., a]| a == 255) { p.rgba } else { premultiplied(&p.rgba) };
         gpu.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &tex,

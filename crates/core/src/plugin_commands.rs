@@ -287,11 +287,13 @@ fn link_utilities(linker: &mut Linker<Host>) -> Result<(), wasmi::Error> {
                 .iter()
                 .map(|b| u32::from_le_bytes(*b))
                 .collect();
-            let entries = first.iter().enumerate().try_fold(0_usize, |sum, (i, &f)| {
-                sum.checked_add(i.checked_sub(f as usize)?.checked_add(1)?)
-            })?;
+            let entries = first
+                .iter()
+                .enumerate()
+                .try_fold(0_usize, |sum, (i, &f)| sum.checked_add(i.checked_sub(f as usize)?.checked_add(1)?))?;
             let bytes = entries.checked_mul(8).filter(|&b| b <= MOST_HANDED)?;
-            let a = read_bytes(&caller, values, bytes)?.as_chunks::<8>().0.iter().map(|b| f64::from_le_bytes(*b)).collect();
+            let a =
+                read_bytes(&caller, values, bytes)?.as_chunks::<8>().0.iter().map(|b| f64::from_le_bytes(*b)).collect();
             let mut band = crate::plugin_band::Band::new(&first, a)?;
             band.factor().then_some(band)
         })();

@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 
 use procraft_engine::animation::{self, FrameLook};
 use procraft_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source, run_out};
-use procraft_engine::document::{BlendMode, Document, DynamicRange, Layer, LayerEffect, LayerId, LayerKind, LayerStyle};
+use procraft_engine::document::{
+    BlendMode, Document, DynamicRange, Layer, LayerEffect, LayerId, LayerKind, LayerStyle,
+};
 pub use procraft_engine::filter::Filter;
 use procraft_engine::geom::{Affine, IRect};
 use procraft_engine::ribbon::{Piece, Ribbon};
@@ -936,14 +938,20 @@ impl LassoPreview {
             return IRect::EMPTY;
         }
         let clamp = |v: f32| v.clamp(-1.0e6, 1.0e6) as i32;
-        IRect { x0: clamp(x0.floor()) - 1, y0: clamp(y0.floor()) - 1, x1: clamp(x1.ceil()) + 1, y1: clamp(y1.ceil()) + 1 }
-            .intersect(full)
+        IRect {
+            x0: clamp(x0.floor()) - 1,
+            y0: clamp(y0.floor()) - 1,
+            x1: clamp(x1.ceil()) + 1,
+            y1: clamp(y1.ceil()) + 1,
+        }
+        .intersect(full)
     }
 }
 
 /// Where a lasso preview's pixels are sampled, sixteenths of a pixel from each one's middle: the
 /// usual eight-sample pattern, spread across and down.
-const LASSO_SAMPLES: [[f32; 2]; 8] = [[1.0, -3.0], [-1.0, 3.0], [5.0, 1.0], [-3.0, -5.0], [-5.0, 5.0], [-7.0, -1.0], [3.0, 7.0], [7.0, -7.0]];
+const LASSO_SAMPLES: [[f32; 2]; 8] =
+    [[1.0, -3.0], [-1.0, 3.0], [5.0, 1.0], [-3.0, -5.0], [-5.0, 5.0], [-7.0, -1.0], [3.0, 7.0], [7.0, -7.0]];
 
 /// A lasso preview's coverage on the GPU (a byte a canvas pixel, 0..1), the winding it is found
 /// from a sample at a time (a half float a canvas pixel), and what draws them.
@@ -1030,7 +1038,10 @@ impl LassoGpu {
         let winding_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lasso winding"),
             layout: &cover.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&winding_view) }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&winding_view),
+            }],
         });
         LassoGpu { texture, view, winding_texture, winding_view, winding_bind, winding, cover }
     }
@@ -2130,7 +2141,7 @@ const STROKE_LAID_HALVED: u32 = 5;
 /// over the layer, or with its alpha kept (see [`FillPreview`]).
 const STROKE_FILL: u32 = 6;
 const STROKE_FILL_LOCKED: u32 = 7;
-    /// A light stroke (the Light tool): brightens, dims or tames what is past white.
+/// A light stroke (the Light tool): brightens, dims or tames what is past white.
 const STROKE_LIGHT: u32 = 8;
 /// A stroke laid in place shown fainter than it is laid: the layer as it was before it is read
 /// where the stroke's texture is, and the layer shows only `stroke_opacity` of the way from it.
@@ -5230,7 +5241,7 @@ impl Canvas {
     /// reach as far past their size as on the artwork, counted in the artwork's pixels.
     pub fn set_artwork_pixel(&mut self, px: f32) {
         self.artwork_pixel = if px.is_finite() { px.max(1.0) } else { 1.0 };
-        }
+    }
 
     /// Redraws the open stroke from scratch as [`Canvas::replace_stamps`] does, given its final
     /// stamps from the `from`th on: those before are the first it laid, as they still are (only
@@ -5515,9 +5526,9 @@ impl Canvas {
     /// (not into a layer's store). It shows no tip or prediction.
     pub fn lays_ahead(&self) -> bool {
         self.pipelines.compute.is_some()
-            && self
-                .active
-                .is_some_and(|a| !a.pencil && a.style.paints_in_place() && a.style.ribbon.is_none() && a.style.store == 0)
+            && self.active.is_some_and(|a| {
+                !a.pencil && a.style.paints_in_place() && a.style.ribbon.is_none() && a.style.store == 0
+            })
     }
 
     /// Stamps of paint laid in place from the open stroke's last stamps on to the pen (and where
@@ -5570,7 +5581,8 @@ impl Canvas {
         let fits = !rect.is_empty()
             && rect.intersect(self.full()) == rect
             && pixels.len() == rect.width() as usize * rect.height() as usize * 4;
-        if fits && self.stroke_laid_apart().is_some()
+        if fits
+            && self.stroke_laid_apart().is_some()
             && let Some(active) = self.active.as_mut()
         {
             let number = *active.under.get_or_insert_with(|| {
@@ -5611,7 +5623,8 @@ impl Canvas {
             return;
         };
         let bounds = preview.bounds(full);
-        let points: Vec<[f32; 2]> = preview.points.iter().copied().filter(|p| p[0].is_finite() && p[1].is_finite()).collect();
+        let points: Vec<[f32; 2]> =
+            preview.points.iter().copied().filter(|p| p[0].is_finite() && p[1].is_finite()).collect();
         // the fan once for each sample position: the polygon moved so the pixel's middle falls
         // where that sample is
         let (w, h) = (self.width as f32, self.height as f32);
@@ -5636,7 +5649,8 @@ impl Canvas {
         let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
         drop(render_pass(encoder, "lasso coverage clear", &lasso.view, clear));
         if triangles > 0 && !bounds.is_empty() {
-            let buffer = buffer_init(&gpu.device, "lasso fans", bytemuck::cast_slice(&fans), wgpu::BufferUsages::VERTEX);
+            let buffer =
+                buffer_init(&gpu.device, "lasso fans", bytemuck::cast_slice(&fans), wgpu::BufferUsages::VERTEX);
             for k in 0..LASSO_SAMPLES.len() {
                 let mut pass = render_pass(encoder, "lasso winding", &lasso.winding_view, clear);
                 pass.set_pipeline(&lasso.winding);
@@ -6946,8 +6960,7 @@ impl Canvas {
             let wide = pixel == procraft_engine::hdr::HDR_PIXEL;
             let mut encoder =
                 gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("upload") });
-            let used =
-                self.upload_as(gpu, &mut encoder, &texture, b, (&rows, 0, b.width() as usize * pixel), wide);
+            let used = self.upload_as(gpu, &mut encoder, &texture, b, (&rows, 0, b.width() as usize * pixel), wide);
             gpu.queue.submit([encoder.finish()]);
             if let Some(buffer) = used {
                 self.uploads.give_back(buffer);
@@ -8177,8 +8190,12 @@ impl Canvas {
             // the second's own, and its tip put on and taken off, go with them too)
             let joins = matches!(&op, Op::Stamps { second: false, pencil: false, clear: false, style, .. }
                 if style.in_place())
-                || matches!(&op, Op::Stamps { second: true, clear: false, .. }
-                    | Op::SaveTip { second: true, .. } | Op::Untip { second: true, .. });
+                || matches!(
+                    &op,
+                    Op::Stamps { second: true, clear: false, .. }
+                        | Op::SaveTip { second: true, .. }
+                        | Op::Untip { second: true, .. }
+                );
             if !joins {
                 self.synthesize_due(gpu, &mut encoder, &mut smudge_uniforms);
             }
@@ -8326,7 +8343,7 @@ impl Canvas {
                     ));
                     self.clear_built_up(&mut encoder, texture);
                 }
-                    Op::Stamps { instances, wet, times, ribbon, style, clear, pencil, second, carry, .. } => {
+                Op::Stamps { instances, wet, times, ribbon, style, clear, pencil, second, carry, .. } => {
                     let count = u32::try_from(instances.len()).unwrap_or(u32::MAX);
                     let first = next_instance;
                     next_instance = next_instance.saturating_add(count);
@@ -8536,7 +8553,7 @@ impl Canvas {
                     }
                 }
                 Op::Commit(stroke) => {
-                        uploaded.extend(self.commit(gpu, &mut encoder, &mut uniforms, *stroke));
+                    uploaded.extend(self.commit(gpu, &mut encoder, &mut uniforms, *stroke));
                     history_changed = true;
                 }
                 Op::Cancel if self.smudge.is_some() => {
@@ -8589,7 +8606,8 @@ impl Canvas {
                         (&self.stroke, &self.tip_backup)
                     };
                     if let Some(backup) = backup {
-                        gpu.copy_texture_to_texture(&mut encoder, 
+                        gpu.copy_texture_to_texture(
+                            &mut encoder,
                             copy_at(backup, 0, 0),
                             copy_at(to, rect.x0, rect.y0),
                             extent(rect.width(), rect.height()),
@@ -9381,9 +9399,9 @@ impl Canvas {
         // what filter layers' editors set, for their filters to read
         self.prepare_filter_tables(gpu, doc);
         self.ensure_caches(gpu, doc, &mut encoder, &mut uniforms);
-            // after the caches: caches just made want the whole picture composited again; and what
-            // filter layers carry a change to round it
-            let (dirty, outer) = composited_rects(doc, self.reached(doc, self.dirty.intersect(self.full())), self.full());
+        // after the caches: caches just made want the whole picture composited again; and what
+        // filter layers carry a change to round it
+        let (dirty, outer) = composited_rects(doc, self.reached(doc, self.dirty.intersect(self.full())), self.full());
         let device = &gpu.device;
         // while caches are remade, or a stroke laid again over several renders, the composite stays
         // as it was, what changed kept for after
@@ -9582,8 +9600,8 @@ impl Canvas {
                     } else {
                         u64::from(SMUDGE_GRID * SMUDGE_GRID) * 16 * 3
                     },
-                        // (copied aside and back where a symmetry's copies take turns in it, and from and
-                        // into while paint is laid ahead, see `ahead.rs`)
+                    // (copied aside and back where a symmetry's copies take turns in it, and from and
+                    // into while paint is laid ahead, see `ahead.rs`)
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 })
@@ -10356,7 +10374,8 @@ impl Canvas {
             let second = if stroke.second.is_some() { self.second_stroke.get(gpu).1 } else { &self.stroke_view };
             let stroke_view = &self.stroke_view;
             let quad = |layer: &wgpu::TextureView| {
-                let views = [layer, stroke_view, stroke_view, stroke_view, stroke_view, second, stroke_view, stroke_view];
+                let views =
+                    [layer, stroke_view, stroke_view, stroke_view, stroke_view, second, stroke_view, stroke_view];
                 let grain = self.grain_view_of(&stroke.style);
                 quad_bind(device, &self.pipelines.quad_layout, views, grain, &self.grain_sampler, &self.paper_view)
             };
@@ -10570,17 +10589,7 @@ impl Canvas {
         let low = self.layers.get(&lower)?;
         let stack = Stack { first: (&low.texture, &low.view), second: Second::OnDemand(&self.scratch, gpu) };
         let mut current = 0;
-        self.composite_adjustment(
-            gpu,
-            doc,
-            encoder,
-            uniforms,
-            self.full(),
-            layer,
-            Look::PLAIN,
-            &stack,
-            &mut current,
-        );
+        self.composite_adjustment(gpu, doc, encoder, uniforms, self.full(), layer, Look::PLAIN, &stack, &mut current);
         if current == 1 {
             gpu.copy_texture_to_texture(
                 encoder,
@@ -10860,7 +10869,8 @@ impl Canvas {
         if rect == self.full() {
             let texture =
                 self.take_spare().unwrap_or_else(|| texture(gpu, "undo", self.width, self.height, self.format));
-            gpu.copy_texture_to_texture(encoder, 
+            gpu.copy_texture_to_texture(
+                encoder,
                 copy_at(&layer.texture, 0, 0),
                 copy_at(&texture, 0, 0),
                 extent(self.width, self.height),
@@ -12559,13 +12569,11 @@ impl Canvas {
                 continue;
             }
             let Some(look) = look_of(id) else { continue };
-                // what is below it through its filter (it is no base: it has no paint)
-                if layer.kind == LayerKind::Paint && layer.filter.is_some() {
-                    self.composite_filter_layer(
-                        gpu, doc, encoder, uniforms, rect, layer, look, CLIP_NONE, stack, current,
-                    );
-                    continue;
-                }
+            // what is below it through its filter (it is no base: it has no paint)
+            if layer.kind == LayerKind::Paint && layer.filter.is_some() {
+                self.composite_filter_layer(gpu, doc, encoder, uniforms, rect, layer, look, CLIP_NONE, stack, current);
+                continue;
+            }
             // a paint layer with the layers clipped to it just above, a clipping group (a layer
             // clipped to one not shown goes through that one's alpha on its own); one with styles
             // likewise, drawn alone first for them to go round
@@ -12717,19 +12725,7 @@ impl Canvas {
     ) {
         let device = &gpu.device;
         let Some(pose) = pose else {
-            self.draw_onto(
-                gpu,
-                encoder,
-                uniforms,
-                rect,
-                view,
-                None,
-                &self.stroke_view,
-                uniform,
-                blend,
-                stack,
-                current,
-            );
+            self.draw_onto(gpu, encoder, uniforms, rect, view, None, &self.stroke_view, uniform, blend, stack, current);
             return;
         };
         let Some(back) = pose.inverse() else { return };
@@ -12932,34 +12928,10 @@ impl Canvas {
             if is_matte {
                 drop(render_pass(encoder, "matte clear", mine.first.1, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
                 let mut at = 0;
-                self.draw_onto(
-                    gpu,
-                    encoder,
-                    uniforms,
-                    rect,
-                    alone.first.1,
-                    clip,
-                    mask,
-                    uniform,
-                    blend,
-                    &mine,
-                    &mut at,
-                );
+                self.draw_onto(gpu, encoder, uniforms, rect, alone.first.1, clip, mask, uniform, blend, &mine, &mut at);
                 mine.settle(gpu, encoder, rect, at);
             } else {
-                self.draw_onto(
-                    gpu,
-                    encoder,
-                    uniforms,
-                    rect,
-                    alone.first.1,
-                    clip,
-                    mask,
-                    uniform,
-                    blend,
-                    stack,
-                    current,
-                );
+                self.draw_onto(gpu, encoder, uniforms, rect, alone.first.1, clip, mask, uniform, blend, stack, current);
                 return;
             }
         }
@@ -13659,16 +13631,16 @@ impl Canvas {
             });
             (&*pipeline, offset)
         });
-            // (laid over another canvas's picture, what is there stays around this one)
-            let load = if self.over { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(clear) };
-            let mut pass = render_pass(encoder, "display", target.view, load);
-            if let Some((picture_pipeline, bind, offset)) = picture.filter(|_| !self.over) {
+        // (laid over another canvas's picture, what is there stays around this one)
+        let load = if self.over { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(clear) };
+        let mut pass = render_pass(encoder, "display", target.view, load);
+        if let Some((picture_pipeline, bind, offset)) = picture.filter(|_| !self.over) {
             pass.set_pipeline(picture_pipeline);
             pass.set_bind_group(0, bind, &[]);
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.draw(0..3, 0..1);
         }
-            if let Some((grid_pipeline, offset)) = grid.filter(|_| !self.over) {
+        if let Some((grid_pipeline, offset)) = grid.filter(|_| !self.over) {
             pass.set_pipeline(grid_pipeline);
             pass.set_bind_group(0, &self.uniform_bind, &[offset]);
             pass.draw(0..3, 0..1);
@@ -15075,7 +15047,7 @@ impl Canvas {
             self.uploads.give_back(buffer);
         }
         Ok(())
-        }
+    }
 
     /// [`Canvas::read_layer_part`] started: the copy queued, the pixels waited for later (once
     /// whatever guards the canvas is let go).
@@ -16353,7 +16325,8 @@ fn stamps_work(stamps: &[StampInstance], full: IRect, in_place: bool) -> u64 {
 fn in_pieces(ops: Vec<Op>, full: IRect, (in_place_most, most, cut_most): (u64, u64, u64), most_stamps: u64) -> Vec<Op> {
     let mut pieces = Vec::with_capacity(ops.len());
     for op in ops {
-            let Op::Stamps { second, instances, wet, picks, times, ribbon, style, clear, again, layer, pencil, carry } = op else {
+        let Op::Stamps { second, instances, wet, picks, times, ribbon, style, clear, again, layer, pencil, carry } = op
+        else {
             pieces.push(op);
             continue;
         };
@@ -16377,7 +16350,20 @@ fn in_pieces(ops: Vec<Op>, full: IRect, (in_place_most, most, cut_most): (u64, u
             work = work.saturating_add(more);
         }
         if counts.is_empty() {
-                pieces.push(Op::Stamps { second, instances, wet, picks, times, ribbon, style, clear, again, layer, pencil, carry });
+            pieces.push(Op::Stamps {
+                second,
+                instances,
+                wet,
+                picks,
+                times,
+                ribbon,
+                style,
+                clear,
+                again,
+                layer,
+                pencil,
+                carry,
+            });
             continue;
         }
         counts.push(count);

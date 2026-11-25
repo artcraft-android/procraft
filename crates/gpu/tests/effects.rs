@@ -166,10 +166,7 @@ fn a_curves_adjustment_layer_reads_its_own_table() {
     assert!(r.abs_diff(55) <= 2 && g.abs_diff(155) <= 2 && b.abs_diff(205) <= 2, "{r} {g} {b}");
     // a new table goes up as it changes
     let same: Vec<u8> = (0..=255u8).flat_map(|v| [v, v, v, v]).collect();
-    doc.set_adjustment(
-        a,
-        LayerAdjustment { filter: Filter::CURVES, table: same, settings: serde_json::Value::Null },
-    );
+    doc.set_adjustment(a, LayerAdjustment { filter: Filter::CURVES, table: same, settings: serde_json::Value::Null });
     canvas.invalidate();
     let [r, g, b, _] = at(&composite(&gpu, &mut doc, &mut canvas), 16, 16);
     assert!(r.abs_diff(200) <= 2 && g.abs_diff(100) <= 2 && b.abs_diff(50) <= 2, "{r} {g} {b}");

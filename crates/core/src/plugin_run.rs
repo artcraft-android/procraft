@@ -2227,14 +2227,16 @@ impl Running {
         let (Some(calls), Some(memory)) = (warp.as_ref(), memory.as_ref()) else { return Err(Stop::Damaged) };
         let len = i32::try_from(bytes.len()).map_err(|_| Stop::Nonsense)?;
         guarded(|| {
-            let at = usize::try_from(long_call(store, &calls.input, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let at =
+                usize::try_from(long_call(store, &calls.input, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
             memory.write(&mut *store, at, bytes).map_err(|_| Stop::Nonsense)?;
             let made = call(store, calls, len, &mut left, until)?;
             let Ok(made) = usize::try_from(made) else { return Ok(None) };
             if made > MOST_WARP_BYTES {
                 return Err(Stop::Nonsense);
             }
-            let at = usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let at =
+                usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
             let mut out = vec![0_u8; made];
             memory.read(&*store, at, &mut out).map_err(|_| Stop::Nonsense)?;
             Ok(Some(out))
@@ -2267,14 +2269,16 @@ impl Running {
         let tool = i32::try_from(tool).map_err(|_| Stop::Nonsense)?;
         let len = i32::try_from(told.len()).map_err(|_| Stop::Nonsense)?;
         guarded(|| {
-            let at = usize::try_from(long_call(store, &calls.input, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let at =
+                usize::try_from(long_call(store, &calls.input, len, &mut left, until)?).map_err(|_| Stop::Nonsense)?;
             memory.write(&mut *store, at, told).map_err(|_| Stop::Nonsense)?;
             let made = long_call(store, &calls.touch, (tool, len), &mut left, until)?;
             let Ok(made) = usize::try_from(made) else { return Ok(None) };
             if made > MOST_TOOL_BYTES {
                 return Err(Stop::Nonsense);
             }
-            let at = usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
+            let at =
+                usize::try_from(long_call(store, &calls.out, (), &mut left, until)?).map_err(|_| Stop::Nonsense)?;
             let mut out = vec![0_u8; made];
             memory.read(&*store, at, &mut out).map_err(|_| Stop::Nonsense)?;
             Ok(Some(out))

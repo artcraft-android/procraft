@@ -1445,7 +1445,7 @@ impl StrokeBuilder {
         self.points_per_pixel = like.points_per_pixel;
         self.pad = like.pad;
         self
-        }
+    }
 
     /// The stroke keeps the path its stamps follow as it walks it (see [`StrokeBuilder::trace`]):
     /// a stroke kept as a stroke is found, cut and filled against by its path, not its stamps.
@@ -1754,10 +1754,10 @@ impl StrokeBuilder {
         if let Some(stamps) = self.add_outside(samples) {
             return stamps;
         }
-            if self.held.is_some() && !self.quiet {
-                let held = self.add_held(samples);
-                return self.pixel_on(held);
-            }
+        if self.held.is_some() && !self.quiet {
+            let held = self.add_held(samples);
+            return self.pixel_on(held);
+        }
         let added = self.add_unsnapped(samples);
         self.pixel_on(added)
     }
@@ -1824,7 +1824,7 @@ impl StrokeBuilder {
             return snapped.collect();
         }
         pixel::perfect(snapped, with_held)
-        }
+    }
 
     /// Its stamps are laid for good as they come (paint laid in place, which changes its layer as it
     /// goes, so that what changes in it is laid again from there): those its start taper changes,
@@ -2200,11 +2200,11 @@ impl StrokeBuilder {
             return None;
         }
         let start = self.start_span();
-            let drawn = match self.held {
-                _ if self.shows_tip() => self.kept,
-                Some(held) => held,
-                None => self.placed.len(),
-            };
+        let drawn = match self.held {
+            _ if self.shows_tip() => self.kept,
+            Some(held) => held,
+            None => self.placed.len(),
+        };
         let stamps = self.placed.iter().take(drawn).map(|p| self.finish_stamp(p, start, None)).collect();
         Some(self.pixel_all(stamps, false))
     }

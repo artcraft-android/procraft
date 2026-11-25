@@ -403,7 +403,20 @@ fn arrives_compressed(name: &str) -> bool {
     let extension = name.rsplit_once('.').map_or("", |(_, e)| e).to_ascii_lowercase();
     matches!(
         extension.as_str(),
-        "mp4" | "mov" | "m4v" | "m4a" | "mp3" | "aac" | "ogg" | "opus" | "flac" | "jpg" | "jpeg" | "heic" | "webp" | "zip"
+        "mp4"
+            | "mov"
+            | "m4v"
+            | "m4a"
+            | "mp3"
+            | "aac"
+            | "ogg"
+            | "opus"
+            | "flac"
+            | "jpg"
+            | "jpeg"
+            | "heic"
+            | "webp"
+            | "zip"
     )
 }
 
@@ -2755,8 +2768,9 @@ impl Scene {
     /// Whether the model brings an image for each part's colour: a USDZ's packed one, or one
     /// picked or zipped with it, that its material maps.
     fn brings_colour(&self) -> Vec<bool> {
-        let zip =
-            (self.source.extension == "usdz").then(|| procraft_engine::zip::ZipReader::new(&self.source.bytes)).flatten();
+        let zip = (self.source.extension == "usdz")
+            .then(|| procraft_engine::zip::ZipReader::new(&self.source.bytes))
+            .flatten();
         let found = |path: &str| match &zip {
             Some(zip) => packed_name(zip, path).is_some(),
             None => companion(&self.picked, path).is_some(),
@@ -3708,7 +3722,8 @@ impl State {
         if !scene.surface_shown {
             let side = scene.texture_size;
             for (part, maps) in scene.surface_maps.iter().enumerate() {
-                for (map, kind) in maps.iter().zip([procraft_gpu::SurfaceMap::Normal, procraft_gpu::SurfaceMap::Occlusion])
+                for (map, kind) in
+                    maps.iter().zip([procraft_gpu::SurfaceMap::Normal, procraft_gpu::SurfaceMap::Occlusion])
                 {
                     view.set_surface_map(gpu, part, kind, map.as_deref().map(|m| (side, m.as_slice())));
                 }

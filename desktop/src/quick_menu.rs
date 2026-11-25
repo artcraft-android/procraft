@@ -396,13 +396,11 @@ impl QuickMenu {
                     Some(a) => (quick_action_label(a), false, Tap::Action(a)),
                 })
                 .collect(),
-            Page::Adjustments => {
-                quick_adjustments_listed()
-                    .into_iter()
-                    .filter(|&a| crate::builtins::action(&self.hidden, a))
-                    .map(|a| (quick_action_label(a), false, Tap::Action(a)))
-                    .collect()
-            }
+            Page::Adjustments => quick_adjustments_listed()
+                .into_iter()
+                .filter(|&a| crate::builtins::action(&self.hidden, a))
+                .map(|a| (quick_action_label(a), false, Tap::Action(a)))
+                .collect(),
             Page::BrushSets => {
                 sets.iter().enumerate().map(|(s, set)| (set.name.clone(), true, Tap::Go(Page::Brushes(s)))).collect()
             }

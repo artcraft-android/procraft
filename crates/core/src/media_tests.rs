@@ -239,7 +239,8 @@ fn a_timing_track_for_a_video_inside_a_group_goes_in_the_group() {
     assert_ne!(group, 0);
     let outside = s.timeline_tracks().len();
     let layers = s.layers().len();
-    let track = s.make_timing_track(clip, vec![AnimaticHold { start: 0, length: 3 }, AnimaticHold { start: 3, length: 4 }]);
+    let track =
+        s.make_timing_track(clip, vec![AnimaticHold { start: 0, length: 3 }, AnimaticHold { start: 3, length: 4 }]);
     assert_ne!(track, 0, "made");
     assert_eq!(s.layers().len(), layers + 4);
     // nothing left behind on the timeline's own tracks

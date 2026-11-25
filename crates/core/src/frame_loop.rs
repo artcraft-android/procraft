@@ -22,8 +22,13 @@ pub(crate) trait Screen {
     /// Configures for `size` pixels (asking for wide colour if `wide`, and for an HDR canvas (`hdr`)
     /// the screen's extended range): the format drawn in and the colours the screen shows, or none if
     /// it can't be (yet).
-    fn configure(&mut self, gpu: &Gpu, size: (u32, u32), wide: bool, hdr: bool)
-    -> Option<(wgpu::TextureFormat, Profile)>;
+    fn configure(
+        &mut self,
+        gpu: &Gpu,
+        size: (u32, u32),
+        wide: bool,
+        hdr: bool,
+    ) -> Option<(wgpu::TextureFormat, Profile)>;
 
     /// Whether the screen offers the extended range an HDR canvas is shown in.
     fn extended_offered(&mut self, _gpu: &Gpu) -> bool {

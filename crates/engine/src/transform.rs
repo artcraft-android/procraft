@@ -347,12 +347,12 @@ impl Transform {
             .then(Affine::scale(scale))
             .then(Affine::rotate(angle(now) - angle(was)))
             .then(Affine::translate(middle));
-            let next = self.kept(map_placement(start, m));
-            // pinched again and again, the content could go past what can be drawn (to a point, or out
-            // past any number): it stays where the last step that could be drawn left it
-            if !self.drawable(&next) {
-                return false;
-            }
+        let next = self.kept(map_placement(start, m));
+        // pinched again and again, the content could go past what can be drawn (to a point, or out
+        // past any number): it stays where the last step that could be drawn left it
+        if !self.drawable(&next) {
+            return false;
+        }
         let moved = next != self.now;
         self.now = next;
         moved
@@ -1063,8 +1063,10 @@ impl Transform {
             verts: rig.mesh.rest().to_vec(),
             angles: bound.iter().map(|p| p.angle.unwrap_or(0.0)).collect(),
         });
-        let mut shown: Vec<(Vec2, f32)> =
-            pins.iter().map(|p| (place.apply(p.at).unwrap_or(p.at), self.shown_angle(p.angle.unwrap_or(0.0)))).collect();
+        let mut shown: Vec<(Vec2, f32)> = pins
+            .iter()
+            .map(|p| (place.apply(p.at).unwrap_or(p.at), self.shown_angle(p.angle.unwrap_or(0.0))))
+            .collect();
         for ((k, _), angle) in laid.iter().zip(&bent.angles) {
             if let Some(s) = shown.get_mut(*k) {
                 s.1 = self.shown_angle(*angle);

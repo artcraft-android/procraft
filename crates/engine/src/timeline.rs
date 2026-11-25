@@ -1208,7 +1208,15 @@ impl Timeline {
             let clips = taken.into_iter().map(|c| Clip { start: c.start - start, ..c }).collect();
             let id = TrackId(next_track);
             next_track += 1;
-            inner.push(Track { id, name: track.name.clone(), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips });
+            inner.push(Track {
+                id,
+                name: track.name.clone(),
+                hidden: false,
+                locked: false,
+                opacity: 1.0,
+                look: Default::default(),
+                clips,
+            });
         }
         let group = Clip {
             id: group_id,
@@ -1229,7 +1237,15 @@ impl Timeline {
             let id = TrackId(next_track);
             next_track += 1;
             home += 1;
-            let track = Track { id, name: name.to_owned(), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips: vec![] };
+            let track = Track {
+                id,
+                name: name.to_owned(),
+                hidden: false,
+                locked: false,
+                opacity: 1.0,
+                look: Default::default(),
+                clips: vec![],
+            };
             level.insert(home.min(level.len()), track);
         }
         let track = level.get_mut(home)?;
@@ -2282,7 +2298,9 @@ impl Channel<[f32; 2]> {
         for _ in 0..passes {
             let was: Vec<[f32; 2]> = inside.iter().filter_map(|i| self.keys.get(*i)).map(|k| k.value).collect();
             for (n, i) in inside.iter().enumerate().take(inside.len() - 1).skip(1) {
-                if let (Some(k), Some(a), Some(b), Some(c)) = (self.keys.get_mut(*i), was.get(n - 1), was.get(n), was.get(n + 1)) {
+                if let (Some(k), Some(a), Some(b), Some(c)) =
+                    (self.keys.get_mut(*i), was.get(n - 1), was.get(n), was.get(n + 1))
+                {
                     k.value = [(a[0] + 2.0 * b[0] + c[0]) / 4.0, (a[1] + 2.0 * b[1] + c[1]) / 4.0];
                 }
             }
@@ -2312,10 +2330,18 @@ impl Channel<f32> {
     /// As a position's [`Channel::thin`], for a single number keyed frame by frame (a turn).
     pub fn thin(&mut self, first: i32, last: i32, tolerance: f32) {
         let mut both: Channel<[f32; 2]> = Channel {
-            keys: self.keys.iter().map(|k| Key { frame: k.frame, value: [k.value, 0.0], easing: k.easing.clone(), path: None }).collect(),
+            keys: self
+                .keys
+                .iter()
+                .map(|k| Key { frame: k.frame, value: [k.value, 0.0], easing: k.easing.clone(), path: None })
+                .collect(),
         };
         both.thin(first, last, tolerance);
-        self.keys = both.keys.into_iter().map(|k| Key { frame: k.frame, value: k.value[0], easing: k.easing, path: None }).collect();
+        self.keys = both
+            .keys
+            .into_iter()
+            .map(|k| Key { frame: k.frame, value: k.value[0], easing: k.easing, path: None })
+            .collect();
     }
 }
 
@@ -2695,7 +2721,15 @@ mod tests {
     }
 
     fn track(clips: Vec<Clip>) -> Track {
-        Track { id: TrackId(1), name: "Lines".into(), hidden: false, locked: false, opacity: 1.0, look: Default::default(), clips }
+        Track {
+            id: TrackId(1),
+            name: "Lines".into(),
+            hidden: false,
+            locked: false,
+            opacity: 1.0,
+            look: Default::default(),
+            clips,
+        }
     }
 
     #[test]
@@ -3476,7 +3510,8 @@ mod tests {
             Track { id: TrackId(1), ..track(vec![drawing(1, 0, 8, 10)]) },
             Track { id: TrackId(2), ..track(vec![drawing(2, 0, 4, 11), own]) },
         ];
-        tl.tracks[1].look = TrackLook { label: Some([1.0, 0.0, 0.5]), blend: BlendMode::Multiply, mask: MaskMode::Clipping };
+        tl.tracks[1].look =
+            TrackLook { label: Some([1.0, 0.0, 0.5]), blend: BlendMode::Multiply, mask: MaskMode::Clipping };
         // a clip with none of its own takes the track's
         let plan = tl.plan(0);
         assert_eq!(plan.items[1].blend, BlendMode::Multiply);
