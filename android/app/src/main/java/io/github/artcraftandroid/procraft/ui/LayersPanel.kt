@@ -97,6 +97,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
+import io.github.artcraftandroid.procraft.canvas.listedLayers
 import io.github.artcraftandroid.procraft.core.LayerInfo
 import io.github.artcraftandroid.procraft.core.LayerOption
 import io.github.artcraftandroid.procraft.core.LayerType
@@ -173,7 +174,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, 
     var blendSettled by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     fun changeBlend(id: ULong?) {
         if (id == blendFor) return
-        val shown = vm.layers.filter { !vm.hidden(it) }
+        val shown = vm.listedLayers()
         val at = listOfNotNull(blendFor, id).map { b -> shown.indexOfFirst { it.id == b } }.filter { it >= 0 }.minOrNull() ?: -1
         val opening = id != null
         blendFor = id
@@ -272,7 +273,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, 
         // a layer added at the top of what shows comes in there, the rows under it sliding down,
         // rather than the list holding its place and leaving the new row out of sight above
         val list = rememberLazyListState()
-        val ids = vm.layers.filter { !vm.hidden(it) }.map { it.id }
+        val ids = vm.listedLayers().map { it.id }
         val lastIds = remember { arrayOfNulls<List<ULong>>(1) }
         val before = lastIds[0]
         if (before != null && ids != before) {
@@ -338,7 +339,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, 
             contentPadding = PaddingValues(bottom = 12.dp),
         ) {
             // a closed group's layers are left out
-            val shown = vm.layers.filter { !vm.hidden(it) }
+            val shown = vm.listedLayers()
             // a layer's row: in the list, or on a model under its submesh, indented
             val layerItem: @Composable LazyItemScope.(Int, LayerInfo, Shape, Dp, String?) -> Unit = { index, l, shape, indent, subtitle ->
                 val dragging = l.id in dragUnit
