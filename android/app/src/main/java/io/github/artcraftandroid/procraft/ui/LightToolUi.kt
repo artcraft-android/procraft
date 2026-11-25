@@ -33,11 +33,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
+import io.github.artcraftandroid.procraft.canvas.DrawMode
+import io.github.artcraftandroid.procraft.core.ToolKind
 import io.github.artcraftandroid.procraft.core.LightKind
 import io.github.artcraftandroid.procraft.core.LightSettings
 import kotlin.math.roundToInt
 
-// the light tool, as the iPad app's (LightPanel.swift): the Pen draws with light on an HDR canvas,
+// the light tool and the Pen's and Eraser's lassos, as the iPad app's (LightPanel.swift): the Pen draws with light on an HDR canvas, or either with its lasso,
 // chosen at the brush library's top; its settings take the brushes' place there
 
 private val TrackFill get() = if (Pc.light) Color(0x1F767680) else Color(0x3D767680)
@@ -68,14 +70,86 @@ fun DrawModeBar(vm: CanvasViewModel) {
     }
 }
 
-/** The library while the Pen draws with light: the Brush | Lasso | Light row, and the light's settings under it. */
+/** The library while the Pen or Eraser draws with its lasso or with light: the Brush | Lasso | Light row, and their settings under it. */
 @Composable
-fun LightLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier, floating: FloatingFrame?) {
+fun DrawModeLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier, floating: FloatingFrame?) {
     Popover(floating?.width ?: LibraryWidth, arrowX, modifier, side = if (floating != null) ArrowSide.NONE else ArrowSide.TOP) {
         floating?.let { FloatingTop(it) }
         DrawModeBar(vm)
         Spacer(Modifier.height(14.dp))
-        LightSettingsView(vm)
+        if (vm.drawMode == DrawMode.LIGHT) LightSettingsView(vm) else LassoSettingsView(vm)
+    }
+}
+
+/**
+ * The Pen's lasso's settings, under the library's Lasso, as the iPad's. Outline: the brush paints
+ * the edge as it goes, and what it goes round fills under it as it lifts, in the paint colour or
+ * the second colour, at a strength of its own (the bar's opacity is the brush's). Without, each
+ * shape drawn fills with the paint colour at the bar's opacity. The Eraser's lasso has only its
+ * Preview and its words.
+ */
+@Composable
+private fun LassoSettingsView(vm: CanvasViewModel) {
+    val preview = vm.lassoPreviewOpacity
+    val previewSlider = @Composable {
+        Group {
+            LightSlider("Preview", preview, if (preview <= 0f) "Off" else "${(preview * 100).roundToInt()}%") { vm.changeLassoPreviewOpacity(it) }
+        }
+    }
+    Column(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (vm.tool == ToolKind.ERASE) {
+            previewSlider()
+            LassoCaption("Draw a shape to erase it, at the eraser's opacity.")
+            return@Column
+        }
+        val outline = vm.lassoOutline
+        Group {
+            Row(
+                Modifier.fillMaxWidth().height(44.dp).clickable { vm.changeLassoOutline(!outline) }.padding(start = 15.dp, end = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Outline with brush", color = MenuText, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                Switch(outline, enabled = true)
+            }
+        }
+        if (outline) {
+            Group {
+                Row(Modifier.fillMaxWidth().height(50.dp).padding(start = 15.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Fill", color = MenuText, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                    FillSegments(listOf("Color", "Second color"), if (vm.lassoFillSecondary) 1 else 0) { vm.changeLassoFillSecondary(it == 1) }
+                }
+                Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+                val opacity = vm.lassoFillOpacity
+                LightSlider("Fill opacity", opacity, "${(opacity * 100).roundToInt()}%") { vm.changeLassoFillOpacity(it) }
+            }
+        }
+        previewSlider()
+        LassoCaption(
+            if (outline) "The brush draws the edge; what it goes round fills under it as you lift."
+            else "Draw a shape to fill it with the color, at the brush's opacity.",
+        )
+    }
+}
+
+/** A note under the lasso's settings. */
+@Composable
+private fun LassoCaption(text: String) {
+    Text(text, color = MenuText.copy(alpha = 0.6f), fontSize = 13.sp, modifier = Modifier.fillMaxWidth().padding(horizontal = 15.dp))
+}
+
+/** A small segmented control of [labels], [chosen] lit. */
+@Composable
+private fun FillSegments(labels: List<String>, chosen: Int, choose: (Int) -> Unit) {
+    Row(Modifier.height(32.dp).clip(RoundedCornerShape(9.dp)).background(TrackFill).padding(2.dp)) {
+        labels.forEachIndexed { i, label ->
+            Box(
+                Modifier.fillMaxHeight().clip(RoundedCornerShape(7.dp)).background(if (i == chosen) ThumbFill else Color.Transparent)
+                    .clickable { choose(i) }.padding(horizontal = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(label, color = if (i == chosen) Pc.PanelTitle else MenuText, fontSize = 13.sp, maxLines = 1)
+            }
+        }
     }
 }
 

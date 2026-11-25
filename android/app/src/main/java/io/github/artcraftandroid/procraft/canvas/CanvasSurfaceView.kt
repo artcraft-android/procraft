@@ -380,6 +380,10 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             s.setTouchFilling(vm.touchFill())
             // the selection tool's touch selects as the tool is set
             s.setTouchSelecting(vm.selectTouch())
+            // the Pen's lasso with Outline: each paint stroke fills what it goes round as it lifts
+            s.setStrokeFill(vm.strokeFill)
+            // a lasso's fill shows on the canvas as it is drawn (or over it, on a sharp vector layer)
+            s.setLassoPreviewOpacity(if (vm.lassoPreviewOnScreen) 0f else vm.lassoPreviewOpacity)
             if (vm.selecting) vm.selectionPopup = SelectionPopup.NONE
             // a transform's touch takes the node it lands on (the warp's inner points with the advanced mesh)
             s.setTouchTransforming(if (vm.transforming) io.github.artcraftandroid.procraft.core.TransformTouch(vm.advancedMesh) else null)

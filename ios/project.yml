@@ -20,8 +20,8 @@ options:
 settings:
   base:
     # build-ipa.sh sets these from android/gradle.properties
-    MARKETING_VERSION: "0.0.7"
-    CURRENT_PROJECT_VERSION: "701"
+    MARKETING_VERSION: "0.0.8"
+    CURRENT_PROJECT_VERSION: "801"
 targets:
   ProCraft:
     type: application

@@ -1310,10 +1310,53 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var eraseLasso by mutableStateOf(false)
         private set
-    /** The current tool draws with its lasso now (nothing else open over it, and the Lasso Fill plugin on). */
+    /**
+     * The Pen's lasso with its brush (Lasso's Outline, as the iPad's): the brush paints the edge as
+     * it goes, and what it goes round fills under it as it lifts, the two one undo step.
+     */
+    var lassoOutline by mutableStateOf(transformPrefs.getBoolean(LASSO_OUTLINE, false))
+        private set
+    /** Outline's fill: with the second colour rather than the paint colour, and how strongly (its own, the bar's opacity being the brush's). */
+    var lassoFillSecondary by mutableStateOf(transformPrefs.getBoolean(LASSO_FILL_SECONDARY, false))
+        private set
+    var lassoFillOpacity by mutableStateOf(transformPrefs.getFloat(LASSO_FILL_OPACITY, 1f).coerceIn(0f, 1f))
+        private set
+    /** How strongly a lasso's fill shows as it is drawn, times how strongly it will fill: none at 0, as it will be at 1. */
+    var lassoPreviewOpacity by mutableStateOf(transformPrefs.getFloat(LASSO_PREVIEW_OPACITY, 0.5f).coerceIn(0f, 1f))
+        private set
+
+    /** A lasso's fill shows drawn over the screen, sharp, rather than on the canvas at its own resolution: on a vector layer with crisp zoom, where the strokes show sharp too. */
+    val lassoPreviewOnScreen: Boolean
+        get() = vectorCrispOn && layers.firstOrNull { it.current }?.vector == true
+
+    /** What the core fills under each paint stroke: Outline's fill while the Pen's lasso has it. */
+    val strokeFill: io.github.artcraftandroid.procraft.core.StrokeFill?
+        get() = if (paintLasso && lassoOutline && lassoFills) io.github.artcraftandroid.procraft.core.StrokeFill(lassoFillSecondary, lassoFillOpacity) else null
+
+    fun changeLassoOutline(on: Boolean) {
+        lassoOutline = on
+        transformPrefs.edit().putBoolean(LASSO_OUTLINE, on).apply()
+    }
+
+    fun changeLassoFillSecondary(on: Boolean) {
+        lassoFillSecondary = on
+        transformPrefs.edit().putBoolean(LASSO_FILL_SECONDARY, on).apply()
+    }
+
+    fun changeLassoFillOpacity(opacity: Float) {
+        lassoFillOpacity = opacity.coerceIn(0f, 1f)
+        transformPrefs.edit().putFloat(LASSO_FILL_OPACITY, lassoFillOpacity).apply()
+    }
+
+    fun changeLassoPreviewOpacity(opacity: Float) {
+        lassoPreviewOpacity = opacity.coerceIn(0f, 1f)
+        transformPrefs.edit().putFloat(LASSO_PREVIEW_OPACITY, lassoPreviewOpacity).apply()
+    }
+
+    /** The current tool draws with its lasso now (nothing else open over it, and the Lasso Fill plugin on); the Pen's with Outline paints strokes, filled as they lift, instead. */
     val lassoToolOn: Boolean
         get() = !selecting && !transforming && adjustment == null && !adjustPencil &&
-            ((tool == ToolKind.PAINT && paintLasso) || (tool == ToolKind.ERASE && eraseLasso)) && lassoFills
+            ((tool == ToolKind.PAINT && paintLasso && !lassoOutline) || (tool == ToolKind.ERASE && eraseLasso)) && lassoFills
 
     /** Whether the app's own [feature] shows: its built-in plugin on, and its switch if it has one. Off, only the ways in to it are hidden; an artwork that uses it opens as saved. */
     fun has(feature: io.github.artcraftandroid.procraft.core.Feature): Boolean {
@@ -11368,6 +11411,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private const val COLOR_FILL = "selectionColorFill"
         private const val SELECTION_THRESHOLD = "selectionThreshold"
         private const val LASSO_FILL = "lassoFill"
+        private const val LASSO_OUTLINE = "lassoOutline"
+        private const val LASSO_FILL_SECONDARY = "lassoFillSecondary"
+        private const val LASSO_FILL_OPACITY = "lassoFillOpacity"
+        private const val LASSO_PREVIEW_OPACITY = "lassoPreviewOpacity"
         private const val FILL_OPACITY = "fillOpacity"
         private const val DROP_THRESHOLD = "dropThreshold"
         private const val DROP_ALL_LAYERS = "dropAllLayers"

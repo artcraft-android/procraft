@@ -264,14 +264,15 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
     // the Recent set, or one of the library's
     val recent = vm.shownSet == RECENT_SET
     val shown = sets.getOrNull(vm.shownSet)
+    // the Pen or Eraser drawing with its lasso or with light: their settings in the brushes'
+    // place, under Brush | Lasso | Light
+    if (vm.drawMode != io.github.artcraftandroid.procraft.canvas.DrawMode.BRUSH) {
+        DrawModeLibrary(vm, arrowX, modifier, floating)
+        return
+    }
     // every library's card, or a library with no sets yet: a panel of their own
     if (vm.showingLibraries || sets.isEmpty() || (shown == null && !recent)) {
         LibrariesPanel(vm, arrowX, modifier, floating)
-        return
-    }
-    // the Pen drawing with light: its settings in the brushes' place, under Brush | Lasso | Light
-    if (vm.drawMode == io.github.artcraftandroid.procraft.canvas.DrawMode.LIGHT) {
-        LightLibrary(vm, arrowX, modifier, floating)
         return
     }
     // the brushes shown, and whether each is pinned in the Recent set

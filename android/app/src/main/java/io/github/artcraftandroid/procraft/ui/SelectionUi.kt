@@ -263,10 +263,13 @@ fun SelectionOverlay(vm: CanvasViewModel, barTop: Dp) {
     val outlines = vm.selectionOutlines
     if (drag == null && path.isEmpty() && threshold == null && taken.size != 8 && outlines.isEmpty()) return
     // Lasso Fill: the shape shows as it will fill, at half its strength (the Paint tool's lasso at
-    // its opacity slider's; the Erase tool's grey, as what it takes away)
+    // its opacity slider's, times the Lasso's Preview; the Erase tool's grey, as what it takes away).
+    // The tools' own lassos show on the canvas itself, but for a sharp vector layer's: here.
+    val strength = vm.lassoPreviewOpacity * vm.opacity
     val preview = when {
-        vm.lassoToolOn && vm.tool == ToolKind.ERASE -> LassoErasePreview.copy(alpha = 0.5f * vm.opacity)
-        vm.lassoToolOn -> CanvasSpace.color(vm.colorRgb()).copy(alpha = 0.5f * vm.opacity)
+        vm.lassoToolOn && !vm.lassoPreviewOnScreen -> null
+        vm.lassoToolOn && vm.tool == ToolKind.ERASE -> LassoErasePreview.copy(alpha = strength)
+        vm.lassoToolOn -> CanvasSpace.color(vm.colorRgb()).copy(alpha = strength)
         vm.lassoFilling -> CanvasSpace.color(vm.colorRgb()).copy(alpha = 0.5f * vm.fillOpacity)
         else -> null
     }

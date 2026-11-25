@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,6 +45,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -55,8 +58,8 @@ import kotlin.math.roundToInt
 // a tab along its bottom for each part (the project's frame rate, length and size; the onion skins;
 // how it plays; the app's own timeline settings), what a row opens standing beside it. Opened by
 // vm.openTimelineSettings() (Actions → Canvas → Timeline Settings) or vm.toggleTimelineSettings()
-// (the grid's header button); it stands vm.timelineSettingsLift over the screen's bottom right, and a
-// press anywhere else closes it.
+// (the grid's header button); it stands on the grid's bar (vm.timelineSettingsLift up) over that
+// button, as the iPad's, and a press anywhere else closes it.
 
 private val CardWidth = 318.dp
 private val BesideWidth = 236.dp
@@ -101,16 +104,50 @@ fun timelineTimecode(frame: Int, fps: Int): String {
     return "%02d:%02d:%02d.%03d".format(seconds / 3600, seconds / 60 % 60, seconds % 60, frame % f)
 }
 
-/** The timeline's settings card, standing on the screen's bottom right. */
+/** The timeline's settings card, standing on the grid's bar over its button. */
 @Composable
 fun BoxScope.TimelineSettingsCard(vm: CanvasViewModel) {
     val info = vm.timelineSettingsInfo ?: return
-    var tab by remember { mutableStateOf(SettingsTab.PROJECT) }
-    var beside by remember { mutableStateOf<Beside?>(null) }
+    val tab = remember { mutableStateOf(SettingsTab.PROJECT) }
+    val beside = remember { mutableStateOf<Beside?>(null) }
     // a press anywhere else closes it
     Box(Modifier.fillMaxSize().pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume(); vm.closeTimelineSettings() } })
+    // over its button in the bar's header, as the bar's own menus stand (the iPad's GridMenuPlace):
+    // the card centred on the button, what a row opens before it, all kept over the bar
+    val lift = vm.timelineSettingsLift
+    Layout(
+        content = { SettingsCards(vm, info, tab, beside) },
+        modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(bottom = if (lift > 0.dp) lift - 2.dp else 16.dp),
+    ) { measurables, constraints ->
+        val cards = measurables.map { it.measure(Constraints(maxHeight = constraints.maxHeight)) }
+        val w = cards.maxOfOrNull { it.width } ?: 0
+        val h = cards.maxOfOrNull { it.height } ?: 0
+        val screen = constraints.maxWidth
+        // the bar: as wide as the screen less 16 a side, 1180 at most, in the middle (TimelineGrid.kt)
+        val bar = minOf(screen - 32.dp.roundToPx(), 1180.dp.roundToPx())
+        val barLeft = (screen - bar) / 2
+        val first = CardWidth.roundToPx()
+        val button = barLeft + bar - SettingsButtonFromEnd.roundToPx()
+        val most = maxOf(barLeft + bar - w, 0)
+        val left = (button - first / 2 - (w - first)).coerceIn(minOf(barLeft, most), most)
+        layout(screen, h) { cards.forEach { it.place(left, 0) } }
+    }
+}
+
+/** How far the grid's settings button is in from the bar's end (its middle), as the iPad's. */
+private val SettingsButtonFromEnd = 241.dp
+
+/** The settings' card, and what a row of it opens standing before it. */
+@Composable
+private fun SettingsCards(
+    vm: CanvasViewModel,
+    info: io.github.artcraftandroid.procraft.core.TimelineInfo,
+    tabState: MutableState<SettingsTab>,
+    besideState: MutableState<Beside?>,
+) {
+    var tab by tabState
+    var beside by besideState
     Row(
-        Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 16.dp + vm.timelineSettingsLift),
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
