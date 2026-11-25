@@ -6636,13 +6636,13 @@ fn a_device_short_of_memory_lets_go_of_what_draws_the_library_s_strokes() {
     let free = |bytes: Option<u64>| crate::device::MEMORY_FREE.with(|m| m.set(bytes));
     let drawn = |t: &crate::layers::ThumbnailImage| t.width == 530 && t.rgba.iter().skip(3).step_by(4).any(|&a| a > 0);
     free(Some(400 << 20));
-    assert!(s.brush_preview(0, 0, 530, 162).is_some_and(|t| drawn(&t)));
+    assert!(s.render_stock_quick_look(0, 0, 530, 162).is_some_and(|t| drawn(&t)));
     assert!(s.shared.lock().preview.is_none(), "nothing kept, memory short");
     free(Some(4 << 30));
-    assert!(s.brush_preview(0, 1, 530, 162).is_some_and(|t| drawn(&t)));
+    assert!(s.render_stock_quick_look(0, 1, 530, 162).is_some_and(|t| drawn(&t)));
     assert!(s.shared.lock().preview.is_some(), "kept for the next");
     free(Some(400 << 20));
-    assert!(s.brush_preview(0, 2, 530, 162).is_some_and(|t| drawn(&t)));
+    assert!(s.render_stock_quick_look(0, 2, 530, 162).is_some_and(|t| drawn(&t)));
     assert!(s.shared.lock().preview.is_none(), "let go, memory short");
     free(None);
 }
@@ -20154,6 +20154,9 @@ fn a_brush_preview_on_a_lost_graphics_device_is_none_and_never_panics() {
     };
     let glaze = pick(|b| !b.mixes_wet() && b.rendering == Rendering::Capped && b.thumbnail.is_none());
     let wet = pick(|b| b.mixes_wet() && b.thumbnail.is_none());
+    for (set, index) in [glaze, wet] {
+        s.shared.lock().library[set as usize].brushes[index as usize].set_setting("preview_size", 0.4567);
+    }
     assert!(s.brush_preview(glaze.0, glaze.1, 106, 32).is_some(), "drawn while the device stands");
     let gpu = s.shared.lock().gpu.clone().unwrap();
     // lost as the next is drawn: not yet seen as lost (that comes as the device is polled)
@@ -20238,7 +20241,7 @@ fn every_stock_brush_draws_on_a_gpu_held_to_downlevel_limits_with_little_memory(
     for (name, set, index) in &all {
         let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert!(s.select_brush(*set, *index));
-            let preview = s.brush_preview(*set, *index, 372, 113);
+            let preview = s.render_stock_quick_look(*set, *index, 372, 113);
             s.set_brush_size(0.4);
             s.set_color(0.2, 0.5, 0.9);
             s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
@@ -20280,6 +20283,11 @@ fn a_sample_stroke_is_kept_by_how_the_brush_looks_and_drawn_anew_once_it_changes
         });
         found.map(|(i, j)| (i as u32, j as u32)).unwrap()
     };
+    // Use a custom appearance so these requests exercise the generated cache.
+    let customise = |s: &CanvasSession| {
+        s.shared.lock().library[set as usize].brushes[index as usize].set_setting("preview_size", 0.4567);
+    };
+    customise(&s);
     let counts = || {
         let st = s.shared.lock();
         (st.drawn_previews.found, st.drawn_previews.missed)
@@ -20292,6 +20300,7 @@ fn a_sample_stroke_is_kept_by_how_the_brush_looks_and_drawn_anew_once_it_changes
     assert_eq!(counts(), (2, 1));
     // drawn anew on a fresh session's canvas: the same pixels as the kept stroke gives
     let fresh = session(64, 64).unwrap();
+    customise(&fresh);
     assert_eq!(fresh.brush_preview(set, index, 1060, 324).unwrap().rgba, file_size);
     // renamed and given notches: it looks the same, so its stroke is kept
     {
@@ -20359,7 +20368,7 @@ fn brush_previews_come_out_the_same_on_a_device_starved_of_memory_and_threads() 
         assert_eq!(picks.len(), 9);
         picks
             .into_iter()
-            .map(|(name, set, index)| (name, s.brush_preview(set, index, 212, 65).map(|t| t.rgba)))
+            .map(|(name, set, index)| (name, s.render_stock_quick_look(set, index, 212, 65).map(|t| t.rgba)))
             .collect()
     };
     // starved first (the pictures drawn then, for both)
@@ -20393,7 +20402,7 @@ fn paced_sample_strokes_make_the_next_piece_ready_while_the_gpu_lays_one() {
         .collect();
     assert_eq!(found.len(), names.len(), "the wet stock brushes");
     // the previews' canvas made (and its pipelines) first
-    let _ = s.brush_preview(0, 0, 530, 162);
+    let _ = s.render_stock_quick_look(0, 0, 530, 162);
     let draw = |each: bool| -> (Vec<Vec<u8>>, f64) {
         if let Some((canvas, _)) = s.shared.lock().preview.as_mut() {
             canvas.pace_each_piece(each);
@@ -20401,10 +20410,7 @@ fn paced_sample_strokes_make_the_next_piece_ready_while_the_gpu_lays_one() {
         let t = std::time::Instant::now();
         let drawn = found
             .iter()
-            .map(|&(set, index)| {
-                s.shared.lock().drawn_previews = Default::default();
-                s.brush_preview(set, index, 530, 162).expect("drawn").rgba
-            })
+            .map(|&(set, index)| s.render_stock_quick_look(set, index, 530, 162).expect("drawn").rgba)
             .collect();
         (drawn, t.elapsed().as_secs_f64() * 1000.0)
     };
@@ -20444,7 +20450,7 @@ fn brush_previews_come_out_the_same_paced_or_not() {
         let previews = |pace: bool| -> Vec<(String, Vec<u8>, u64)> {
             let s = session_on(gpu.clone(), 64, 64);
             // the preview's canvas made, then paced or not
-            let _ = s.brush_preview(0, 0, 106, 32);
+            let _ = s.render_stock_quick_look(0, 0, 106, 32);
             if let Some((canvas, _)) = s.shared.lock().preview.as_mut() {
                 canvas.pace(pace);
             }
@@ -20473,7 +20479,7 @@ fn brush_previews_come_out_the_same_paced_or_not() {
                 .into_iter()
                 .map(|(name, set, index)| {
                     let before = sent(&s);
-                    let drawn = s.brush_preview(set, index, 212, 65).map(|t| t.rgba);
+                    let drawn = s.render_stock_quick_look(set, index, 212, 65).map(|t| t.rgba);
                     assert!(drawn.is_some(), "{name}: drawn");
                     (name, drawn.unwrap_or_default(), sent(&s) - before)
                 })
@@ -20577,7 +20583,7 @@ fn previews_beside_frames(gpu: Gpu, window: (u32, u32), scale: f32) -> Option<Pa
     }
     // each drawn once first (their pictures, the preview's canvas), and frames (their pipelines)
     for &(set, index, _) in &picks {
-        s.brush_preview(set, index, 530, 162);
+        s.render_stock_quick_look(set, index, 530, 162);
     }
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     // frames every 8 ms while `work` runs, the app's thread asking for the Recent set every 16 ms:
@@ -20641,7 +20647,7 @@ fn previews_beside_frames(gpu: Gpu, window: (u32, u32), scale: f32) -> Option<Pa
         let (hold, wait, said, frames) = beside(&|| {
             for &(set, index, name) in &picks {
                 let t = Instant::now();
-                let preview = s.brush_preview(set, index, 530, 162).map(|p| p.rgba);
+                let preview = s.render_stock_quick_look(set, index, 530, 162).map(|p| p.rgba);
                 took.lock().unwrap().push(format!("{name} {:.0}", ms(t.elapsed())));
                 drawn.lock().unwrap().push((name, preview));
             }
@@ -24176,13 +24182,14 @@ fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_ag
         // again from scratch (no marks to go back to), or all of it laid again whole
         let ended = |rewinds: bool, whole: bool| -> Option<(Vec<u8>, u64, bool)> {
             let s = session(side, side)?;
-            let (set, index) = library_brush(&s, |b| b.name == name && timed(b))?;
+            let (set, index) = library_brush(&s, |b| b.name == name && timed(b))
+                .unwrap_or_else(|| panic!("{name}: no stock brush of paint laid in place with a timed start taper"));
             assert!(s.select_brush(set, index));
             s.set_brush_size(0.3);
             s.set_color(0.1, 0.3, 0.7);
             {
                 let mut st = s.shared.lock();
-                let canvas = st.canvas.as_mut()?;
+                let canvas = st.canvas.as_mut().expect("test canvas");
                 canvas.lay_ends_whole(whole);
                 canvas.set_rewinds(rewinds, None);
             }
@@ -24196,19 +24203,20 @@ fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_ag
             picture(&s);
             let (before, held) = {
                 let st = s.shared.lock();
-                (st.canvas.as_ref()?.compute_dispatches(), st.stroke.as_ref()?.holds_start())
+                (
+                    st.canvas.as_ref().expect("test canvas").compute_dispatches(),
+                    st.stroke.as_ref().expect("active stroke").holds_start(),
+                )
             };
             s.stroke_end(vec![point(241)]);
             picture(&s);
-            let sent = s.shared.lock().canvas.as_ref()?.compute_dispatches() - before;
+            let sent = s.shared.lock().canvas.as_ref().expect("test canvas").compute_dispatches() - before;
             let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
             Some((layer_rgba(&s, current), sent, held))
         };
-        let (Some((rest, sent_rest, held)), Some((scratch, ..)), Some((whole, sent_whole, _))) =
-            (ended(true, false), ended(false, false), ended(false, true))
-        else {
-            panic!("{name}: no stock brush of paint laid in place with a timed start taper");
-        };
+        let Some((rest, sent_rest, held)) = ended(true, false) else { return };
+        let Some((scratch, ..)) = ended(false, false) else { return };
+        let Some((whole, sent_whole, _)) = ended(false, true) else { return };
         let (most, count) = differ(&whole, &rest);
         println!(
             "{name}: {sent_rest} dispatches at its end, {sent_whole} laid again whole; {count} of {} channels within {most} of that",
@@ -24251,11 +24259,12 @@ fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_it
         // the picture every tenth event, the layer as it ends, and the windows laid while drawn
         let drawn = |joined: bool| -> Option<(Vec<Vec<u8>>, Vec<u8>, u64)> {
             let s = session(side, side)?;
-            let (set, index) = library_brush(&s, |b| b.name == name && b.secondary.is_some())?;
+            let (set, index) = library_brush(&s, |b| b.name == name && b.secondary.is_some())
+                .unwrap_or_else(|| panic!("{name}: no stock dual brush of that name"));
             assert!(s.select_brush(set, index));
             s.set_brush_size(size);
             s.set_color(0.2, 0.5, 0.3);
-            s.shared.lock().canvas.as_mut()?.join_synthesis(joined);
+            s.shared.lock().canvas.as_mut().expect("test canvas").join_synthesis(joined);
             let windows = || s.shared.lock().canvas.as_deref().map_or(0, procraft_gpu::Canvas::smudge_windows);
             let before = windows();
             let mut frames = Vec::new();
@@ -24275,11 +24284,8 @@ fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_it
             let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
             Some((frames, layer_rgba(&s, current), laid))
         };
-        let (Some((shown, ended, windows)), Some((shown_apart, ended_apart, windows_apart))) =
-            (drawn(true), drawn(false))
-        else {
-            panic!("{name}: no stock dual brush of that name");
-        };
+        let Some((shown, ended, windows)) = drawn(true) else { return };
+        let Some((shown_apart, ended_apart, windows_apart)) = drawn(false) else { return };
         println!(
             "{name}@{size}: {windows} windows while drawn, against {windows_apart} with its second put together apart"
         );
@@ -24422,12 +24428,13 @@ fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
         // whether it is on OpenGL
         let drawn = |tiles: Option<u32>| -> Option<(Vec<u8>, u64, u32, bool)> {
             let s = session(side, side)?;
-            let (set, index) = library_brush(&s, |b| b.name == name)?;
+            let (set, index) =
+                library_brush(&s, |b| b.name == name).unwrap_or_else(|| panic!("{name}: no stock brush of that name"));
             assert!(s.select_brush(set, index));
             s.set_brush_size(size);
             s.set_color(0.3, 0.2, 0.6);
-            s.shared.lock().canvas.as_mut()?.set_smudge_tiles(tiles);
-            let gl = s.shared.lock().gpu.as_ref()?.is_gl();
+            s.shared.lock().canvas.as_mut().expect("test canvas").set_smudge_tiles(tiles);
+            let gl = s.shared.lock().gpu.as_ref().expect("test GPU").is_gl();
             picture(&s);
             let held =
                 |s: &CanvasSession| s.shared.lock().canvas.as_deref().map_or(0, procraft_gpu::Canvas::texture_bytes);
@@ -24447,11 +24454,9 @@ fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
             let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
             Some((layer_rgba(&s, current), most, tile, gl))
         };
-        let (Some((own, held_own, tile, gl)), Some((thin_tiles, held_thin, ..)), Some((big_tiles, held_big, ..))) =
-            (drawn(None), drawn(Some(256)), drawn(Some(512)))
-        else {
-            panic!("{name}: no stock brush of that name");
-        };
+        let Some((own, held_own, tile, gl)) = drawn(None) else { return };
+        let Some((thin_tiles, held_thin, ..)) = drawn(Some(256)) else { return };
+        let Some((big_tiles, held_big, ..)) = drawn(Some(512)) else { return };
         let mb = |b: u64| b as f64 / 1048576.0;
         println!(
             "{name}@{size}: tiles {tile} across, the stroke holding {:.1} MB; {:.1} MB in tiles 256 across, {:.1} MB in tiles 512 across",

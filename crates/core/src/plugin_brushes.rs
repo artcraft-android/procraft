@@ -1892,9 +1892,17 @@ mod tests {
         let shape = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(layer)).unwrap();
         assert!(alpha(&shape, 20, 60) > 240 && alpha(&shape, 60, 60) > 240, "squares along the shape");
         assert_eq!(alpha(&shape, 40, 60), 0, "spaced as the engine spaces them");
-        // its preview drawn by the engine: squares too, not the preset's picture
-        let preview = s.brush_preview(set, 0, 400, 120).expect("a preview");
+        // The imported PNG takes priority even with the brush engine active.
+        let marker = [136, 21, 44, 255].repeat(16 * 16);
+        s.shared.lock().library[set as usize].brushes[0].thumbnail =
+            Some(crate::project::rgba_png(16, 16, &marker).into());
+        assert_eq!(s.brush_preview(set, 0, 16, 16).unwrap().rgba, marker);
+        s.studio_begin();
+        s.set_studio_setting("preview_size".to_owned(), 0.75);
+        s.studio_end(true);
+        let preview = s.brush_preview(set, 0, 400, 120).expect("a regenerated preview");
         assert!(preview.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
+        assert!(s.shared.lock().library[set as usize].brushes[0].thumbnail.is_none());
         // an eraser's preview shows what it takes away
         let read = crate::read_brushes(
             preset_of(r#"<param name="EraserMode"><![CDATA[true]]></param>"#),

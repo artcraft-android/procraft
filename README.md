@@ -180,6 +180,10 @@ Build time dependencies:
 
 `cargo test --workspace` runs the engine's and the renderer's tests on the desktop.
 
+Release builds render the stock brush Quick Look PNGs once and embed them in every platform's app.
+After changing the stock brushes, refresh the bundled previews for local builds with
+`cargo run --locked -p procraft-core --example stock_quick_looks -- assets/brushes/quick-look.zip`.
+
 | Path | What |
 |---|---|
 | `crates/engine` | document, brushes, stroke geometry, canvas view (no GPU) |

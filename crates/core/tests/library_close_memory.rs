@@ -65,7 +65,7 @@ fn the_library_closed_gives_back_what_its_strokes_took() {
         let set = library.iter().find(|set| set.name == name).unwrap();
         for b in &set.brushes {
             brushes += 1;
-            if s.brush_preview(b.set, b.index, 530, 162).is_some() {
+            if s.render_stock_quick_look(b.set, b.index, 530, 162).is_some() {
                 drawn += 1;
             }
             // what the canvas kept for the next stroke
@@ -100,7 +100,7 @@ fn the_library_closed_gives_back_what_its_strokes_took() {
     // another set's stroke drawn as the library opens again (those drawn come from what is kept,
     // drawing nothing), then the artwork left
     let b = &library.iter().find(|set| set.name == "Inks").unwrap().brushes[0];
-    assert!(s.brush_preview(b.set, b.index, 530, 162).is_some());
+    assert!(s.render_stock_quick_look(b.set, b.index, 530, 162).is_some());
     assert!(s.preview_canvas_bytes().is_some(), "a canvas made again for the next");
     s.release_canvas();
     assert!(s.preview_canvas_bytes().is_none(), "the strokes' canvas let go of with the canvas");
@@ -113,7 +113,7 @@ fn the_strokes_canvas_goes_a_while_after_the_last() {
     let library = s.brush_library();
     let set = library.iter().find(|set| set.name == "Gouache").unwrap();
     for b in set.brushes.iter().take(3) {
-        assert!(s.brush_preview(b.set, b.index, 530, 162).is_some());
+        assert!(s.render_stock_quick_look(b.set, b.index, 530, 162).is_some());
     }
     let last = Instant::now();
     assert!(s.preview_canvas_bytes().is_some(), "kept for the next stroke");

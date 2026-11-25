@@ -157,6 +157,10 @@ impl Default for Libraries {
 }
 
 impl Libraries {
+    pub(crate) fn directory(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
     /// Whether shipped brushes join the library held.
     pub(crate) fn stock(&self) -> bool {
         self.list.iter().find(|e| e.id == self.held).is_some_and(|e| e.stock)

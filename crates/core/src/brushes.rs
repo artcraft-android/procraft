@@ -724,6 +724,14 @@ impl CanvasSession {
         self.sample_stroke(brush, width, height, true)
     }
 
+    /// Renders a stock sample for the build's Quick Look archive.
+    #[doc(hidden)]
+    pub fn render_stock_quick_look(&self, set: u32, index: u32, width: u32, height: u32) -> Option<ThumbnailImage> {
+        let brush = self.shared.lock().library.get(set as usize)?.brushes.get(index as usize)?.clone();
+        let key = crate::drawn_previews::look_key(&brush);
+        self.render_sample_stroke(brush, width.clamp(16, 2048), height.clamp(16, 1024), key, false)
+    }
+
     /// `brush`'s sample stroke (see [`CanvasSession::brush_preview`]): the one drawn already from
     /// a brush looking as it does, if it is kept, else drawn now, and kept if `keep` says (the
     /// library's are; the studio's, a new one at every step of a slider, aren't).
@@ -734,34 +742,56 @@ impl CanvasSession {
         height: u32,
         keep: bool,
     ) -> Option<ThumbnailImage> {
+        use crate::drawn_previews::{look_key, stock_png};
+
         let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
-        let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
-        // a brush a plugin's brush engine draws, while that is on, is drawn by it
-        let hooks = self
-            .shared
-            .lock()
-            .hooks
-            .clone()
-            .filter(|h| brush.engine.as_ref().is_some_and(|e| h.engine(&e.engine).is_some()));
-        // the preview it came with, while it is as it came: a blank file preview (some imported
-        // brushes ship one) is no preview, so the brush draws its own
-        if let Some((tw, th, rgba)) =
-            brush.thumbnail.as_deref().filter(|_| hooks.is_none()).and_then(crate::brush_files::thumbnail_pixels)
-        {
-            let (pixels, _) = rgba.as_chunks::<4>();
-            if pixels.iter().any(|p| p[3] > 0) {
-                return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
-            }
+        let fit = |png: &[u8]| {
+            let (tw, th, rgba) = crate::brush_files::thumbnail_pixels(png)?;
+            let rgba = if (w, h) == (tw, th) { rgba } else { preview::fit_image(&rgba, (tw, th), w, h) };
+            Some(ThumbnailImage { width: w, height: h, rgba })
+        };
+        if let Some(image) = brush.thumbnail.as_deref().and_then(fit) {
+            return Some(image);
         }
-        // drawn already from a brush looking as this one does: that stroke (one a plugin's brush
-        // engine draws is drawn again, as the plugin may have changed)
-        let key = hooks.is_none().then(|| crate::drawn_previews::look_key(&brush));
-        let kept_stroke = |key: Option<u64>| {
-            let png = self.shared.lock().drawn_previews.find(key?)?;
-            let rgba = crate::drawn_previews::unpacked(cw, ch, &png)?;
+        let key = look_key(&brush);
+        if let Some(image) = stock_png(key).as_deref().and_then(fit) {
+            return Some(image);
+        }
+        self.render_sample_stroke(brush, w, h, key, keep)
+    }
+
+    fn render_sample_stroke(
+        &self,
+        brush: procraft_engine::brush::Brush,
+        w: u32,
+        h: u32,
+        key: u64,
+        keep: bool,
+    ) -> Option<ThumbnailImage> {
+        use crate::drawn_previews::{self, DrawnPreviews};
+
+        let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
+        let (hooks, directory) = {
+            let st = self.shared.lock();
+            let hooks =
+                st.hooks.clone().filter(|h| brush.engine.as_ref().is_some_and(|e| h.engine(&e.engine).is_some()));
+            (hooks, st.libraries.directory().map(drawn_previews::directory))
+        };
+        // The plugin and native fallback can draw different strokes for the same settings.
+        let key = if hooks.is_some() { key ^ 0x3c6e_f372_fe94_f82b } else { key };
+        let kept_stroke = || {
+            let png = self.shared.lock().drawn_previews.find(key);
+            if let Some(rgba) = png.as_deref().and_then(|png| drawn_previews::unpacked(cw, ch, png)) {
+                return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba, w, h) });
+            }
+            let png = DrawnPreviews::read(directory.as_deref()?, key)?;
+            let rgba = drawn_previews::unpacked(cw, ch, &png)?;
+            if keep {
+                self.shared.lock().drawn_previews.keep(key, png);
+            }
             Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba, w, h) })
         };
-        if let Some(kept) = kept_stroke(key) {
+        if let Some(kept) = kept_stroke() {
             return Some(kept);
         }
         // one at a time, on the canvas kept for them: drawn side by side, each took a canvas of its
@@ -770,12 +800,10 @@ impl CanvasSession {
         let _pending = PreviewPending::new(&self.shared);
         let _drawing = PREVIEWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // (drawn meanwhile, by an ask for it made before this one)
-        if let Some(kept) = kept_stroke(key) {
+        if let Some(kept) = kept_stroke() {
             return Some(kept);
         }
-        if key.is_some() {
-            self.shared.lock().drawn_previews.missed += 1;
-        }
+        self.shared.lock().drawn_previews.missed += 1;
         // what it needs taken under the lock; drawn without it, so painting goes on meanwhile
         let (gpu, kept) = {
             let mut st = self.shared.lock();
@@ -847,10 +875,11 @@ impl CanvasSession {
         }
         let mut rgba = rgba?;
         // kept, it shows as it will when taken again (a white stroke as its coverage)
-        if let Some(key) = key.filter(|_| keep)
-            && let Some(png) = crate::drawn_previews::packed(cw, ch, &rgba)
-        {
-            rgba = crate::drawn_previews::unpacked(cw, ch, &png).unwrap_or(rgba);
+        if keep && let Some(png) = drawn_previews::packed(cw, ch, &rgba) {
+            rgba = drawn_previews::unpacked(cw, ch, &png).unwrap_or(rgba);
+            if let Some(directory) = directory {
+                DrawnPreviews::write(&directory, key, &png);
+            }
             self.shared.lock().drawn_previews.keep(key, png);
         }
         Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba, w, h) })
@@ -1059,20 +1088,35 @@ mod tests {
         eprintln!("hover fill: plain {plain:?}, by opacity {fading:?} (at 90% {harder:?}), by size {thinning:?}");
     }
 
-    /// A brush file whose own preview is blank (a brush imported from another app can bring one):
-    /// the library draws the brush instead of showing nothing.
     #[test]
-    fn a_blank_brush_file_preview_is_drawn_from_the_brush() {
+    fn an_imported_quick_look_is_used_until_a_studio_edit_is_kept() {
         let s = CanvasSession::new(64, 64);
-        if !s.prepare_offscreen() {
-            return;
-        }
-        let mut brush = Brush::round_pen();
-        let blank = crate::project::rgba_png(8, 8, &[0u8; 8 * 8 * 4]);
-        brush.thumbnail = Some(Arc::from(blank));
-        let preview = s.drawn_preview(brush, 240, 60).expect("a preview");
-        let painted = preview.rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
-        assert!(painted > 100, "{painted} pixels");
+        let at = {
+            let mut st = s.shared.lock();
+            let at = st.brush_ref(st.tool);
+            let brush = &mut st.library[at.0].brushes[at.1];
+            brush.thumbnail = Some(crate::project::rgba_png(16, 16, &[0; 16 * 16 * 4]).into());
+            (at.0 as u32, at.1 as u32)
+        };
+        let preview = || s.brush_preview(at.0, at.1, 16, 16).map(|image| image.rgba);
+        let embedded = Some(vec![0; 16 * 16 * 4]);
+        assert!(preview() == embedded, "shows the embedded PNG");
+        s.studio_begin();
+        let setting = "preview_size".to_owned();
+        let original = s.studio_settings(vec![setting.clone()])[0];
+        let changed = if original < 0.5 { 0.8 } else { 0.2 };
+        s.set_studio_setting(setting.clone(), changed);
+        s.set_studio_setting(setting.clone(), original);
+        s.studio_end(true);
+        assert!(preview() == embedded, "restoring a setting keeps the embedded PNG");
+        s.studio_begin();
+        s.set_studio_setting(setting.clone(), changed);
+        s.studio_end(false);
+        assert!(preview() == embedded, "canceling keeps the embedded PNG");
+        s.studio_begin();
+        s.set_studio_setting(setting, changed);
+        s.studio_end(true);
+        assert_eq!(preview(), None, "the edited brush needs a renderer");
     }
 
     /// The canvas the sample strokes are drawn on stays while a stroke waits for its turn behind

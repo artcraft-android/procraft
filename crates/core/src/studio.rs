@@ -334,7 +334,9 @@ impl CanvasSession {
     }
 
     pub fn set_studio_combine_mode(&self, mode: u32) {
-        if let Some(brush) = self.shared.lock().studio_whole() {
+        if let Some(brush) = self.shared.lock().studio_whole()
+            && brush.setting("dual_blend") != mode as f32
+        {
             brush.thumbnail = None;
             brush.set_setting("dual_blend", mode as f32);
         }
@@ -374,6 +376,12 @@ impl CanvasSession {
     /// Moves the control `key` to `value`.
     pub fn set_studio_setting(&self, key: String, value: f32) {
         let mut st = self.shared.lock();
+        if !value.is_finite()
+            || (!matches!(key.as_str(), "spacing" | "wet_pull")
+                && st.studio_brush().is_some_and(|brush| brush.setting(&key) == value))
+        {
+            return;
+        }
         if let Some(brush) = st.studio_change() {
             brush.set_setting(&key, value);
             // spacing set by hand is spaced the current way, as a new brush is
@@ -597,12 +605,17 @@ impl CanvasSession {
         let (set, index) = (*set, *index);
         let origin = st.library.get(set).and_then(|s| s.origins.get(index)).copied().flatten();
         let start = st.origin_brush(origin);
+        let second = st.studio_second;
         if let Some(brush) = st.studio_brush() {
             let name = std::mem::take(&mut brush.name);
             let reset = brush.reset_point.take();
             // back to its reset point, else to how it started
             let back = reset.as_ref().map_or(start, |r| (*r.brush).clone());
+            let changed = second && crate::drawn_previews::look_key(brush) != crate::drawn_previews::look_key(&back);
             *brush = Brush { name, reset_point: reset, ..back };
+            if changed && let Some(whole) = st.studio_whole() {
+                whole.thumbnail = None;
+            }
         }
     }
 
@@ -792,11 +805,26 @@ impl CanvasSession {
         let st = &mut *guard;
         st.studio_second = false;
         let Some(((set, index), before)) = st.studio.take() else { return };
-        if !keep && let Some(brush) = st.library.get_mut(set).and_then(|s| s.brushes.get_mut(index)) {
+        let Some(brush) = st.library.get_mut(set).and_then(|s| s.brushes.get_mut(index)) else { return };
+        if keep {
+            restore_unchanged_thumbnail(brush, before);
+        } else {
             // a reset point made meanwhile stays
             let reset = brush.reset_point.take();
             *brush = Brush { reset_point: reset, ..before };
         }
+    }
+}
+
+fn restore_unchanged_thumbnail(brush: &mut Brush, before: Brush) {
+    if brush.thumbnail.is_none()
+        && before.thumbnail.is_some()
+        && crate::drawn_previews::look_key(brush) == crate::drawn_previews::look_key(&before)
+    {
+        brush.thumbnail = before.thumbnail;
+    }
+    if let (Some(second), Some(original)) = (brush.secondary.as_deref_mut(), before.secondary) {
+        restore_unchanged_thumbnail(second, *original);
     }
 }
 
