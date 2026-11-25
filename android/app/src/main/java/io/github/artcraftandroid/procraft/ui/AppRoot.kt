@@ -344,12 +344,17 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             }
             // the timeline's settings card, over the canvas and its bars
             if (vm.timelineSettingsOpen && !pageOver) TimelineSettingsCard(vm)
-            // the bottom toolbars rise from below the screen, and drop away
+            // the bottom toolbars rise from below the screen, and drop away (over the timeline's
+            // bar, not on it: they and their menus stand as much higher as it is tall)
+            val overTimeline = Modifier.offset(y = -vm.timeline.gridLift)
+            val screenWidth = maxWidth
+            val screenHeight = maxHeight
             FloatableBottom(
                 vm,
                 io.github.artcraftandroid.procraft.core.LayoutPiece.TRANSFORM,
                 vm.transforming && !vm.barsHidden,
-                goesWith = { if (vm.transforming && !vm.barsHidden) TransformPopover(vm, maxWidth, maxHeight) },
+                raise = vm.timeline.gridLift,
+                goesWith = { if (vm.transforming && !vm.barsHidden) Box(overTimeline) { TransformPopover(vm, screenWidth, screenHeight) } },
             ) { TransformToolbar(vm, maxWidth) }
             BrushCursor(vm)
             // the Reference window floats over the bars and the canvas's own marks; the panels,
@@ -592,7 +597,8 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             val shownPanel = androidx.compose.runtime.remember { arrayOfNulls<Adjustment>(1) }
             if (bottomPanel != null) shownPanel[0] = bottomPanel
             val bottomPiece = if (shownPanel[0] == Adjustment.LIQUIFY) io.github.artcraftandroid.procraft.core.LayoutPiece.LIQUIFY else io.github.artcraftandroid.procraft.core.LayoutPiece.ADJUSTING
-            FloatableBottom(vm, bottomPiece, bottomPanel != null) {
+            // (Liquify's stands where it is: it is a piece of its own)
+            FloatableBottom(vm, bottomPiece, bottomPanel != null, raise = if (shownPanel[0] == Adjustment.LIQUIFY) 0.dp else vm.timeline.gridLift) {
                 shownPanel[0]?.let {
                     when (it) {
                         Adjustment.HSB -> HsbPanel(vm, Modifier)
@@ -617,7 +623,8 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
                 vm,
                 io.github.artcraftandroid.procraft.core.LayoutPiece.SELECTION,
                 vm.selecting && !vm.barsHidden,
-                goesWith = { if (vm.selecting && !vm.barsHidden) SelectionPopover(vm, maxWidth, maxHeight) },
+                raise = vm.timeline.gridLift,
+                goesWith = { if (vm.selecting && !vm.barsHidden) Box(overTimeline) { SelectionPopover(vm, screenWidth, screenHeight) } },
             ) { SelectionToolbar(vm, maxWidth) }
             GuideEditor(vm)
             LightingStudio(vm)

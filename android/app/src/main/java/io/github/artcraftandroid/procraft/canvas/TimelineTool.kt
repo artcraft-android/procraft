@@ -7,11 +7,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.core.CanvasSession
 import io.github.artcraftandroid.procraft.core.LayerInfo
 import io.github.artcraftandroid.procraft.core.TimelineClipInfo
 import io.github.artcraftandroid.procraft.core.TimelineClipKind
+import io.github.artcraftandroid.procraft.core.TimelineClipboardInfo
 import io.github.artcraftandroid.procraft.core.TimelineGroupShot
 import io.github.artcraftandroid.procraft.core.TimelineInfo
 import io.github.artcraftandroid.procraft.core.TimelineKeyInfo
@@ -34,7 +36,7 @@ import kotlinx.coroutines.withContext
 // the playhead, scrubbing, playing, the drawings' pictures.
 
 /** The timeline as the core keeps it: its tracks and clips, the playhead, playing. */
-class TimelineTool internal constructor(private val vm: CanvasViewModel) {
+class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
     /** The timeline's settings and playhead; none while the canvas isn't on one. */
     var info by mutableStateOf<TimelineInfo?>(null)
         private set
@@ -67,6 +69,26 @@ class TimelineTool internal constructor(private val vm: CanvasViewModel) {
     /** The frame standing under the grid's playhead while it plays: the grid holds still there, the playhead's outline going over the frames instead. */
     var playHeld by mutableStateOf<UInt?>(null)
         private set
+
+    /** What the timeline's clipboard holds (pasting needs something there). */
+    var clipboard by mutableStateOf(TimelineClipboardInfo(0u, false))
+        private set
+
+    /** Counts the panel's readings: what is read through the session rather than kept here (an empty run's length) is read again with it. */
+    var revision by mutableStateOf(0)
+        private set
+
+    /** The frame tapped under the playhead: its handles out, it lasts longer or shorter by them (see ui/TimelineGridEdges.kt). */
+    var picked by mutableStateOf<ULong?>(null)
+
+    /** The lasso on: the frames picked together (a tap takes one in or out, a stroke every one it crosses). None: it is off. */
+    var selecting by mutableStateOf<Set<ULong>?>(null)
+
+    /** The clip whose Keys card is open (a frame's or a block's menu's Keys asked for it): the card is the keys' own (none: closed). */
+    var keysCardFor by mutableStateOf<ULong?>(null)
+
+    /** How tall the grid's bar stands from the bottom of the screen: the toolbars at the bottom (the transform's, the selection's, an adjustment's) stand above it. */
+    var gridLift by mutableStateOf(0.dp)
 
     /** The frames the grid shows with frame `at` under its playhead (the grid sets it as it is laid out; none of the timeline's in sight, none): playing goes round them. */
     var gridFrames: ((UInt) -> UIntRange?)? = null
@@ -101,7 +123,7 @@ class TimelineTool internal constructor(private val vm: CanvasViewModel) {
         return null
     }
 
-    private val session: CanvasSession? get() = vm.session
+    internal val session: CanvasSession? get() = vm.session
 
     /** The session the panel was last read from, and the number of that reading (see [refresh]). */
     private var readFrom: CanvasSession? = null
@@ -137,8 +159,19 @@ class TimelineTool internal constructor(private val vm: CanvasViewModel) {
         if (info == null) {
             stopPlaying()
             if (vm.timelineSettingsOpen) vm.closeTimelineSettings()
+            if (picked != null) picked = null
+            if (selecting != null) selecting = null
+            if (keysCardFor != null) keysCardFor = null
             return
         }
+        // clips that have gone are no longer picked
+        picked?.let { if (clip(it) == null) picked = null }
+        selecting?.let { chosen ->
+            val kept = chosen.filterTo(HashSet()) { clip(it) != null }
+            if (kept != chosen) selecting = kept
+        }
+        keysCardFor?.let { if (clip(it) == null) keysCardFor = null }
+        revision++
         readThumbnails(s)
     }
 
@@ -159,6 +192,8 @@ class TimelineTool internal constructor(private val vm: CanvasViewModel) {
         val g = p?.groups.orEmpty().associate { it.id to it.shots }
         if (groupShots != g) groupShots = g
         if (onion != p?.onion) onion = p?.onion
+        val held = p?.clipboard ?: TimelineClipboardInfo(0u, false)
+        if (clipboard != held) clipboard = held
         pictures = p?.pictures.orEmpty()
     }
 
@@ -236,6 +271,7 @@ class TimelineTool internal constructor(private val vm: CanvasViewModel) {
         val last = (info?.duration ?: 1u).toInt() - 1 + PAST_END
         val to = (frame.toInt() + by).coerceIn(0, maxOf(last, 0))
         if (to == frame.toInt()) return
+        picked = null
         goTo(to.toUInt())
     }
 
