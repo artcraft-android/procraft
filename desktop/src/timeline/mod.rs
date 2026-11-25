@@ -11,10 +11,20 @@
 //! track (a stroke on an empty frame makes one), and the core draws the onion skins: the grid only
 //! moves the playhead and the track drawn on.
 //!
-//! Not here yet (the iPad has them): the lasso, Animate, Add new, the menus on a hold, the frame
-//! picked's lengthening handles, moving blocks, zoom and the rows of keys.
+//! Keys (keys.rs): a track's rows of keys under it, their marks picked, dragged, stretched and
+//! eased; a block's Keys card (keys_card.rs); Animate in the header, keying with the transform tool,
+//! and Perform (animate.rs); the motion path over the canvas (motion_path.rs).
+//!
+//! Not here yet (the iPad has them): the lasso, Add new, the menus on a hold, the frame picked's
+//! lengthening handles, moving blocks and zoom.
 
+mod animate;
 mod grid;
+mod keys;
+mod keys_card;
+mod motion_path;
+
+pub use animate::bar_top;
 
 use std::collections::HashMap;
 
@@ -38,6 +48,13 @@ pub struct TimelineGrid {
     pub settings_asked: bool,
     /// Where the settings button was last drawn (window points): the card stands over it.
     pub settings_button: Option<egui::Rect>,
+    /// The block (a clip id) whose Keys card is open: a frame's menu's Keys sets it.
+    pub keys_card_for: Option<u64>,
+    /// Animate tapped (or the autokey badge's Turn Off): autokey wanted on or off. The app takes
+    /// it, since it opens and ends the transform tool.
+    pub animate_asked: Option<bool>,
+    /// Settings → Timeline → Perform smoothing (0..1), for a take's keys.
+    pub perform_smoothing: f32,
     /// The canvas it read (its address), the number of the panel's last reading, and the edits
     /// and timeline it was read at.
     session: usize,
@@ -49,6 +66,10 @@ pub struct TimelineGrid {
     pictures: HashMap<u64, (u64, Option<TextureHandle>)>,
     motion: grid::Motion,
     playing: Option<Playing>,
+    pub(crate) keys: keys::Keys,
+    pub(crate) animate: animate::Animate,
+    card: keys_card::Card,
+    path: motion_path::PathDrag,
 }
 
 /// Playing: round the frames `first..end` (those the grid showed as it began), the frame showing,
@@ -101,6 +122,9 @@ impl TimelineGrid {
     pub fn reset(&mut self, session: &CanvasSession) {
         self.stop(session, false);
         self.motion.let_go();
+        self.keys.cancel_drag();
+        self.keys.menu = None;
+        self.animate.armed = false;
     }
 
     /// The timeline as last read: none off one.
@@ -123,8 +147,15 @@ impl TimelineGrid {
     fn read(&mut self, ctx: &egui::Context, session: &CanvasSession) -> bool {
         let address = std::ptr::from_ref(session) as usize;
         if address != self.session {
+            let curves = self.keys.curves.take();
             // another canvas: nothing read of the last one holds
-            *self = TimelineGrid { settings_asked: self.settings_asked, session: address, ..TimelineGrid::default() };
+            *self = TimelineGrid {
+                settings_asked: self.settings_asked,
+                session: address,
+                perform_smoothing: self.perform_smoothing,
+                ..TimelineGrid::default()
+            };
+            self.keys.curves = curves;
         }
         let Some(info) = session.timeline_info() else {
             if self.panel.is_some() || self.playing.is_some() {
@@ -133,6 +164,11 @@ impl TimelineGrid {
                 self.pictures.clear();
                 self.read_at = None;
                 self.motion.let_go();
+                self.keys.picks.clear();
+                self.keys.cancel_drag();
+                self.keys.menu = None;
+                self.keys_card_for = None;
+                self.animate.armed = false;
             }
             return false;
         };
@@ -140,6 +176,7 @@ impl TimelineGrid {
         if self.read_at.as_ref().is_none_or(|(e, i)| *e != edits || *i != info) {
             if let Some(panel) = session.timeline_panel(self.known) {
                 self.known = panel.generation;
+                self.keys.refreshed(&panel);
                 self.panel = Some(panel);
             }
             self.read_at = Some((edits, info));

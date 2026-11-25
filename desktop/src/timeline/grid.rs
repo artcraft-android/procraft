@@ -4,8 +4,9 @@
 use std::collections::HashSet;
 
 use egui::{Align2, Color32, CornerRadius, Id, Order, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
-use procraft_core::{CanvasSession, TimelineClipInfo, TimelineClipKind, TimelinePanel, TimelineRow};
+use procraft_core::{CanvasSession, TimelineClipInfo, TimelineClipKind, TimelineKeyPick, TimelinePanel, TimelineRow};
 
+use super::keys::{KEYS_HEIGHT, Kind};
 use super::{PAST_END, TimelineGrid};
 use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, cubic_bezier, pc, text, text_width};
@@ -13,7 +14,7 @@ use crate::look::{Look, Themed, Weight, argb, cubic_bezier, pc, text, text_width
 /// From one frame's cell to the next, a cell's own size, a row's height, a cell's corners.
 pub(super) const PITCH: f32 = 44.0;
 pub(super) const CELL_WIDTH: f32 = 40.0;
-const CELL_HEIGHT: f32 = 31.0;
+pub(super) const CELL_HEIGHT: f32 = 31.0;
 pub(super) const ROW_HEIGHT: f32 = 44.0;
 const CORNER: u8 = 7;
 const GAP: f32 = PITCH - CELL_WIDTH;
@@ -34,15 +35,15 @@ const ROWS_INSET: f32 = 8.0;
 /// A frame tapped or stepped to slides under the playhead in this long (seconds).
 const SLIDE: f64 = 0.35;
 /// How long a header button is held for what holding it does (seconds).
-const HOLD: f64 = 0.4;
+pub(super) const HOLD: f64 = 0.4;
 /// How long a tapped header button stays lit (seconds).
 const FLASH: f64 = 0.18;
 
-const PANEL: Themed = Themed(0xFF212121, 0xFFE4E4E4);
+pub(super) const PANEL: Themed = Themed(0xFF212121, 0xFFE4E4E4);
 const SLOT: Themed = Themed(0xFF161616, 0xFFD1D1D1);
 const LINE: Themed = Themed(0xFF474747, 0xFFC0C0C0);
 const CAPSULE: Themed = Themed(0xFF353535, 0xFFCBCBCB);
-const INK: Themed = Themed(0xFFC9C9C9, 0xFF393939);
+pub(super) const INK: Themed = Themed(0xFFC9C9C9, 0xFF393939);
 const INK_BRIGHT: Themed = Themed(0xFFF2F2F2, 0xFF1C1C1C);
 const INK_DIM: Themed = Themed(0xFF757575, 0xFF8C8C8C);
 const BOX: Themed = Themed(0xFF868686, 0xFF8A8A8A);
@@ -57,16 +58,28 @@ const ON_LABEL: u32 = 0xE6000000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Button {
     Play,
+    /// With Animate on: a take armed or let go (Perform).
+    Record,
     Back,
     On,
     Settings,
+    /// Animate: autokey on or off.
+    Animate,
     Track,
     Add,
 }
 
+/// A line of the grid, top first: a track's row of frames (its place among the rows, top first),
+/// or a row of keys under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Line {
+    Track(usize),
+    Keys(usize, Kind),
+}
+
 /// What a press on the frames (or the ruler) is doing.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-enum Touch {
+pub(super) enum Touch {
     #[default]
     None,
     /// Dragged sideways: the frames slide under the playhead, from frame `from` there.
@@ -75,6 +88,10 @@ enum Touch {
     Pan { from: f32 },
     /// Nothing of the frames' (it stopped them playing).
     Ignore,
+    /// A key's mark dragged: it and the keys picked with it go along by frames.
+    Keys { key: TimelineKeyPick },
+    /// A grip beside the keys picked dragged from frame `from`: they stretch about `anchor`.
+    Stretch { anchor: u32, from: u32 },
 }
 
 /// How the frames are moving under the playhead, and the presses on the bar under way.
@@ -136,47 +153,61 @@ impl Motion {
 }
 
 /// Where everything stands on the bar.
-struct Place {
-    bar: Rect,
+pub(super) struct Place {
+    pub(super) bar: Rect,
     header: Rect,
     ruler: Rect,
     /// The rows' area as it shows, and the top of the first row (scrolled).
-    rows: Rect,
-    top: f32,
+    pub(super) rows: Rect,
+    pub(super) top: f32,
     /// The playhead's cell's middle, and frame 0's cell's left edge.
     playhead: f32,
     origin: f32,
-    /// The last frame there is a cell for, and how many rows there are.
+    /// The last frame there is a cell for.
     last: u32,
-    count: usize,
+    /// The grid's lines, top first: each with its top (down from the first's) and height.
+    pub(super) lines: Vec<(Line, f32, f32)>,
     /// How far the rows can scroll.
     over: f32,
 }
 
 impl Place {
     /// Frame `f`'s cell's left edge.
-    fn x(&self, f: f32) -> f32 {
+    pub(super) fn x(&self, f: f32) -> f32 {
         self.origin + f * PITCH
     }
 
     /// The frame whose cell (and the gap after it) `x` is over, if there is one.
-    fn frame_at(&self, x: f32) -> Option<u32> {
+    pub(super) fn frame_at(&self, x: f32) -> Option<u32> {
         let f = ((x - self.origin) / PITCH).floor();
         (f >= 0.0 && f <= self.last as f32).then_some(f as u32)
     }
 
-    /// The row (top first) at height `y`.
-    fn row_at(&self, y: f32) -> Option<usize> {
+    /// The line at height `y`.
+    pub(super) fn line_at(&self, y: f32) -> Option<Line> {
         if !self.rows.y_range().contains(y) || y < self.top {
             return None;
         }
-        let r = ((y - self.top) / ROW_HEIGHT).floor() as usize;
-        (r < self.count).then_some(r)
+        let y = y - self.top;
+        self.lines.iter().find(|(_, top, height)| y >= *top && y < top + height).map(|(l, _, _)| *l)
+    }
+
+    /// The track's row (top first) at height `y` (none on a row of keys).
+    fn row_at(&self, y: f32) -> Option<usize> {
+        match self.line_at(y) {
+            Some(Line::Track(r)) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// Row `r`'s top edge, down from the first's.
+    fn row_offset(&self, r: usize) -> f32 {
+        self.lines.iter().find(|(l, _, _)| *l == Line::Track(r)).map_or(0.0, |(_, top, _)| *top)
     }
 
     /// Row `r`'s top edge.
-    fn row_top(&self, r: usize) -> f32 {
-        self.top + r as f32 * ROW_HEIGHT
+    pub(super) fn row_top(&self, r: usize) -> f32 {
+        self.top + self.row_offset(r)
     }
 
     /// The top of a cell on row `r`.
@@ -195,7 +226,7 @@ impl Place {
 }
 
 /// The rows, top first: the core reads them bottom first.
-fn rows_of(panel: &TimelinePanel) -> Vec<&TimelineRow> {
+pub(super) fn rows_of(panel: &TimelinePanel) -> Vec<&TimelineRow> {
     panel.rows.iter().rev().collect()
 }
 
@@ -251,6 +282,13 @@ impl TimelineGrid {
             let place = self.place(ui.ctx());
             self.draw(ui, look, session, &place);
         });
+        let place = self.place(ctx);
+        super::animate::keep_bar_top(ctx, place.bar.top());
+        said = self.key_menu(ctx, look, session).or(said);
+        said = self.keys_card(ctx, look, session, &place).or(said);
+        self.motion_path(ctx, session, &place);
+        said = self.perform(ctx, session, &place).or(said);
+        self.autokey_badge(ctx, session);
         said
     }
 
@@ -258,8 +296,8 @@ impl TimelineGrid {
     fn place(&self, ctx: &egui::Context) -> Place {
         let screen = ctx.content_rect();
         let width = (screen.width() - 32.0).clamp(LABELS_WIDTH * 2.0, MOST_WIDTH);
-        let count = self.panel.as_ref().map_or(0, |p| p.rows.len());
-        let all = (count as f32 * ROW_HEIGHT).max(ROW_HEIGHT);
+        let lines = self.lines();
+        let all = lines.last().map_or(0.0, |(_, top, height)| top + height).max(ROW_HEIGHT);
         let most = (screen.height() * 0.5 - HEADER_HEIGHT - RULER_HEIGHT - 12.0).floor().max(ROW_HEIGHT);
         let shown = all.min(most);
         let height = HEADER_HEIGHT + 1.0 + RULER_HEIGHT + shown + UNDER_ROWS;
@@ -283,9 +321,28 @@ impl TimelineGrid {
             playhead,
             origin: playhead - CELL_WIDTH / 2.0 - self.motion.at * PITCH,
             last: duration.saturating_sub(1) + PAST_END,
-            count,
+            lines,
             over,
         }
+    }
+
+    /// The grid's lines, top first: each track's row, and under a track whose rows of keys are
+    /// out, a row for each kind of key its blocks have.
+    fn lines(&self) -> Vec<(Line, f32, f32)> {
+        let Some(panel) = self.panel.as_ref() else { return Vec::new() };
+        let mut out = Vec::new();
+        let mut y = 0.0;
+        for (r, row) in rows_of(panel).into_iter().enumerate() {
+            out.push((Line::Track(r), y, ROW_HEIGHT));
+            y += ROW_HEIGHT;
+            if self.keys.out.contains(&row.track.id) {
+                for kind in super::keys::kinds(panel, row) {
+                    out.push((Line::Keys(r, kind), y, KEYS_HEIGHT));
+                    y += KEYS_HEIGHT;
+                }
+            }
+        }
+        out
     }
 
     /// Where not every track shows, the rows scrolled as little as brings the chosen track's
@@ -298,7 +355,7 @@ impl TimelineGrid {
         }
         self.motion.revealed = track;
         let Some(r) = rows_of(panel).iter().position(|row| Some(row.track.id) == track) else { return };
-        let top = r as f32 * ROW_HEIGHT;
+        let top = place.row_offset(r);
         let now = self.motion.rows_offset.clamp(0.0, place.over);
         self.motion.rows_offset = now.min(top).max(top + ROW_HEIGHT - place.rows.height()).clamp(0.0, place.over);
     }
@@ -318,17 +375,23 @@ impl TimelineGrid {
         let ink = argb(INK);
         let painter = ui.painter();
         let word = if self.playing.is_some() { "Pause" } else { "Play" };
-        let buttons = header_buttons(place, text_width(painter, word, 17.0, Weight::Bold));
-        let [(_, play), (_, back), (_, on), (_, settings), (_, track), (_, add)] = buttons;
-        text(painter, pos2(play.left(), y), Align2::LEFT_CENTER, word, 17.0, Weight::Bold, ink);
+        let autokey = self.animate.autokey;
+        let buttons = header_buttons(place, text_width(painter, word, 17.0, Weight::Bold), autokey);
+        let at = |b: Button| buttons.iter().find(|(x, _)| *x == b).map_or(Rect::NOTHING, |(_, r)| *r);
+        text(painter, pos2(at(Button::Play).left(), y), Align2::LEFT_CENTER, word, 17.0, Weight::Bold, ink);
         let lit = |b: Button| self.motion.flash.is_some_and(|(f, at)| f == b && now - at < FLASH);
         let tint = |b: Button| if lit(b) { argb(pc::ACCENT) } else { ink };
-        look.icon(ui, &icons::CHEVRON_LEFT, back.center(), 21.0, tint(Button::Back));
-        look.icon(ui, &icons::CHEVRON_RIGHT, on.center(), 21.0, tint(Button::On));
-        settings_glyph(painter, settings.center(), tint(Button::Settings));
-        self.settings_button = Some(settings);
-        track_glyph(painter, track.center(), tint(Button::Track));
-        look.icon(ui, &icons::ADD, add.center(), 38.0, tint(Button::Add));
+        if autokey {
+            super::animate::record_glyph(painter, at(Button::Record).center(), self.animate.armed);
+        }
+        look.icon(ui, &icons::CHEVRON_LEFT, at(Button::Back).center(), 21.0, tint(Button::Back));
+        look.icon(ui, &icons::CHEVRON_RIGHT, at(Button::On).center(), 21.0, tint(Button::On));
+        settings_glyph(painter, at(Button::Settings).center(), tint(Button::Settings));
+        self.settings_button = Some(at(Button::Settings));
+        let animate = if autokey { super::animate::RED } else { tint(Button::Animate) };
+        super::animate::animate_glyph(painter, at(Button::Animate).center(), animate, autokey);
+        track_glyph(painter, at(Button::Track).center(), tint(Button::Track));
+        look.icon(ui, &icons::ADD, at(Button::Add).center(), 38.0, tint(Button::Add));
         let mut said = None;
         for (button, rect) in buttons {
             let response = ui.interact(rect, ui.scope_id().with(("timeline header", button as u8)), Sense::click());
@@ -387,6 +450,14 @@ impl TimelineGrid {
                 self.stop(session, false);
                 self.settings_asked = true;
             }
+            Button::Animate => {
+                self.stop(session, false);
+                self.animate_asked = Some(!self.animate.autokey);
+            }
+            Button::Record => {
+                self.stop(session, false);
+                self.animate.armed = !self.animate.armed;
+            }
             Button::Track => self.add_track(session),
             Button::Add => return self.add_frame(session),
         }
@@ -429,10 +500,16 @@ impl TimelineGrid {
             self.motion.touch = Touch::Ignore;
             self.read_at = None;
         }
+        // a mark held still: its menu
+        let down = response.is_pointer_button_down_on() && self.motion.touch == Touch::None && self.playing.is_none();
+        let held = self.keys_held(ui, place, now, down);
         if response.drag_started() && self.motion.touch != Touch::Ignore {
             let delta = ui.input(|i| i.pointer.interact_pos().zip(origin).map_or(egui::Vec2::ZERO, |(p, o)| p - o));
+            let keys = origin.filter(|o| !on_names(*o)).and_then(|o| self.key_touch(place, o));
             self.motion.touch = if origin.is_some_and(on_names) {
                 Touch::Ignore
+            } else if let Some(touch) = keys {
+                touch
             } else if delta.x.abs() < delta.y.abs()
                 && place.over > 0.0
                 && origin.is_some_and(|o| place.rows.contains(o))
@@ -458,9 +535,18 @@ impl TimelineGrid {
             Touch::Pan { from } if response.dragged() => {
                 self.motion.rows_offset = (from - moved.y).clamp(0.0, place.over);
             }
+            Touch::Keys { key } if response.dragged() => {
+                self.keys_dragged(session, key, (moved.x / PITCH).round() as i32);
+            }
+            Touch::Stretch { anchor, from } if response.dragged() => {
+                self.keys_stretched(session, anchor, from, moved.x);
+            }
             _ => {}
         }
         if response.drag_stopped() {
+            if let Touch::Keys { .. } | Touch::Stretch { .. } = self.motion.touch {
+                self.keys_let_go(session);
+            }
             if let Touch::Scroll { .. } = self.motion.touch {
                 // carried on as far as it was going, then settling on a frame, which is drawn on
                 let speed = ui.input(|i| i.pointer.velocity().x);
@@ -477,10 +563,18 @@ impl TimelineGrid {
         }
         if response.clicked()
             && self.motion.touch != Touch::Ignore
+            && !held
             && let Some(at) = response.interact_pointer_pos()
         {
-            self.tapped(session, place, at);
+            self.tapped(ui, session, place, at);
             self.read_at = None;
+        }
+        // a mark right-clicked: its menu
+        if response.secondary_clicked()
+            && let Some(at) = response.interact_pointer_pos()
+            && let Some(key) = self.mark_at(place, at)
+        {
+            self.open_key_menu(place, key, at);
         }
         if !response.is_pointer_button_down_on() && !response.drag_stopped() && !response.dragged() {
             self.motion.touch = Touch::None;
@@ -488,8 +582,12 @@ impl TimelineGrid {
     }
 
     /// A tap at `at`: on the ruler, the playhead goes to the frame there; on a frame, the playhead
-    /// goes to it on its track; on a track's name, it is chosen (its box, hidden or shown).
-    fn tapped(&mut self, session: &CanvasSession, place: &Place, at: Pos2) {
+    /// goes to it on its track; on a track's name, it is chosen (its box, hidden or shown; its
+    /// chevron, its rows of keys out or away); on a row of keys, see [`TimelineGrid::keys_tapped`].
+    fn tapped(&mut self, ui: &Ui, session: &CanvasSession, place: &Place, at: Pos2) {
+        if self.keys_tapped(session, place, at) {
+            return;
+        }
         let Some(panel) = self.panel.as_ref() else { return };
         let rows = rows_of(panel);
         if place.ruler.contains(at) {
@@ -505,7 +603,12 @@ impl TimelineGrid {
         let track = row.track.id;
         if at.x < place.bar.left() + LABELS_WIDTH - 12.0 {
             let check = place.bar.left() + 12.0 + 6.0 + 26.0;
-            if at.x < check {
+            let chevron = label_place(ui.painter(), place, r, row, super::keys::keyed(panel, row)).chevron;
+            if chevron.is_some_and(|c| c.expand(4.0).contains(at)) {
+                if !self.keys.out.remove(&track) {
+                    self.keys.out.insert(track);
+                }
+            } else if at.x < check {
                 session.set_timeline_track(track, !row.track.hidden, row.track.locked);
             } else {
                 self.select_track(session, track);
@@ -557,6 +660,7 @@ impl TimelineGrid {
         for (r, row) in rows.iter().enumerate() {
             self.row(&cells, place, r, row, panel, lo, hi, paper);
         }
+        self.draw_keys(&cells, place, lo, hi);
         // past the timeline's end: shaded, since nothing there plays
         let end = place.x(info.duration as f32) - GAP / 2.0;
         if end < place.rows.right() {
@@ -579,8 +683,10 @@ impl TimelineGrid {
         fade(&cells, names, argb(PANEL));
         for (r, row) in rows.iter().enumerate() {
             let chosen = Some(row.track.id) == info.track;
-            track_label(ui, look, &cells, place, r, row, chosen);
+            let keyed = super::keys::keyed(panel, row).then(|| self.keys.out.contains(&row.track.id));
+            track_label(ui, look, &cells, place, r, row, chosen, keyed);
         }
+        self.draw_key_names(&cells, place);
     }
 
     /// The ruler of frame numbers: every frame's, the playhead's lit.
@@ -702,21 +808,28 @@ impl TimelineGrid {
     }
 }
 
-/// Where the header's buttons are: Play (its word `words` wide), a frame back and on; then the
-/// settings, a new track and a new frame.
-fn header_buttons(place: &Place, words: f32) -> [(Button, Rect); 6] {
+/// Where the header's buttons are: Play (its word `words` wide), with Animate on (`autokey`) the
+/// record button, a frame back and on; then the settings, Animate, a new track and a new frame.
+fn header_buttons(place: &Place, words: f32, autokey: bool) -> Vec<(Button, Rect)> {
     let y = place.header.top() + 4.0 + 20.0;
     let play = Rect::from_min_size(pos2(place.bar.left() + 26.0, y - 20.0), vec2(words.max(54.0), 40.0));
-    let back = Rect::from_min_size(pos2(play.right() + 18.0, y - 20.0), vec2(50.0, 40.0));
+    let record = Rect::from_min_size(pos2(play.right(), y - 20.0), vec2(40.0, 40.0));
+    let after = if autokey { record.right() } else { play.right() };
+    let back = Rect::from_min_size(pos2(after + 18.0, y - 20.0), vec2(50.0, 40.0));
     let add = Rect::from_min_size(pos2(place.bar.right() - 16.0 - 50.0, y - 20.0), vec2(50.0, 40.0));
-    [
-        (Button::Play, play),
+    let mut all = vec![(Button::Play, play)];
+    if autokey {
+        all.push((Button::Record, record));
+    }
+    all.extend([
         (Button::Back, back),
         (Button::On, back.translate(vec2(50.0, 0.0))),
-        (Button::Settings, add.translate(vec2(-100.0, 0.0))),
+        (Button::Settings, add.translate(vec2(-150.0, 0.0))),
+        (Button::Animate, add.translate(vec2(-100.0, 0.0))),
         (Button::Track, add.translate(vec2(-50.0, 0.0))),
         (Button::Add, add),
-    ]
+    ]);
+    all
 }
 
 #[cfg(test)]
@@ -736,7 +849,8 @@ impl TimelineGrid {
     /// The middle of the header's button `name`: Play, Back, On, Settings, Track or Add.
     pub(crate) fn button_centre(&self, ctx: &egui::Context, name: &str) -> Pos2 {
         let place = self.place(ctx);
-        let found = header_buttons(&place, 0.0).into_iter().find(|(b, _)| format!("{b:?}") == name);
+        let found =
+            header_buttons(&place, 0.0, self.animate.autokey).into_iter().find(|(b, _)| format!("{b:?}") == name);
         found.map_or(Pos2::ZERO, |(_, r)| r.center())
     }
 
@@ -744,6 +858,49 @@ impl TimelineGrid {
     pub(crate) fn name_centre(&self, ctx: &egui::Context, r: usize) -> Pos2 {
         let place = self.place(ctx);
         pos2(place.bar.left() + 12.0 + 6.0 + 26.0 + 30.0, place.row_top(r) + ROW_HEIGHT / 2.0)
+    }
+
+    /// The middle of row `r`'s chevron after its track's name (its rows of keys out or away),
+    /// where its blocks have keys.
+    pub(crate) fn chevron_centre(&self, ctx: &egui::Context, r: usize) -> Option<Pos2> {
+        let place = self.place(ctx);
+        let panel = self.panel.as_ref()?;
+        let row = rows_of(panel).get(r).copied()?;
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        label_place(&painter, &place, r, row, super::keys::keyed(panel, row)).chevron.map(|c| c.center())
+    }
+
+    /// The rows of keys out, top first: the row each is under, and its name.
+    pub(crate) fn key_rows(&self, ctx: &egui::Context) -> Vec<(usize, &'static str)> {
+        let place = self.place(ctx);
+        place
+            .lines
+            .iter()
+            .filter_map(|(l, _, _)| match l {
+                Line::Keys(r, kind) => Some((*r, kind.said())),
+                Line::Track(_) => None,
+            })
+            .collect()
+    }
+
+    /// The middle of the row of keys `name` under row `r`, over frame `f` (on its name, `f`
+    /// none).
+    pub(crate) fn key_centre(&self, ctx: &egui::Context, r: usize, name: &str, f: Option<u32>) -> Option<Pos2> {
+        let place = self.place(ctx);
+        let (_, top, height) = place.lines.iter().find(|(l, _, _)| match l {
+            Line::Keys(at, kind) => *at == r && kind.said() == name,
+            Line::Track(_) => false,
+        })?;
+        let x = f.map_or(place.bar.left() + 70.0, |f| place.x(f as f32) + CELL_WIDTH / 2.0);
+        Some(pos2(x, place.top + top + height / 2.0))
+    }
+
+    /// The middle of the grip before the keys picked (`leading`) or after them, where they span
+    /// two frames or more.
+    pub(crate) fn grip_centre(&self, ctx: &egui::Context, leading: bool) -> Option<Pos2> {
+        let place = self.place(ctx);
+        let g = self.grips(&place)?;
+        Some(g.rect(&place, leading).center())
     }
 
     /// Whether it has a timeline to show.
@@ -776,8 +933,35 @@ fn fade(painter: &egui::Painter, rect: Rect, colour: Color32) {
     painter.add(Shape::mesh(mesh));
 }
 
+/// Where row `r`'s track's name stands: its capsule, its name (as it fits), and where its blocks
+/// have keys (`keyed`), the chevron after it.
+struct LabelPlace {
+    capsule: Rect,
+    name: String,
+    chevron: Option<Rect>,
+}
+
+fn label_place(painter: &egui::Painter, place: &Place, r: usize, row: &TimelineRow, keyed: bool) -> LabelPlace {
+    let t = &row.track;
+    let lock = if t.locked { 20.0 } else { 0.0 };
+    let chevron = if keyed { 22.0 } else { 0.0 };
+    let most = LABELS_WIDTH - 34.0 - 6.0 - 26.0 - 6.0 - 14.0 - lock - chevron;
+    let name = fitted(painter, &t.name, most);
+    let words = text_width(painter, &name, 14.0, Weight::Medium);
+    let left = place.bar.left() + 12.0 + row.depth as f32 * 14.0;
+    let end = if keyed { 6.0 } else { 14.0 };
+    let width = 6.0 + 26.0 + 6.0 + words + lock + chevron + end;
+    let middle = place.row_top(r) + ROW_HEIGHT / 2.0;
+    let capsule = Rect::from_min_size(pos2(left, middle - 16.0), vec2(width, 32.0));
+    let chevron =
+        keyed.then(|| Rect::from_min_size(pos2(capsule.right() - end - chevron, middle - 15.0), vec2(chevron, 30.0)));
+    LabelPlace { capsule, name, chevron }
+}
+
 /// Row `r`'s track's name in its capsule (the chosen track's lit), with its box, standing still
-/// over the frames.
+/// over the frames; where its blocks have keys, a chevron after it (down while its rows of keys
+/// are out: `keyed` says whether they are).
+#[allow(clippy::too_many_arguments)]
 fn track_label(
     ui: &Ui,
     look: &mut Look,
@@ -786,6 +970,7 @@ fn track_label(
     r: usize,
     row: &TimelineRow,
     chosen: bool,
+    keyed: Option<bool>,
 ) {
     let t = &row.track;
     let label = t.label.map(label_colour);
@@ -795,13 +980,8 @@ fn track_label(
         (None, false) => argb(INK),
     };
     let alpha = if t.hidden { 0.6 } else { 1.0 };
-    let most = LABELS_WIDTH - 34.0 - 6.0 - 26.0 - 6.0 - 14.0 - if t.locked { 20.0 } else { 0.0 };
-    let name = fitted(painter, &t.name, most);
-    let words = text_width(painter, &name, 14.0, Weight::Medium);
-    let left = place.bar.left() + 12.0 + row.depth as f32 * 14.0;
-    let width = 6.0 + 26.0 + 6.0 + words + if t.locked { 20.0 } else { 0.0 } + 14.0;
-    let middle = place.row_top(r) + ROW_HEIGHT / 2.0;
-    let capsule = Rect::from_min_size(pos2(left, middle - 16.0), vec2(width, 32.0));
+    let LabelPlace { capsule, name, chevron } = label_place(painter, place, r, row, keyed.is_some());
+    let (left, middle) = (capsule.left(), capsule.center().y);
     if let Some(fill) = label.or(chosen.then(|| argb(CAPSULE))) {
         painter.rect_filled(capsule, 16, faded(fill, alpha));
     }
@@ -831,6 +1011,13 @@ fn track_label(
     let shown = text(painter, at, Align2::LEFT_CENTER, &name, 14.0, Weight::Medium, faded(ink, alpha));
     if t.locked && painter.clip_rect().contains(pos2(shown.right() + 13.0, middle)) {
         look.icon_on(ui, painter, &icons::LOCK, pos2(shown.right() + 13.0, middle), 14.0, faded(ink, alpha));
+    }
+    if let (Some(c), Some(out)) = (chevron, keyed) {
+        let icon = if out { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT };
+        let tint = if out { argb(pc::ACCENT) } else { faded(ink, alpha) };
+        if painter.clip_rect().contains(c.center()) {
+            look.icon_on(ui, painter, icon, c.center(), 13.0, tint);
+        }
     }
 }
 

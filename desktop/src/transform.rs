@@ -781,8 +781,11 @@ fn toolbar_layout(screen: f32, count: usize, roomy: f32, icon: f32) -> ToolbarFi
 fn toolbar_rect(ctx: &egui::Context, count: usize, roomy: f32, icon: f32) -> (Rect, ToolbarFit) {
     let screen = ctx.content_rect();
     let fit = toolbar_layout(screen.width(), count, roomy, icon);
+    // (above the timeline's bar, where it shows)
+    let foot = screen.bottom() - TOOLBAR_BOTTOM;
+    let foot = crate::timeline::bar_top(ctx).map_or(foot, |top| foot.min(top - 10.0));
     let bar = Rect::from_min_size(
-        pos2(screen.center().x - fit.width / 2.0, screen.bottom() - TOOLBAR_BOTTOM - TOOLBAR_HEIGHT),
+        pos2(screen.center().x - fit.width / 2.0, foot - TOOLBAR_HEIGHT),
         vec2(fit.width, TOOLBAR_HEIGHT),
     );
     // (floating, where the layout has it: its buttons and the popovers pointing at them with it)

@@ -1279,8 +1279,17 @@ impl Interface {
             if let Some(crate::animation::Said::NoRoom) = said {
                 crate::files::no_room(session);
             }
+            self.timeline.perform_smoothing = self.prefs.timeline_perform_smoothing;
             if let Some(said) = self.timeline.show(&ctx, &mut self.look, session) {
                 self.overlays.notice(said, true);
+            }
+            // Animate: autokey on or off, the transform tool opened or ended with it; while it
+            // keys a pose, its box follows the playhead
+            if let Some(on) = self.timeline.animate_asked.take() {
+                self.set_animate(session, on);
+            }
+            if let Some(laid) = self.timeline.autokey_box(session) {
+                self.transform.moved(Some(laid));
             }
             // the grid's settings button: the settings' card over it, or put away
             if std::mem::take(&mut self.timeline.settings_asked) {
@@ -2272,6 +2281,24 @@ impl Interface {
         }
         if place == procraft_core::LayerDrop::AboveCurrent && held.items == 1 {
             self.toggle_transform(session);
+        }
+    }
+
+    /// The timeline's Animate (autokey) on or off: on, the transform tool opens to key what is
+    /// under the playhead (a transform moving pixels kept first); off, a transform keying a pose
+    /// ends with its keys kept.
+    fn set_animate(&mut self, session: &CanvasSession, on: bool) {
+        let posing = session.timeline_autokey_posing();
+        self.timeline.set_autokey(session, on);
+        if on {
+            if self.transform.on && !posing {
+                self.transform.end(session, true);
+            }
+            if !self.transform.on {
+                self.toggle_transform(session);
+            }
+        } else if self.transform.on && posing {
+            self.transform.end(session, true);
         }
     }
 
@@ -5480,6 +5507,12 @@ mod tests {
         assert!(!w.ui.comic_panels.open);
         let after = w.paper();
         assert!((after.center() - fitted.center()).length() < 1.0, "{after:?} {fitted:?}");
+    }
+
+    /// The timeline's keys' tests (kept beside them), with this window.
+    mod timeline_keys {
+        use super::*;
+        include!("timeline/keys_tests.rs");
     }
 
     /// The timeline grid's tests (kept beside it), with this window.
