@@ -14,7 +14,7 @@ const FULL: u64 = W as u64 * W as u64 * 4;
 fn noise(seed: u32) -> Vec<u8> {
     let mut x = seed.wrapping_mul(2_654_435_761).max(1);
     let mut px = vec![0u8; FULL as usize];
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;

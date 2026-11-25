@@ -114,11 +114,13 @@ impl Timeline {
         let (level, t, c) = level_of_clip(&mut self.tracks, id)?;
         let track = level.get_mut(t)?;
         // packed from the first frame, the clips before it take this many
-        let taken: u32 = track.clips[..c].iter().map(|x| x.duration).sum();
-        let to = to.max(taken).min(track.clips[c].start);
+        let start = track.clips.get(c)?.start;
+        let before = track.clips.get_mut(..c)?;
+        let taken: u32 = before.iter().map(|x| x.duration).sum();
+        let to = to.max(taken).min(start);
         // each ends no later than where the one after it now starts
         let mut next = to;
-        for x in track.clips[..c].iter_mut().rev() {
+        for x in before.iter_mut().rev() {
             if x.end() > next {
                 x.start = next - x.duration;
             }

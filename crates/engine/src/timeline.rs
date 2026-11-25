@@ -2249,7 +2249,9 @@ impl Channel<[f32; 2]> {
             if let Some((off, n)) = furthest
                 && off > tolerance
             {
-                keep[n] = true;
+                if let Some(k) = keep.get_mut(n) {
+                    *k = true;
+                }
                 spans.push((i, n));
                 spans.push((n, j));
             }
@@ -2258,7 +2260,7 @@ impl Channel<[f32; 2]> {
         self.keys.retain(|_| {
             let i = n;
             n += 1;
-            i <= a || i >= b || keep[i]
+            i <= a || i >= b || keep.get(i).copied().unwrap_or(true)
         });
         for k in self.keys.iter_mut().filter(|k| k.frame >= first && k.frame <= last) {
             k.easing = Easing::Linear;
@@ -2295,7 +2297,7 @@ impl Channel<[f32; 2]> {
             self.keys.iter().enumerate().filter(|(_, k)| k.frame >= first && k.frame <= last).map(|(i, _)| i).collect();
         for (n, i) in inside.iter().enumerate() {
             let around = (n > 0 && n + 1 < inside.len() && strength > 0.0)
-                .then(|| Some((self.keys.get(inside[n - 1])?.value, self.keys.get(inside[n + 1])?.value)))
+                .then(|| Some((self.keys.get(*inside.get(n - 1)?)?.value, self.keys.get(*inside.get(n + 1)?)?.value)))
                 .flatten();
             let Some(k) = self.keys.get_mut(*i) else { continue };
             k.path = around.map(|(a, b)| {

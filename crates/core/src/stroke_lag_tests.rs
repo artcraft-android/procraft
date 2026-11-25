@@ -246,7 +246,7 @@ fn undoing_a_wet_dual_stroke_leaves_nothing_of_its_second() {
         let st = s.shared.lock();
         let (canvas, gpu) = (st.canvas.as_ref().unwrap(), st.gpu.as_ref().unwrap());
         let layer = canvas.read_layer(gpu, st.doc.current()).unwrap();
-        let left = layer.chunks_exact(4).filter(|px| px[3] != 0).count();
+        let left = layer.as_chunks::<4>().0.iter().filter(|[.., a]| *a != 0).count();
         assert_eq!(left, 0, "by {mode}: {left} pixels of paint left after undo");
     }
 }

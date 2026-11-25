@@ -156,7 +156,7 @@ impl Timeline {
                 c.start = start;
             }
             clips.sort_by_key(|c| c.start);
-            if clips.windows(2).any(|w| w[0].end() > w[1].start) {
+            if clips.windows(2).any(|w| matches!(w, [a, b] if a.end() > b.start)) {
                 return false;
             }
             next.push((t, clips));
@@ -165,7 +165,9 @@ impl Timeline {
             return false;
         }
         for (t, clips) in next {
-            level[t].clips = clips;
+            if let Some(track) = level.get_mut(t) {
+                track.clips = clips;
+            }
         }
         true
     }

@@ -362,7 +362,8 @@ pub(crate) fn place(feature: Feature) -> (&'static str, Option<String>) {
             return (b.id, Some(switch_key(b.id, last)));
         }
     }
-    unreachable!("every feature is listed")
+    // (every feature is listed: every_feature_has_one_place says so)
+    ("", None)
 }
 
 /// Whether `feature` is shown, as `plugins` stand: its plugin on and, for a switch, the switch on.
@@ -376,7 +377,7 @@ pub(crate) fn has(plugins: &[PluginInfo], feature: Feature) -> bool {
             .iter()
             .any(|c| matches!(c, PluginControl::Switch { control } if control.key == key && control.on))
     });
-    let needs = (id == "procraft.timeline-media").then(|| has(plugins, Feature::Timeline)).unwrap_or(true);
+    let needs = id != "procraft.timeline-media" || has(plugins, Feature::Timeline);
     plugin.on && switched && needs
 }
 

@@ -137,11 +137,13 @@ struct PuppetRig {
     worked: Arc<Mutex<Worked>>,
 }
 
+/// Each pin of a puppet as it is shown: its canvas point and angle.
+type ShownPins = Vec<(Vec2, f32)>;
+
 #[derive(Debug, Default)]
 struct Worked {
-    /// The pins and content quad the frame is for, the frame, and each pin as shown (canvas
-    /// point and angle).
-    frame: Option<(Vec<PuppetPin>, Quad, Arc<PuppetFrame>, Vec<(Vec2, f32)>)>,
+    /// The pins and content quad the frame is for, the frame, and each pin as shown.
+    frame: Option<(Vec<PuppetPin>, Quad, Arc<PuppetFrame>, ShownPins)>,
 }
 
 /// An open transform.
@@ -592,7 +594,7 @@ impl Transform {
                 let c = centre(f);
                 let turn = angle(to - c) - angle(from - c);
                 let [a, b, ..] = f;
-                let frame = self.fit_box(&start, angle(b - a) + turn)?;
+                let frame = self.fit_box(start, angle(b - a) + turn)?;
                 Placement { frame, ..start.clone() }
             }
             Handle::Mesh(_) | Handle::Pin(_) | Handle::PinRing(_) | Handle::OnMesh => start.clone(),
@@ -1035,7 +1037,7 @@ impl Transform {
 
     /// The puppet as it is now, worked out (or as it was last, when nothing has changed), and
     /// each pin as it is shown.
-    fn puppet_frame(&self) -> Option<(Arc<PuppetFrame>, Vec<(Vec2, f32)>)> {
+    fn puppet_frame(&self) -> Option<(Arc<PuppetFrame>, ShownPins)> {
         let rig = self.puppet.as_ref()?;
         let (pins, content) = (self.now.pins(), self.now.content);
         let mut worked = rig.worked.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

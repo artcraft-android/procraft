@@ -160,8 +160,11 @@ pub(crate) struct OpenTool {
     plugins: Arc<Plugins>,
     running: Running,
     mode: u32,
-    step: Option<(Document, Vec<(LayerId, Vec<Point>)>)>,
+    step: Option<(Document, Shown)>,
 }
+
+/// The shapes the edits under way changed, each as it was before them.
+type Shown = Vec<(LayerId, Vec<Point>)>;
 
 fn f32s(values: impl IntoIterator<Item = f32>) -> Vec<u8> {
     values.into_iter().flat_map(f32::to_le_bytes).collect()
@@ -206,7 +209,7 @@ fn read_answer(bytes: &[u8]) -> Option<(Vec<PluginToolShape>, Vec<Edit>, u32, Op
                     }
                 }
                 let corners = shape.points.len() / 2;
-                if shape.points.len() % 2 != 0 || !(2..=MOST_CORNERS).contains(&corners) || shapes.len() >= MOST_SHOWN {
+                if !shape.points.len().is_multiple_of(2) || !(2..=MOST_CORNERS).contains(&corners) || shapes.len() >= MOST_SHOWN {
                     return None;
                 }
                 shapes.push(shape);

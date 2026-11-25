@@ -553,11 +553,13 @@ impl CanvasSession {
         let mut opened: HashMap<u32, (u32, u32, Vec<u8>)> = HashMap::new();
         for (number, part, (to_x, to_y)) in places {
             let Some(k) = kept.get(&number) else { continue };
-            if !opened.contains_key(&number) {
-                let Some(decoded) = png_pixels(&k.png) else { continue };
-                opened.insert(number, decoded);
-            }
-            let Some((pw, _, source)) = opened.get(&number) else { continue };
+            let (pw, _, source) = match opened.entry(number) {
+                std::collections::hash_map::Entry::Occupied(e) => &*e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    let Some(decoded) = png_pixels(&k.png) else { continue };
+                    &*e.insert(decoded)
+                }
+            };
             // each row of the part that the picture has painted (the rest is clear)
             for row in 0..part.h {
                 let (fy, ty) = (part.y + row, u64::from(to_y) + u64::from(row));

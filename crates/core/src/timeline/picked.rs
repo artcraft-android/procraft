@@ -101,7 +101,7 @@ pub(super) fn placed_together(tl: &mut Timeline, ids: &[ClipId], primary: u64, t
 /// The latest goes first, so the room one makes isn't taken by the next.
 fn lengthened_together(tl: &mut Timeline, ids: &[ClipId], leading: bool, by: i32) -> Vec<TrackId> {
     let mut order: Vec<(u32, ClipId)> = ids.iter().filter_map(|id| Some((tl.origin(*id)?, *id))).collect();
-    order.sort_by(|a, b| b.0.cmp(&a.0));
+    order.sort_by_key(|o| std::cmp::Reverse(o.0));
     let mut changed = Vec::new();
     for (_, id) in order {
         // (where its edge is now: one after it may have moved it)

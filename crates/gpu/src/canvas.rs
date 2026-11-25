@@ -5622,7 +5622,9 @@ impl Canvas {
             let clip = |[x, y]: [f32; 2]| [(x + dx) / w * 2.0 - 1.0, 1.0 - (y + dy) / h * 2.0];
             if let Some(&first) = points.first() {
                 for pair in points.get(1..).unwrap_or_default().windows(2) {
-                    fans.extend([clip(first), clip(pair[0]), clip(pair[1])]);
+                    if let [a, b] = pair {
+                        fans.extend([clip(first), clip(*a), clip(*b)]);
+                    }
                 }
             }
         }

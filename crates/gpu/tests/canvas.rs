@@ -5790,7 +5790,7 @@ fn a_wet_dual_brush_shows_on_to_the_pen_cut_by_its_seconds_tip() {
     canvas.undo();
     canvas.render(&gpu, &mut doc, None);
     let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
-    assert!(layer.chunks_exact(4).all(|px| px[3] == 0), "paint left after undo");
+    assert!(layer.as_chunks::<4>().0.iter().all(|[.., a]| *a == 0), "paint left after undo");
 }
 
 #[test]
@@ -5837,7 +5837,8 @@ fn a_stroke_shows_as_strongly_as_said_while_it_is_drawn_and_is_kept_as_it_is() {
     let _check = NoErrors(&gpu);
     let paint = StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0);
     // (a stroke laid in place, wet or dry, changes its layer as it goes and shows as it is laid)
-    for (name, style) in [("drawn apart", paint)] {
+    {
+        let (name, style) = ("drawn apart", paint);
         let mut doc = Document::new(200, 60);
         let mut canvas = Canvas::new(&gpu, &doc).unwrap();
         let shown = |canvas: &mut Canvas, doc: &mut Document, x: u32| {
@@ -5908,7 +5909,7 @@ fn a_wet_dual_brush_s_seconds_paint_past_its_own_is_undone_with_it() {
     canvas.undo();
     canvas.render(&gpu, &mut doc, None);
     let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
-    let left = layer.chunks_exact(4).filter(|px| px[3] != 0).count();
+    let left = layer.as_chunks::<4>().0.iter().filter(|[.., a]| *a != 0).count();
     assert_eq!(left, 0, "{left} pixels of paint left after undo");
 }
 
