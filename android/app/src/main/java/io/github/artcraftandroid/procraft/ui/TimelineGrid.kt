@@ -96,12 +96,14 @@ import androidx.compose.ui.unit.min
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.TimelineTool
+import io.github.artcraftandroid.procraft.canvas.addFile
 import io.github.artcraftandroid.procraft.canvas.addPicture
 import io.github.artcraftandroid.procraft.canvas.setLasso
 import io.github.artcraftandroid.procraft.canvas.setLength
 import io.github.artcraftandroid.procraft.canvas.keyRows
 import io.github.artcraftandroid.procraft.canvas.keyed
 import io.github.artcraftandroid.procraft.core.TimelineClipInfo
+import io.github.artcraftandroid.procraft.core.TimelineMediaKind
 import io.github.artcraftandroid.procraft.core.TimelineClipKind
 import io.github.artcraftandroid.procraft.core.TimelineInfo
 import io.github.artcraftandroid.procraft.core.TimelineTrackInfo
@@ -283,9 +285,13 @@ fun BoxScope.TimelineGridBar(vm: CanvasViewModel) {
             )
         }
     }
-    // Add new's picture: from the photo picker or a file, as a new frame at the playhead
+    // Add new's picture or video from the photo picker, or a sound, picture or video from a file,
+    // at the playhead (see TimelineMedia.kt)
     val photo = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let { tool.addPicture(it) } }
-    val file = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { tool.addPicture(it) } }
+    val video = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let { tool.media.bringIn(it, TimelineMediaKind.VIDEO) } }
+    val file = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { tool.addFile(it) } }
+    // the animatic detector, opened from a video's menu
+    tool.media.detecting?.let { AnimaticSheet(vm, tool, it) }
     // the grid's menus close as the settings' card opens
     LaunchedEffect(vm.timelineSettingsOpen) { if (vm.timelineSettingsOpen) grid.closeOwn() }
     BoxWithConstraints(Modifier.align(Alignment.BottomCenter).fillMaxSize()) {
@@ -318,7 +324,8 @@ fun BoxScope.TimelineGridBar(vm: CanvasViewModel) {
             GridMenus(
                 vm, tool, info, grid, width.value, room,
                 onPhoto = { photo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-                onFile = { file.launch(arrayOf("image/*")) },
+                onVideo = { video.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) },
+                onFile = { file.launch(arrayOf("audio/*", "image/*", "video/*")) },
             )
             Box {
                 Column(

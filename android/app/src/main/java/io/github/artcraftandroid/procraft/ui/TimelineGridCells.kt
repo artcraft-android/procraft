@@ -211,7 +211,7 @@ private class CellsDraw(
     /**
      * A clip over the frames it lasts. A drawing shows its picture on the canvas's paper in each
      * frame, the first as it is and the held ones shaded; a group, collapsed, the drawings in it
-     * on each frame; a sound or a video is a plain block with its name.
+     * on each frame; a sound its waveform, a video its pictures.
      */
     private fun block(c: TimelineClipInfo, r: GridRow, t: TimelineTrackInfo, hiddenAbove: Boolean) = with(scope) {
         val (sx, sw) = edges.span(c)
@@ -249,12 +249,8 @@ private class CellsDraw(
                         if (w > cellW + 1f) drawRect(Grid.HeldShade, Offset(left + cellW, y), Size(w - cellW, cellH))
                     }
                     TimelineClipKind.GROUP -> group(c, bounds, from, to, tint)
-                    else -> {
-                        drawRect(tint ?: look.block, bounds.topLeft, bounds.size)
-                        // (its name follows the bar's edge no further than its own first frame)
-                        val laid = look.measurer.measure(c.name, TextStyle(color = look.inkBright, fontSize = 12.sp), maxLines = 1)
-                        drawText(laid, topLeft = Offset(left + from * pitch + 7f * d, y + (cellH - laid.size.height) / 2f))
-                    }
+                    // (see TimelineGridMedia.kt)
+                    else -> gridMediaBlock(tool, c, bounds, from, to, pitch, sz.rowScale, tint, look.measurer, look.inkBright)
                 }
                 // touched by the stroke under way: glowing
                 if (chosen && grid.stroke.isNotEmpty()) drawRect(look.accent.copy(alpha = 0.28f), bounds.topLeft, bounds.size)
