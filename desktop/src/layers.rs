@@ -451,7 +451,10 @@ impl Layers {
             }
             false
         };
-        let shown: Vec<&LayerInfo> = layers.iter().filter(|l| !hidden(l)).collect();
+        // on a timeline, only the drawing drawn on
+        let drawing = session.timeline_drawing_shown();
+        let shown: Vec<&LayerInfo> =
+            layers.iter().filter(|l| !hidden(l) && crate::timeline::listed(&layers, l, drawing)).collect();
         self.closed_contents = closed_contents(&layers);
         let masked = |l: &LayerInfo| layers.iter().any(|m| m.kind == LayerType::Mask && m.parent == Some(l.id));
         // a closed group's row grows as it closes

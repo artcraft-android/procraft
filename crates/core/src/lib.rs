@@ -150,6 +150,12 @@ mod text_runs;
 mod texture_packer;
 mod timelapse;
 mod timeline;
+/// The timeline panel's reading, named for the desktop's grid (the other apps read it through
+/// uniffi).
+pub use timeline::{
+    TimelineClipInfo, TimelineClipKind, TimelineInfo, TimelineKeyInfo, TimelineRepeat, TimelineRow, TimelineTrackInfo,
+    panel::{TimelineClipKeys, TimelinePanel, TimelinePicture},
+};
 mod touch;
 mod transform;
 mod turn;

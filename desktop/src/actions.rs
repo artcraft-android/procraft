@@ -113,7 +113,11 @@ pub enum Act {
     GestureControls,
     CanvasInfo,
     AnimationAssist,
+    /// Timeline Settings: the timeline's settings card (only on a timeline).
+    TimelineSettings,
     PageAssist,
+    /// The artwork on a timeline, or off it.
+    Timeline,
     TimeLapseReplay,
     TimeLapseRecording,
     ExportTimeLapse,
@@ -279,6 +283,8 @@ pub struct Showing {
     pub time_lapse_recorded: bool,
     pub reference: bool,
     pub guide: bool,
+    /// The canvas has a timeline: Timeline Settings opens its settings.
+    pub timeline: bool,
     pub side_bar: bool,
     /// The artwork paints on a model: whether its 2D texture shows flat, and strokes reach
     /// through it.
@@ -392,6 +398,9 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             vec![
                 Switch("Animation Assist", showing.animation, Some(Act::AnimationAssist)),
                 Switch("Page Assist", showing.pages, Some(Act::PageAssist)),
+                Switch("Timeline", showing.timeline, Some(Act::Timeline)),
+                // only on a timeline: its frame rate, playback, onion skins and length, on a card
+                Button("Timeline Settings", None, showing.timeline.then_some(Act::TimelineSettings)),
                 Switch("Drawing Guide", showing.guide, Some(Act::DrawingGuide)),
                 // greyed until the guide is on
                 Button("Edit Drawing Guide", None, showing.guide.then_some(Act::EditGuide)),
