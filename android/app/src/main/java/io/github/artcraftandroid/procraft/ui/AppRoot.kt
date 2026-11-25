@@ -87,6 +87,7 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             vm.guideEditing -> vm.closeGuideEditor(keep = false)
             vm.cropRect != null -> vm.endCrop(false)
             vm.comicPanels.open -> vm.closeComicPanels()
+            vm.timelineSettingsOpen -> vm.closeTimelineSettings()
             vm.lightingStudioOpen -> vm.closeLightingStudio(keep = false)
             vm.studioOpen -> vm.closeStudio(keep = false)
             vm.transformPopup != TransformPopup.NONE -> vm.transformPopup = TransformPopup.NONE
@@ -337,6 +338,8 @@ private fun ScreensShown(vm: CanvasViewModel, keptClear: Clearance) {
             val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.comicPanels.open || vm.timeLapseReplaying ||
                 vm.animatedExport != null || vm.modelAnimatedExport != null || vm.spriteSheetExport
             if (!vm.barsHidden && !pageOver) AnimationBar(vm)
+            // the timeline's settings card, over the canvas and its bars
+            if (vm.timelineSettingsOpen && !pageOver) TimelineSettingsCard(vm)
             // the bottom toolbars rise from below the screen, and drop away
             FloatableBottom(
                 vm,

@@ -127,6 +127,16 @@ pub struct Prefs {
     /// Pen buttons: the plugins' actions (`<id>.<key>`) the pen's buttons run in place of
     /// `pen_buttons`, `None` for none; one runs only while its plugin is on.
     pub pen_button_plugins: Vec<Option<String>>,
+    /// The timeline's settings that are the app's, not the artwork's (Timeline Settings, see
+    /// [`crate::timeline_settings`]): the timing kept by moving every frame as the frame rate
+    /// changes; the timecode over the grid's corner; a sound as the playhead is moved by hand; a
+    /// timeline's new drawings made as vector layers; how much a performed take is evened out
+    /// (0..1).
+    pub timeline_keep_timing: bool,
+    pub timeline_timecode: bool,
+    pub timeline_scrub_sound: bool,
+    pub timeline_vector_frames: bool,
+    pub timeline_perform_smoothing: f32,
 }
 
 impl Default for Prefs {
@@ -179,6 +189,11 @@ impl Default for Prefs {
             selection_pixelated: false,
             pen_buttons: procraft_core::pen_button_actions(None),
             pen_button_plugins: procraft_core::pen_button_plugin_actions(None),
+            timeline_keep_timing: true,
+            timeline_timecode: false,
+            timeline_scrub_sound: true,
+            timeline_vector_frames: false,
+            timeline_perform_smoothing: 0.5,
         }
     }
 }
@@ -252,6 +267,11 @@ impl Prefs {
                 "drop_all_layers" => p.drop_all_layers = on,
                 "drop_continuous" => p.drop_continuous = on,
                 "selection_pixelated" => p.selection_pixelated = on,
+                "timeline_keep_timing" => p.timeline_keep_timing = on,
+                "timeline_timecode" => p.timeline_timecode = on,
+                "timeline_scrub_sound" => p.timeline_scrub_sound = on,
+                "timeline_vector_frames" => p.timeline_vector_frames = on,
+                "timeline_perform_smoothing" => p.timeline_perform_smoothing = unit.unwrap_or(0.5),
                 "pen_buttons" => {
                     p.pen_buttons = procraft_core::pen_button_actions(Some(value.to_owned()));
                     p.pen_button_plugins = procraft_core::pen_button_plugin_actions(Some(value.to_owned()));
@@ -329,6 +349,11 @@ impl Prefs {
             format!("drop_all_layers {}", self.drop_all_layers),
             format!("drop_continuous {}", self.drop_continuous),
             format!("selection_pixelated {}", self.selection_pixelated),
+            format!("timeline_keep_timing {}", self.timeline_keep_timing),
+            format!("timeline_timecode {}", self.timeline_timecode),
+            format!("timeline_scrub_sound {}", self.timeline_scrub_sound),
+            format!("timeline_vector_frames {}", self.timeline_vector_frames),
+            format!("timeline_perform_smoothing {}", self.timeline_perform_smoothing),
             format!(
                 "pen_buttons {}",
                 procraft_core::pen_buttons_saved(self.pen_buttons.clone(), self.pen_button_plugins.clone())
@@ -357,6 +382,7 @@ impl Prefs {
         session.set_fill_opacity(self.fill_opacity);
         session.set_pour_all_layers(self.drop_all_layers);
         session.set_selection_pixelated(self.selection_pixelated);
+        session.set_timeline_vector_frames(self.timeline_vector_frames);
         session.set_brush_scaling(self.brush_on_screen);
         session.set_vector_crisp(self.vector_crisp);
         session.set_selection_visibility(self.selection_visibility);

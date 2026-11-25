@@ -4312,6 +4312,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.setSelectionVisibility(selectionVisibility)
         s.setBrushScaling(brushOnScreen)
         s.setVectorCrisp(vectorCrispOn)
+        s.setTimelineVectorFrames(timelineVectorFrames)
         s.setLightInterface(lightInterface)
         s.setInterfaceSize(interfaceShown)
         // the system's animations off: a dropped colour's fill shows at once
@@ -10038,6 +10039,159 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (layersShown) layers.firstOrNull { it.current }?.let { loadThumbnail(it.id) }
     }
 
+    // ---- Timeline Settings ----
+
+    /** The timeline's settings and onion skins while the canvas has one, as the settings card shows them. */
+    var timelineSettingsInfo by mutableStateOf<io.github.artcraftandroid.procraft.core.TimelineInfo?>(null)
+        private set
+    var timelineSettingsOnion by mutableStateOf<io.github.artcraftandroid.procraft.core.TimelineOnion?>(null)
+        private set
+
+    /** The settings card is open (ui/TimelineSettingsUi.kt): from Actions → Canvas → Timeline Settings, or the grid's header button. */
+    var timelineSettingsOpen by mutableStateOf(false)
+        private set
+
+    /** How far over the screen's bottom edge the card stands (the grid sets it to stand on its bar). */
+    var timelineSettingsLift by mutableStateOf(0.dp)
+
+    /** The onion skins' counts each side, as they were when last turned off. */
+    private var timelineOnionKept = 1u to 1u
+
+    /** Opens the timeline's settings card, on a canvas with a timeline. */
+    fun openTimelineSettings() {
+        refreshTimelineSettings()
+        if (timelineSettingsInfo == null) return
+        closePanels()
+        timelineSettingsOpen = true
+    }
+
+    fun closeTimelineSettings() {
+        timelineSettingsOpen = false
+    }
+
+    /** Opens the card, or closes it if open (the grid's header button). */
+    fun toggleTimelineSettings() {
+        if (timelineSettingsOpen) closeTimelineSettings() else openTimelineSettings()
+    }
+
+    /** Re-reads the timeline's settings (closing the card when the canvas has none). */
+    private fun refreshTimelineSettings() {
+        val s = session
+        timelineSettingsInfo = s?.timelineInfo()
+        timelineSettingsOnion = s?.timelineOnion()
+        if (timelineSettingsInfo == null) timelineSettingsOpen = false
+    }
+
+    /** The timeline's settings as [f] changes them (live, as sliders move: not an undo step). */
+    fun changeTimeline(f: (io.github.artcraftandroid.procraft.core.TimelineSettings) -> io.github.artcraftandroid.procraft.core.TimelineSettings) {
+        val s = session ?: return
+        val i = s.timelineInfo() ?: return
+        s.setTimelineSettings(f(io.github.artcraftandroid.procraft.core.TimelineSettings(i.fps, i.duration, i.exposure, i.playback, i.onionFrames, i.onionOpacity)))
+        refreshTimelineSettings()
+    }
+
+    /** The frame rate to [fps]: with the timing kept (every frame moved, one undo step), if so set, else the rate alone. */
+    fun setTimelineRate(fps: Int) {
+        val s = session ?: return
+        val to = fps.coerceIn(1, TIMELINE_MOST_FPS).toUInt()
+        if (s.timelineInfo()?.fps == to) return
+        if (timelineKeepTiming) {
+            s.retimeTimeline(to)
+            refresh()
+        } else {
+            changeTimeline { it.copy(fps = to) }
+        }
+    }
+
+    /** The timeline [frames] long (what is past its end stays, shaded): one undo step. */
+    fun setTimelineLength(frames: Int) {
+        session?.setTimelineLength(frames.coerceAtLeast(1).toUInt())
+        refresh()
+    }
+
+    /** The timeline as long as its clips: one undo step. */
+    fun fitTimelineToContent() {
+        session?.fitTimelineToContent()
+        refresh()
+    }
+
+    /** The onion skins either side as [f] changes them (not an undo step). */
+    fun changeTimelineOnion(f: (io.github.artcraftandroid.procraft.core.TimelineOnion) -> io.github.artcraftandroid.procraft.core.TimelineOnion) {
+        val s = session ?: return
+        val o = s.timelineOnion() ?: return
+        s.setTimelineOnion(f(o))
+        refreshTimelineSettings()
+    }
+
+    /** Onion skins off, or back to as many as each side had (their colours as they were). */
+    fun toggleTimelineOnion() {
+        val o = session?.timelineOnion() ?: return
+        if (o.before > 0u || o.after > 0u) {
+            timelineOnionKept = o.before to o.after
+            changeTimelineOnion { it.copy(before = 0u, after = 0u) }
+        } else {
+            changeTimelineOnion { it.copy(before = timelineOnionKept.first, after = timelineOnionKept.second) }
+        }
+    }
+
+    /** The canvas's size tapped on the card: Crop & Resize changes it. */
+    fun timelineResolution() {
+        closeTimelineSettings()
+        beginCrop()
+    }
+
+    // the timeline's settings that are the app's, not the artwork's (kept in the interface's preferences)
+
+    /** The timing kept by moving every frame as the frame rate changes. */
+    var timelineKeepTiming by mutableStateOf(interfacePrefs.getBoolean(TIMELINE_KEEP_TIMING, true))
+        private set
+
+    fun changeTimelineKeepTiming(on: Boolean) {
+        timelineKeepTiming = on
+        interfacePrefs.edit().putBoolean(TIMELINE_KEEP_TIMING, on).apply()
+    }
+
+    /** Where the playhead is, in time, over the grid's corner. */
+    var timelineTimecode by mutableStateOf(interfacePrefs.getBoolean(TIMELINE_TIMECODE, false))
+        private set
+
+    fun changeTimelineTimecode(on: Boolean) {
+        timelineTimecode = on
+        interfacePrefs.edit().putBoolean(TIMELINE_TIMECODE, on).apply()
+    }
+
+    /** A sound as the playhead is moved by hand (off: scrubbing is silent; playing still sounds). */
+    var timelineScrubSound by mutableStateOf(interfacePrefs.getBoolean(TIMELINE_SCRUB_SOUND, true))
+        private set
+
+    fun changeTimelineScrubSound(on: Boolean) {
+        timelineScrubSound = on
+        interfacePrefs.edit().putBoolean(TIMELINE_SCRUB_SOUND, on).apply()
+    }
+
+    /** A timeline's new drawings are made as vector layers (the session told as it opens). */
+    var timelineVectorFrames by mutableStateOf(interfacePrefs.getBoolean(TIMELINE_VECTOR_FRAMES, false))
+        private set
+
+    fun changeTimelineVectorFrames(on: Boolean) {
+        timelineVectorFrames = on
+        session?.setTimelineVectorFrames(on)
+        interfacePrefs.edit().putBoolean(TIMELINE_VECTOR_FRAMES, on).apply()
+    }
+
+    /** How much a performed take is evened out when it ends, 0..1 (none: kept as it was made). */
+    var timelinePerformSmoothing by mutableFloatStateOf(interfacePrefs.getFloat(TIMELINE_PERFORM_SMOOTHING, 0.5f).coerceIn(0f, 1f))
+        private set
+
+    fun changeTimelinePerformSmoothing(v: Float) {
+        timelinePerformSmoothing = v.coerceIn(0f, 1f)
+    }
+
+    /** Perform smoothing's slider let go: kept. */
+    fun keepTimelinePerformSmoothing() {
+        interfacePrefs.edit().putFloat(TIMELINE_PERFORM_SMOOTHING, timelinePerformSmoothing).apply()
+    }
+
     // ---- Animation Assist ----
 
     /** Animation Assist's settings while it is on. */
@@ -10721,6 +10875,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // an undo or a cut changes the panels Comic Panels outlines
         if (comicPanels.open) comicPanels.read(s)
         refreshAnimation()
+        refreshTimelineSettings()
     }
 
     private fun refreshFlags() {
@@ -10909,6 +11064,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val CURSOR_STYLE = "cursor_style"
         const val BRUSH_ON_SCREEN = "brush_on_screen"
         const val VECTOR_CRISP = "vector_crisp"
+        const val TIMELINE_KEEP_TIMING = "timeline_keep_timing"
+        const val TIMELINE_TIMECODE = "timeline_timecode"
+        const val TIMELINE_SCRUB_SOUND = "timeline_scrub_sound"
+        const val TIMELINE_VECTOR_FRAMES = "timeline_vector_frames"
+        const val TIMELINE_PERFORM_SMOOTHING = "timeline_perform_smoothing"
+        /** The most a timeline's settings take (the core's own): frames a second, frames a new drawing is held, onion skins a side, frames long. */
+        const val TIMELINE_MOST_FPS = 120
+        const val TIMELINE_MOST_HELD = 12
+        const val TIMELINE_MOST_SKINS = 12
+        const val TIMELINE_MOST_LENGTH = 100_000
         const val PROJECT_CANVAS = "project_canvas"
         const val PALETTE_CARDS = "palette_cards"
         const val COLOR_HISTORY_SHOWN = "color_history_shown"

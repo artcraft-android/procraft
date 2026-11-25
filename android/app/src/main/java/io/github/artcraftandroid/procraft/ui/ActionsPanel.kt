@@ -265,6 +265,8 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             listOf(
                 Toggle("Animation Assist", vm.animation?.pages == false) { vm.changeAnimationAssist(it) },
                 Toggle("Page Assist", vm.animation?.pages == true) { vm.changePageAssist(it) },
+                // only on a timeline: its frame rate, playback, onion skins and length, on a card
+                Act("Timeline Settings", onClick = if (vm.session?.timelineInfo() != null) ({ vm.openTimelineSettings() }) else null),
                 Toggle("Drawing Guide", vm.guide?.on == true) { vm.setGuideOn(it) },
                 // only with the guide on
                 Act("Edit Drawing Guide", onClick = if (vm.guide?.on == true) ({ vm.openGuideEditor() }) else null),
