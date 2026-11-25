@@ -536,6 +536,10 @@ impl TimelineGrid {
                 self.motion.rows_offset = (from - moved.y).clamp(0.0, place.over);
             }
             Touch::Keys { key } if response.dragged() => {
+                // (a hold's menu stays until the mark is taken somewhere)
+                if moved.length() > 8.0 {
+                    self.keys.menu = None;
+                }
                 self.keys_dragged(session, key, (moved.x / PITCH).round() as i32);
             }
             Touch::Stretch { anchor, from } if response.dragged() => {

@@ -187,6 +187,19 @@ fn a_mark_is_picked_and_dragged_along_by_frames() {
     assert_eq!(w.ui.timeline.keys.picks.iter().map(|p| p.frame).collect::<Vec<_>>(), vec![4], "still picked");
     assert_eq!(w.session.undo().as_deref(), Some("Move Keys"));
     assert_eq!(keyed(&w, clip, TimelineChannel::Position), vec![2, 6]);
+    settle(&mut w);
+    // held still on a mark: its menu, the mark taken alone; let go, nothing more
+    let mark = w.ui.timeline.key_centre(&w.ctx, 0, "Position", Some(6)).expect("its row");
+    w.hover(mark);
+    w.mouse_button(mark, true);
+    for _ in 0..30 {
+        w.hover(mark);
+    }
+    assert!(w.ui.timeline.keys.menu.is_some(), "held: its menu");
+    w.mouse_button(mark, false);
+    settle(&mut w);
+    assert!(w.ui.timeline.keys.menu.is_some(), "still open");
+    assert_eq!(w.ui.timeline.keys.picks.iter().map(|p| p.frame).collect::<Vec<_>>(), vec![6]);
 }
 
 /// A mark right-clicked opens its menu: Easing's simple easings set how the key eases; Edit
@@ -284,6 +297,14 @@ fn animate_keys_a_move_with_the_transform_tool() {
     assert!(keyed(&w, clip, TimelineChannel::Position).contains(&3), "{:?}", w.session.timeline_keys(clip));
     let pose = w.session.timeline_pose(clip).expect("its pose");
     assert!(pose.x > 8.0 && pose.y.abs() < 2.0, "moved across: {pose:?}");
+    // the playhead moved: the box laid again over the drawing as it is there
+    let here = w.ui.transform.shown().0.map(|b| b.corners.clone()).expect("the box");
+    button(&mut w, "Back");
+    button(&mut w, "Back");
+    assert_eq!(frame(&w), 1);
+    let there = w.ui.transform.shown().0.map(|b| b.corners.clone()).expect("the box");
+    let x = |c: &[f32]| c.first().copied().unwrap_or(0.0);
+    assert!(x(&there) < x(&here) - 2.0, "{there:?} against {here:?}");
     let off = word(&mut w, "Turn Off");
     w.click(off);
     settle(&mut w);

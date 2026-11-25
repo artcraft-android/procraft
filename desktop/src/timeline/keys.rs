@@ -483,7 +483,6 @@ impl TimelineGrid {
             return Some(super::grid::Touch::Stretch { anchor, from });
         }
         let key = self.mark_at(place, at)?;
-        self.keys.menu = None;
         Some(super::grid::Touch::Keys { key })
     }
 
