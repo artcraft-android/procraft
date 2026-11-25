@@ -105,12 +105,29 @@ impl Gallery {
         self.refresh();
     }
 
+    /// With the Workspaces plugin off, the gallery is the first workspace's, where the app has
+    /// always kept its artworks (as on the iPad); the others wait, as they were, for it to be on
+    /// again.
+    pub(super) fn follow_workspaces_plugin(&mut self) {
+        if !self.hidden.contains(&procraft_core::Feature::Workspaces) {
+            return;
+        }
+        self.workspaces.open = false;
+        let Some(kept) = self.workspaces.kept.clone() else { return };
+        if self.workspaces.showing.as_ref().is_none_or(|w| w.is_default) {
+            return;
+        }
+        let Some(first) = kept.list().into_iter().next() else { return };
+        kept.select(first);
+        self.read_workspaces();
+    }
+
     /// The capsule in the middle of the title row (`top` its top), on a `screen` this wide: the
-    /// workspace showing, and a chevron for the list a tap on it opens. Not in a stack, where the
-    /// middle is the stack's name's.
+    /// workspace showing, and a chevron for the list a tap on it opens, while the Workspaces plugin
+    /// is on. Not in a stack, where the middle is the stack's name's.
     pub(super) fn workspace_button(&mut self, ui: &Ui, look: &mut Look, screen: Rect, top: f32) {
         let Some(showing) = self.workspaces.showing.as_ref() else { return };
-        if self.stack.is_some() {
+        if self.stack.is_some() || self.hidden.contains(&procraft_core::Feature::Workspaces) {
             return;
         }
         let ink = argb(TEXT);

@@ -96,7 +96,7 @@ fun BoxScope.AutokeyBadge(vm: CanvasViewModel) {
 @Composable
 fun BoxScope.PerformOverlay(vm: CanvasViewModel) {
     val tool = vm.timeline
-    if (!tool.performArmed || !tool.on) return
+    if (!tool.performArmed || !tool.on || !tool.shows(io.github.artcraftandroid.procraft.core.Feature.PERFORMED_MOVES)) return
     val perform = tool.perform
     Box(
         Modifier.fillMaxSize().pointerInput(Unit) {

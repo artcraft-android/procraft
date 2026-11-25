@@ -160,6 +160,9 @@ fun GalleryScreen(vm: CanvasViewModel) {
     // the workspaces' list open, a workspace's name being asked for, and one asked about deleting
     var workspacesOpen by remember { mutableStateOf(false) }
     var namingWorkspace by remember { mutableStateOf<WorkspaceNaming?>(null) }
+    // the first workspace's gallery while the Workspaces plugin is off
+    val workspacesOn = vm.has(io.github.artcraftandroid.procraft.core.Feature.WORKSPACES)
+    LaunchedEffect(workspacesOn) { vm.followWorkspacesPlugin() }
     var deletingWorkspace by remember { mutableStateOf<WorkspaceDeleting?>(null) }
     // Share's formats, open for these artworks
     var sharing by remember { mutableStateOf<GalleryShare?>(null) }
@@ -279,7 +282,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
             } else {
                 GalleryHeader(
                     stack = vm.openStack?.name,
-                    workspace = vm.workspace.name,
+                    // the workspaces while their plugin is on
+                    workspace = vm.workspace.name.takeIf { vm.has(io.github.artcraftandroid.procraft.core.Feature.WORKSPACES) },
                     onWorkspaces = {
                         moreOpen = false
                         workspacesOpen = !workspacesOpen
@@ -920,7 +924,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
 @Composable
 private fun GalleryHeader(
     stack: String?,
-    workspace: String,
+    workspace: String?,
     onWorkspaces: () -> Unit,
     fit: io.github.artcraftandroid.procraft.core.GalleryHeaderFit,
     titleHeight: Dp,
@@ -936,7 +940,7 @@ private fun GalleryHeader(
 ) {
     BoxWithConstraints(Modifier.fillMaxWidth().height(55.dp)) {
         // the workspaces are the gallery's: in a stack the middle is its name's
-        if (stack == null) {
+        if (stack == null && workspace != null) {
             WorkspaceButton(workspace, workspaceButtonRoom(maxWidth), Modifier.align(Alignment.TopCenter).padding(top = 10.dp), onWorkspaces)
         }
         // into a stack the title changes at once; back out, the stack's name fades out as the

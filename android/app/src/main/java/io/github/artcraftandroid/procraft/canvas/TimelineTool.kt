@@ -101,6 +101,16 @@ class TimelineTool internal constructor(internal val vm: CanvasViewModel) {
     /** The tracks whose rows of keys are put out under them. */
     var gridKeyTracks by mutableStateOf<Set<ULong>>(emptySet())
 
+    /**
+     * The app's own features showing (their built-in plugins on), as the canvas reads them: the
+     * record button (Performed moves), My curves, and Add new's sounds and videos and the
+     * animatic detector (Timeline media) go with theirs.
+     */
+    var features by mutableStateOf(io.github.artcraftandroid.procraft.core.Feature.entries.toSet())
+
+    /** Whether [feature]'s ways in show. */
+    fun shows(feature: io.github.artcraftandroid.procraft.core.Feature): Boolean = feature in features
+
     /** With Animate on, a take armed: the next touch on the canvas performs a move; and a take under way. */
     var performArmed by mutableStateOf(false)
     var performing by mutableStateOf(false)

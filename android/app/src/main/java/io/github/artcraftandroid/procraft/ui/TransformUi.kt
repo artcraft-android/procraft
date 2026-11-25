@@ -378,7 +378,7 @@ fun TransformToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
                 ToolbarButton(PcIcons.Rotate45, "Rotate 45°", width = w, iconSize = 44.dp) { vm.transformAction(TransformAction.ROTATE45) }
             }
             ToolbarButton(PcIcons.FitToCanvas, "Fit to Canvas", width = w, iconSize = 35.dp) { vm.transformAction(TransformAction.FIT_TO_CANVAS) }
-            ToolbarButton(PcIcons.Interpolation, if (vm.transformPixelated) "Pixelated" else interpolationName(vm.interpolation, short = true), active = popup == TransformPopup.INTERPOLATION, width = w, iconSize = 44.dp) {
+            ToolbarButton(PcIcons.Interpolation, if (vm.transformPixelatedUsed) "Pixelated" else interpolationName(vm.interpolation, short = true), active = popup == TransformPopup.INTERPOLATION, width = w, iconSize = 44.dp) {
                 vm.transformPopup = if (popup == TransformPopup.INTERPOLATION) TransformPopup.NONE else TransformPopup.INTERPOLATION
             }
             ToolbarButton(PcIcons.TransformReset, "Reset", width = w, iconSize = 44.dp) { vm.transformAction(TransformAction.RESET) }
@@ -646,16 +646,19 @@ private fun InterpolationMenu(vm: CanvasViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // Pixelated blends nothing, whichever is chosen
-                val dim = Modifier.alpha(if (vm.transformPixelated) 0.45f else 1f)
+                val dim = Modifier.alpha(if (vm.transformPixelatedUsed) 0.45f else 1f)
                 MenuLabel(interpolationName(kind, short = false), if (selected) Color.White else MenuText, Modifier.weight(1f).then(dim))
                 if (selected) Icon(PcIcons.MenuTick, contentDescription = null, tint = Color.White, modifier = Modifier.size(29.dp).then(dim))
             }
         }
     }
-    Spacer(Modifier.height(10.dp))
-    // for pixel art: whole pixels moved and sized, nothing blended, turns kept clean
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
-        SwitchRow("Pixelated", vm.transformPixelated) { vm.toggleTransformPixelated() }
+    // for pixel art: whole pixels moved and sized, nothing blended, turns kept clean (while the
+    // Pixel art plugin is on)
+    if (vm.has(io.github.artcraftandroid.procraft.core.Feature.PIXEL_ART)) {
+        Spacer(Modifier.height(10.dp))
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+            SwitchRow("Pixelated", vm.transformPixelated) { vm.toggleTransformPixelated() }
+        }
     }
 }
 

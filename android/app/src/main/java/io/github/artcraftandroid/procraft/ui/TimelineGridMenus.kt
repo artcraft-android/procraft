@@ -169,7 +169,7 @@ internal fun GridMenus(
     Box(Modifier.width(width.dp).padding(bottom = 8.dp)) {
         when {
             // over the `+` it was opened from
-            grid.adding -> GridMenuPlace(width - 41f, first = ADD_CARD, trailing = true) { GridAddMenu(tool.media.bringing, onPhoto, onVideo, onFile, close) }
+            grid.adding -> GridMenuPlace(width - 41f, first = ADD_CARD, trailing = true) { GridAddMenu(tool.media.bringing, tool.shows(io.github.artcraftandroid.procraft.core.Feature.VIDEOS), onPhoto, onVideo, onFile, close) }
             emptyMenu != null -> tool.tracks.firstOrNull { it.id == emptyMenu.track }?.let { track ->
                 GridMenuPlace(emptyMenu.x) { GridEmptyMenu(vm, tool, track, emptyMenu.frame, room, close) }
             }
@@ -522,14 +522,14 @@ private fun GridFlapMenu(tool: TimelineTool, info: TimelineInfo, close: () -> Un
     }
 }
 
-/** The card `+` held opens: a picture or a video from the photo picker, or a sound, a picture or a video from a file, at the playhead. While a file is being brought in ([busy]), no other is. */
+/** The card `+` held opens: a picture or a video from the photo picker, or a sound, a picture or a video from a file, at the playhead (a video while Timeline media's Videos is on). While a file is being brought in ([busy]), no other is. */
 @Composable
-private fun GridAddMenu(busy: Boolean, onPhoto: () -> Unit, onVideo: () -> Unit, onFile: () -> Unit, close: () -> Unit) {
+private fun GridAddMenu(busy: Boolean, videos: Boolean, onPhoto: () -> Unit, onVideo: () -> Unit, onFile: () -> Unit, close: () -> Unit) {
     GridCard(ADD_CARD) {
         Text(if (busy) "Bringing in…" else "Add new", color = Grid.InkBright, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 12.dp))
         Row(Modifier.padding(horizontal = 10.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             GridAddTile(GridIcons.Photo, "Photo", dim = false) { close(); onPhoto() }
-            GridAddTile(GridIcons.Video, "Video", dim = busy) { close(); onVideo() }
+            if (videos) GridAddTile(GridIcons.Video, "Video", dim = busy) { close(); onVideo() }
         }
         val ink = if (busy) Grid.InkDim else Grid.InkBright
         Row(

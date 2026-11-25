@@ -1218,11 +1218,22 @@ impl Interface {
         if self.text.editing() && hidden.contains(&procraft_core::Feature::Text) {
             self.text.end(session, true);
         }
+        // the Light tool (an artwork left on it) goes back to the brush while its plugin is off
+        if info.tool == ToolKind::Light && hidden.contains(&procraft_core::Feature::LightTool) {
+            session.set_tool(ToolKind::Paint);
+        }
         self.quick_menu.hidden.clone_from(&hidden);
         self.gesture_controls.hidden.clone_from(&hidden);
         self.layers.hidden = hidden;
         self.selection.fill_opacity = self.prefs.fill_opacity;
         self.selection.pixelated = self.prefs.selection_pixelated;
+        // Pixelated in Selection and Transform while the Pixel art plugin is on (kept as set)
+        let pixel_art_hidden = !self.prefs.plugins.has(procraft_core::Feature::PixelArt);
+        if self.selection.pixel_art_hidden != pixel_art_hidden {
+            session.set_selection_pixelated(self.prefs.selection_pixelated && !pixel_art_hidden);
+        }
+        self.selection.pixel_art_hidden = pixel_art_hidden;
+        self.transform.pixel_art_hidden = pixel_art_hidden;
         // the bars and panels that hang from the top bar hang from where it ends as it shows
         let bar_bottom = crate::panel::bar_shown(&ctx);
         crate::panel::drawing_bottom(
@@ -1315,6 +1326,8 @@ impl Interface {
                 crate::files::no_room(session);
             }
             self.timeline.perform_smoothing = self.prefs.timeline_perform_smoothing;
+            self.timeline.perform_hidden = !self.prefs.plugins.has(procraft_core::Feature::PerformedMoves);
+            self.timeline.my_curves_hidden = !self.prefs.plugins.has(procraft_core::Feature::MyCurves);
             // the grid while the Timeline plugin is on (the iPad's timeline bar, likewise)
             if self.prefs.plugins.has(procraft_core::Feature::Timeline) {
                 if let Some((said, warning)) = self.timeline.show(&ctx, &mut self.look, session, &self.prefs) {
@@ -3403,8 +3416,9 @@ impl Interface {
         let filters = self.prefs.plugins.filters();
         let actions = self.prefs.plugins.actions_in(procraft_core::PluginPlace::Adjustments);
         let turned = self.adjustments.showing_filters && (!filters.is_empty() || !actions.is_empty());
-        let as_layer = self.adjustments.as_layer;
         let hidden = self.prefs.plugins.hidden_features();
+        // (on a layer of its own while the Effects plugin's Adjustment layers is on)
+        let as_layer = self.adjustments.as_layer && !hidden.contains(&procraft_core::Feature::AdjustmentLayers);
         let (shown, tapped) = crate::adjustments::menu(
             ctx,
             &mut self.look,

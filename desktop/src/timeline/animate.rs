@@ -167,6 +167,10 @@ impl TimelineGrid {
         session: &CanvasSession,
         place: &Place,
     ) -> Option<&'static str> {
+        // (nothing armed while the Timeline plugin's Performed moves is off)
+        if self.perform_hidden {
+            self.animate.armed = false;
+        }
         if !self.animate.armed || !self.animate.autokey {
             if let Some(take) = self.animate.take.take() {
                 self.end_take(session, take);

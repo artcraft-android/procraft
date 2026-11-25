@@ -68,6 +68,8 @@ pub struct Selection {
     /// to select with have their points on whole pixels and take whole pixels only. (Paint's and
     /// Eraser's lassos go by their brush's Pixelated.)
     pub pixelated: bool,
+    /// The Pixel art plugin is off: Feather has no Pixelated, and none is used.
+    pub pixel_art_hidden: bool,
     /// How many buttons the toolbar has, for where a popover points.
     buttons: usize,
     feather: f32,
@@ -118,6 +120,7 @@ impl Default for Selection {
             lasso_fills: false,
             fill_opacity: 1.0,
             pixelated: false,
+            pixel_art_hidden: false,
             buttons: 8,
             feather: 0.0,
             popup: Popup::None,
@@ -389,7 +392,8 @@ impl Selection {
         let (tip_x, tip_y) = button_tip(ctx, BUTTON_ROOMY, index, self.buttons);
         let width = if self.popup == Popup::Feather { FEATHER_WIDTH } else { MENU_WIDTH };
         let height = match self.popup {
-            Popup::Feather => 40.0 + 4.0 + 59.0 + 16.0 + 10.0 + 49.0,
+            // (Pixelated's row only with the Pixel art plugin on)
+            Popup::Feather => 40.0 + 4.0 + 59.0 + 16.0 + if self.pixel_art_hidden { 0.0 } else { 10.0 + 49.0 },
             // (Lasso Fill's row only with its plugin on)
             Popup::ColorFill => 40.0 + 4.0 + if self.lasso_fills { 49.0 + 10.0 } else { 0.0 } + 59.0 + 16.0,
             _ => 40.0 + 8.0 + 172.0,
@@ -428,7 +432,10 @@ impl Selection {
                     session.select_feather_let_go();
                 }
                 // the other end of the same thing: no soft edge at all, for pixel art (shapes on
-                // whole pixels, taking whole pixels only)
+                // whole pixels, taking whole pixels only), while the Pixel art plugin is on
+                if self.pixel_art_hidden {
+                    return;
+                }
                 let row = Rect::from_min_size(pos2(inner.left(), group.bottom() + 10.0), vec2(inner.width(), 49.0));
                 ui.painter().rect_filled(row, 13, argb(MENU_GROUP));
                 text(

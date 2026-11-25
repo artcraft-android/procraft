@@ -516,9 +516,10 @@ private fun KeyMenu(tool: TimelineTool, key: TimelineKeyPick, beside: KeyBeside?
                 KeyChoiceRow(name, chosen = now == easing) { tool.lanes.apply(TimelineKeyEdit.Ease(easing)) }
             }
             if (clip != null) {
-                // (the curves kept under the easing editor, for this key)
+                // (the curves kept under the easing editor, for this key, while the Timeline
+                // plugin's My curves is on)
                 val saved = SavedCurves.of(LocalContext.current)
-                if (saved.all.isNotEmpty()) {
+                if (saved.all.isNotEmpty() && tool.shows(io.github.artcraftandroid.procraft.core.Feature.MY_CURVES)) {
                     KeyMenuLine()
                     for (choice in saved.easingChoices(tool.easing(clip, key.frame))) {
                         KeyChoiceRow(choice.name, chosen = choice.chosen) { tool.setEasing(clip, key.frame, choice.spec, done = true) }
@@ -539,6 +540,7 @@ private fun KeyMenu(tool: TimelineTool, key: TimelineKeyPick, beside: KeyBeside?
                         onChange = { tool.setEasing(clip, key.frame, it, done = false) },
                         onDone = { tool.setEasing(clip, key.frame, it, done = true) },
                         onBack = { open(KeyBeside.EASING) },
+                        myCurves = tool.shows(io.github.artcraftandroid.procraft.core.Feature.MY_CURVES),
                     )
                 }
             }

@@ -148,9 +148,11 @@ fun SelectionPopover(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
                 }
                 Spacer(Modifier.height(10.dp))
                 // the other end of the same thing: no soft edge at all, for pixel art (shapes on
-                // whole pixels, taking whole pixels only)
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
-                    SwitchRow("Pixelated", vm.selectionPixelated) { vm.toggleSelectionPixelated() }
+                // whole pixels, taking whole pixels only), while the Pixel art plugin is on
+                if (vm.has(io.github.artcraftandroid.procraft.core.Feature.PIXEL_ART)) {
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(MenuGroupCorner)).background(MenuGroup)) {
+                        SwitchRow("Pixelated", vm.selectionPixelated) { vm.toggleSelectionPixelated() }
+                    }
                 }
             }
             SelectionPopup.SAVED -> SavedSelections(vm)

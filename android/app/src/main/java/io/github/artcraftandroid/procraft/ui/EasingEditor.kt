@@ -102,7 +102,8 @@ private val Danger = Color(0xFFFE604D)
 /**
  * The easing editor for [easing]: [onChange] as a slider, point or handle is held (shown at once,
  * no undo step yet), [onDone] when it is let go or a kind, switch or kept curve is tapped (one undo
- * step), [onBack] from its back chevron.
+ * step), [onBack] from its back chevron. [myCurves]: the curves kept show under it (the Timeline
+ * plugin's My curves on).
  */
 @Composable
 fun EasingEditor(
@@ -111,6 +112,7 @@ fun EasingEditor(
     onDone: (EasingSpec) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    myCurves: Boolean = true,
 ) {
     // the easing as a slider or point moves it, before it is let go
     var live by remember { mutableStateOf<EasingSpec?>(null) }
@@ -193,8 +195,11 @@ fun EasingEditor(
             EasingToggle("Backwards", spec.reversed) { commit(spec.copy(reversed = !spec.reversed)) }
         }
         Spacer(Modifier.height(14.dp))
-        MyCurves(spec) { commit(it) }
-        Spacer(Modifier.height(10.dp))
+        // while the Timeline plugin's My curves is on
+        if (myCurves) {
+            MyCurves(spec) { commit(it) }
+            Spacer(Modifier.height(10.dp))
+        }
     }
 }
 

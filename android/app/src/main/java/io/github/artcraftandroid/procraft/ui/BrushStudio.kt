@@ -242,7 +242,7 @@ val STUDIO_TABS: List<StudioTab> by lazy {
             StudioSection("Ribbon", listOf(
                 toggle("ribbon", "Ribbon"),
                 slider("ribbon_scale", "Ribbon scale", Shown.STRETCH, enabledBy = "ribbon" to 1),
-            )),
+            ), io.github.artcraftandroid.procraft.core.Feature.RIBBON_BRUSHES),
             StudioSection("Shape filtering", listOf(StudioControl.Choice("shape_filtering", FILTERING))),
         )),
         StudioTab("Grain", PcIcons.StudioGrain, 45.dp, listOf(

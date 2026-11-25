@@ -112,6 +112,18 @@ struct Section {
     controls: &'static [Control],
 }
 
+impl Section {
+    /// The built-in feature the section is a way in to, if it is one's: it shows while that
+    /// feature's plugin is on (a brush whose setting is on keeps painting so with it off).
+    fn feature(&self) -> Option<procraft_core::Feature> {
+        match self.title {
+            Some("Pixel art") => Some(procraft_core::Feature::PixelArt),
+            Some("Ribbon") => Some(procraft_core::Feature::RibbonBrushes),
+            _ => None,
+        }
+    }
+}
+
 /// A plugin's row, as the spacing goes by it (its words are its own).
 static PLUGIN_ROW: Control = Control::Choice("", &[]);
 
@@ -737,6 +749,9 @@ pub struct Studio {
     pub open: bool,
     /// The rows plugins add to Properties: each one's label, key and choices.
     pub plugin_rows: Vec<(String, String, Vec<String>)>,
+    /// The app's own features hidden (their built-in plugins off): Pixel art's and Ribbon's
+    /// sections go with theirs.
+    hidden: Vec<procraft_core::Feature>,
     tab: usize,
     name: String,
     /// The name as typed in its field on the About page, and whether the field has been focused.
@@ -1081,6 +1096,7 @@ impl Studio {
             return None;
         }
         self.plugin_rows = plugin_rows(&prefs.plugins);
+        self.hidden = prefs.plugins.hidden_features();
         if let Some(drawing) = &self.preview_drawing {
             match drawing.try_recv() {
                 Ok(image) => {
@@ -1275,7 +1291,9 @@ impl Studio {
                     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                     let width = ui.available_width();
                     let mut above = Edge::Top;
-                    for (k, section) in page.sections.iter().enumerate() {
+                    let hidden = self.hidden.clone();
+                    let shown = page.sections.iter().filter(|s| s.feature().is_none_or(|f| !hidden.contains(&f)));
+                    for (k, section) in shown.enumerate() {
                         // the About page is headed by the brush's name
                         let about = matches!(section.controls.first(), Some(Control::About));
                         let title = section.title.map(str::to_owned).or_else(|| about.then(|| self.name.clone()));

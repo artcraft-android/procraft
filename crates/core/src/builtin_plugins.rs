@@ -422,6 +422,8 @@ pub fn layer_option_feature(option: crate::LayerOption) -> Option<Feature> {
         crate::LayerOption::EditText => Some(Feature::Text),
         crate::LayerOption::ClippingMask => Some(Feature::ClippingGroups),
         crate::LayerOption::DrawingAssist => Some(Feature::DrawingGuides),
+        crate::LayerOption::LayerStyle => Some(Feature::LayerStyles),
+        crate::LayerOption::AdjustmentSettings => Some(Feature::AdjustmentLayers),
         _ => None,
     }
 }

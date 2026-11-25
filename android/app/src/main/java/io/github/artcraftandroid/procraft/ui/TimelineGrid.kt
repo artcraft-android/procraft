@@ -331,7 +331,15 @@ fun BoxScope.TimelineGridBar(vm: CanvasViewModel) {
                 vm, tool, info, grid, width.value, room,
                 onPhoto = { photo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
                 onVideo = { video.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) },
-                onFile = { file.launch(arrayOf("audio/*", "image/*", "video/*")) },
+                // sounds and videos while Timeline media's switches for them are on
+                onFile = {
+                    val kinds = listOfNotNull(
+                        "audio/*".takeIf { tool.shows(io.github.artcraftandroid.procraft.core.Feature.SOUNDS) },
+                        "image/*",
+                        "video/*".takeIf { tool.shows(io.github.artcraftandroid.procraft.core.Feature.VIDEOS) },
+                    )
+                    file.launch(kinds.toTypedArray())
+                },
             )
             Box {
                 Column(
@@ -394,8 +402,8 @@ private fun GridHeader(vm: CanvasViewModel, tool: TimelineTool, grid: GridState)
             Text(if (tool.isPlaying) "Pause" else "Play", color = Grid.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
         // with Animate on: a take armed, which the next touch on the canvas starts (a record
-        // light, ringed while a take is armed)
-        if (tool.autokey) {
+        // light, ringed while a take is armed), while the Timeline plugin's Performed moves is on
+        if (tool.autokey && tool.shows(io.github.artcraftandroid.procraft.core.Feature.PERFORMED_MOVES)) {
             Box(
                 Modifier.size(40.dp)
                     .semantics {

@@ -214,10 +214,13 @@ internal fun GridVideoRows(tool: TimelineTool, clip: TimelineClipInfo, media: Ti
         close()
         tool.media.separateAudio(clip.id)
     }
-    GridMenuRow(GridIcons.Insert, "Make timing track…") {
-        close()
-        tool.stopPlaying()
-        tool.media.detecting = clip.id
+    // the animatic detector, while Timeline media's switch for it is on
+    if (tool.shows(io.github.artcraftandroid.procraft.core.Feature.ANIMATIC_DETECTOR)) {
+        GridMenuRow(GridIcons.Insert, "Make timing track…") {
+            close()
+            tool.stopPlaying()
+            tool.media.detecting = clip.id
+        }
     }
     GridMenuRow(GridIcons.Blend, "Size", chevron = true, lit = sizeLit, action = size)
 }

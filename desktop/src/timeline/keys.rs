@@ -689,12 +689,17 @@ impl TimelineGrid {
         if beside == Some(Beside::Easing) {
             easings.extend(EASINGS.iter().map(|(e, name)| ((*name).to_owned(), Asked::Ease(*e), now == Some(*e))));
             if let Some(id) = clip {
-                let spec = session.timeline_key_easing(id, key.frame);
-                let curves = crate::saved_curves::easing_choices(
-                    self.keys.curves(),
-                    &spec.map_or(Easing::Smooth, |s| s.easing()),
-                );
-                easings.extend(curves.into_iter().map(|c| (c.name, Asked::Curve(EasingSpec::of(&c.easing)), c.chosen)));
+                // the curves kept, while the Timeline plugin's My curves is on
+                if !self.my_curves_hidden {
+                    let spec = session.timeline_key_easing(id, key.frame);
+                    let curves = crate::saved_curves::easing_choices(
+                        self.keys.curves(),
+                        &spec.map_or(Easing::Smooth, |s| s.easing()),
+                    );
+                    easings.extend(
+                        curves.into_iter().map(|c| (c.name, Asked::Curve(EasingSpec::of(&c.easing)), c.chosen)),
+                    );
+                }
                 easings.push(("Edit Curve…".into(), Asked::EditCurve, false));
             }
         }
@@ -705,6 +710,7 @@ impl TimelineGrid {
                 Some(Rect::from_min_size(pos2(card.right() + 6.0, top), vec2(MENU_WIDTH, h)))
             }
             Some(Beside::Curve) => {
+                self.keys.editor.my_curves_hidden = self.my_curves_hidden;
                 let h = self.keys.editor.height().clamp(300.0, (card.bottom() - screen.top() - 16.0).max(300.0));
                 let top = (card.bottom() - h).max(screen.top() + 8.0);
                 Some(Rect::from_min_size(pos2(card.right() + 6.0, top), vec2(crate::easing_editor::WIDTH, h)))

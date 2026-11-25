@@ -1106,6 +1106,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // Actions' Video tab gone while it was the one open: the first instead
         if (actionsTab == 3 && !modelOpen && !has(io.github.artcraftandroid.procraft.core.Feature.TIME_LAPSE)) actionsTab = 0
         if (textInfo != null && !has(io.github.artcraftandroid.procraft.core.Feature.TEXT)) endText(keep = true)
+        // Selection's Pixelated while the Pixel art plugin is on (kept as set)
+        s.setSelectionPixelated(selectionPixelated && has(io.github.artcraftandroid.procraft.core.Feature.PIXEL_ART))
+        // the timeline's ways in go with the Timeline and Timeline media plugins
+        timeline.features = plugins.features().toSet()
+        if (!has(io.github.artcraftandroid.procraft.core.Feature.TIMELINE)) timeline.stopPlaying()
+        if (!has(io.github.artcraftandroid.procraft.core.Feature.PERFORMED_MOVES)) timeline.performArmed = false
+        // the Light tool goes back to the brush while its plugin is off
+        if (tool == ToolKind.LIGHT && !has(io.github.artcraftandroid.procraft.core.Feature.LIGHT_TOOL)) chooseDrawMode(DrawMode.BRUSH)
     }
 
     /** The interface shows at [size] now: what hit-tests its handles, and what clears its bars, go with it. */
@@ -1233,6 +1241,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      */
     var transformPixelated by mutableStateOf(transformPrefs.getBoolean(TRANSFORM_PIXELATED, false))
         private set
+    /** [transformPixelated] as it is used: while the Pixel art plugin is on. */
+    val transformPixelatedUsed: Boolean get() = transformPixelated && has(io.github.artcraftandroid.procraft.core.Feature.PIXEL_ART)
 
     /** Pixelated on or off: an open transform's content goes onto whole pixels at once. */
     fun toggleTransformPixelated() {
@@ -1406,6 +1416,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     /** The Adjustments menu adds an adjustment layer rather than changing the current layer. */
     var adjustAsLayer by mutableStateOf(false)
+    /** [adjustAsLayer] as it is used: while the Effects plugin's Adjustment layers is on. */
+    val adjustingAsLayer: Boolean get() = adjustAsLayer && has(io.github.artcraftandroid.procraft.core.Feature.ADJUSTMENT_LAYERS)
     var hue50 by mutableFloatStateOf(0.5f)
         private set
     var saturation50 by mutableFloatStateOf(0.5f)
@@ -2471,6 +2483,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun showWorkspace(next: io.github.artcraftandroid.procraft.core.Workspace) {
         workspaces.select(next)
         readWorkspaces()
+    }
+
+    /**
+     * With the Workspaces plugin off, the gallery is the first workspace's, where the app has
+     * always kept its artworks (as on the iPad); the others wait, as they were, for it to be on again.
+     */
+    fun followWorkspacesPlugin() {
+        if (has(io.github.artcraftandroid.procraft.core.Feature.WORKSPACES) || workspace.isDefault) return
+        workspaces.list().firstOrNull()?.let(::showWorkspace)
     }
 
     /** A new, empty workspace named [name], shown at once. */
@@ -4389,7 +4410,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the system's animations off: a dropped colour's fill shows at once
         s.setReduceMotion(!android.animation.ValueAnimator.areAnimatorsEnabled())
         s.setPourAllLayers(dropAllLayers)
-        s.setSelectionPixelated(selectionPixelated)
+        s.setSelectionPixelated(selectionPixelated && has(io.github.artcraftandroid.procraft.core.Feature.PIXEL_ART))
         applyPlugins(s)
         // the controls kept with this artwork, as it keeps them
         readPlugins()
@@ -5464,7 +5485,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The Pen's tool: the light tool while it draws with light. */
-    val penTool: ToolKind get() = if (penLight && isHdr) ToolKind.LIGHT else ToolKind.PAINT
+    val penTool: ToolKind get() = if (penLight && isHdr && has(io.github.artcraftandroid.procraft.core.Feature.LIGHT_TOOL)) ToolKind.LIGHT else ToolKind.PAINT
 
     /** The ways the current tool can draw, as the library's top offers them: none for the Smudge, Lasso only with the Lasso Fill plugin, Light only on an HDR canvas. */
     val drawModes: List<DrawMode>
@@ -5472,7 +5493,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             if (tool == ToolKind.SMUDGE) return emptyList()
             val modes = mutableListOf(DrawMode.BRUSH)
             if (lassoFills) modes += DrawMode.LASSO
-            if (tool != ToolKind.ERASE && isHdr) modes += DrawMode.LIGHT
+            // (Light while the HDR plugin's Light tool is on)
+            if (tool != ToolKind.ERASE && isHdr && has(io.github.artcraftandroid.procraft.core.Feature.LIGHT_TOOL)) modes += DrawMode.LIGHT
             return if (modes.size > 1) modes else emptyList()
         }
 
@@ -9976,7 +9998,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         panel = Panel.NONE
         pickNext = false
         s.transformSetInterpolation(interpolation)
-        s.transformSetPixelated(transformPixelated)
+        s.transformSetPixelated(transformPixelatedUsed)
         s.transformSetGuides(guides)
         s.transformPuppetSettings(puppet.settings)
         // Puppet's mesh is a plugin's (Puppet Warp), as on the iPad: none on, no Puppet

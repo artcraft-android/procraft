@@ -41,5 +41,10 @@ mod tests {
         assert!(action(&hidden, QuickAction::Undo) && action(&[], QuickAction::Liquify));
         assert!(!gesture_page(&hidden, GesturePurpose::Quickshape) && gesture_page(&hidden, GesturePurpose::Smudge));
         assert!(layer_option(&hidden, LayerOption::ClippingMask));
+        // Layer Style and an adjustment layer's settings go with the Effects plugin's switches
+        let effects = [Feature::LayerStyles, Feature::AdjustmentLayers];
+        assert!(!layer_option(&effects, LayerOption::LayerStyle));
+        assert!(!layer_option(&effects, LayerOption::AdjustmentSettings));
+        assert!(layer_option(&hidden, LayerOption::LayerStyle));
     }
 }

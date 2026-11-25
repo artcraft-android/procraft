@@ -103,7 +103,8 @@ fn menu_back(body: Rect) -> Rect {
 }
 
 /// The adjustments menu hanging from its `button`, in groups: colour, blurs, effects, painting;
-/// over them Adjustment Layer, ticked with `as_layer` (those that can't be one then greyed).
+/// over them Adjustment Layer (while the Effects plugin's Adjustment layers is on), ticked with
+/// `as_layer` (those that can't be one then greyed).
 /// Returns where it is (points) and the row tapped.
 #[allow(clippy::too_many_arguments)]
 pub fn menu(
@@ -129,8 +130,9 @@ pub fn menu(
         .map(Vec::from_iter)
         .filter(|g| !g.is_empty())
         .collect();
-    // (Adjustment Layer's own group over the adjustments)
-    let switch = if showing_filters { 0.0 } else { 44.0 + 10.0 };
+    // (Adjustment Layer's own group over the adjustments, while its plugin's switch is on)
+    let layered = !showing_filters && !hidden.contains(&procraft_core::Feature::AdjustmentLayers);
+    let switch = if layered { 44.0 + 10.0 } else { 0.0 };
     let rows: f32 = groups.iter().map(|g| g.len() as f32 * 44.0 + g.len().saturating_sub(1) as f32).sum::<f32>()
         + 10.0 * groups.len().saturating_sub(1) as f32
         + switch;
@@ -166,7 +168,7 @@ pub fn menu(
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                     // the adjustment chosen next goes on a layer of its own, editable
-                    if !showing_filters {
+                    if layered {
                         let (card, _) = ui.allocate_exact_size(vec2(list.width(), 44.0), Sense::hover());
                         ui.painter().rect_filled(card, 13, argb(GROUP_FILL));
                         let at = pos2(card.left() + 15.0, card.center().y);
@@ -736,8 +738,7 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                let (rect, row) =
-                    menu(ui.ctx(), &mut look, button, &mut Vec::new(), &filters, &[], turned, false, &[]);
+                let (rect, row) = menu(ui.ctx(), &mut look, button, &mut Vec::new(), &filters, &[], turned, false, &[]);
                 at = menu_back(panel::body(rect)).center();
                 tapped = tapped.clone().or(row);
             });

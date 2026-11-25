@@ -78,6 +78,10 @@ pub struct TimelineGrid {
     pub animate_asked: Option<bool>,
     /// Settings → Timeline → Perform smoothing (0..1), for a take's keys.
     pub perform_smoothing: f32,
+    /// The Timeline plugin's Performed moves is off: no record button, nothing armed.
+    pub perform_hidden: bool,
+    /// The Timeline plugin's My curves is off: the curves kept aren't offered.
+    pub my_curves_hidden: bool,
     /// The canvas it read (its address), the number of the panel's last reading, and the edits
     /// and timeline it was read at.
     session: usize,
@@ -257,6 +261,8 @@ impl TimelineGrid {
                 settings_asked: self.settings_asked,
                 session: address,
                 perform_smoothing: self.perform_smoothing,
+                perform_hidden: self.perform_hidden,
+                my_curves_hidden: self.my_curves_hidden,
                 ..TimelineGrid::default()
             };
             self.keys.curves = curves;

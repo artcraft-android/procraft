@@ -143,6 +143,8 @@ pub struct Transform {
     puppet_mesh: bool,
     /// A plugin lays and bends Puppet's mesh (Puppet Warp): Puppet is offered.
     has_puppet: bool,
+    /// The Pixel art plugin is off: Interpolation has no Pixelated, and none is used.
+    pub pixel_art_hidden: bool,
     popup: Popup,
     /// The node held and where (window pixels); a rotate or box-turning node let go, where, and when.
     held: Option<(TransformHandle, Pos2)>,
@@ -164,6 +166,7 @@ impl Default for Transform {
             puppet: PuppetSettings::default(),
             puppet_mesh: true,
             has_puppet: false,
+            pixel_art_hidden: false,
             popup: Popup::None,
             held: None,
             let_go: None,
@@ -173,6 +176,11 @@ impl Default for Transform {
 }
 
 impl Transform {
+    /// Pixelated as it is used: as set, while the Pixel art plugin is on.
+    fn pixelated(&self) -> bool {
+        self.pixelated && !self.pixel_art_hidden
+    }
+
     /// Starts transforming the current layer (the caller has checked it takes changes). Returns
     /// what to say when there is nothing there to move.
     pub fn begin(
@@ -181,7 +189,7 @@ impl Transform {
         plugins: &std::sync::Arc<procraft_core::Plugins>,
     ) -> Result<(), String> {
         session.transform_set_interpolation(self.interpolation);
-        session.transform_set_pixelated(self.pixelated);
+        session.transform_set_pixelated(self.pixelated());
         session.transform_set_guides(self.guides);
         session.transform_puppet_settings(self.puppet);
         // Puppet's mesh is a plugin's (Puppet Warp), as on the iPad: none on, no Puppet
@@ -468,7 +476,7 @@ impl Transform {
             Button::new(&icons::FIT_TO_CANVAS, "Fit to Canvas", 35.0),
             Button::new(
                 &icons::INTERPOLATION,
-                if self.pixelated { "Pixelated" } else { interpolation_name(self.interpolation, true) },
+                if self.pixelated() { "Pixelated" } else { interpolation_name(self.interpolation, true) },
                 44.0,
             )
             .active(self.popup == Popup::Interpolation),
@@ -503,7 +511,9 @@ impl Transform {
         let (tip_x, tip_y) = button_tip(ctx, BUTTON_ROOMY, index, 7);
         let screen = ctx.content_rect();
         let body_height = match self.popup {
-            Popup::Interpolation => 40.0 + 10.0 + 40.0 * 3.0 + 2.0 + 10.0 + 49.0,
+            Popup::Interpolation => {
+                40.0 + 10.0 + 40.0 * 3.0 + 2.0 + if self.pixel_art_hidden { 0.0 } else { 10.0 + 49.0 }
+            }
             _ => 40.0 + 4.0 + 49.0 * 2.0 + 1.0 + 10.0 + 59.0 * 2.0 + 1.0,
         } + 20.0;
         let left = (tip_x - MENU_WIDTH / 2.0).clamp(screen.left(), screen.right() - MENU_WIDTH);
@@ -541,7 +551,7 @@ impl Transform {
                             ui.painter().rect_filled(row, corners, argb(pc::ACCENT));
                         }
                         // Pixelated blends nothing, whichever is chosen
-                        let dim = if self.pixelated { 0.45 } else { 1.0 };
+                        let dim = if self.pixelated() { 0.45 } else { 1.0 };
                         let ink = if on { Color32::WHITE } else { argb(MENU_TEXT) }.gamma_multiply(dim);
                         text(
                             ui.painter(),
@@ -568,6 +578,10 @@ impl Transform {
                         }
                     }
                     // for pixel art: whole pixels moved and sized, nothing blended, turns kept clean
+                    // (while the Pixel art plugin is on)
+                    if self.pixel_art_hidden {
+                        return;
+                    }
                     let row = Rect::from_min_size(pos2(inner.left(), group.bottom() + 10.0), vec2(inner.width(), 49.0));
                     ui.painter().rect_filled(row, 13, argb(MENU_GROUP));
                     text(

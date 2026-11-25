@@ -132,8 +132,9 @@ fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modif
                 if (filters.isNotEmpty()) MenuGroup(filters) { filter -> MenuRow(filter.name) { vm.startPluginFilter(filter) } }
                 if (actions.isNotEmpty()) MenuGroup(actions) { action -> MenuRow(action.label) { vm.runPluginAction(action.key) } }
             } else {
-                // the adjustment chosen next goes on a layer of its own, editable
-                MenuGroup(listOf("Adjustment Layer")) { label ->
+                // the adjustment chosen next goes on a layer of its own, editable (while the Effects
+                // plugin's Adjustment layers is on)
+                if (vm.has(io.github.artcraftandroid.procraft.core.Feature.ADJUSTMENT_LAYERS)) MenuGroup(listOf("Adjustment Layer")) { label ->
                     Row(
                         Modifier.fillMaxWidth().height(44.dp).tap { vm.adjustAsLayer = !vm.adjustAsLayer }.padding(start = 15.dp, end = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -146,7 +147,7 @@ fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modif
                 for (group in Adjustment.groups.map { g -> g.filter(vm::showsAdjustment) }.filter { it.isNotEmpty() }) {
                     MenuGroup(group) { a ->
                         // as an adjustment layer, those that can't be one are greyed
-                        if (vm.adjustAsLayer) {
+                        if (vm.adjustingAsLayer) {
                             MenuRow(a.label, enabled = a.live) { vm.addAdjustmentLayer(a) }
                         } else {
                             MenuRow(a.label) { vm.startAdjustment(a) }

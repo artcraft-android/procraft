@@ -622,6 +622,7 @@ impl Gallery {
 
     /// Shows the gallery over the whole window; returns what a tap asked for.
     pub fn show(&mut self, ctx: &egui::Context, look: &mut Look, colours: &crate::colours::Colours) -> Option<Asked> {
+        self.follow_workspaces_plugin();
         self.thumbnails_read(ctx);
         self.duplicated(ctx);
         let screen = ctx.content_rect();

@@ -123,23 +123,23 @@ Lasso Fill and Stroke preview opacity are already plugins.
 | Gradients | Adjustments' Gradient Map (as an adjustment layer too); its QuickMenu action | the same | the same |
 | Recolor | its QuickMenu action, its only way in | the same | the same |
 | Timeline | Actions › Canvas › Timeline and its settings; the timeline bar and the motion path on the canvas (an artwork on a timeline still opens on its frame) | Actions › Canvas › Timeline and Timeline Settings; the timeline grid's bar and its settings card | the same |
-| Performed moves | the grid's Perform button and an armed take | | |
-| My curves | My curves in the curve editor | | |
-| Sounds, Videos | the Add card's Video tile; sounds and videos in its file picker | | |
-| Animatic detector | Make timing track… on a video clip | | |
+| Performed moves | the grid's Perform button and an armed take | the same | the same |
+| My curves | My curves in the curve editor | the same, and the kept curves in a key's Easing menu | the same, and the kept curves in a key's Easing menu |
+| Sounds, Videos | the Add card's Video tile; sounds and videos in its file picker | the same | none there |
+| Animatic detector | Make timing track… on a video clip | the same | none there |
 | HDR | the new-canvas HDR switch (a new canvas is standard) | none there | none there |
-| Light tool | the Light draw mode; the Light tool left for the brush | | |
+| Light tool | the Light draw mode; the Light tool left for the brush | the same | the Light tool left for the brush (no way in there) |
 | HDR curves, colours, exports | Curves' Exposure and Limit; the colour panel's light row; HDR HEIC and OpenEXR | | |
-| Adjustment layers | the Adjustments menu's Adjustment Layer; Adjustment settings in layer options | (not offered there) | (not offered there) |
-| Layer styles | Layer Style in layer options | (not offered there) | (not offered there) |
+| Adjustment layers | the Adjustments menu's Adjustment Layer; Adjustment settings in layer options | the same | the same |
+| Layer styles | Layer Style in layer options | the same | the same |
 | Vector layers | + held; SVG brought in (says to turn the plugin on); a vector layer's own rows | + held; SVG brought in | + held; SVG brought in |
 | Vector PDF | Share | Share | Share |
-| Texture Packer | Share | none there | none there |
-| Ribbon brushes | the brush studio's Ribbon | none there | none there |
-| Pixel art | the studio's Pixel art; Pixelated in Selection, Transform and Crop, off while hidden | the studio's Pixel art; Crop's Pixelated | Crop's Pixelated |
-| Comic Panels (the plugin's tool, step 5) | Actions › Canvas › Comic panels | none there | none there |
-| Workspaces | the gallery's workspace button; the gallery goes back to the first workspace | none there | none there |
-| Puppet Warp (the plugin's warp, step 5) | Transform's Puppet (a remembered Puppet opens as Freeform) | none there | none there |
+| Texture Packer | Share | the same | the same |
+| Ribbon brushes | the brush studio's Ribbon | the same | the same |
+| Pixel art | the studio's Pixel art; Pixelated in Selection, Transform and Crop, off while hidden | the same | the same |
+| Comic Panels (the plugin's tool, step 5) | Actions › Canvas › Comic panels | the same | the same |
+| Workspaces | the gallery's workspace button; the gallery goes back to the first workspace | the same | the same |
+| Puppet Warp (the plugin's warp, step 5) | Transform's Puppet (a remembered Puppet opens as Freeform) | the same | the same |
 
 A brush whose Pixelated or Ribbon is set keeps painting that way with the plugin off: the setting
 is the brush's, as an artwork's content is.
@@ -229,7 +229,7 @@ real code out and can be done in any order. Step 6 is independent of 3 to 5.
 
 ## Open questions
 
-- Built-in plugins on Android and desktop: the upstream merge ported many iPad features there
-  (the timeline grid and its keys, sounds and videos, My curves, Perform, adjustment layers, layer
-  styles, workspaces, the Light tool). Timeline and Texture Packer ask their built-ins there; the
-  rest don't yet, so turning their plugin off hides them only on the iPad.
+- Built-in plugins on Android and desktop: the upstream merge ported many iPad features there; each
+  asks its built-in as on the iPad (the table above). HDR canvases, their curves, colour row and
+  exports aren't there yet (desktop has no timeline media either), so those switches change
+  nothing there.

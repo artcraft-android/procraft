@@ -463,7 +463,8 @@ impl TimelineGrid {
         let ink = argb(INK);
         let painter = ui.painter();
         let word = if self.playing.is_some() { "Pause" } else { "Play" };
-        let autokey = self.animate.autokey;
+        // the record button with Animate on, while the Timeline plugin's Performed moves is on
+        let autokey = self.animate.autokey && !self.perform_hidden;
         let buttons = header_buttons(place, text_width(painter, word, 17.0, Weight::Bold), autokey);
         let at = |b: Button| buttons.iter().find(|(x, _)| *x == b).map_or(Rect::NOTHING, |(_, r)| *r);
         text(painter, pos2(at(Button::Play).left(), y), Align2::LEFT_CENTER, word, 17.0, Weight::Bold, ink);
@@ -1483,8 +1484,9 @@ impl TimelineGrid {
     /// Track or Add.
     pub(crate) fn button_centre(&self, ctx: &egui::Context, name: &str) -> Pos2 {
         let place = self.place(ctx);
-        let found =
-            header_buttons(&place, 0.0, self.animate.autokey).into_iter().find(|(b, _)| format!("{b:?}") == name);
+        let found = header_buttons(&place, 0.0, self.animate.autokey && !self.perform_hidden)
+            .into_iter()
+            .find(|(b, _)| format!("{b:?}") == name);
         found.map_or(Pos2::ZERO, |(_, r)| r.center())
     }
 

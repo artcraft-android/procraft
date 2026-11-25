@@ -155,6 +155,8 @@ pub struct EasingEditor {
     to_foot: u8,
     /// Where the curve was last drawn.
     curve_rect: Option<Rect>,
+    /// The Timeline plugin's My curves is off: the section isn't shown.
+    pub my_curves_hidden: bool,
 }
 
 /// A drawn curve's points as the engine reads them: in time's order, the ends pinned.
@@ -418,8 +420,10 @@ impl EasingEditor {
                 done = done.or(Some(Done::Set));
             }
             y = group.bottom() + 14.0;
-            // My curves
-            if let Some(picked) = self.my_curves(ui, look, &mut y, left, right, &spec, curves) {
+            // My curves, while the Timeline plugin's switch for them is on
+            if !self.my_curves_hidden
+                && let Some(picked) = self.my_curves(ui, look, &mut y, left, right, &spec, curves)
+            {
                 next = Some(picked);
                 done = done.or(Some(Done::Set));
             }
