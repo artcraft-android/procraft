@@ -24169,6 +24169,7 @@ fn paint_laid_in_place_laid_again_as_it_ends_goes_back_to_a_mark_and_ends_as_lai
 /// taper of their own.
 #[test]
 fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_again() {
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
     let side = 512;
     let point = |k: usize| PenSample {
         pressure: 0.4 + 0.5 * (k as f32 * 0.06).sin().abs(),
@@ -24181,7 +24182,7 @@ fn paint_laid_in_place_with_a_timed_start_taper_ends_without_laying_its_start_ag
         // the layer, the dispatches at its end, and whether it held its start: ended as it ends, laid
         // again from scratch (no marks to go back to), or all of it laid again whole
         let ended = |rewinds: bool, whole: bool| -> Option<(Vec<u8>, u64, bool)> {
-            let s = session(side, side)?;
+            let s = session_on(gpu.clone(), side, side);
             let (set, index) = library_brush(&s, |b| b.name == name && timed(b))?;
             assert!(s.select_brush(set, index));
             s.set_brush_size(0.3);
@@ -24243,6 +24244,7 @@ const TIMED_START_WET: [&str; 5] = ["Lundy", "Kingsley", "Dunlin", "Copperwing",
 /// and as the stroke ends, in fewer windows.
 #[test]
 fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_its_own() {
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
     let side = 512;
     let point = |k: usize| PenSample {
         pressure: 0.3 + 0.6 * (k as f32 * 0.05).sin().abs(),
@@ -24256,7 +24258,7 @@ fn a_wet_dual_brushs_second_is_put_together_in_its_paints_window_as_in_one_of_it
     for (name, size) in brushes {
         // the picture every tenth event, the layer as it ends, and the windows laid while drawn
         let drawn = |joined: bool| -> Option<(Vec<Vec<u8>>, Vec<u8>, u64)> {
-            let s = session(side, side)?;
+            let s = session_on(gpu.clone(), side, side);
             let (set, index) = library_brush(&s, |b| b.name == name && b.secondary.is_some())?;
             assert!(s.select_brush(set, index));
             s.set_brush_size(size);
@@ -24418,6 +24420,7 @@ fn a_wet_dual_brushs_stroke_gone_back_to_a_mark_ends_as_with_its_second_put_toge
 /// Either way it comes out the same, pixel for pixel. Prints what each holds.
 #[test]
 fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
+    let Ok(gpu) = Gpu::headless() else { return eprintln!("skipped: no GPU") };
     let side = 1024;
     let point = |k: usize| PenSample {
         pressure: 0.5 + 0.3 * (k as f32 * 0.05).sin(),
@@ -24427,7 +24430,7 @@ fn a_thin_stroke_painting_in_place_keeps_thin_tiles_and_comes_out_the_same() {
         // the layer, the most the canvas held past what it held before, the side of its tiles, and
         // whether it is on OpenGL
         let drawn = |tiles: Option<u32>| -> Option<(Vec<u8>, u64, u32, bool)> {
-            let s = session(side, side)?;
+            let s = session_on(gpu.clone(), side, side);
             let (set, index) = library_brush(&s, |b| b.name == name)?;
             assert!(s.select_brush(set, index));
             s.set_brush_size(size);
