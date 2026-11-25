@@ -2662,9 +2662,12 @@ impl CanvasSession {
             Mode::Guide => t.guide_grab = None,
             // a tap on a handle rather than a drag of it: a curve's anchor steps to its next state
             Mode::Shape(i) => {
-                let tapped = !t.shape_dragged && now - t.tap_start <= TAP_MS && !cancelled;
+                let dragged = t.shape_dragged;
+                let tapped = !dragged && now - t.tap_start <= TAP_MS && !cancelled;
                 drop(t);
-                if tapped && self.quickshape_cycle_anchor(i).is_some() {
+                if dragged {
+                    self.quickshape_unpin();
+                } else if tapped && self.quickshape_cycle_anchor(i).is_some() {
                     out.push(TouchCommand::ShapeChanged);
                 }
             }
@@ -2672,8 +2675,8 @@ impl CanvasSession {
             Mode::ShapePin | Mode::ShapeMove => {
                 let tapped = !t.shape_dragged && now - t.tap_start <= TAP_MS;
                 drop(t);
+                self.quickshape_unpin();
                 if mode == Mode::ShapePin {
-                    self.quickshape_unpin();
                     out.push(TouchCommand::ShapeChanged);
                 }
                 if tapped {

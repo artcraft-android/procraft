@@ -17,7 +17,10 @@ struct OverlayUniform {
     srgb: u32,
     // the coarsest mip level the shape is read from, as for the stamps
     shape_lod_cap: f32,
-    _p1: u32,
+    // 1 when the overlay holds round-ended QuickShape segments
+    path: u32,
+    canvas_size: vec2<f32>,
+    _pad: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> ou: OverlayUniform;
@@ -44,6 +47,11 @@ struct Out {
     @location(2) alpha: f32,
     // how much of its quad the stamp itself is across each way, mirrored as the stamp says
     @location(3) fill: vec2<f32>,
+    @location(4) canvas: vec2<f32>,
+}
+
+fn to_clip(p: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(ou.m0.x * p.x + ou.m0.z * p.y + ou.m1.x, ou.m0.y * p.x + ou.m0.w * p.y + ou.m1.y, 0.0, 1.0);
 }
 
 @vertex
@@ -53,6 +61,16 @@ fn vs_overlay(@builtin(vertex_index) vi: u32, inst: StampIn) -> Out {
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
     );
     let zoom = max(ou.m1.z, 1e-3);
+    if (ou.path == 1u) {
+        let span = length(inst.grain_offset);
+        let axis = select(vec2<f32>(1.0, 0.0), inst.grain_offset / max(span, 1e-6), span > 1e-6);
+        let normal = vec2<f32>(-axis.y, axis.x);
+        let radius = clamp(inst.radius * zoom, 0.75, 8.0);
+        let reach = span * zoom;
+        let q = corners[vi % 6u] * vec2<f32>(reach + radius + 1.0, radius + 1.0);
+        let p = inst.center + (axis * q.x + normal * q.y) / zoom;
+        return Out(to_clip(p), q, radius, 1.0, vec2<f32>(reach, 0.0), p);
+    }
     let r = max(inst.radius, 0.25);
     let rs = r * zoom;
     let half = vec2<f32>(r, max(r * inst.roundness, 1e-3));
@@ -63,11 +81,12 @@ fn vs_overlay(@builtin(vertex_index) vi: u32, inst: StampIn) -> Out {
     let s = sin(inst.angle);
     let p = inst.center + vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
     var o: Out;
-    o.pos = vec4<f32>(ou.m0.x * p.x + ou.m0.z * p.y + ou.m1.x, ou.m0.y * p.x + ou.m0.w * p.y + ou.m1.y, 0.0, 1.0);
+    o.pos = to_clip(p);
     o.q = q;
     o.radius = rs;
     o.alpha = inst.alpha;
     o.fill = inst.flip * half / (half + QUAD_REACH);
+    o.canvas = p;
     return o;
 }
 
@@ -82,7 +101,13 @@ fn fs_overlay(i: Out) -> @location(0) vec4<f32> {
     let r = i.radius;
     let zoom = max(ou.m1.z, 1e-3);
     var a = 0.0;
-    if (ou.shape < 0) {
+    if (ou.path == 1u) {
+        if (any(i.canvas < vec2<f32>(0.0)) || any(i.canvas >= ou.canvas_size)) {
+            discard;
+        }
+        let d = length(vec2<f32>(max(abs(i.q.x) - i.fill.x, 0.0), i.q.y));
+        a = clamp(r - d + 0.5, 0.0, 1.0);
+    } else if (ou.shape < 0) {
         let d = length(i.q) * r;
         let rim = clamp(r - d + 0.5, 0.0, 1.0);
         let soft = 1.0 - smoothstep(min(ou.m1.w, 0.999) * r, r + 0.5, d);
