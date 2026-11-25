@@ -108,7 +108,7 @@ impl GradientMap {
         let screen = ctx.content_rect();
         let width = if screen.width() > screen.height() { 835.0 } else { 544.0 };
         let rect = Rect::from_min_size(
-            pos2(screen.center().x - width / 2.0, screen.bottom() - PANEL_RISE - 159.0),
+            pos2(screen.center().x - width / 2.0, screen.bottom() - PANEL_RISE - 159.0 - crate::timeline::lift(ctx)),
             vec2(width, 159.0),
         );
         let list = gradients.list();

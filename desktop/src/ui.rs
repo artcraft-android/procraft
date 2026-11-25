@@ -1279,8 +1279,8 @@ impl Interface {
             if let Some(crate::animation::Said::NoRoom) = said {
                 crate::files::no_room(session);
             }
-            if let Some(said) = self.timeline.show(&ctx, &mut self.look, session) {
-                self.overlays.notice(said, true);
+            if let Some((said, warning)) = self.timeline.show(&ctx, &mut self.look, session, &self.prefs) {
+                self.overlays.notice(said, warning);
             }
             // the grid's settings button: the settings' card over it, or put away
             if std::mem::take(&mut self.timeline.settings_asked) {
@@ -3920,6 +3920,7 @@ impl Interface {
                 && self.colours.takes_keys())
             || self.animation.takes_keys()
             || self.timeline_settings.takes_keys()
+            || self.timeline.takes_keys()
             // (the Texture Packer's picture stays as it opened: the canvas isn't changed under it)
             || self.texture_packer.is_some()
     }

@@ -11,12 +11,37 @@
 //! track (a stroke on an empty frame makes one), and the core draws the onion skins: the grid only
 //! moves the playhead and the track drawn on.
 //!
-//! Not here yet (the iPad has them): the lasso, Animate, Add new, the menus on a hold, the frame
-//! picked's lengthening handles, moving blocks, zoom and the rows of keys.
+//! Editing the frames, as the iPad's grid does (ios/ProCraft/TimelineGridCells.swift,
+//! TimelineGridMenus.swift, TimelineGridMove.swift, TimelineGroupRows.swift):
+//!
+//! - **Lasting longer** (`edges.rs`): the frame under the playhead, tapped, is outlined with a
+//!   handle on each edge; a handle dragged shows what it would do (`timeline_lengthen_preview`)
+//!   and is one step when let go; held at a limit, a line stands down the tracks there.
+//! - **The lasso** (the header's lasso): strokes pick the frames they cross; the last of them in
+//!   time has the handles, which lengthen them all; one of them held (or right-clicked) opens
+//!   their menu.
+//! - **Moving** (`moving.rs`): a block held and dragged goes along by frames and rows, dropped
+//!   where it is let go, onto a new track over the line between two rows.
+//! - **Menus** (`menus.rs`), on a hold or a right-click: a frame's, a block's (a group, a sound,
+//!   a video), an empty frame's, a track's (on its name), the picked frames', the end flap's (it
+//!   is tapped), and Add new (`+` held).
+//! - **Groups** (`rows.rs`): an expanded group's tracks share rows under its track, inside an
+//!   outline; collapsed, each of its frames shows the drawings in it.
+//!
+//! A frame's or a group's menu's **Keys** sets [`TimelineGrid::keys_card_for`]: the keys' card is
+//! not the grid's. Not here (the iPad has them): Animate, the rows of keys, zoom, and what only
+//! sounds and videos have.
 
+mod actions;
+mod edges;
 mod grid;
+mod grid_icons;
+mod menus;
+mod moving;
+mod rows;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use egui::TextureHandle;
 use procraft_core::{CanvasSession, LayerInfo, TimelineClipKind, TimelineInfo, TimelinePanel};
@@ -49,6 +74,26 @@ pub struct TimelineGrid {
     pictures: HashMap<u64, (u64, Option<TextureHandle>)>,
     motion: grid::Motion,
     playing: Option<Playing>,
+    /// A frame's or a block's menu asked for its keys: the clip whose keys' card is wanted (the
+    /// playhead brought onto it). The keys' card takes it.
+    pub keys_card_for: Option<u64>,
+    /// The rows as last read, top first.
+    rows: Arc<rows::GridRows>,
+    /// The frame under the playhead tapped: its handles out.
+    picked: Option<u64>,
+    /// The lasso on: the frames picked together.
+    selecting: Option<BTreeSet<u64>>,
+    /// An edge being dragged, the lasso's stroke, a block being moved.
+    edit: edges::Edit,
+    stroke: grid::Lasso,
+    moving: Option<moving::Move>,
+    /// The menu standing on the bar, and where its cards were last drawn.
+    menu: Option<menus::Menu>,
+    cards: Vec<egui::Rect>,
+    /// The timeline's length as the end flap is dragged, before it is let go.
+    length_draft: Option<u32>,
+    /// What to tell (a warning, or not).
+    said: Option<(String, bool)>,
 }
 
 /// Playing: round the frames `first..end` (those the grid showed as it began), the frame showing,
@@ -61,6 +106,15 @@ struct Playing {
     step: i32,
     due: f64,
     held: f32,
+}
+
+/// How far over the window's foot the grid's bar reaches this frame (0 while none shows): the
+/// toolbars and the adjustments' panels at the foot stand over it, as on the iPad.
+pub fn lift(ctx: &egui::Context) -> f32 {
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data(|d| d.get_temp::<(f32, u64)>(egui::Id::unique("timeline grid lift")))
+        .filter(|(_, at)| at + 1 >= frame)
+        .map_or(0.0, |(lift, _)| lift)
 }
 
 /// Whether layer `l` is listed in the layers panel: off a timeline (`root` none), every layer; on
@@ -101,6 +155,45 @@ impl TimelineGrid {
     pub fn reset(&mut self, session: &CanvasSession) {
         self.stop(session, false);
         self.motion.let_go();
+        self.let_go_edits();
+    }
+
+    /// Its menu's keypad or a name being typed takes the keyboard's keys.
+    pub fn takes_keys(&self) -> bool {
+        self.menu.as_ref().is_some_and(menus::Menu::takes_keys)
+    }
+
+    /// Everything being dragged or open let go: the menu, an edge, the stroke, a block moving.
+    fn let_go_edits(&mut self) {
+        self.menu = None;
+        self.cards.clear();
+        self.edit = edges::Edit::default();
+        self.stroke = grid::Lasso::default();
+        self.moving = None;
+        self.length_draft = None;
+    }
+
+    /// What is picked, or has a menu, that the timeline no longer has, let go.
+    fn forget_gone(&mut self) {
+        if let Some(p) = self.picked
+            && self.clip(p).is_none()
+        {
+            self.picked = None;
+        }
+        let rows = Arc::clone(&self.rows);
+        let has = |id: u64| rows.tracks().any(|(_, s)| s.track().clips.iter().any(|c| c.id == id));
+        if let Some(chosen) = self.selecting.as_mut() {
+            chosen.retain(|id| has(*id));
+        }
+        let gone = match self.menu.as_ref().map(|m| &m.kind) {
+            Some(menus::Kind::Frame { clip } | menus::Kind::Block { clip }) => !has(*clip),
+            Some(menus::Kind::Track { track } | menus::Kind::Empty { track, .. }) => rows.segment_of(*track).is_none(),
+            Some(menus::Kind::Picked) => self.selecting.as_ref().is_none_or(BTreeSet::is_empty),
+            _ => false,
+        };
+        if gone {
+            self.menu = None;
+        }
     }
 
     /// The timeline as last read: none off one.
@@ -130,7 +223,9 @@ impl TimelineGrid {
             if self.panel.is_some() || self.playing.is_some() {
                 self.stop(session, false);
                 self.panel = None;
+                self.rows = Arc::default();
                 self.pictures.clear();
+                self.let_go_edits();
                 self.read_at = None;
                 self.motion.let_go();
             }
@@ -140,7 +235,9 @@ impl TimelineGrid {
         if self.read_at.as_ref().is_none_or(|(e, i)| *e != edits || *i != info) {
             if let Some(panel) = session.timeline_panel(self.known) {
                 self.known = panel.generation;
+                self.rows = Arc::new(rows::GridRows::new(&panel.rows));
                 self.panel = Some(panel);
+                self.forget_gone();
             }
             self.read_at = Some((edits, info));
         }
