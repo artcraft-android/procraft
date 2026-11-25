@@ -1,5 +1,20 @@
 package io.github.artcraftandroid.procraft.ui
 
+import android.view.HapticFeedbackConstants
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.platform.LocalView
+import io.github.artcraftandroid.procraft.canvas.addPicture
+import io.github.artcraftandroid.procraft.canvas.setLasso
+import io.github.artcraftandroid.procraft.canvas.setLength
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.calculateTargetValue
@@ -105,8 +120,12 @@ import kotlinx.coroutines.launch
 // frames dragged sideways scrub and settle on a frame; a frame tapped slides under the playhead
 // and its track is drawn on. Play goes round the frames the grid shows.
 //
-// The grid's first wave: the lasso, Animate, Add new, the menus held open, the lengthening
-// handles, moving blocks, zoom and the rows of keys come later.
+// The frame under the playhead, tapped, gets a handle on each edge: dragged, it lasts longer or
+// shorter (TimelineGridEdges.kt). The lasso picks frames together with a stroke drawn across them.
+// A frame, an empty frame, a track's name or the picked frames held open a menu standing on the
+// bar (TimelineGridMenus.kt); a block held and dragged on goes along by frames and rows
+// (TimelineGridTouch.kt). The flap on the ruler sets the timeline's length; `+` held, Add new.
+// Zoom, Animate and the rows of keys are not here.
 
 /** The grid's fixed sizes (dp, the iPad's points) and colours; its cells' and rows' sizes, which will zoom, are [GridSizes]. */
 internal object Grid {
@@ -135,15 +154,16 @@ internal object Grid {
 
     /** What is written on a track's highlight colour. */
     val OnLabel = Color(0xE6000000)
+
+    /** A menu's card standing on the bar (the iPad's is see-through and blurred; this one is nearly solid). */
+    val Card: Color get() = pick(0xF22C2C2C, 0xF5F2F2F2)
+    val Danger = Color(0xFFFF453A)
 }
 
 /** A colour the core gives as 0xRRGGBB. */
 internal fun rgb(packed: UInt): Color = Color(0xFF000000.toInt() or packed.toInt())
 
-/** What a finger down on the frames is doing. */
-private enum class GridTouch { UNDECIDED, SCROLL, PAN }
-
-/** What the grid shows that isn't the timeline's own: where it is scrolled to while dragged, and how far its rows are scrolled up. */
+/** What the grid shows that isn't the timeline's own: where it is scrolled to while dragged, how far its rows are scrolled up, an edge or a block being dragged, the lasso's stroke, the menus open. */
 @Stable
 internal class GridState {
     /** The frame under the playhead while the frames are dragged (between frames too); none when they rest on the playhead's own. */
@@ -161,9 +181,68 @@ internal class GridState {
     var scrubbed = 0u
     var settling: Job? = null
 
+    /** An edge of the frame with handles being dragged, or of the frames picked together (see TimelineGridEdges.kt). */
+    var trim by mutableStateOf<GridTrim?>(null)
+    var pickedTrim by mutableStateOf<GridPickedTrim?>(null)
+
+    /** The lasso's stroke under way (dp of all the rows), and the last one fading out. */
+    val stroke = mutableStateListOf<Offset>()
+    var faded by mutableStateOf<List<Offset>>(emptyList())
+    var fadeAlpha by mutableFloatStateOf(1f)
+
+    /** A block held, its menu open; a track's name held; the picked frames' menu (where along the bar it stands); an empty frame held; the end flap's menu; the Add new card. */
+    var clipMenu by mutableStateOf<GridClipMenu?>(null)
+    var trackMenu by mutableStateOf<ULong?>(null)
+    var pickedMenu by mutableStateOf<Float?>(null)
+    var emptyMenu by mutableStateOf<GridEmptySpot?>(null)
+    var flapMenu by mutableStateOf<Float?>(null)
+    var adding by mutableStateOf(false)
+
+    /** The timeline's length as the end flap is dragged, before it is let go. */
+    var lengthDraft by mutableStateOf<Int?>(null)
+
+    /** A block being dragged somewhere else. */
+    var move by mutableStateOf<GridMove?>(null)
+
+    /** The frames the stroke under way has crossed, and what was picked as it began. */
+    val touched = HashSet<ULong>()
+    var strokeBefore: Set<ULong>? = null
+
+    /** The block the finger down is holding, if it held one; and of a block dragged, which way the frames slide under it near an end of the bar, what slides them, and what works out again where it would land once they have. */
+    var heldClip: ULong? = null
+    var moveSlide = 0f
+    var moveTask: Job? = null
+    var moveAgain: (() -> Unit)? = null
+
+    /** A buzz for what a touch does (the bar sets it). */
+    var haptic: (GridHaptic) -> Unit = {}
+
+    /** Every menu standing on the bar closed (the Keys card and the settings too). */
+    fun closeMenus(tool: TimelineTool) {
+        closeOwn()
+        if (tool.keysCardFor != null) tool.keysCardFor = null
+        if (tool.vm.timelineSettingsOpen) tool.vm.closeTimelineSettings()
+    }
+
+    /** The grid's own menus closed. */
+    fun closeOwn() {
+        if (clipMenu != null) clipMenu = null
+        if (trackMenu != null) trackMenu = null
+        if (pickedMenu != null) pickedMenu = null
+        if (emptyMenu != null) emptyMenu = null
+        if (flapMenu != null) flapMenu = null
+        if (adding) adding = false
+    }
+
+    fun menuOpen(tool: TimelineTool): Boolean =
+        clipMenu != null || trackMenu != null || pickedMenu != null || emptyMenu != null || flapMenu != null || adding || tool.keysCardFor != null
+
     /** The frames dragged sideways [translation] (dp) from where they were: the frame now under the playhead shows as it plays. */
     fun scrolled(translation: Float, last: Int, tool: TimelineTool) {
-        if (dragged == null) scrubbed = tool.frame
+        if (dragged == null) {
+            scrubbed = tool.frame
+            tool.picked = null
+        }
         val at = (scrollFrom - translation / sizes.pitch).coerceIn(0f, last.toFloat())
         dragged = at
         val frame = at.roundToInt().toUInt()
@@ -184,6 +263,25 @@ fun BoxScope.TimelineGridBar(vm: CanvasViewModel) {
     val tool = vm.timeline
     val info = tool.info ?: return
     val grid = remember { GridState() }
+    val view = LocalView.current
+    grid.haptic = remember(view) {
+        { kind ->
+            view.performHapticFeedback(
+                when (kind) {
+                    GridHaptic.TICK -> HapticFeedbackConstants.CLOCK_TICK
+                    GridHaptic.FIRM -> HapticFeedbackConstants.CONTEXT_CLICK
+                    GridHaptic.LIGHT -> HapticFeedbackConstants.KEYBOARD_TAP
+                    GridHaptic.HOLD -> HapticFeedbackConstants.LONG_PRESS
+                    GridHaptic.WARN -> if (android.os.Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS
+                },
+            )
+        }
+    }
+    // Add new's picture: from the photo picker or a file, as a new frame at the playhead
+    val photo = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let { tool.addPicture(it) } }
+    val file = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { tool.addPicture(it) } }
+    // the grid's menus close as the settings' card opens
+    LaunchedEffect(vm.timelineSettingsOpen) { if (vm.timelineSettingsOpen) grid.closeOwn() }
     BoxWithConstraints(Modifier.align(Alignment.BottomCenter).fillMaxSize()) {
         val width = min(maxWidth - 32.dp, 1180.dp)
         val sizes = grid.sizes
@@ -192,57 +290,135 @@ fun BoxScope.TimelineGridBar(vm: CanvasViewModel) {
         val all = maxOf(rows.height, sizes.rowHeight)
         val most = maxOf(floor(maxHeight.value * 0.5f - Grid.HeaderHeight.value - Grid.RulerHeight.value - 12f), sizes.rowHeight)
         val shown = minOf(all, most)
+        // what is left above the bar for a menu standing on it
+        val room = maxOf(maxHeight.value - shown - Grid.HeaderHeight.value - Grid.RulerHeight.value - 110f, 240f)
         val shape = RoundedCornerShape(28.dp)
-        // the settings' card stands on the bar, clear of it
+        // the settings' card stands on the bar, clear of it; the bottom toolbars stand above it
         val density = androidx.compose.ui.platform.LocalDensity.current
-        androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.timelineSettingsLift = 0.dp } }
-        Column(
-            Modifier.align(Alignment.BottomCenter).padding(bottom = 19.dp).width(width)
-                .onSizeChanged { vm.timelineSettingsLift = 19.dp + with(density) { it.height.toDp() } + 10.dp }
-                .shadow(16.dp, shape)
-                .clip(shape)
-                .background(Grid.Panel)
-                // the whole bar takes its touches: none reach the canvas under it
-                .pointerInput(Unit) { detectTapGestures { } },
-        ) {
-            GridHeader(vm, tool)
-            Box(Modifier.fillMaxWidth().height(1.dp).background(Grid.Line))
-            GridBody(vm, tool, info, grid, rows, width, shown.dp)
-            Spacer(Modifier.height(9.dp))
+        androidx.compose.runtime.DisposableEffect(Unit) {
+            onDispose {
+                vm.timelineSettingsLift = 0.dp
+                tool.gridLift = 0.dp
+            }
+        }
+        // a press anywhere else closes a menu standing on the bar
+        if (grid.menuOpen(tool)) {
+            Box(Modifier.fillMaxSize().pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume(); grid.closeMenus(tool) } })
+        }
+        Column(Modifier.align(Alignment.BottomCenter).padding(bottom = 19.dp).width(width)) {
+            GridMenus(
+                vm, tool, info, grid, width.value, room,
+                onPhoto = { photo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                onFile = { file.launch(arrayOf("image/*")) },
+            )
+            Box {
+                Column(
+                    Modifier.fillMaxWidth()
+                        .onSizeChanged {
+                            val tall = with(density) { it.height.toDp() }
+                            vm.timelineSettingsLift = 19.dp + tall + 10.dp
+                            tool.gridLift = 19.dp + tall
+                        }
+                        .shadow(16.dp, shape)
+                        .clip(shape)
+                        .background(Grid.Panel)
+                        // the whole bar takes its touches: none reach the canvas under it
+                        .pointerInput(Unit) { detectTapGestures { } },
+                ) {
+                    GridHeader(vm, tool, grid)
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(Grid.Line))
+                    GridBody(vm, tool, info, grid, rows, width, shown.dp)
+                    Spacer(Modifier.height(9.dp))
+                }
+                // where the playhead is in time, over the bar's corner
+                if (vm.timelineTimecode && !grid.menuOpen(tool)) GridTimecode(tool.frame.toInt(), info.fps.toInt(), Modifier.offset(x = 4.dp, y = (-36).dp))
+            }
         }
     }
 }
 
-/** The bar's top row: Play, a frame back and on; then the settings, a new track, a new frame. */
+/** Where the playhead is, in time (Settings → Prefs → Timecode), over the bar's corner. */
 @Composable
-private fun GridHeader(vm: CanvasViewModel, tool: TimelineTool) {
+private fun GridTimecode(frame: Int, fps: Int, modifier: Modifier) {
+    Box(
+        modifier.height(28.dp).clip(CircleShape).background(Grid.Panel.copy(alpha = 0.82f)).padding(horizontal = 10.dp)
+            .semantics { contentDescription = "Timecode" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(timelineTimecode(frame, fps), color = Grid.Ink, fontSize = 17.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, maxLines = 1)
+    }
+}
+
+/** The bar's top row: Play, a frame back and on; then the settings, the lasso, a new track, a new frame (held, Add new). A tap beside its buttons closes a menu. */
+@Composable
+private fun GridHeader(vm: CanvasViewModel, tool: TimelineTool, grid: GridState) {
     Row(
-        Modifier.fillMaxWidth().height(Grid.HeaderHeight).padding(start = 26.dp, end = 16.dp, top = 4.dp),
+        Modifier.fillMaxWidth().height(Grid.HeaderHeight)
+            .pointerInput(Unit) { detectTapGestures { grid.closeMenus(tool) } }
+            .padding(start = 26.dp, end = 16.dp, top = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             Modifier.widthIn(min = 54.dp).height(40.dp)
-                .clickable(remember { MutableInteractionSource() }, indication = null) { tool.togglePlaying() },
+                .clickable(remember { MutableInteractionSource() }, indication = null) {
+                    grid.closeMenus(tool)
+                    tool.picked = null
+                    tool.togglePlaying()
+                },
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(if (tool.isPlaying) "Pause" else "Play", color = Grid.Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
         // tapped, a frame back or on; held, to the drawing before or after on the chosen track
         Spacer(Modifier.width(18.dp))
-        GridIconButton(PcIcons.ChevronLeft, 21.dp, name = "Previous Frame", held = { tool.stepDrawing(-1) }) { tool.stepFrame(-1) }
-        GridIconButton(PcIcons.ChevronRight, 21.dp, name = "Next Frame", held = { tool.stepDrawing(1) }) { tool.stepFrame(1) }
+        GridIconButton(PcIcons.ChevronLeft, 21.dp, name = "Previous Frame", held = {
+            grid.closeMenus(tool)
+            tool.picked = null
+            tool.stepDrawing(-1)
+        }) {
+            grid.closeMenus(tool)
+            tool.stepFrame(-1)
+        }
+        GridIconButton(PcIcons.ChevronRight, 21.dp, name = "Next Frame", held = {
+            grid.closeMenus(tool)
+            tool.picked = null
+            tool.stepDrawing(1)
+        }) {
+            grid.closeMenus(tool)
+            tool.stepFrame(1)
+        }
         Spacer(Modifier.weight(1f))
         GridIconButton(PcIcons.GridSettings, 27.dp, on = vm.timelineSettingsOpen, name = "Timeline Settings") {
-            if (vm.timelineSettingsOpen) vm.closeTimelineSettings() else tool.openSettings()
+            val open = !vm.timelineSettingsOpen
+            grid.closeMenus(tool)
+            if (open) tool.openSettings()
         }
-        GridIconButton(PcIcons.GridTrack, 27.dp, name = "Add Track") { tool.addTrack() }
-        GridIconButton(PcIcons.Add, 38.dp, name = "Add Frame") { tool.addDrawing() }
+        GridIconButton(GridIcons.Lasso, 27.dp, on = tool.selecting != null, name = "Select Frames") {
+            grid.closeMenus(tool)
+            tool.setLasso(tool.selecting == null)
+        }
+        GridIconButton(PcIcons.GridTrack, 27.dp, name = "Add Track") {
+            grid.closeMenus(tool)
+            tool.picked = null
+            tool.addTrack()
+        }
+        // tapped, a new frame; held a moment, the Add new card
+        GridIconButton(PcIcons.Add, 38.dp, on = grid.adding, name = "Add Frame", holdFor = 200L, held = {
+            grid.closeMenus(tool)
+            tool.picked = null
+            tool.stopPlaying()
+            grid.adding = true
+        }) {
+            grid.closeMenus(tool)
+            tool.picked = null
+            tool.addDrawing()
+        }
     }
 }
 
-/** One of the header's glyphs: lit in the accent while it is on, and for a moment when tapped; [held], what holding it does. */
+/** One of the header's glyphs: lit in the accent while it is on, and for a moment when tapped; [held], what holding it [holdFor] ms does. */
 @Composable
-private fun GridIconButton(icon: ImageVector, size: Dp, on: Boolean = false, name: String, held: (() -> Unit)? = null, action: () -> Unit) {
+private fun GridIconButton(icon: ImageVector, size: Dp, on: Boolean = false, name: String, holdFor: Long = 400L, held: (() -> Unit)? = null, action: () -> Unit) {
     var flash by remember { mutableStateOf(false) }
     val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
@@ -254,21 +430,31 @@ private fun GridIconButton(icon: ImageVector, size: Dp, on: Boolean = false, nam
                 role = Role.Button
                 contentDescription = name
             }
-            .pointerInput(held != null) {
-                detectTapGestures(
-                    onTap = {
-                        flash = true
-                        now()
-                        scope.launch {
-                            delay(180)
-                            flash = false
-                        }
-                    },
-                    onLongPress = if (held != null) ({
+            .pointerInput(holdFor) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    // held long enough (if holding does something), the lift is no tap
+                    // (none: held that long; a list of none: taken away)
+                    val lifted = if (hold != null) withTimeoutOrNull(holdFor) { listOf(waitForUpOrCancellation()) } else listOf(waitForUpOrCancellation())
+                    if (lifted == null) {
                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                         hold?.invoke()
-                    }) else null,
-                )
+                        do {
+                            val e = awaitPointerEvent()
+                            e.changes.forEach { it.consume() }
+                        } while (e.changes.any { it.pressed })
+                        return@awaitEachGesture
+                    }
+                    val up = lifted[0] ?: return@awaitEachGesture
+                    up.consume()
+                    flash = true
+                    now()
+                    scope.launch {
+                        delay(180)
+                        flash = false
+                    }
+                }
             },
         contentAlignment = Alignment.Center,
     ) {
@@ -333,8 +519,24 @@ private fun GridBody(vm: CanvasViewModel, tool: TimelineTool, info: TimelineInfo
         val next = minOf(maxOf(minOf(now, top), top + rows[row].height - h), over)
         if (abs(next - grid.rowsOffset) > 0.5f) grid.rowsOffset = maxOf(next, 0f)
     }
+    // the handles stay with the frame they are on: gone when the playhead leaves it
+    LaunchedEffect(tool.frame, tool.picked) {
+        val c = tool.picked?.let { tool.clip(it) }?.second ?: return@LaunchedEffect
+        if (tool.frame < c.start || tool.frame >= c.start + c.duration) tool.picked = null
+    }
+    // the lasso off: the picked frames' menu and handle go with it
+    LaunchedEffect(tool.selecting == null) {
+        if (tool.selecting == null) {
+            grid.pickedMenu = null
+            grid.pickedTrim = null
+        }
+    }
     Column {
-        GridRuler(tool, grid, info, place, lo, hi, width)
+        Box(Modifier.size(width, Grid.RulerHeight).clipToBounds()) {
+            GridRuler(tool, grid, info, place, lo, hi, width)
+            // the flap where the timeline ends
+            GridEndFlap(tool, grid, info, place)
+        }
         GridTracks(vm, tool, info, grid, rows, place, lo, hi, width, height, labels)
     }
 }
@@ -397,6 +599,7 @@ private fun Modifier.gridTouches(
                     GridTouch.UNDECIDED -> if (hypot(moved.x, moved.y) > 6f) {
                         if (ruler || abs(moved.x) >= abs(moved.y) || p0.over <= 0f) {
                             touch = GridTouch.SCROLL
+                            grid.closeMenus(tool)
                             grid.settling?.cancel()
                             grid.scrolling = true
                             grid.scrolled(moved.x, p0.last, tool)
@@ -407,6 +610,7 @@ private fun Modifier.gridTouches(
                     }
                     GridTouch.SCROLL -> grid.scrolled(moved.x, p0.last, tool)
                     GridTouch.PAN -> grid.rowsOffset = (panFrom - moved.y).coerceIn(0f, p0.over)
+                    else -> {}
                 }
                 change.consume()
             }
@@ -427,7 +631,7 @@ private fun Modifier.gridTouches(
                         }
                     }
                 }
-                GridTouch.PAN -> {}
+                else -> {}
             }
             if (lifted) lastChange.consume()
         }
@@ -444,14 +648,17 @@ private fun GridRuler(tool: TimelineTool, grid: GridState, info: TimelineInfo, p
     val measurer = rememberTextMeasurer()
     val current = tool.frame.toInt()
     val dim = Grid.InkDim
-    val lit = Grid.InkBright
+    val lit = if (tool.selecting != null) Pc.Accent else Grid.InkBright
     val latest by rememberUpdatedState(place)
     val scope = rememberCoroutineScope()
     Canvas(
         Modifier.size(width, Grid.RulerHeight).clipToBounds()
             .gridTouches(tool, grid, scope, { latest }, ruler = true, labels = 0f) { at ->
                 val f = latest.frame(at.x, sz) ?: return@gridTouches
-                if (f.toUInt() != tool.frame) tool.goTo(f.toUInt())
+                if (f.toUInt() == tool.frame) return@gridTouches
+                grid.closeMenus(tool)
+                tool.picked = null
+                tool.goTo(f.toUInt())
             },
     ) {
         val d = density
@@ -478,7 +685,11 @@ private fun GridRuler(tool: TimelineTool, grid: GridState, info: TimelineInfo, p
     }
 }
 
-/** The tracks' rows: the cells, the frames past the end shaded, the playhead's outline, and the tracks' names standing still over them. */
+/**
+ * The tracks' rows: the cells, the frames past the end shaded, an empty frame held ringed, the
+ * playhead's outline, an edge held at a limit, the line a block would be dropped on, the lasso's
+ * stroke, and the tracks' names standing still over them.
+ */
 @Composable
 private fun GridTracks(
     vm: CanvasViewModel,
@@ -494,34 +705,56 @@ private fun GridTracks(
     labels: Float,
 ) {
     val sz = grid.sizes
-    val latest by rememberUpdatedState(place)
-    // (the touches' handler stays as it began: what a tap reads is read as it is now)
-    val onTap by rememberUpdatedState<(Offset) -> Unit> { at -> tapped(tool, info, rows, place, sz, at) }
+    // (the touches' handler stays as it began: what it reads is read as the grid was last laid out)
+    val input = remember(tool, grid) { GridRowsInput(tool, grid) }
+    input.rows = rows
+    input.place = place
+    input.info = info
+    input.width = width.value
+    input.labels = labels
     val scope = rememberCoroutineScope()
     val all = maxOf(rows.height, sz.rowHeight)
     val chosenRow = rows.indexOf(info.track)
     // while it plays, where the playhead's outline stands as the grid holds still under it
     val head = if (tool.isPlaying) place.origin + tool.frame.toFloat() * sz.pitch else null
+    // (a frame with its handles out, or the frames picked together, are outlined instead)
+    val outlined = tool.selecting == null && tool.picked?.let { tool.clip(it) } == null
     val accent = Pc.Accent
     val panel = Grid.Panel
     val line = Grid.Line
+    val ring = Grid.InkBright.copy(alpha = 0.85f)
+    val frames = grid.lengthDraft ?: info.duration.toInt()
     Box(
         Modifier.size(width, height).clipToBounds()
-            .gridTouches(tool, grid, scope, { latest }, ruler = false, labels = labels) { at -> onTap(at) },
+            .gridRowTouches(input, scope),
     ) {
-        GridCells(vm, tool, rows, place, lo, hi, sz, labels, Modifier.fillMaxSize())
+        GridCells(vm, tool, grid, rows, place, lo, hi, sz, labels, Modifier.fillMaxSize())
         Canvas(Modifier.fillMaxSize()) {
             val d = density
             val dy = (place.inset - place.scroll) * d
             // past the timeline's end: shaded, since nothing there plays
-            val end = (place.origin + info.duration.toFloat() * sz.pitch - sz.gap / 2f) * d
+            val end = (place.origin + frames.toFloat() * sz.pitch - sz.gap / 2f) * d
             if (end < size.width) {
                 val from = maxOf(end, 0f)
                 drawRect(panel.copy(alpha = 0.55f), Offset(from, dy), Size(size.width - from, all * d))
                 drawRect(line, Offset(from, dy), Size(1f * d, all * d))
             }
+            // an empty frame held for its menu: ringed
+            grid.emptyMenu?.let { spot ->
+                val r = rows.indexOf(spot.track) ?: return@let
+                val stroke = 2f * d
+                val left = (place.origin + spot.frame.toFloat() * sz.pitch - 2.5f) * d
+                val top = (rows[r].y + (rows[r].height - sz.cellHeight) / 2f - 2.5f) * d + dy
+                drawRoundRect(
+                    ring,
+                    Offset(left + stroke / 2f, top + stroke / 2f),
+                    Size((sz.cellWidth + 5f) * d - stroke, (sz.cellHeight + 5f) * d - stroke),
+                    CornerRadius((sz.corner + 2f) * d - stroke / 2f),
+                    style = Stroke(stroke),
+                )
+            }
             // the playhead: an outline on the chosen track's frame, where it stands whatever slides under it
-            if (chosenRow != null) {
+            if (chosenRow != null && outlined) {
                 val r = rows[chosenRow]
                 val stroke = 2.5f * d
                 val left = ((head ?: (place.playhead - sz.cellWidth / 2f)) - 2.5f) * d
@@ -534,39 +767,128 @@ private fun GridTracks(
                     style = Stroke(stroke),
                 )
             }
+            // a dragged edge held at a limit: a line down the tracks there
+            (grid.trim?.limit ?: grid.pickedTrim?.limit)?.let { limit ->
+                drawRect(accent, Offset((place.origin + limit * sz.pitch - 0.75f) * d, dy), Size(1.5f * d, all * d))
+            }
+            // a dragged block over the line between two rows: dropped there, a track of its own
+            grid.move?.between?.let { between ->
+                val y = between.y * d + dy
+                drawLine(
+                    accent, Offset((labels - 40f) * d, y), Offset(size.width, y), strokeWidth = 2f * d, cap = StrokeCap.Round,
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(7f * d, 6f * d)),
+                )
+            }
+            // the lasso's stroke: glowing while it is drawn, fading once lifted
+            fun lasso(points: List<Offset>, alpha: Float) {
+                if (points.size < 2 || alpha <= 0f) return
+                val path = Path()
+                path.moveTo(points[0].x * d, points[0].y * d + dy)
+                for (i in 1 until points.size) path.lineTo(points[i].x * d, points[i].y * d + dy)
+                drawPath(path, accent.copy(alpha = 0.3f * alpha), style = Stroke(11f * d, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                drawPath(path, accent.copy(alpha = alpha), style = Stroke(5f * d, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                drawPath(path, Color.White.copy(alpha = 0.9f * alpha), style = Stroke(2f * d, cap = StrokeCap.Round, join = StrokeJoin.Round))
+            }
+            lasso(grid.stroke, 1f)
+            lasso(grid.faded, grid.fadeAlpha)
         }
         // the tracks' names, standing still over the frames (a row several groups' tracks share
         // is named for the group the playhead is in)
         for (r in rows.list) {
             val t = r.track(tool.frame.toInt())
             Box(Modifier.offset(y = (r.y + place.inset - place.scroll).dp).height(r.height.dp)) {
-                GridTrackLabel(tool, t, chosen = t.id == info.track, height = r.height, depth = r.depth, labels = labels)
+                GridTrackLabel(tool, grid, t, chosen = t.id == info.track, height = r.height, depth = r.depth, labels = labels)
             }
         }
     }
 }
 
-/** A tap on the rows at [at] (dp of the rows as they show): the playhead goes to the frame there on its track; a group's chevron folds it or unfolds it. */
-private fun tapped(tool: TimelineTool, info: TimelineInfo, rows: GridRows, place: GridPlace, sz: GridSizes, at: Offset) {
-    val p = place.inRows(at)
-    val f = place.frame(p.x, sz) ?: return
-    val r = rows.index(p.y) ?: return
-    val row = rows[r]
-    if (!row.has(f)) return
-    val t = row.track(f)
-    val found = t.clips.firstOrNull { f.toUInt() >= it.start && f.toUInt() < it.start + it.duration }
-    if (found != null && found.kind == TimelineClipKind.GROUP && p.x - (place.origin + found.start.toFloat() * sz.pitch) < 30f) {
-        tool.fold(found.id, tool.unfolded(found.id))
-        return
+/**
+ * The flap on the ruler where the timeline ends: dragged, the timeline is longer or shorter (what
+ * is left past its end stays, shaded, and neither plays nor is exported); tapped, its menu opens.
+ */
+@Composable
+private fun GridEndFlap(tool: TimelineTool, grid: GridState, info: TimelineInfo, place: GridPlace) {
+    val sz = grid.sizes
+    val frames = grid.lengthDraft ?: info.duration.toInt()
+    val color = if (grid.lengthDraft != null || grid.flapMenu != null) Pc.Accent else Grid.Box
+    val panel = Grid.Panel
+    val x = place.origin + frames * sz.pitch - sz.gap / 2f
+    val latestX by rememberUpdatedState(x)
+    val duration by rememberUpdatedState(info.duration.toInt())
+    Canvas(
+        Modifier.offset(x = (x - 9f).dp).size(30.dp, Grid.RulerHeight)
+            .semantics {
+                role = Role.Button
+                contentDescription = "Timeline end, $frames frames"
+            }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    var from: Int? = null
+                    try {
+                        while (true) {
+                            val e = awaitPointerEvent()
+                            val c = e.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!c.pressed) {
+                                c.consume()
+                                val length = grid.lengthDraft
+                                if (from == null) {
+                                    // tapped: its menu
+                                    val open = grid.flapMenu == null
+                                    grid.closeMenus(tool)
+                                    if (open) grid.flapMenu = latestX
+                                } else if (length != null && length != duration) {
+                                    tool.setLength(length)
+                                }
+                                break
+                            }
+                            val dx = (c.position.x - down.position.x) / density
+                            if (from == null && abs(dx) >= 4f) {
+                                from = duration
+                                tool.stopPlaying()
+                                grid.closeMenus(tool)
+                            }
+                            from?.let { f ->
+                                val next = maxOf(f + (dx / sz.pitch).roundToInt(), 1)
+                                if (next != grid.lengthDraft) {
+                                    grid.lengthDraft = next
+                                    grid.haptic(GridHaptic.TICK)
+                                }
+                            }
+                            c.consume()
+                        }
+                    } finally {
+                        grid.lengthDraft = null
+                    }
+                }
+            },
+    ) {
+        val d = density
+        // its pole, and the flap flying from the top of it
+        drawRect(color, Offset(8f * d, 0f), Size(2f * d, size.height))
+        val flap = Path().apply {
+            addRoundRect(
+                RoundRect(
+                    Rect(Offset(10f * d, 2f * d), Size(13f * d, 13f * d)),
+                    topLeft = CornerRadius.Zero,
+                    topRight = CornerRadius(5f * d),
+                    bottomRight = CornerRadius(5f * d),
+                    bottomLeft = CornerRadius.Zero,
+                ),
+            )
+        }
+        drawPath(flap, color)
+        for (i in 0..1) {
+            drawRoundRect(panel, Offset(13.5f * d, (6.5f + i * 4f) * d), Size(6f * d, 1.5f * d), CornerRadius(0.75f * d))
+        }
     }
-    if (t.id == info.track && f.toUInt() == tool.frame) return
-    tool.selectTrack(t.id)
-    if (f.toUInt() != tool.frame) tool.goTo(f.toUInt())
 }
 
-/** A track's name in its capsule, with its checkbox: tapped, the track is drawn on; its box tapped, it shows or hides. */
+/** A track's name in its capsule, with its checkbox: tapped, the track is drawn on; its box tapped, it shows or hides; held, its menu opens. */
 @Composable
-private fun GridTrackLabel(tool: TimelineTool, track: TimelineTrackInfo, chosen: Boolean, height: Float, depth: Int, labels: Float) {
+private fun GridTrackLabel(tool: TimelineTool, grid: GridState, track: TimelineTrackInfo, chosen: Boolean, height: Float, depth: Int, labels: Float) {
     val scale = height / GridSizes.ROW_HEIGHT
     val label = track.label?.let { rgb(it) }
     val text = if (label != null) Grid.OnLabel else if (chosen) Grid.InkBright else Grid.Ink
@@ -590,7 +912,21 @@ private fun GridTrackLabel(tool: TimelineTool, track: TimelineTrackInfo, chosen:
                 .clip(capsule)
                 .background(label ?: if (chosen) Grid.Capsule else Color.Transparent)
                 .then(if (chosen && label != null) Modifier.border(1.5.dp, Grid.InkBright.copy(alpha = 0.75f), capsule) else Modifier)
-                .clickable(remember { MutableInteractionSource() }, indication = null) { tool.selectTrack(track.id) }
+                .pointerInput(track.id) {
+                    detectTapGestures(
+                        onTap = {
+                            grid.closeMenus(tool)
+                            tool.selectTrack(track.id)
+                        },
+                        onLongPress = {
+                            if (!tool.isPlaying) {
+                                grid.closeMenus(tool)
+                                grid.trackMenu = track.id
+                                grid.haptic(GridHaptic.HOLD)
+                            }
+                        },
+                    )
+                }
                 .padding(start = 6.dp, end = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),

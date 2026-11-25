@@ -5297,7 +5297,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * A picture's straight RGBA pixels, at most [MAX_PICTURE] pixels on a side, its colours turned
      * into Display P3 ([p3]) or sRGB.
      */
-    private fun decodePicture(uri: android.net.Uri, p3: Boolean): io.github.artcraftandroid.procraft.core.ThumbnailImage? = runCatching {
+    internal fun decodePicture(uri: android.net.Uri, p3: Boolean): io.github.artcraftandroid.procraft.core.ThumbnailImage? = runCatching {
         val resolver = getApplication<Application>().contentResolver
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }

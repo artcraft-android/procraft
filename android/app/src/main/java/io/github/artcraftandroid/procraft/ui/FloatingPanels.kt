@@ -598,7 +598,7 @@ private val MostBottomHeight = 400.dp
  * with a grabber over it while a plugin lets it float; or, torn off, where the layout has it, a strip over it to move it
  * (its menu, its fold and its Close on it). It shows while [visible]; it draws itself [lift] above where it is laid out.
  * [goesWith] (the menus it opens) moves with it, as the whole layer they are drawn in moves. The layout is told how big
- * it is, at the size it shows.
+ * it is, at the size it shows. Where it always is, it stands [raise] higher (the timeline's bar is under it).
  */
 @Composable
 fun BoxScope.FloatableBottom(
@@ -606,6 +606,7 @@ fun BoxScope.FloatableBottom(
     piece: LayoutPiece,
     visible: Boolean,
     lift: Dp = 25.dp,
+    raise: Dp = 0.dp,
     goesWith: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
@@ -635,7 +636,7 @@ fun BoxScope.FloatableBottom(
             exit = if (floating != null) androidx.compose.animation.fadeOut() else Motion.toolbarOut(),
         ) {
             Box(
-                Modifier.onGloballyPositioned { c ->
+                Modifier.offset(y = -raise).onGloballyPositioned { c ->
                     // where it is drawn, less the shift: where it always is
                     val b = c.boundsInRoot().translate(-corner)
                     val r = androidx.compose.ui.geometry.Rect(b.left / density - shift.x, b.top / density - shift.y, b.right / density - shift.x, b.bottom / density - shift.y)
