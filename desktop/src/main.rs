@@ -80,6 +80,7 @@ mod transform;
 mod transform_numeric;
 mod ui;
 mod video;
+mod window_watch;
 mod zoom;
 
 use std::sync::Arc;
@@ -345,6 +346,7 @@ fn main() {
         interface_touches: input::InterfaceTouches::default(),
         modifiers: winit::keyboard::ModifiersState::empty(),
         maximised_before_full_screen: false,
+        window_watch: window_watch::WindowWatch::default(),
         closed: false,
         leave_question: questions::LeaveQuestion::default(),
         left_unsaved: None,
@@ -429,6 +431,8 @@ struct App {
     modifiers: winit::keyboard::ModifiersState,
     /// The window was maximised as it went full screen, and is maximised again as it comes back.
     maximised_before_full_screen: bool,
+    /// Whether the window is full screen and counted as hidden, as last seen (for the log).
+    window_watch: window_watch::WindowWatch,
     /// The window was closed (the artwork open kept): the app's end needs nothing more.
     closed: bool,
     /// Whether to leave the artwork open without saving it, asked once it couldn't be saved; what
@@ -510,7 +514,9 @@ fn full_screen_key(key: &winit::keyboard::Key, modifiers: winit::keyboard::Modif
 /// window is put back to its own size first and maximised again as it comes back: left maximised,
 /// Windows keeps it to the screen less the task bar, and the task bar's strip shows black.
 fn toggle_full_screen(window: &Window, maximised_before: &mut bool) {
-    if window.fullscreen().is_some() {
+    let leaving = window.fullscreen().is_some();
+    log::info!("full screen asked {} by its key", if leaving { "off" } else { "on" });
+    if leaving {
         pen::set_full_screen(false);
         window.set_fullscreen(None);
         if std::mem::take(maximised_before) {
@@ -703,6 +709,17 @@ impl ApplicationHandler for App {
                 self.dropped.push(path);
                 screen.window.request_redraw();
             }
+            // shown again: drawn at once, for the frames missed while it was hidden (a Mac's
+            // surface gives none while the system counts the window as hidden)
+            WindowEvent::Occluded(occluded) => {
+                let (draw, line) = self.window_watch.occluded(occluded, Instant::now());
+                if let Some(line) = line {
+                    log::info!("{line}");
+                }
+                if draw {
+                    screen.window.request_redraw();
+                }
+            }
             event => {
                 let Some(session) = session else { return };
                 // with a popover open, a press on the canvas only closes it (a panel alone lets it
@@ -774,6 +791,14 @@ impl ApplicationHandler for App {
         if self.screen.as_ref().is_some_and(|s| s.gpu.is_lost()) {
             self.gpu_lost(event_loop);
             return;
+        }
+        // the window gone full screen or back, by its key or the system's own (a Mac's green
+        // button): logged
+        if let Some(screen) = &self.screen {
+            let size = screen.window.inner_size();
+            if let Some(line) = self.window_watch.full_screen(screen.window.fullscreen().is_some(), size.into()) {
+                log::info!("{line}");
+            }
         }
         // the window's close went on with once the artwork was left without saving
         if std::mem::take(&mut self.close_asked) && self.leave_artwork(Some(questions::Then::Close)) {
@@ -1261,16 +1286,23 @@ impl App {
     fn sync_projection(&mut self, event_loop: &ActiveEventLoop) {
         let Some(screen) = &self.screen else { return };
         if !self.ui.project_canvas() {
-            self.projection = None;
+            if self.projection.take().is_some() {
+                log::info!("Project canvas: turned off");
+            }
             return;
         }
         if self.displays_seen.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
             return;
         }
         self.displays_seen = Some(Instant::now());
-        let second = projection::second_display(event_loop, &screen.window);
+        // the main window's display unknown (as some systems have it while the window is
+        // minimised): nothing changes, as a projection opened now could cover the main window's own
+        // display, with nothing left on screen to turn it off with
+        let Some(main) = screen.window.current_monitor() else { return };
+        let second = projection::other_display(event_loop.available_monitors(), &main);
         // gone, or the main window moved onto its display: opened again where it now goes
         if self.projection.as_ref().is_some_and(|p| Some(&p.monitor) != second.as_ref()) {
+            log::info!("Project canvas: its display is gone, or the main window is on it: closed");
             self.projection = None;
         }
         if self.projection.is_none()
@@ -1292,8 +1324,16 @@ impl App {
                 projection.window.request_redraw();
             }
             WindowEvent::RedrawRequested => projection.draw(&screen.gpu, self.session.as_deref()),
-            // closed there: Project canvas goes off
+            // shown again: drawn, for a frame missed while it was hidden
+            WindowEvent::Occluded(false) => projection.window.request_redraw(),
+            // closed there, or Escape pressed on it: Project canvas goes off
             WindowEvent::CloseRequested => {
+                log::info!("Project canvas: its window closed");
+                self.projection = None;
+                self.ui.stop_projecting();
+            }
+            WindowEvent::KeyboardInput { event: key, .. } if projection::closes(&key.logical_key, key.state) => {
+                log::info!("Project canvas: Escape pressed on its window");
                 self.projection = None;
                 self.ui.stop_projecting();
             }
@@ -1704,8 +1744,6 @@ impl App {
             let _ = made.join();
         }
         files::keep_brushes(&session);
-        let (brush, mask) = self.ui.colours.brush_and_mask();
-        files::keep_colours(brush, mask);
         let edits = session.edits();
         match Arc::clone(&session).save_to_leave(dir) {
             procraft_core::Leaving::Left => {
@@ -1731,8 +1769,6 @@ impl App {
             let _ = made.join();
         }
         files::keep_brushes(&session);
-        let (brush, mask) = self.ui.colours.brush_and_mask();
-        files::keep_colours(brush, mask);
         let edits = session.edits();
         match session.save(dir) {
             Ok(()) => {

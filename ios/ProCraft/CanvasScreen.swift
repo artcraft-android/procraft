@@ -434,6 +434,10 @@ struct CanvasScreen: View {
                     onAction: { model.rasterizeCurrent() }
                 )
             }
+            // while a plugin lays the panels out, a panel may lie over a window, or a window over
+            // another or a bar: they hide what is under them whole (only the canvas blurs behind
+            // the frost)
+            .environment(\.panelsSolid, model.layoutLook.on)
             .animation(Motion.bars, value: hidden)
             .animation(model.sideBarShown ? Motion.sideBarIn : Motion.sideBarOut, value: model.sideBarShown)
             .sized(screen)
@@ -1156,6 +1160,8 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
         observers.removeAll()
         // the second display let go before the canvas is
         Projection.shared.artwork(nil)
+        // from now on its model should go: the log says when it does
+        CanvasLife.left(model)
         leave()
         Gallery.closingSaves += 1
         let canvases = CanvasLife.canvases
@@ -1260,6 +1266,11 @@ enum CanvasLife {
     private(set) static var canvases = 0
     /// Each model made, by its artwork's folder, while it is alive (on the main thread).
     private static var models: [WeakModel] = []
+    /// Touches begun on the window so far, as the gallery's watcher sees them (under the lock).
+    private static var touches = 0
+    /// The models of canvases left, until they go: which, when they were left and the touches
+    /// counted by then; the last few (under the lock: a model may go on any thread).
+    private static var leftModels: [(id: ObjectIdentifier, at: CFAbsoluteTime, touches: Int)] = []
 
     private final class WeakModel {
         weak var model: CanvasModel?
@@ -1293,43 +1304,138 @@ enum CanvasLife {
         lock.unlock()
     }
 
+    /// A touch began on the window.
+    static func touched() {
+        lock.lock()
+        touches += 1
+        lock.unlock()
+    }
+
+    /// The canvas of `model` is being left (on the main thread): once its model goes, the log says
+    /// how long after, and how many touches came between.
+    static func left(_ model: CanvasModel) {
+        lock.lock()
+        leftModels.append((id: ObjectIdentifier(model), at: CFAbsoluteTimeGetCurrent(), touches: touches))
+        if leftModels.count > 8 {
+            leftModels.removeFirst()
+        }
+        lock.unlock()
+    }
+
+    /// The model `id` went (on whichever thread let it go): one whose canvas was left says how long
+    /// after, and how many touches the window had meanwhile. What holds a model past its canvas is
+    /// told by what lets it go: the next touch, a time, or neither (a look at the screen's
+    /// accessibility elements, say).
+    static func modelGone(_ id: ObjectIdentifier) {
+        lock.lock()
+        let found = leftModels.firstIndex { $0.id == id }
+        let left = found.map { leftModels[$0] }
+        if let found {
+            leftModels.remove(at: found)
+        }
+        let now = touches
+        lock.unlock()
+        guard let left else { return }
+        let seconds = String(format: "%.1f", CFAbsoluteTimeGetCurrent() - left.at)
+        AppLog.info("memory", "the model of a canvas left \(seconds) s ago let go, after \(now - left.touches) touches on the window")
+    }
+
+    /// What is left of a canvas left, looked at a while after: held weakly, so looking keeps none of
+    /// it; the touches counted on the window as it was left.
+    private final class LeftCanvas {
+        weak var session: CanvasSession?
+        weak var model: CanvasModel?
+        let dir: String?
+        /// Canvases made by then.
+        let since: Int
+        let touches: Int
+
+        init(session: CanvasSession, model: CanvasModel?, since: Int, touches: Int) {
+            self.session = session
+            self.model = model
+            dir = model?.dir
+            self.since = since
+            self.touches = touches
+        }
+
+        var held: Bool {
+            session != nil || model != nil
+        }
+    }
+
     /// The canvas of `session` and `model` was left (`since` canvases made by then) and its canvas
     /// let go: a few seconds on, once its zoom out is over, the log says what is still alive of it
     /// (whether the app still holds the session itself, or only the core its state; what of the
-    /// app's own holds its model, and the artworks whose models are alive); if anything is, and no
-    /// canvas was made since, as a problem.
+    /// app's own holds its model, the artworks whose models are alive, and how many touches the
+    /// window has had since); if anything is, and no canvas was made since, as a problem. What is
+    /// still held is looked at again 15 and 35 seconds on (the model says too when it goes).
     static func lookAfterLeaving(_ session: CanvasSession, model: CanvasModel?, canvases since: Int) {
-        weak var left = session
-        weak var leftModel = model
-        let dir = model?.dir
+        lock.lock()
+        let left = LeftCanvas(session: session, model: model, since: since, touches: touches)
+        lock.unlock()
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-            lock.lock()
-            let counts = alive
-            lock.unlock()
-            let sessions = liveSessions()
-            var line = "\(sessions) sessions, \(counts[0]) canvas models, \(counts[1]) canvas screens, "
-                + "\(counts[2]) canvas views alive; the one left \(left == nil ? "let go" : "still held by the app")"
-            if let leftModel {
-                // the root view's open canvas (which the gallery's open handler reaches, and
-                // nothing else of it), or the gallery's zoom still under way on it
-                var by: [String] = []
-                if OpenCanvas.shared.model === leftModel {
-                    by.append("the open canvas")
-                }
-                if let dir, GalleryZoomer.shared.zoom?.dir == dir {
-                    by.append("the gallery's zoom")
-                }
-                let holders = by.isEmpty ? "none of the open canvas, the gallery or its zoom" : by.joined(separator: " and ")
-                line += "; its model held by " + holders
+            lookFirst(left)
+        }
+    }
+
+    /// The touches begun on the window since `left` was left.
+    private static func touchesSince(_ left: LeftCanvas) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return touches - left.touches
+    }
+
+    /// The look 5 seconds after leaving `left` (on the main thread).
+    private static func lookFirst(_ left: LeftCanvas) {
+        lock.lock()
+        let counts = alive
+        lock.unlock()
+        let sessions = liveSessions()
+        var line = "\(sessions) sessions, \(counts[0]) canvas models, \(counts[1]) canvas screens, "
+            + "\(counts[2]) canvas views alive; the one left \(left.session == nil ? "let go" : "still held by the app")"
+        if let leftModel = left.model {
+            // the root view's open canvas (which the gallery's open handler reaches, and nothing
+            // else of it), or the gallery's zoom still under way on it
+            var by: [String] = []
+            if OpenCanvas.shared.model === leftModel {
+                by.append("the open canvas")
             }
-            models.removeAll { $0.model == nil }
-            if !models.isEmpty {
-                line += "; models alive for " + models.map { ($0.dir as NSString).lastPathComponent }.joined(separator: ", ")
+            if let dir = left.dir, GalleryZoomer.shared.zoom?.dir == dir {
+                by.append("the gallery's zoom")
             }
-            if canvases == since, left != nil || leftModel != nil || sessions > 0 || counts.contains(where: { $0 > 0 }) {
-                AppLog.error("memory", "a canvas left 5 s ago is still held: \(line)")
-            } else {
-                AppLog.info("memory", "5 s after leaving a canvas: \(line)")
+            let holders = by.isEmpty ? "none of the open canvas, the gallery or its zoom" : by.joined(separator: " and ")
+            line += "; its model held by " + holders
+        }
+        models.removeAll { $0.model == nil }
+        if !models.isEmpty {
+            line += "; models alive for " + models.map { ($0.dir as NSString).lastPathComponent }.joined(separator: ", ")
+        }
+        line += "; \(touchesSince(left)) touches on the window since it was left"
+        if canvases == left.since, left.held || sessions > 0 || counts.contains(where: { $0 > 0 }) {
+            AppLog.error("memory", "a canvas left 5 s ago is still held: \(line)")
+        } else {
+            AppLog.info("memory", "5 s after leaving a canvas: \(line)")
+        }
+        if left.held {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                lookAgain(left, at: 15, then: 35)
+            }
+        }
+    }
+
+    /// The look `seconds` after leaving `left` (on the main thread), when it was still held at the
+    /// one before: said only if it still is; and looked at once more at `then`.
+    private static func lookAgain(_ left: LeftCanvas, at seconds: Int, then: Int?) {
+        guard left.held else { return }
+        let what = [left.model == nil ? nil : "its model", left.session == nil ? nil : "its session"].compactMap { $0 }
+        AppLog.error(
+            "memory",
+            "a canvas left \(seconds) s ago is still held: \(what.joined(separator: " and ")) alive; "
+                + "\(touchesSince(left)) touches on the window since it was left"
+        )
+        if let then {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(then - seconds)) {
+                lookAgain(left, at: then, then: nil)
             }
         }
     }

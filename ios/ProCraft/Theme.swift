@@ -118,6 +118,10 @@ enum Pc {
     static var popoverFrost: Color { frost(0xE11E_1E1E, 0xFFE6_E6E6) }
     /// That tint laid straight over what is behind, for what has no frost under it.
     static var popoverTint: Color { pick(0xE11E_1E1E, 0xFFE6_E6E6) }
+    /// That tint wholly opaque: a panel's ground while a plugin lays the panels out, when a panel
+    /// may lie over a window or a window over another (only the canvas blurs behind the frost: a
+    /// window under it would show through it sharp).
+    static var popoverSolid: Color { pick(0xFF1E_1E1E, 0xFFE6_E6E6) }
     /// The gallery's popovers: their glass as it shows over the gallery's dark.
     static var galleryPopover: Color { pick(0xFF21_2121, 0xFFE6_E6E6) }
     static var popoverShadow: Color { pick(0x3800_0000, 0x2400_0000) }

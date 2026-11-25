@@ -146,12 +146,16 @@ internal fun frostBox(onCanvas: Offset, width: Int, height: Int, left: Float, ri
     floatArrayOf(onCanvas.x - left, onCanvas.y - above, onCanvas.x + width + right, onCanvas.y + height + below, corner)
 
 
-/** How solid a floating window's frost is: what is under it (a bar, another window) doesn't show. */
-private const val WindowFrostAlpha = 0.98f
+/**
+ * How solid a panel's frost is: as the interface has it ([frost], what is behind showing through blurred), or wholly
+ * [solid]. Only the canvas blurs behind the frost: a window or a bar under a panel would show through it sharp, so a
+ * panel that may lie over one (a floating window, or any panel while the panels float) hides it entirely.
+ */
+internal fun frostAlpha(frost: Float, solid: Boolean): Float = if (solid) 1f else frost
 
 /**
- * Whether every panel is drawn nearly solid: while the panels float (a plugin lays them out), a window lies over the
- * bars and other windows and a panel over a window, and only the canvas blurs behind the frost.
+ * Whether every panel is drawn solid: while the panels float (a plugin lays them out), a window lies over the bars and
+ * other windows and a panel over a window, and only the canvas blurs behind the frost.
  */
 val LocalSolidPanels = androidx.compose.runtime.staticCompositionLocalOf { false }
 
@@ -226,9 +230,9 @@ private fun PopoverBody(
 ) {
     val backdrops = LocalBackdrops.current.takeIf { fill == null && Pc.PopoverFrost.alpha < 1f }
     // frosted; a floating window, which may lie over the bars and other windows (only the canvas
-    // blurs behind the frost), nearly solid so what is under it doesn't read through
+    // blurs behind the frost), solid so what is under it doesn't read through
     val solid = window || LocalSolidPanels.current
-    val frosted = if (solid) Pc.PopoverFrost.copy(alpha = maxOf(Pc.PopoverFrost.alpha, WindowFrostAlpha)) else Pc.PopoverFrost
+    val frosted = Pc.PopoverFrost.copy(alpha = frostAlpha(Pc.PopoverFrost.alpha, solid))
     val paint = fill ?: if (backdrops != null) frosted else Pc.PopoverFill
     val key = remember { Any() }
     val density = LocalDensity.current

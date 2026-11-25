@@ -313,12 +313,14 @@ internal fun sideBarBody(width: Float, stretch: Float, right: Boolean): Pair<Flo
  * mirrored but the glyphs. Stretched [stretch] toward the finger (its modify button dragged out),
  * it is placed that far out by its caller and its glass reaches back as far: its edge side stays
  * against the window's edge (see [sideBarBody]). Moved by Edit layout, it is square only on the sides of it against the
- * window's edges ([edges], its own way up), and round all round away from them.
+ * window's edges ([edges], its own way up), and round all round away from them. [turn] slides it into its side or lays
+ * it down: its glass goes with it (what [modifier] does, as it slides out of sight, the glass follows by [shown]).
  */
 @Composable
 fun SideBar(
     vm: CanvasViewModel,
     modifier: Modifier = Modifier,
+    turn: Modifier = Modifier,
     right: Boolean = false,
     trackHeight: Dp = Pc.SliderHeight,
     shown: Float = 1f,
@@ -344,7 +346,8 @@ fun SideBar(
     // glass under them is already)
     val track = BarGlass(shown, moved, window = true).takeIf { Pc.sliderLook.frosted != true }
     Box(
-        Modifier.then(rememberFrost(Pc.SideBarCorner, body)).then(modifier).size(Pc.SideBarWidth, Pc.SideBarHeight - shorter * 2)
+        // (its glass where it is drawn: laid down, across, not standing where it was laid out)
+        turn.then(rememberFrost(Pc.SideBarCorner, body)).then(modifier).size(Pc.SideBarWidth, Pc.SideBarHeight - shorter * 2)
             // a touch on it keeps a slider's panel up
             .onGloballyPositioned { vm.sideBarOnWindow = it.boundsInWindow() }
             .drawBehind {

@@ -22,6 +22,7 @@ mod bars;
 mod big_pictures;
 mod blend_wheel;
 mod brush_files;
+mod brush_hold;
 mod brush_libraries;
 mod brush_library;
 mod brush_pictures;
@@ -59,6 +60,7 @@ mod hues;
 #[cfg(test)]
 mod import_tests;
 mod interface_size;
+mod kept_colours;
 mod keys;
 mod lasso_fill;
 #[cfg(target_os = "ios")]
@@ -186,6 +188,10 @@ pub use brush_files::{
     BrushFileBytes, BrushFileReading, BrushFileWriting, BrushesRead, IMPORT_CANCELLED, OTHER_BRUSH_EXTENSIONS,
     ReadBrushes, is_brush_zip, read_any_brushes, read_brushes, read_brushes_file, read_brushes_from,
 };
+pub use brush_hold::{
+    BRUSH_DRAG_WINDOW, BRUSH_MENU_HOLD, BRUSH_TOUCH_CLOCK_TRUST, BrushHoldMove, brush_hold_move,
+    brush_menu_hold_seconds, brush_menu_wait, brush_row_slides,
+};
 pub use brush_libraries::BrushLibraryInfo;
 pub use brush_library::{BrushDrop, BrushDropOver, brush_drop_copies, brush_drop_place, prepare_brushes};
 pub use brushes::{BrushInfo, BrushSetInfo, HoverFill, RecentBrush, brush_previews_kept};
@@ -227,6 +233,7 @@ pub use gradients::{GradientInfo, GradientStop, Gradients};
 pub use guide::{GuideInfo, GuideType, GuideUnit, SymmetryType};
 pub use history::{COLOUR_HOLD_MS, ColourHistory};
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
+pub use kept_colours::{COLOUR_WRITE_GAP_MS, FIRST_BRUSH_COLOUR, FIRST_MASK_COLOUR, KeptColours};
 pub use keys::{KEY_ZOOM, KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
 pub use layer_bundle::{LayerBundle, LayerDrop};
 pub use layers::{
@@ -1755,6 +1762,14 @@ pub(crate) struct Shared {
     /// How many times the brush studio has asked for its brush's sample stroke: the newest ask
     /// is the one drawn (see [`CanvasSession::studio_preview`]).
     pub(crate) studio_previews: std::sync::atomic::AtomicU64,
+    /// The brushes' sample strokes ended or kept so far, when the last ended (milliseconds into
+    /// the run), how many are waiting for their turn or being drawn, and whether a thread waits to
+    /// let go of the canvas they are drawn on once none has been asked for a while (see
+    /// `brushes.rs`).
+    pub(crate) previews_drawn: std::sync::atomic::AtomicU64,
+    pub(crate) preview_drawn_at: std::sync::atomic::AtomicU64,
+    pub(crate) previews_pending: std::sync::atomic::AtomicU64,
+    pub(crate) previews_watched: std::sync::atomic::AtomicBool,
     /// Where `state` was last taken, for the log when a wait on it is long.
     holder: held::Holder,
     /// What the session's own threads have done (see [`CanvasSession::activity`]).
@@ -2416,6 +2431,10 @@ impl CanvasSession {
                 touches: Mutex::new(touch::Touches::default()),
                 pad_sync: Mutex::new(studio::PadSync::default()),
                 studio_previews: std::sync::atomic::AtomicU64::new(0),
+                previews_drawn: std::sync::atomic::AtomicU64::new(0),
+                preview_drawn_at: std::sync::atomic::AtomicU64::new(0),
+                previews_pending: std::sync::atomic::AtomicU64::new(0),
+                previews_watched: std::sync::atomic::AtomicBool::new(false),
                 holder: held::Holder::default(),
                 counts: activity::Counts::default(),
                 nudge: Arc::new(activity::Nudge::default()),
@@ -3301,6 +3320,8 @@ impl CanvasSession {
         st.canvas = None;
         st.pending_pixels.clear();
         st.scene = None;
+        // and the canvas the brushes' sample strokes are drawn on
+        st.preview = None;
     }
 
     /// Canvas Orientation Memory: on, the quarter turn the artwork is kept at (which it opens

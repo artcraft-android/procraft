@@ -20,7 +20,6 @@ use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::studio::MAX_GRAIN_SCALE;
 use procraft_engine::usd::{read_usd, read_usdc, read_usdz};
 use procraft_engine::view::View;
-use procraft_gpu::wgpu::util::DeviceExt as _;
 use procraft_gpu::{
     Canvas, Gpu, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, SharedStroke, ShownSelection, StrokeStyle, StrokeTool,
     wgpu,
@@ -906,7 +905,7 @@ impl Scene {
         let (doc, screen) = self.screen.as_mut()?;
         let view = self.view.as_mut()?;
         screen.render(gpu, doc, None);
-        let seen = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        let seen = gpu.texture(&wgpu::TextureDescriptor {
             label: Some("layer as seen"),
             size: wgpu::Extent3d { width: size.0.max(1), height: size.1.max(1), depth_or_array_layers: 1 },
             mip_level_count: 1,
@@ -1080,8 +1079,7 @@ impl CanvasSession {
         let (Some(gpu), Some(scene), Some(canvas)) = (st.gpu.as_ref(), st.scene.as_mut(), st.canvas.as_mut()) else {
             return false;
         };
-        let texture = gpu.device.create_texture_with_data(
-            &gpu.queue,
+        let texture = gpu.texture_with_data(
             &wgpu::TextureDescriptor {
                 label: Some("picture placed on the model"),
                 size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -1092,7 +1090,6 @@ impl CanvasSession {
                 usage: wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
-            wgpu::util::TextureDataOrder::LayerMajor,
             &image.rgba,
         );
         let first = PicturePlace::first((w, h), size);

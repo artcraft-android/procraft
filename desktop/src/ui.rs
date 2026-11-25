@@ -600,6 +600,10 @@ impl Interface {
         let typing = self.typing;
         self.gallery_button = None;
         self.show_frame(ui, session, input);
+        // the colour as it now is kept (written only as it changes)
+        self.colours.keep();
+        // the library closed this frame lets go of what draws its strokes
+        self.library.after_frame(session);
         let ctx = ui.ctx();
         if !self.store_open() && !self.said_alert.is_open() {
             self.follow_held(ctx, session);
@@ -635,6 +639,7 @@ impl Interface {
         self.floating.follow(&self.prefs.plugins);
         self.floating.place(&ctx);
         crate::panel::set_panels_fold(&ctx, self.floating.layout.look().fold);
+        crate::panel::set_panels_solid(&ctx, self.floating.layout.look().on);
         self.ended_export = None;
         self.canvas_pressed = std::mem::take(&mut input.canvas_pressed);
         // looked at again soon while an insert is read, or brushes made
