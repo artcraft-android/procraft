@@ -93,7 +93,7 @@ struct NewCanvasPanel: View {
                 .background(Capsule().fill(Pc.lightRowStrong))
                 .padding(.horizontal, 9)
                 // the presets scroll past 376 tall
-                KineticScrollView(.vertical, showsIndicators: false) {
+                ScrollView(.vertical, showsIndicators: false) {
                     VStack(spacing: 0) {
                         ForEach(model.presets.indices, id: \.self) { i in
                             if i > 0 {

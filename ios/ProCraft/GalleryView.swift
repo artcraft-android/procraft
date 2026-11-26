@@ -349,7 +349,7 @@ struct GalleryView: View {
     private func grid(_ screen: CGSize) -> some View {
         let columns = galleryColumnCount(screen)
         let cell = CellSize(screenWidth: screen.width, columns: columns)
-        return KineticScrollView {
+        return ScrollView {
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(cell.pitch), spacing: 0), count: columns), spacing: 0) {
                 ForEach(model.entries, id: \.dir) { entry in
                     switch entry {

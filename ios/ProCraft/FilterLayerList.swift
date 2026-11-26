@@ -23,33 +23,15 @@ struct FilterLayerList: View {
 
     var body: some View {
         NavigationStack {
-            KineticScrollView {
-                LazyVStack(alignment: .leading, spacing: 20) {
-                    ForEach(groups, id: \.0) { group in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(group.0)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 16)
-                                .accessibilityAddTraits(.isHeader)
-                            VStack(spacing: 0) {
-                                ForEach(group.1, id: \.id) { filter in
-                                    if filter.id != group.1.first?.id { Divider().padding(.leading, 16) }
-                                    Button { onPick(filter.id) } label: {
-                                        Text(filter.label)
-                                            .padding(.horizontal, 16)
-                                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                                            .contentShape(Rectangle())
-                                    }
-                                }
-                            }
-                            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+            List {
+                ForEach(groups, id: \.0) { group in
+                    Section(group.0) {
+                        ForEach(group.1, id: \.id) { f in
+                            Button(f.label) { onPick(f.id) }
                         }
                     }
                 }
-                .padding(20)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("Filter Layer")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

@@ -446,7 +446,7 @@ private struct SavedSelections: View {
         }
         .padding(.leading, 14)
         .frame(height: 40)
-        KineticScrollView(.vertical, showsIndicators: false) {
+        ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 1) {
                 // the newest at the top, each named by its place among them, oldest first
                 ForEach((0 ..< tool.saved).reversed(), id: \.self) { i in

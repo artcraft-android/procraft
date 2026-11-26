@@ -626,7 +626,7 @@ private struct SourceLibrary: View {
                 .padding(.top, 69)
                 .frame(height: 108, alignment: .bottom)
                 tabs
-                KineticScrollView {
+                ScrollView {
                     LazyVGrid(columns: Array(repeating: GridItem(.fixed(147), spacing: 53), count: 3), spacing: 18) {
                         ForEach(found, id: \.index) { item in
                             cell(item.index, item.source)

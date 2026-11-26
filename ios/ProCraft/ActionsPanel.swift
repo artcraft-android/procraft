@@ -258,7 +258,7 @@ struct ActionsPanel: View {
             }
             .padding(.leading, 10)
             .frame(height: 60, alignment: .top)
-            KineticScrollView {
+            ScrollView {
                 VStack(spacing: 20) {
                     ForEach(Array(groups().enumerated()), id: \.offset) { _, rows in
                         ActionsGroup(rows: rows)

@@ -312,7 +312,7 @@ struct PluginPanelView: View {
             .padding(.horizontal, 24)
             .padding(.top, 12)
             .frame(height: 52)
-            KineticScrollView {
+            ScrollView {
                 VStack(spacing: 0) {
                     ForEach(panel.rows.indices, id: \.self) { i in
                         if i > 0 {

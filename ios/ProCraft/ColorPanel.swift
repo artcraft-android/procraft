@@ -1524,7 +1524,7 @@ private struct PalettesList: View {
             .frame(height: 36)
             .background(RoundedRectangle(cornerRadius: 9, style: .circular).fill(Pc.setCell))
             .padding(.horizontal, 8.5)
-            KineticScrollView {
+            ScrollView {
                 VStack(spacing: 8) {
                     ForEach(Array(model.palettes.enumerated()), id: \.offset) { i, p in
                         card(i, p, cards: cards)
@@ -2470,7 +2470,7 @@ private struct FloatingPalettes: View {
             .background(RoundedRectangle(cornerRadius: 9, style: .circular).fill(floatingGroup))
             .padding(.horizontal, 10)
             .padding(.top, 4)
-            KineticScrollView {
+            ScrollView {
                 VStack(spacing: 10) {
                     ForEach(Array(model.palettes.enumerated()), id: \.offset) { i, palette in
                         card(i, palette)
@@ -2827,7 +2827,7 @@ private struct CompactPalettes: View {
     }
 
     var body: some View {
-        KineticScrollView(.vertical, showsIndicators: false) {
+        ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(spacing: 10) {
                 ForEach(palettes.indices, id: \.self) { i in
                     grid(palettes[i])

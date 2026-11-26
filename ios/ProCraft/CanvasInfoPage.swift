@@ -74,7 +74,7 @@ struct LicencesPage: View {
             screenFill
                 .contentShape(Rectangle())
                 .onTapGesture {}
-            KineticScrollView(.vertical, showsIndicators: true) {
+            ScrollView(.vertical, showsIndicators: true) {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(paragraphs.indices, id: \.self) { i in
                         Text(verbatim: paragraphs[i])
@@ -444,7 +444,7 @@ struct CanvasInfoPage: View {
                 rail
             }
             topRow
-            KineticScrollView(.vertical, showsIndicators: false) {
+            ScrollView(.vertical, showsIndicators: false) {
                 pageShown
                     .padding(.bottom, 40)
             }

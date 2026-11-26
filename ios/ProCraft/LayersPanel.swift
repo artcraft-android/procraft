@@ -68,6 +68,42 @@ private let newRowFade = 0.1
 /// The rows standing aside for a dragged row, and coming back: a 0.3 s spring, damping 0.75.
 private let rowAside = Animation.spring(duration: 0.3, bounce: 0.25)
 
+/// Calls its tick once a frame with the seconds since the frame before, until the tick says to
+/// stop or it is stopped. The blend wheel and the animation timeline move by it.
+final class FrameLoop: NSObject {
+    private var link: CADisplayLink?
+    private var last: CFTimeInterval = 0
+    private var tick: ((CFTimeInterval) -> Bool)?
+
+    var running: Bool {
+        link != nil
+    }
+
+    func start(_ tick: @escaping (CFTimeInterval) -> Bool) {
+        stop()
+        self.tick = tick
+        last = CACurrentMediaTime()
+        let made = CADisplayLink(target: self, selector: #selector(step))
+        made.add(to: .main, forMode: .common)
+        link = made
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+        tick = nil
+    }
+
+    @objc private func step() {
+        let now = CACurrentMediaTime()
+        let seconds = now - last
+        last = now
+        if tick?(seconds) != true {
+            stop()
+        }
+    }
+}
+
 /// How far row `id` stands aside while the rows of `unit` are dragged: the rows between where they
 /// were and where they land (`place`) take the room they left, so the gap shows where they will
 /// land; held onto a row, or over their own place, none moves.
@@ -411,7 +447,7 @@ struct LayersPanel: View {
                     .padding(.top, 12)
             }
             ScrollViewReader { reader in
-                KineticScrollView {
+                ScrollView {
                     VStack(spacing: rowGap) {
                         if model.scene.open {
                             ModelRows(model: model, ui: ui, shown: shown)

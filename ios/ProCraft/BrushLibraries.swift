@@ -189,7 +189,7 @@ private struct LibraryCards: View {
 
     var body: some View {
         let columns = [GridItem(.flexible(), spacing: cardGap), GridItem(.flexible(), spacing: cardGap)]
-        KineticScrollView {
+        ScrollView {
             LazyVGrid(columns: columns, spacing: cardGap) {
                 ForEach(Array(model.brushLibraries.enumerated()), id: \.offset) { i, library in
                     LibraryCard(model: model, ui: ui, index: i, library: library)

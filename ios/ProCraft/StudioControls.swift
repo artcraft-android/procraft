@@ -1223,7 +1223,7 @@ struct BlendModeList: View {
                 .contentShape(Rectangle())
                 .onTapGesture { onDone(nil) }
             ScrollViewReader { reader in
-                KineticScrollView {
+                ScrollView {
                     VStack(spacing: 0) {
                         ForEach(Array(modes.enumerated()), id: \.offset) { i, m in
                             let picked = i == chosen

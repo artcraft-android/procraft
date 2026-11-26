@@ -964,7 +964,7 @@ private struct TextStyleSheet: View {
     }
 
     private func rows(_ count: Int, _ cell: @escaping (Int) -> Cell) -> some View {
-        KineticScrollView(.vertical, showsIndicators: false) {
+        ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 0) {
                 ForEach(0 ..< count, id: \.self) { cell($0) }
             }
