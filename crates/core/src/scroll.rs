@@ -279,4 +279,193 @@ mod tests {
         assert_eq!(scroll_fling_velocity(1000.0, 800.0, 0.5), 1000.0);
         assert_eq!(scroll_fling_velocity(0.0, 800.0, 0.1), 0.0);
     }
+
+    /// UIScrollView's normal deceleration: the share of its speed a coast keeps each millisecond.
+    const KEPT_PER_MS: f32 = 0.998;
+    /// The rubber band's constant.
+    const C: f32 = 0.55;
+
+    /// The rubber band: a pull `x` past an edge of a view `d` long shows `x·d·c / (d + c·x)` past it.
+    fn rubber_band(x: f32, d: f32) -> f32 {
+        x * d * C / (d + C * x)
+    }
+
+    /// Followed at 120 frames a second until done: each frame's time and sample.
+    fn follow(motion: ScrollMotion) -> Vec<(f32, ScrollSample)> {
+        let mut steps = Vec::new();
+        for frame in 0..3600 {
+            let t = frame as f32 / 120.0;
+            let sample = scroll_motion_at(motion, t);
+            steps.push((t, sample));
+            if sample.done {
+                return steps;
+            }
+        }
+        panic!("{motion:?} still moving after 30 s");
+    }
+
+    #[test]
+    fn a_coast_keeps_0_998_of_its_speed_each_millisecond() {
+        let motion = scroll_motion(0.0, 3000.0, 0.0, 100_000.0, 0.0);
+        assert!(matches!(motion, ScrollMotion::Coast { .. }), "{motion:?}");
+        for fps in [60.0_f32, 120.0] {
+            let dt = 1.0 / fps;
+            let kept = KEPT_PER_MS.powf(dt * 1000.0);
+            let mut worst = 0.0_f32;
+            for frame in 0..fps as usize {
+                let a = scroll_motion_at(motion, frame as f32 * dt);
+                let b = scroll_motion_at(motion, (frame + 1) as f32 * dt);
+                worst = worst.max((b.velocity / a.velocity - kept).abs());
+            }
+            eprintln!(
+                "{fps} fps: {kept:.5} of the speed kept a frame (0.998^{:.2}), worst {worst:.1e} off",
+                dt * 1000.0
+            );
+            assert!(worst < 1e-4, "{fps} fps: {worst} off");
+        }
+        // 0.998^1000 of it left after a second
+        let left = scroll_motion_at(motion, 1.0).velocity / 3000.0;
+        assert!((left - KEPT_PER_MS.powf(1000.0)).abs() < 1e-3, "{left} left after 1 s");
+    }
+
+    #[test]
+    fn a_flick_goes_as_far_as_the_deceleration_projects() {
+        // the distance a rate r a millisecond projects for a speed v: v / 1000 · r / (1 − r)
+        for v in [200.0_f32, 1000.0, 2500.0, -1500.0] {
+            let projected = v / 1000.0 * KEPT_PER_MS / (1.0 - KEPT_PER_MS);
+            let end = scroll_motion_at(scroll_motion(0.0, v, -100_000.0, 100_000.0, 0.0), 30.0);
+            assert!(end.done, "{v}: {end:?}");
+            let off = (end.position - projected) / projected;
+            eprintln!("{v} pt/s: went {:.1} pt, projected {projected:.1} ({:+.2}%)", end.position, off * 100.0);
+            assert!(off.abs() < 0.002, "{v}: {off}");
+        }
+    }
+
+    #[test]
+    fn a_pull_past_an_edge_shows_the_rubber_band() {
+        for d in [351.0_f32, 744.0, 1133.0] {
+            for x in [1.0_f32, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0] {
+                let want = rubber_band(x, d);
+                let past_top = -scroll_drag(0.0, -x, 0.0, 2000.0, d);
+                let past_bottom = scroll_drag(2000.0, x, 0.0, 2000.0, d) - 2000.0;
+                assert!((past_top - want).abs() <= want * 1e-4 + 1e-3, "{x} on {d}: {past_top} for {want}");
+                assert!((past_bottom - want).abs() <= want * 1e-4 + 1e-3, "{x} on {d}: {past_bottom} for {want}");
+                // the same pull in four moves ends in the same place
+                let mut at = 0.0;
+                for _ in 0..4 {
+                    at = scroll_drag(at, -x / 4.0, 0.0, 2000.0, d);
+                }
+                assert!((-at - want).abs() <= want * 1e-3 + 1e-2, "{x} on {d} in four: {} for {want}", -at);
+            }
+            // no hard stop, but never as far as the view is long
+            let far = -scroll_drag(0.0, -1e7, 0.0, 2000.0, d);
+            assert!(far > 0.99 * d && far < d, "{far} on {d}");
+            eprintln!(
+                "on {d}: pulls of 50, 100, 500 pt show {:.1}, {:.1}, {:.1}",
+                rubber_band(50.0, d),
+                rubber_band(100.0, d),
+                rubber_band(500.0, d)
+            );
+        }
+    }
+
+    #[test]
+    fn let_go_past_an_edge_the_content_keeps_the_rubber_bands_slope() {
+        // the content moves at the finger's speed times f'(x) = c·d² / (d + c·x)²
+        let d = 744.0;
+        for x in [5.0_f32, 20.0, 100.0, 400.0, 2000.0] {
+            let slope = C * d * d / ((d + C * x) * (d + C * x));
+            let got = scroll_drag_velocity(-rubber_band(x, d), -1000.0, 0.0, 2000.0, d);
+            assert!((got + 1000.0 * slope).abs() < 0.5, "{x} past: {got} for {}", -1000.0 * slope);
+        }
+        // between the ends the speed is the finger's
+        assert_eq!(scroll_drag_velocity(300.0, -1000.0, 0.0, 2000.0, d), -1000.0);
+    }
+
+    #[test]
+    fn let_go_stretched_it_springs_back_in_about_half_a_second_without_overshoot() {
+        for shown in [20.0_f32, 50.0, 120.0] {
+            let motion = scroll_motion(-shown, 0.0, 0.0, 2000.0, 0.0);
+            let steps = follow(motion);
+            for pair in steps.windows(2) {
+                let ((_, a), (_, b)) = (pair[0], pair[1]);
+                assert!((a.position..=0.0).contains(&b.position), "{shown}: {a:?} then {b:?}");
+            }
+            // half way back in 70 ms
+            let half = scroll_motion_at(motion, RETURN_HALF_LIFE as f32).position;
+            assert!((half + shown / 2.0).abs() < 0.02 * shown, "{shown}: {half} after 70 ms");
+            let near = steps.iter().find(|(_, s)| s.position > -1.0).map_or(f32::MAX, |(t, _)| *t);
+            let rest = steps[steps.len() - 1].0;
+            eprintln!("let go {shown} pt past the top: within 1 pt after {near:.3} s, at rest after {rest:.3} s");
+            assert!((0.25..=0.6).contains(&near), "{shown}: within 1 pt after {near}");
+            assert!(rest <= 0.75, "{shown}: at rest after {rest}");
+        }
+    }
+
+    #[test]
+    fn flicked_into_an_end_it_overshoots_by_its_speed_over_14e_and_comes_back() {
+        for v in [500.0_f32, 1000.0, 2000.0] {
+            let motion = scroll_motion(1900.0, v, 0.0, 2000.0, 0.0);
+            let ScrollMotion::Bounce { hit_time, hit_velocity, .. } = motion else {
+                panic!("{v}: {motion:?} doesn't reach the end");
+            };
+            let steps = follow(motion);
+            let peak = steps.iter().map(|(_, s)| s.position - 2000.0).fold(0.0, f32::max);
+            // a critically damped spring at rate k let go at the edge going v peaks at v / (k·e)
+            let expected = hit_velocity / (EDGE_RATE * core::f32::consts::E);
+            let back = steps[steps.len() - 1].0 - hit_time;
+            eprintln!("{v} pt/s, {hit_velocity:.0} at the end: overshoots {peak:.1} pt, back {back:.3} s after");
+            assert!((peak - expected).abs() < 0.01 * expected, "{v}: {peak} for {expected}");
+            assert!(back < 0.75, "{v}: back after {back}");
+        }
+    }
+
+    #[test]
+    fn a_flicked_timeline_slows_straight_onto_a_frame() {
+        let pitch = 54.0;
+        let end = pitch * 39.0;
+        let (mut glides, mut springs) = (0, 0);
+        for from in [0.0_f32, 10.0, 300.0, 1000.0, end] {
+            for v in [-2500.0_f32, -800.0, -150.0, -20.0, 20.0, 150.0, 800.0, 2500.0] {
+                let motion = scroll_motion(from, v, 0.0, end, pitch);
+                let steps = follow(motion);
+                let last = steps[steps.len() - 1].1.position;
+                assert!((last / pitch - (last / pitch).round()).abs() < 1e-4, "from {from} at {v}: ends at {last}");
+                assert!((0.0..=end).contains(&last));
+                if matches!(motion, ScrollMotion::Coast { .. }) {
+                    glides += 1;
+                    for pair in steps.windows(2) {
+                        let ((_, a), (_, b)) = (pair[0], pair[1]);
+                        assert!((b.position - a.position) * v >= 0.0, "from {from} at {v}: turned back");
+                    }
+                } else if matches!(motion, ScrollMotion::Spring { .. }) {
+                    springs += 1;
+                }
+            }
+        }
+        eprintln!("{glides} flicks glided onto their frame, {springs} sprang onto it");
+        assert!(glides > springs);
+    }
+
+    #[test]
+    #[ignore = "timing: run alone, --ignored --test-threads=1"]
+    fn sampling_a_motion_costs_well_under_a_microsecond() {
+        let motions = [
+            scroll_motion(0.0, 1500.0, 0.0, 5000.0, 0.0),
+            scroll_motion(4900.0, 1500.0, 0.0, 5000.0, 0.0),
+            scroll_motion(-40.0, 1200.0, 0.0, 5000.0, 54.0),
+            scroll_motion(-40.0, 0.0, 0.0, 5000.0, 0.0),
+        ];
+        let count = 200_000;
+        let start = std::time::Instant::now();
+        let mut sum = 0.0;
+        for i in 0..count {
+            sum += scroll_motion_at(motions[i % 4], (i % 240) as f32 / 120.0).position;
+        }
+        std::hint::black_box(sum);
+        let each = start.elapsed().as_nanos() as f64 / count as f64;
+        eprintln!("{each:.0} ns a sample");
+        // a frame samples once: 58 ns in a debug build on 2026-11-26
+        assert!(each < 2_000.0, "{each} ns a sample");
+    }
 }

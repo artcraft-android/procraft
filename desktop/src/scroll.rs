@@ -424,4 +424,28 @@ mod tests {
         assert!(after > released + 20.0);
         assert_eq!(with_flick(true), (released, after));
     }
+
+    #[test]
+    fn a_mouse_wheel_scrolls_by_its_notches_and_never_coasts() {
+        let mut show = scroll_harness(Sense::hover());
+        let wheel = |y| Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, y),
+            phase: TouchPhase::Move,
+            source: MouseWheelSource::Wheel,
+            modifiers: Modifiers::NONE,
+        };
+        show(vec![Event::PointerMoved(pos2(80.0, 80.0))]);
+        show(vec![wheel(-50.0)]);
+        // egui spreads a notch over a few frames
+        let mut settled = 0.0;
+        for _ in 0..60 {
+            settled = show(vec![]);
+        }
+        assert!((settled - 50.0).abs() < 0.5, "a 50 point notch scrolled {settled}");
+        // and nothing moves on after it
+        for _ in 0..30 {
+            assert_eq!(show(vec![]), settled);
+        }
+    }
 }
