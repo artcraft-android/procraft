@@ -229,7 +229,7 @@ struct TextureLibrary: View {
             .frame(height: 39)
             .padding(.horizontal, 19)
             .padding(.top, 40)
-            ScrollView {
+            KineticScrollView {
                 LazyVGrid(columns: Array(repeating: GridItem(.fixed(147), spacing: 53), count: 3), spacing: 18) {
                     ForEach(tiles.indices, id: \.self) { k in
                         cell(tiles[k], control)

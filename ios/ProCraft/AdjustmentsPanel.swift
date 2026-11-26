@@ -70,7 +70,7 @@ struct AdjustmentsPanel: View {
                     .padding(.leading, 24)
                     .padding(.top, 22.5)
                     .frame(height: 52, alignment: .topLeading)
-                ScrollView {
+                KineticScrollView {
                     VStack(spacing: 10) {
                         if showFilters {
                             filterRows

@@ -378,7 +378,7 @@ private struct EnvironmentPopover: View {
                     .onTapGesture { scene.setEnvironmentShown(!scene.environmentShown) }
                     ExposureSlider(value: scene.exposure) { scene.setExposure($0) }
                         .padding(.top, 10)
-                    ScrollView {
+                    KineticScrollView {
                         VStack(spacing: 0) {
                             ForEach(Array(modelEnvironments.enumerated()), id: \.offset) { i, env in
                                 if i > 0 {

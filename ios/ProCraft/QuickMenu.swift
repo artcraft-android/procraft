@@ -429,7 +429,7 @@ private struct ActionPicker: View {
                     }
                 }
                 ScrollViewReader { reader in
-                    ScrollView(.vertical, showsIndicators: false) {
+                    KineticScrollView(.vertical, showsIndicators: false) {
                         VStack(spacing: pickerRowGap) {
                             ForEach(listed.indices, id: \.self) { k in
                                 row(listed[k], on: k == blue)
@@ -567,7 +567,7 @@ private struct MenusPopover: View {
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onAdd)
                 .offset(x: pickerWidth - 30 - 22, y: 28 - 22)
-                ScrollView(.vertical, showsIndicators: false) {
+                KineticScrollView(.vertical, showsIndicators: false) {
                     VStack(spacing: pickerRowGap) {
                         ForEach(order, id: \.self) { i in
                             row(i, name: menus[i].name, swipes: menus.count > 1)

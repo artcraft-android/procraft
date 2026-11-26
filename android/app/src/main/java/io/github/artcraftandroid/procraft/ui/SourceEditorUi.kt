@@ -384,6 +384,8 @@ private fun SourceLibrary(vm: CanvasViewModel, grain: Boolean, onPick: (Int) -> 
                 horizontalArrangement = Arrangement.spacedBy(53.dp),
                 verticalArrangement = Arrangement.spacedBy(18.dp),
                 modifier = Modifier.fillMaxSize(),
+                flingBehavior = rememberScrollFling(),
+                overscrollEffect = rememberScrollEdges(),
             ) {
                 items(shown.size) { k ->
                     val (i, item) = shown[k]

@@ -3,6 +3,7 @@
 //! pad, a canvas of its own painting with the brush as it is being edited. Cancel puts the brush
 //! back as it was; Done keeps the edits.
 
+use crate::scroll::ScrollArea;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1239,7 +1240,7 @@ impl Studio {
         }
         let column = Rect::from_min_max(pos2(area.left() + 20.0, area.top()), pos2(area.right() - 20.0, area.bottom()));
         ui.scope_builder(UiBuilder::new().max_rect(column), |ui| {
-            egui::ScrollArea::vertical()
+            ScrollArea::vertical()
                 .id_salt(("studio page", self.tab))
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
@@ -2689,7 +2690,7 @@ impl Studio {
             ui.painter().add(shadow.as_shape(rect, 13.0));
             ui.painter().rect_filled(rect, 13, argb(MODE_LIST_FILL));
             ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-                let mut area = egui::ScrollArea::vertical()
+                let mut area = ScrollArea::vertical()
                     .id_salt("blend list")
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
                 if fresh {
@@ -2876,9 +2877,8 @@ mod tests {
             open
         };
         let heading = "Stroke color jitter";
-        // how far up a pen dragged 200 points up from the heading takes it, the interface told it
-        // is on a touch screen first if `told` (egui drags a list only once it has had a touch,
-        // from the frame after)
+        // How far a 200 point drag on the heading takes it, with or without a detected
+        // touch screen.
         let scrolled = |touches: bool, told: bool| {
             let mut open = open();
             if told {
@@ -2896,8 +2896,8 @@ mod tests {
         // the system's pen, which has touched before: its touches drag the page
         let by_touch = scrolled(true, true);
         assert!(by_touch > 150.0, "{by_touch}");
-        // a tablet's pen moving the mouse pointer: egui drags a list only on a touch screen
-        assert_eq!(scrolled(false, false), 0.0, "the mouse pointer alone");
+        let by_mouse = scrolled(false, false);
+        assert!(by_mouse > 150.0, "mouse drag only moved the page {by_mouse} points");
         let by_pointer = scrolled(false, true);
         assert!(by_pointer > 150.0, "{by_pointer}");
     }

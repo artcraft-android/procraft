@@ -240,7 +240,7 @@ private struct GradientCards: View {
     }
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        KineticScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .bottom, spacing: 6) {
                 ForEach(tool.gradients.indices, id: \.self) { i in
                     cardView(i)

@@ -219,7 +219,7 @@ private struct StudioPagesCard: View {
                 .lineLimit(1)
                 .padding(.leading, 24)
                 .padding(.top, 19)
-            ScrollView {
+            KineticScrollView {
                 VStack(spacing: 4) {
                     if studio.dual {
                         StudioParts(studio: studio, ui: ui, width: partListWidth, landscape: true)
@@ -691,7 +691,7 @@ private struct StudioSettings: View {
         // the rows plugins that are on add go under Properties
         let rows = studioRows(tab, plugins: tab.name == "Properties" ? model.studio.pluginControls : [])
         ScrollViewReader { reader in
-            ScrollView {
+            KineticScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
                         Group {

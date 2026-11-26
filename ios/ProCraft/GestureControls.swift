@@ -52,7 +52,7 @@ struct GestureControls: View {
     }
 
     private var rail: some View {
-        ScrollView {
+        KineticScrollView {
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(pages, id: \.self) { p in
                     let chosen = p == model.gesturePage
@@ -86,7 +86,7 @@ struct GestureControls: View {
                 .lineLimit(1)
                 .padding(.leading, 24)
                 .padding(.top, 19)
-            ScrollView {
+            KineticScrollView {
                 VStack(spacing: 3) {
                     ForEach(pages, id: \.self) { p in
                         let chosen = p == model.gesturePage
@@ -125,7 +125,7 @@ struct GestureControls: View {
         let purpose = model.gesturePage
         // the Pencil has no button to hold down, nor a second one: it double-taps and squeezes
         let options = gestureOptions(purpose: purpose).filter { !$0.secondButton && !$0.heldButton }
-        return ScrollView {
+        return KineticScrollView {
             VStack(spacing: 0) {
                 VStack(spacing: 0) {
                     ForEach(Array(options.enumerated()), id: \.offset) { i, o in

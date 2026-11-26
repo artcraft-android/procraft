@@ -550,7 +550,7 @@ private struct SearchResults: View {
                 .padding(.top, 24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else {
-            ScrollView {
+            KineticScrollView {
                 let tints = model.previewTints()
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 2), spacing: 6) {
                     ForEach(found, id: \.self) { b in
@@ -879,7 +879,7 @@ private struct SetColumn: View {
 
     var body: some View {
         ScrollViewReader { reader in
-            ScrollView {
+            KineticScrollView {
                 VStack(spacing: 0) {
                     SearchScroll(ui: ui)
                         .frame(height: 0)
@@ -959,7 +959,7 @@ private struct SearchScroll: UIViewRepresentable {
                 let taken = min(step, searchBlock - ui.searchAway, y - top)
                 ui.searchAway += taken
                 give(list, to: y - taken)
-            } else if y < top, list.isTracking, ui.searchAway > 0 {
+            } else if y < top, isKineticScrollTracking(list), ui.searchAway > 0 {
                 // pulled down past the top, the field comes back first
                 let taken = min(top - y, ui.searchAway)
                 ui.searchAway -= taken
@@ -1105,7 +1105,7 @@ private struct BrushColumn: View {
         let listed = listed
         let tints = model.previewTints()
         ScrollViewReader { reader in
-            ScrollView {
+            KineticScrollView {
                 VStack(spacing: 0) {
                     SearchScroll(ui: ui)
                         .frame(height: 0)
@@ -1672,7 +1672,7 @@ private struct LibraryMenus: View {
         let spot = kept(CGPoint(x: frame.minX - pickerInset, y: below + tall <= room ? below : rowTop - tall), CGSize(width: 250, height: tall), below: menuTop)
         let shape = RoundedRectangle(cornerRadius: 26, style: .circular)
         return ScrollViewReader { reader in
-            ScrollView {
+            KineticScrollView {
                 LazyVGrid(columns: Array(repeating: GridItem(.fixed(48), spacing: 0), count: pickerColumns), spacing: 0) {
                     ForEach(0 ..< pickedSetIcons, id: \.self) { k in
                         ZStack {

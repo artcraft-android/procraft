@@ -200,7 +200,7 @@ struct PressurePage: View {
             // its title lower than the other pages', as measured
             PageHeader(title: "Pressure & Smoothing", onBack: onBack)
                 .padding(.top, 8)
-            ScrollView {
+            KineticScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     group {
                         slide("Stabilization", settings.inputStabilization) { settings.inputStabilization = $0 }

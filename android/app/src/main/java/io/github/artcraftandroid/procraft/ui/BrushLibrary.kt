@@ -238,6 +238,8 @@ private fun SearchResults(vm: CanvasViewModel, query: String, onPick: (BrushInfo
         contentPadding = PaddingValues(start = 12.dp, top = 11.dp, end = 12.dp, bottom = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
+        flingBehavior = rememberScrollFling(),
+        overscrollEffect = rememberScrollEdges(),
     ) {
         items(found, key = { "${it.set}-${it.index}" }) { b ->
             val key = "${b.set}-${b.index}"
@@ -560,6 +562,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                 state = setsState,
                 contentPadding = PaddingValues(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
+                flingBehavior = rememberScrollFling(),
+                overscrollEffect = rememberScrollEdges(),
             ) {
                 // the brushes last painted with, and those pinned there, above the sets
                 item {
@@ -678,6 +682,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                                     columns = GridCells.Fixed(PICKER_COLUMNS),
                                     state = androidx.compose.foundation.lazy.grid.rememberLazyGridState(initialFirstVisibleItemIndex = first),
                                     modifier = look.size(250.dp, 325.dp).clip(shape).background(MenuFill).border(1.dp, MenuEdge, shape).padding(3.dp),
+                                    flingBehavior = rememberScrollFling(),
+                                    overscrollEffect = rememberScrollEdges(),
                                 ) {
                                     items(PcIcons.PICKED_SET_ICONS) { k ->
                                         val chosen = k == set.icon.toInt()
@@ -712,6 +718,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                     state = listState,
                     contentPadding = PaddingValues(start = 12.dp, top = 9.75.dp, end = 12.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(BrushGap),
+                    flingBehavior = rememberScrollFling(),
+                    overscrollEffect = rememberScrollEdges(),
                 ) {
                     items(listed, key = { (b, _) -> "${b.set}-${b.index}" }) { (b, pinned) ->
                         val key = "${b.set}-${b.index}"
@@ -1384,6 +1392,8 @@ private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier, 
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(CardGap),
                 verticalArrangement = Arrangement.spacedBy(CardGap),
+                flingBehavior = rememberScrollFling(),
+                overscrollEffect = rememberScrollEdges(),
             ) {
                 items(vm.brushLibraries.size) { i ->
                     val library = vm.brushLibraries[i]

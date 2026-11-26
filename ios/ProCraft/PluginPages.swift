@@ -29,7 +29,7 @@ struct PluginsPage: View {
                     .onTapGesture { importing = true }
                     .padding(.top, 9)
             }
-            ScrollView {
+            KineticScrollView {
                 VStack(spacing: 20) {
                     if shown.isEmpty {
                         Text(verbatim: "Nothing imported yet. Import a .procraft-plugin file to add one.")
