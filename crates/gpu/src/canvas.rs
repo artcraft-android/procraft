@@ -884,15 +884,21 @@ struct StampInstance {
 // (read as 28 floats a stamp by the shader laying stamps by their stroke's rule)
 const _: () = assert!(size_of::<StampInstance>() == 28 * 4);
 
-/// A stamp's estimated work on the canvas and the bounds of its quad.
-/// Work is higher for paint laid in place (see [`WORK_AT_ONCE`]).
-fn stamp_work(s: &StampInstance, full: IRect, in_place: bool) -> (u64, IRect) {
+/// How much work stamp `s` is on a canvas `full`: the pixels it covers there, more for one
+/// painted `in_place` (see [`WORK_AT_ONCE`]).
+fn stamp_work(s: &StampInstance, full: IRect, in_place: bool) -> u64 {
     let at = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
-    let bounds = IRect::around(at, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2);
-    let reach = bounds.intersect(full);
+    let reach = IRect::around(at, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
     let pixels = u64::from(reach.width()) * u64::from(reach.height());
-    let work = if in_place { pixels * IN_PLACE_PIXEL_WORK + IN_PLACE_STAMP_WORK } else { pixels + STAMP_WORK };
-    (work, bounds)
+    if in_place { pixels * IN_PLACE_PIXEL_WORK + IN_PLACE_STAMP_WORK } else { pixels + STAMP_WORK }
+}
+
+/// Where `stamps` reach (canvas pixels, as [`stamp_work`] counts them): where they show.
+fn stamps_reach(stamps: &[StampInstance]) -> IRect {
+    stamps.iter().fold(IRect::EMPTY, |r, s| {
+        let at = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+        r.union(IRect::around(at, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2))
+    })
 }
 
 /// A stamp's (alpha, transfer) as its instance takes them: a capped stroke keeps its transfer
@@ -1167,7 +1173,7 @@ impl Carried {
         let mut runs = Vec::new();
         let (mut from, mut begins) = (0, false);
         for (k, s) in instances.iter().enumerate() {
-            let (more, _) = stamp_work(s, full, false);
+            let more = stamp_work(s, full, false);
             if self.count > 0 && (self.work.saturating_add(more) > most || self.count >= most_stamps) {
                 if k > from {
                     runs.push((from..k, begins));
@@ -4701,6 +4707,7 @@ impl Canvas {
     /// Takes the tip off the open stroke.
     fn untip(&mut self) {
         if let Some(rect) = self.tip.take() {
+            self.dirty = self.dirty.union(rect);
             self.ops.push(Op::Untip(rect));
         }
     }
@@ -4819,9 +4826,7 @@ impl Canvas {
                 }
             })
             .collect();
-        if style.in_place() && !second {
-            self.dirty = self.dirty.union(bounds);
-        }
+        self.dirty = self.dirty.union(bounds);
         self.stamps_queued += instances.len() as u64;
         if !instances.is_empty() || clear {
             let pencil = active.pencil;
@@ -7207,16 +7212,10 @@ impl Canvas {
             if !joins {
                 self.synthesize_due(gpu, &mut encoder, &mut smudge_uniforms);
             }
-            let (work, stamp_bounds) = match &op {
-                Op::Stamps { instances, style, second, .. } => {
-                    stamps_work(instances, full, style.in_place() && !second)
-                }
-                _ => (0, IRect::EMPTY),
-            };
-            if let (Some(until), Op::Stamps { style, second, .. }) = (relay_until, &op) {
+            if let (Some(until), Op::Stamps { instances, style, second, .. }) = (relay_until, &op) {
                 // (paint laid in place keeps to its own pace, see `in_place_most`)
                 let dry = !style.in_place() || *second;
-                let work = if dry { work } else { 0 };
+                let work = if dry { stamps_work(instances, full, false) } else { 0 };
                 if relaid && (std::time::Instant::now() >= until || relay_laid.saturating_add(work) > relay_most) {
                     let rest: Vec<Op> = std::iter::once(op).chain(ops.by_ref()).collect();
                     self.hold_or_catch_up(&rest, true);
@@ -7225,9 +7224,10 @@ impl Canvas {
                 }
                 relay_laid = relay_laid.saturating_add(work);
             }
-            if let Op::Stamps { style, second: false, pencil: false, .. } = &op
+            if let Op::Stamps { instances, style, second: false, pencil: false, .. } = &op
                 && style.in_place()
             {
+                let work = stamps_work(instances, full, true);
                 let ms = in_place_rate.map_or(0.0, |rate| work as f64 / rate);
                 let past_own = in_place_laid > 0 && in_place_laid.saturating_add(work) > in_place_most;
                 let past_both = spent_ms > 0.0
@@ -7242,9 +7242,10 @@ impl Canvas {
                 in_place_laid = in_place_laid.saturating_add(work);
                 spent_ms += ms;
             }
-            if let Op::Stamps { style, second, .. } = &op
+            if let Op::Stamps { instances, style, second, .. } = &op
                 && (!style.in_place() || *second)
             {
+                let work = stamps_work(instances, full, false);
                 let ms = dry_rate.map_or(0.0, |rate| work as f64 / rate);
                 let past_own = dry_laid > 0 && dry_laid.saturating_add(work) > dry_most;
                 let past_both =
@@ -7282,7 +7283,8 @@ impl Canvas {
             }
             // what is recorded goes first if this would make it too much for one piece, or (laying
             // a stroke again) once it has taken a while to record, so the GPU starts on it
-            if matches!(op, Op::Stamps { .. }) {
+            if let Op::Stamps { instances, style, second, .. } = &op {
+                let work = stamps_work(instances, self.full(), style.in_place() && !second);
                 let due = relay_until.is_some() && self.relay_paced && relay_sent_at.elapsed() >= RELAY_SEND_EVERY;
                 if recorded > 0 && (recorded.saturating_add(work) > self.work_at_once || due) {
                     self.send_piece(gpu, &mut encoder, (&mut uniforms, &mut smudge_uniforms, &mut wet_uniforms));
@@ -7355,11 +7357,14 @@ impl Canvas {
                     self.clear_built_up(&mut encoder, texture);
                 }
                 Op::Stamps { instances, wet, times, style, clear, pencil, second, carry, .. } => {
-                    // A later frame may draw these stamps. Refresh their rectangle when they land.
-                    self.dirty = self.dirty.union(stamp_bounds.intersect(full));
                     let count = u32::try_from(instances.len()).unwrap_or(u32::MAX);
                     let first = next_instance;
                     next_instance = next_instance.saturating_add(count);
+                    // shown where they reach in this render's composite: held back from the render
+                    // that queued them (a frame's share at a time, see `DRY_FRAME_MS`), they come
+                    // after the composite there was made again without them
+                    let reach = stamps_reach(&instances);
+                    self.dirty = self.dirty.union(reach.intersect(full));
                     let (grain, grain_scale, grain_depth) =
                         style.moving_grain().map_or((-1, 1.0, 0.0), |(g, s, d)| (g as i32, s, d));
                     let own_grain = self.full_grain_bind(device, &style);
@@ -7486,12 +7491,11 @@ impl Canvas {
                     // both, it comes out the same, nothing reading what it puts together), or where
                     // it went before the paint began as the stroke ends
                     if second {
+                        let rect = reach;
                         match self.smudge.as_ref().filter(|s| s.apart.is_some()) {
-                            Some(_) if self.joins_synthesis => {
-                                self.synthesis_due = self.synthesis_due.union(stamp_bounds)
-                            }
-                            Some(_) => self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, stamp_bounds),
-                            None => self.second_unsynthesized = self.second_unsynthesized.union(stamp_bounds),
+                            Some(_) if self.joins_synthesis => self.synthesis_due = self.synthesis_due.union(rect),
+                            Some(_) => self.synthesize(gpu, &mut encoder, &mut smudge_uniforms, rect),
+                            None => self.second_unsynthesized = self.second_unsynthesized.union(rect),
                         }
                     }
                 }
@@ -7583,7 +7587,6 @@ impl Canvas {
                     self.save_tip_built_up(gpu, &mut encoder, rect);
                 }
                 Op::Untip(rect) => {
-                    self.dirty = self.dirty.union(rect);
                     if let Some(backup) = &self.tip_backup {
                         gpu.copy_texture_to_texture(
                             &mut encoder,
@@ -13900,12 +13903,9 @@ fn relay_budget(work: u64, after: f64) -> u64 {
     }
 }
 
-/// The work of a batch of stamps and the rectangle they cover.
-fn stamps_work(stamps: &[StampInstance], full: IRect, in_place: bool) -> (u64, IRect) {
-    stamps.iter().fold((0u64, IRect::EMPTY), |(work, bounds), s| {
-        let (more, reach) = stamp_work(s, full, in_place);
-        (work.saturating_add(more), bounds.union(reach))
-    })
+/// The work of `stamps` on a canvas `full` (see [`stamp_work`]).
+fn stamps_work(stamps: &[StampInstance], full: IRect, in_place: bool) -> u64 {
+    stamps.iter().fold(0, |work, s| work.saturating_add(stamp_work(s, full, in_place)))
 }
 
 /// `ops` with stamps of more work than `most` (the first for paint laid in place, the second for
@@ -13931,7 +13931,7 @@ fn in_pieces(ops: Vec<Op>, full: IRect, (in_place_most, most, cut_most): (u64, u
         let mut counts = Vec::new();
         let (mut count, mut work) = (0usize, 0u64);
         for s in &instances {
-            let (more, _) = stamp_work(s, full, in_place);
+            let more = stamp_work(s, full, in_place);
             if count > 0 && (work.saturating_add(more) > most || count as u64 >= most_stamps) {
                 counts.push(count);
                 (count, work) = (0, 0);
