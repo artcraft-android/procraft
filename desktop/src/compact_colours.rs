@@ -70,7 +70,7 @@ impl CompactColours {
     /// How tall the mode shown's picker is.
     fn body_height(&self) -> f32 {
         match self.mode {
-            Mode::Disc => 4.0 + 240.0 + 6.0,
+            Mode::Disc | Mode::Sphere => 4.0 + 240.0 + 6.0,
             Mode::Classic => 248.0 + 40.0,
             Mode::Harmony => 10.0 + 200.0 + 8.0 + 36.0,
             Mode::Value => 36.0 + 6.0 + 188.0 + 6.0 + 44.0 + 10.0,
@@ -153,7 +153,7 @@ impl CompactColours {
         p3: bool,
     ) -> Rect {
         match self.mode {
-            Mode::Disc => {
+            Mode::Disc | Mode::Sphere => {
                 let disc = Rect::from_min_size(pos2(left + 10.0, top + 4.0), vec2(240.0, 240.0));
                 self.pickers.disc(ui, &mut self.hsv, disc);
             }
@@ -181,7 +181,7 @@ impl CompactColours {
 
     /// The modes as icons at `rect` (260 by [`TABS`]); a tap shows that mode.
     pub fn tabs(&mut self, ui: &Ui, look: &mut Look, rect: Rect) {
-        if let Some(mode) = tabs_row(ui, look, rect, self.mode) {
+        if let Some(mode) = tabs_row(ui, look, rect, self.mode, false) {
             self.mode = mode;
             self.hex = None;
         }
@@ -245,10 +245,11 @@ impl CompactColours {
 }
 
 /// The modes as a row of icons, the one shown blue; returns the one tapped.
-pub(crate) fn tabs_row(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode) -> Option<Mode> {
-    let w = rect.width() / colours::MODE_TABS.len() as f32;
+pub(crate) fn tabs_row(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode, sphere: bool) -> Option<Mode> {
+    let tabs = colours::available_tabs(sphere);
+    let w = rect.width() / tabs.clone().count() as f32;
     let mut chosen = None;
-    for (i, (icon, _, m)) in colours::MODE_TABS.into_iter().enumerate() {
+    for (i, (icon, _, m)) in tabs.enumerate() {
         let tab = Rect::from_min_size(pos2(rect.left() + w * i as f32, rect.top()), vec2(w, rect.height()));
         if ui.interact(tab, ui.scope_id().with(("compact tab", i)), Sense::click()).clicked() {
             chosen = Some(m);

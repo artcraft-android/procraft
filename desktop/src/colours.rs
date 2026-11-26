@@ -8,9 +8,9 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui
 use std::sync::Arc;
 
 use procraft_core::{
-    CanvasSession, ColourHistory, ColourModel, ColourPlace, HueControl, KeptColours, Palettes, Plugins, SLIDER_HUES,
-    colours_in_p3, harmony_wheel, hue_at, hue_position, oklab_of, oklab_slid, oklab_to_rgb, oklab_tracks, p3_hsv_of,
-    p3_hsv_to_rgb,
+    CanvasSession, ColourHistory, ColourModel, ColourPlace, ColourSphere, HueControl, KeptColours, Palettes, Plugins,
+    SLIDER_HUES, SphereSnap, SphereTone, colours_in_p3, harmony_wheel, hue_at, hue_position, oklab_of, oklab_slid,
+    oklab_to_rgb, oklab_tracks, p3_hsv_of, p3_hsv_to_rgb,
 };
 
 use crate::colour_drop::{ColourDrop, Touch};
@@ -28,6 +28,12 @@ const RING_OUTER: f32 = 182.0;
 const RING_INNER: f32 = 124.0;
 const DISC_RADIUS: f32 = 105.0;
 const PICKER: f32 = 364.0;
+const SPHERE_MODE_HEIGHT: f32 = 44.0;
+const SPHERE_TONE_HEIGHT: f32 = 52.0;
+const SPHERE_CONTROL_GAP: f32 = 6.0;
+const SPHERE_SLIDER_HEIGHT: f32 = 48.0;
+const SPHERE_TONES: [(SphereTone, &str); 3] =
+    [(SphereTone::Shadow, "Shadow"), (SphereTone::Midtone, "Midtone"), (SphereTone::Highlight, "Highlight")];
 const SWATCH_EDGE: Themed = Themed(0xFF5A5A5A, 0xFFC0C0C0);
 const MODEL_BUTTON: Themed = Themed(0xFF3A3A3A, 0xFFDCDCDC);
 const GRABBER: Themed = Themed(0x7AC6C6C6, 0xFFB0B0B0);
@@ -196,6 +202,7 @@ pub enum Mode {
     Harmony,
     Value,
     Palettes,
+    Sphere,
 }
 
 /// Which colours go with the colour in Harmony: the hues turned from it (degrees).
@@ -258,6 +265,10 @@ pub struct Colours {
     /// The palettes, kept by the shared core (the default one shows here).
     pub palettes: Arc<Palettes>,
     pickers: Pickers,
+    sphere: Option<Arc<ColourSphere>>,
+    sphere_edit: Option<(SphereTone, [f32; 3])>,
+    sphere_enabled: bool,
+    sphere_generation: Option<u64>,
     /// The mode shown.
     pub mode: Mode,
     pub harmony: HarmonyKind,
@@ -349,6 +360,10 @@ impl Default for Colours {
             before_shown: false,
             before: None,
             mode: Mode::default(),
+            sphere: None,
+            sphere_edit: None,
+            sphere_enabled: false,
+            sphere_generation: None,
             harmony: HarmonyKind::default(),
             harmony_menu: crate::menu::Menu::default(),
             hex: None,
@@ -419,6 +434,69 @@ impl Colours {
         changed
     }
 
+    fn sphere_controls_height(&self) -> f32 {
+        let custom = self.sphere.as_ref().is_some_and(|sphere| sphere.custom_enabled());
+        SPHERE_MODE_HEIGHT
+            + 2.0 * SPHERE_CONTROL_GAP
+            + if custom { SPHERE_TONE_HEIGHT + SPHERE_CONTROL_GAP } else { 0.0 }
+    }
+
+    /// The sphere and its controls take the same space while choosing or editing a tone.
+    fn sphere_picker(&mut self, ui: &Ui, square: Rect, controls_height: f32) -> bool {
+        let model = self.model();
+        let mut coords = self.model_coords();
+        let current = to_hex(self.rgb());
+        let sphere = self.sphere.get_or_insert_with(|| ColourSphere::new(model, coords[0])).clone();
+        self.sphere_controls(ui, square, &sphere);
+        let rect = square.translate(vec2(0.0, controls_height));
+        if let Some((tone, hsv)) = &mut self.sphere_edit {
+            if self.pickers.sphere_editor(ui, rect, &sphere, *tone, hsv) {
+                self.sphere_edit = None;
+            }
+            return false;
+        }
+        let picked = self.pickers.round_picker(ui, &mut coords, rect, Some((&sphere, current)));
+        if let Some(rgb) = picked {
+            take_rgb(&mut self.hsv, rgb);
+        }
+        to_hex(self.rgb()) != current
+    }
+
+    fn sphere_controls(&mut self, ui: &Ui, rect: Rect, sphere: &ColourSphere) {
+        let custom = sphere.custom_enabled();
+        let top = rect.top() + SPHERE_CONTROL_GAP;
+        let modes = Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), SPHERE_MODE_HEIGHT));
+        for (i, (on, label)) in [(false, "Single hue"), (true, "Custom")].into_iter().enumerate() {
+            if sphere_button(ui, sphere_control_cell(modes, i, 2), label, custom == on, None) && custom != on {
+                sphere.set_custom_enabled(self.model(), on);
+                self.sphere_edit = None;
+                self.pickers.sphere_snap = None;
+                ui.ctx().request_repaint();
+            }
+        }
+        if custom {
+            let tones = Rect::from_min_size(
+                pos2(rect.left(), modes.bottom() + SPHERE_CONTROL_GAP),
+                vec2(rect.width(), SPHERE_TONE_HEIGHT),
+            );
+            for (i, (tone, label)) in SPHERE_TONES.into_iter().enumerate() {
+                if let Some(rgb) = sphere.tone_rgb(tone)
+                    && sphere_button(
+                        ui,
+                        sphere_control_cell(tones, i, 3),
+                        label,
+                        self.sphere_edit.is_some_and(|(at, _)| at == tone),
+                        Some(rgb),
+                    )
+                {
+                    self.sphere_edit = Some((tone, rgb_to_hsv(of_hex(rgb))));
+                    self.pickers.sphere_snap = None;
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+    }
+
     /// Whether Classic's picker (a picker plugin's) has the hue on a ring of its own, in place of
     /// the hue slider.
     pub(crate) fn hue_ringed(&self) -> bool {
@@ -446,6 +524,19 @@ impl Colours {
     pub fn set_floating_look(&mut self, plugins: &Plugins) {
         self.floating_scale = plugins.interface_part_scale(procraft_core::InterfacePart::Floating);
         self.floating_picker_only = plugins.floating_picker_only();
+    }
+
+    pub fn follow_sphere_plugin(&mut self, plugins: &Plugins) {
+        let generation = plugins.generation();
+        if self.sphere_generation == Some(generation) {
+            return;
+        }
+        self.sphere_enabled = plugins.colour_sphere();
+        self.sphere_generation = Some(generation);
+        if !self.sphere_enabled && self.mode == Mode::Sphere {
+            self.mode = Mode::Disc;
+            self.scrolled = 0.0;
+        }
     }
 
     /// Classic's square in `rect`, in the colour model; whether it changed the colour.
@@ -621,6 +712,10 @@ impl Colours {
     /// another colour than it opened on, that one is the previous colour.
     pub fn panel_shown(&mut self, docked: bool) {
         let shown = docked || self.floating.is_some();
+        if !shown || self.mode != Mode::Sphere {
+            self.pickers.sphere_snap = None;
+            self.sphere_edit = None;
+        }
         self.history.panel_shown(shown, to_hex(self.rgb()), self.on_mask);
         // the colour as it opened, while it is open
         self.before = if shown { self.before.or(Some(to_hex(self.rgb()))) } else { None };
@@ -695,17 +790,18 @@ impl Colours {
         let header = match self.mode {
             Mode::Harmony => HEADER_HEIGHT + 14.0,
             // short, the disc reaches up into the header's last 7
-            Mode::Disc if short => HEADER_HEIGHT - 7.0,
+            Mode::Disc | Mode::Sphere if short => HEADER_HEIGHT - 7.0,
             _ => HEADER_HEIGHT,
         };
+        let lighting_height = if self.mode == Mode::Sphere { self.sphere_controls_height() } else { 0.0 };
         let picker_height = match self.mode {
-            Mode::Disc if short => PICKER + 3.0 + self.luma_sliders_height(),
-            Mode::Disc => 8.0 + PICKER + 17.0 + self.luma_sliders_height(),
+            Mode::Disc | Mode::Sphere if short => PICKER + 3.0 + self.luma_sliders_height(),
+            Mode::Disc | Mode::Sphere => 8.0 + PICKER + 17.0 + self.luma_sliders_height(),
             Mode::Palettes => 8.0 + PICKER + 17.0,
             Mode::Classic => shape.square + SLIDER_ROW * 3.0,
             Mode::Harmony => shape.harmony_top + shape.harmony_radius * 2.0 + shape.harmony_gap + SLIDER_ROW,
             Mode::Value => shape.value_group * 2.0 + 6.0 + 6.0 + 44.0 + if short { 2.0 } else { 0.0 },
-        };
+        } + lighting_height;
         let bottom = match (short, history) {
             (false, _) => 80.0 + 44.0 + 108.0,
             (true, true) => 44.0 + 36.0,
@@ -818,14 +914,21 @@ impl Colours {
             };
             match self.mode {
                 Mode::Palettes => self.palettes_view(ui, look, session, body, top, shape.palette_list),
-                Mode::Disc => {
+                Mode::Disc | Mode::Sphere => {
                     let at = pos2(body.left() + 6.0, top + if short { 0.0 } else { 8.0 });
                     let picker = Rect::from_min_size(at, vec2(PICKER, PICKER));
-                    if self.model_disc(ui, picker) {
+                    let changed = if self.mode == Mode::Sphere {
+                        self.sphere_picker(ui, picker, lighting_height)
+                    } else {
+                        self.model_disc(ui, picker)
+                    };
+                    if changed {
                         self.send(session);
                     }
                     // HSY′: its saturation and luma on sliders under the wheel
-                    if self.model() == ColourModel::Hsy && self.luma_sliders(ui, body, picker.bottom() + 4.0) {
+                    if self.model() == ColourModel::Hsy
+                        && self.luma_sliders(ui, body, picker.bottom() + lighting_height + 4.0)
+                    {
                         self.send(session);
                     }
                 }
@@ -903,7 +1006,7 @@ impl Colours {
             }
             ui.set_clip_rect(clip);
             let tabs = Rect::from_min_max(pos2(body.left(), body.bottom() - 70.0), body.max);
-            if let Some(mode) = mode_tabs(ui, look, tabs, self.mode) {
+            if let Some(mode) = mode_tabs(ui, look, tabs, self.mode, self.sphere_enabled) {
                 self.mode = mode;
                 self.hex = None;
                 self.scrolled = 0.0;
@@ -976,7 +1079,17 @@ impl Colours {
                 let id = ui.scope_id().with(("palette swatch", slot));
                 match rgb {
                     Some(c) => match drop.source(ui, session, id, cell, c, true, Some(panel)) {
-                        Some(Touch::Tap) => self.set_rgb(session, c),
+                        Some(Touch::Tap) => {
+                            self.set_rgb(session, c);
+                            if self.mode == Mode::Sphere
+                                && let Some(sphere) = &self.sphere
+                            {
+                                sphere.set_base_swatch(self.model(), c);
+                                self.sphere_edit = None;
+                                self.pickers.sphere_snap = None;
+                                ui.ctx().request_repaint();
+                            }
+                        }
                         Some(Touch::Hold) => self.palettes.set_swatch(index, slot, None),
                         Some(Touch::Dragged) | None => {}
                     },
@@ -1055,6 +1168,30 @@ impl Colours {
     }
 }
 
+fn sphere_control_cell(row: Rect, index: usize, count: usize) -> Rect {
+    let gap = SPHERE_CONTROL_GAP;
+    let width = (row.width() - gap * (count - 1) as f32) / count as f32;
+    Rect::from_min_size(pos2(row.left() + (width + gap) * index as f32, row.top()), vec2(width, row.height()))
+}
+
+fn sphere_button(ui: &Ui, rect: Rect, label: &str, selected: bool, rgb: Option<u32>) -> bool {
+    let button = ui.interact(rect, ui.scope_id().with(("sphere control", label)), Sense::click());
+    button.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
+    let fill = if selected && rgb.is_none() { argb(pc::ACCENT) } else { argb(SET_CELL) };
+    ui.painter().rect_filled(rect, 9, fill);
+    if let Some(rgb) = rgb {
+        if selected {
+            ui.painter().rect_stroke(rect, 9, egui::Stroke::new(2.0, argb(pc::ACCENT)), egui::StrokeKind::Inside);
+        }
+        let swatch = Rect::from_min_size(pos2(rect.left() + 8.0, rect.top() + 7.0), vec2(rect.width() - 16.0, 21.0));
+        ui.painter().rect_filled(swatch, 5, srgb(of_hex(rgb)));
+    }
+    let at = if rgb.is_some() { pos2(rect.center().x, rect.bottom() - 12.0) } else { rect.center() };
+    let ink = if selected && rgb.is_none() { Color32::WHITE } else { argb(PANEL_TITLE) };
+    text(ui.painter(), at, Align2::CENTER_CENTER, label, 13.0, Weight::SemiBold, ink);
+    button.clicked()
+}
+
 /// The pictures the pickers draw with, kept while they still fit, and what a drag on the disc
 /// moves. Each set of pickers (the panel's, a compact picker's) has its own.
 #[derive(Default)]
@@ -1065,6 +1202,9 @@ pub struct Pickers {
     /// it shows).
     disc: Option<(u32, usize, ColourModel, TextureHandle)>,
     ring: Option<(usize, ColourModel, TextureHandle)>,
+    sphere_picture: Option<(ColourModel, u32, TextureHandle)>,
+    sphere_snap: Option<(SphereSnap, ColourModel, f64)>,
+    sphere_ring_turn: Option<f32>,
     /// What a drag that started on the disc picker, or on a picker plugin's Classic, moves: the hue
     /// on a ring (true), or the rest.
     on_ring: Option<bool>,
@@ -1085,23 +1225,118 @@ pub struct Pickers {
 }
 
 impl Pickers {
+    fn sphere_texture(&mut self, ctx: &egui::Context, sphere: &ColourSphere) -> egui::TextureId {
+        let model = self.model;
+        let revision = sphere.picture_revision();
+        if let Some((at, old, texture)) = &mut self.sphere_picture {
+            if *at != model || *old != revision {
+                texture.set(picture_image(&sphere.picture(model)), TextureOptions::LINEAR);
+                *at = model;
+                *old = revision;
+            }
+            return texture.id();
+        }
+        let image = picture_image(&sphere.picture(model));
+        let texture = ctx.load_texture("colour sphere", image, TextureOptions::LINEAR);
+        let id = texture.id();
+        self.sphere_picture = Some((model, revision, texture));
+        id
+    }
+
+    fn sphere_editor(
+        &mut self,
+        ui: &Ui,
+        rect: Rect,
+        sphere: &ColourSphere,
+        tone: SphereTone,
+        hsv: &mut [f32; 3],
+    ) -> bool {
+        let done = Rect::from_min_size(pos2(rect.right() - 68.0, rect.top() + 6.0), vec2(62.0, 44.0));
+        let slider_top = rect.bottom() - 3.0 * SPHERE_SLIDER_HEIGHT - 6.0;
+        for (i, ((value, colours), label)) in
+            classic_tracks(ColourModel::Hsb, *hsv).into_iter().zip(["Hue", "Saturation", "Brightness"]).enumerate()
+        {
+            let top = slider_top + i as f32 * SPHERE_SLIDER_HEIGHT;
+            let slider = Rect::from_min_max(
+                pos2(rect.left() + 86.0, top),
+                pos2(rect.right() - 12.0, top + SPHERE_SLIDER_HEIGHT),
+            );
+            text(
+                ui.painter(),
+                pos2(rect.left() + 12.0, slider.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                13.0,
+                Weight::Regular,
+                argb(PANEL_TITLE),
+            );
+            if let Some(value) = slider_row(ui, slider, ("sphere tone", tone, i), value, &colours)
+                && let Some(channel) = hsv.get_mut(i)
+            {
+                *channel = if i == 0 { hue_at(HueControl::Slider, value) } else { value };
+                sphere.set_tone_rgb(tone, to_hex(hsv_to_rgb(*hsv)));
+            }
+        }
+        let preview_top = rect.top() + 6.0;
+        let side = (slider_top - preview_top - 6.0).min(rect.width() * 0.46);
+        let face = Rect::from_center_size(pos2(rect.center().x, (preview_top + slider_top) * 0.5), vec2(side, side));
+        ui.painter().image(
+            self.sphere_texture(ui.ctx(), sphere),
+            face,
+            Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        sphere_button(ui, done, "Done", true, None)
+    }
+
     /// The disc picker in `rect` (364 square, or smaller and scaled alike): a hue ring (radii 124
     /// to 182, its hues running anticlockwise from the right) round the saturation/brightness disc
     /// (radius 105). Returns whether it changed `hsv`.
     pub fn disc(&mut self, ui: &Ui, hsv: &mut [f32; 3], rect: Rect) -> bool {
+        let before = *hsv;
+        self.round_picker(ui, hsv, rect, None);
+        *hsv != before
+    }
+
+    fn round_picker(
+        &mut self,
+        ui: &Ui,
+        hsv: &mut [f32; 3],
+        rect: Rect,
+        sphere: Option<(&ColourSphere, u32)>,
+    ) -> Option<u32> {
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let k = rect.width() / PICKER;
         let (disc_radius, ring_inner, ring_outer) = (DISC_RADIUS * k, RING_INNER * k, RING_OUTER * k);
         let centre = rect.center();
-        let before = *hsv;
-        let response = ui.interact(rect, ui.scope_id().with("disc"), Sense::click_and_drag());
+        let model = self.model;
+        let mut picked = None;
+        let response = ui.interact(rect, ui.scope_id().with(("disc", sphere.is_some())), Sense::click_and_drag());
         if let Some(p) = response.interact_pointer_pos() {
+            self.sphere_snap = None;
             let d = p - centre;
             let ring = *self.on_ring.get_or_insert(d.length() > (disc_radius + ring_inner) / 2.0);
             if ring {
                 let turn = ((-d.y).atan2(d.x) / std::f32::consts::TAU + 1.0) % 1.0;
-                hsv[0] = self.model.ring_hue(turn);
+                let hue = model.ring_hue(turn);
+                if let Some((sphere, _)) = sphere {
+                    if sphere.custom_enabled() {
+                        if let Some(previous) = self.sphere_ring_turn.replace(turn) {
+                            sphere.rotate_hues(turn - previous);
+                        }
+                    } else {
+                        sphere.set_hue(model, hue);
+                    }
+                } else {
+                    hsv[0] = hue;
+                }
+            } else if let Some((sphere, _)) = sphere {
+                let (x, y) = (d.x / disc_radius, d.y / disc_radius);
+                picked = sphere.sample(model, x, y).map(|sample| sample.rgb);
+                if response.double_clicked() {
+                    self.sphere_snap = sphere.snap(model, x, y).map(|snap| (snap, model, ctx.input(|i| i.time)));
+                }
             } else {
                 // (HSY′'s disc is Krita's wheel: hue round it and saturation out, worked out on
                 // linear light at the colour's luma; the ring and sliders on the encoded values)
@@ -1110,42 +1345,66 @@ impl Pickers {
         }
         if !response.is_pointer_button_down_on() {
             self.on_ring = None;
+            self.sphere_ring_turn = None;
+        }
+        if let Some((sphere, current)) = sphere
+            && let Some((snap, at_model, started)) = self.sphere_snap.take()
+            && at_model == model
+            && sphere.marker(model).is_some_and(|sample| sample.rgb == picked.unwrap_or(current))
+        {
+            let elapsed_ms = ((ctx.input(|i| i.time) - started) * 1000.0) as f32;
+            picked = sphere.sample_snap(model, snap, elapsed_ms).map(|sample| sample.rgb);
+            if elapsed_ms < snap.duration_ms as f32 {
+                self.sphere_snap = Some((snap, model, started));
+                ctx.request_repaint();
+            }
         }
         // the ring, drawn once for its size
         let side = (rect.width() * ppp).round() as usize;
-        let model = self.model;
         if self.ring.as_ref().is_none_or(|(at, m, _)| *at != side || *m != model) {
             let image = ring_image(side, ppp * k, model);
             self.ring = Some((side, model, ctx.load_texture("hue ring", image, TextureOptions::LINEAR)));
         }
-        // the disc is drawn for its hue (HSY′'s, all hues, for its linear luma)
-        let hue_key = model.disc_key(*hsv);
-        let disc_side = (disc_radius * 2.0 * ppp).round() as usize;
-        if self.disc.as_ref().is_none_or(|(h, at, m, _)| *h != hue_key || *at != disc_side || *m != model) {
-            let image = picture_image(&model.disc_picture(*hsv, disc_side as u32));
-            self.disc =
-                Some((hue_key, disc_side, model, ctx.load_texture("colour disc", image, TextureOptions::LINEAR)));
-        }
+        let hue = sphere.map_or(hsv[0], |(sphere, _)| sphere.hue(model));
+        let center_texture = if let Some((sphere, _)) = sphere {
+            Some(self.sphere_texture(&ctx, sphere))
+        } else {
+            // The disc is drawn for its hue (HSY′'s, all hues, for its linear luma).
+            let hue_key = model.disc_key(*hsv);
+            let disc_side = (disc_radius * 2.0 * ppp).round() as usize;
+            if self.disc.as_ref().is_none_or(|(h, at, m, _)| *h != hue_key || *at != disc_side || *m != model) {
+                let image = picture_image(&model.disc_picture(*hsv, disc_side as u32));
+                self.disc =
+                    Some((hue_key, disc_side, model, ctx.load_texture("colour disc", image, TextureOptions::LINEAR)));
+            }
+            self.disc.as_ref().map(|(_, _, _, texture)| texture.id())
+        };
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         let painter = ui.painter();
         if let Some((_, _, t)) = &self.ring {
             painter.image(t.id(), rect, uv, Color32::WHITE);
         }
-        if let Some((_, _, _, t)) = &self.disc {
+        if let Some(texture) = center_texture {
             painter.image(
-                t.id(),
+                texture,
                 Rect::from_center_size(centre, vec2(disc_radius * 2.0, disc_radius * 2.0)),
                 uv,
                 Color32::WHITE,
             );
         }
         // the ring's knob sits on the middle of the ring, where the hue is
-        let turn = model.ring_turn(hsv[0]) * std::f32::consts::TAU;
+        let turn = model.ring_turn(hue) * std::f32::consts::TAU;
         let mid = (ring_inner + ring_outer) / 2.0;
-        knob(ui, centre + vec2(turn.cos() * mid, -turn.sin() * mid), 26.2 * k, srgb(model.pure(hsv[0])));
-        let [x, y] = model.disc_point(*hsv);
-        knob(ui, centre + vec2(x, y) * disc_radius, 10.75, srgb(model.to_rgb(*hsv)));
-        *hsv != before
+        knob(ui, centre + vec2(turn.cos() * mid, -turn.sin() * mid), 26.2 * k, srgb(model.pure(hue)));
+        if let Some((sphere, current)) = sphere {
+            if let Some(sample) = sphere.marker(model).filter(|sample| sample.rgb == picked.unwrap_or(current)) {
+                knob(ui, centre + vec2(sample.x, sample.y) * disc_radius, 10.75, srgb(of_hex(sample.rgb)));
+            }
+        } else {
+            let [x, y] = model.disc_point(*hsv);
+            knob(ui, centre + vec2(x, y) * disc_radius, 10.75, srgb(model.to_rgb(*hsv)));
+        }
+        picked
     }
 
     /// Classic's saturation/brightness square in `square` (rounded 10), saturation across and
@@ -2215,19 +2474,25 @@ pub(crate) fn paint_row(
 }
 
 /// The modes, as their tabs list them.
-pub(crate) const MODE_TABS: [(&icons::Icon, &str, Mode); 5] = [
+const MODE_TABS: [(&icons::Icon, &str, Mode); 6] = [
     (&icons::MODE_DISC, "Disc", Mode::Disc),
     (&icons::MODE_CLASSIC, "Classic", Mode::Classic),
     (&icons::MODE_HARMONY, "Harmony", Mode::Harmony),
+    (&icons::MODE_SPHERE, "Sphere", Mode::Sphere),
     (&icons::MODE_VALUE, "Value", Mode::Value),
     (&icons::MODE_PALETTES, "Palettes", Mode::Palettes),
 ];
 
+pub(crate) fn available_tabs(sphere: bool) -> impl Iterator<Item = (&'static icons::Icon, &'static str, Mode)> + Clone {
+    MODE_TABS.into_iter().filter(move |(_, _, mode)| sphere || *mode != Mode::Sphere)
+}
+
 /// The mode tabs: Disc, Classic, Harmony, Value and Palettes.
-fn mode_tabs(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode) -> Option<Mode> {
-    let w = rect.width() / MODE_TABS.len() as f32;
+fn mode_tabs(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode, sphere: bool) -> Option<Mode> {
+    let tabs = available_tabs(sphere);
+    let w = rect.width() / tabs.clone().count() as f32;
     let mut chosen = None;
-    for (i, (icon, label, m)) in MODE_TABS.into_iter().enumerate() {
+    for (i, (icon, label, m)) in tabs.enumerate() {
         let selected = m == mode;
         let tab = Rect::from_min_size(pos2(rect.left() + w * i as f32, rect.top()), vec2(w, rect.height()));
         if ui.interact(tab, ui.scope_id().with(("mode tab", i)), Sense::click()).clicked() {
@@ -2347,6 +2612,104 @@ pub fn rgb_to_hsv([r, g, b]: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_sphere_lighting_uses_full_touch_targets_and_edits_inline() {
+        use egui::{Event, Modifiers, PointerButton, RawInput, TouchDeviceId, TouchId, TouchPhase};
+        let ctx = egui::Context::default();
+        crate::look::install_fonts(&ctx);
+        let mut colours = Colours::default();
+        let square = Rect::from_min_size(pos2(12.0, 8.0), vec2(240.0, 240.0));
+        let mut time = 0.0;
+        let mut frame = |colours: &mut Colours, pos, press| {
+            time += 0.02;
+            let mut events = vec![Event::PointerMoved(pos)];
+            if let Some(pressed) = press {
+                let phase = if pressed { TouchPhase::Start } else { TouchPhase::End };
+                events.push(Event::Touch { device_id: TouchDeviceId(1), id: TouchId(1), phase, pos, force: None });
+                events.push(Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+            let mut output = ctx.run_ui(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(264.0, 380.0))),
+                    time: Some(time),
+                    events,
+                    ..RawInput::default()
+                },
+                |ui| {
+                    colours.sphere_picker(ui, square, colours.sphere_controls_height());
+                },
+            );
+            output.textures_delta.clear();
+        };
+        let mut tap = |colours: &mut Colours, pos| {
+            frame(colours, pos, None);
+            frame(colours, pos, Some(true));
+            frame(colours, pos, Some(false));
+        };
+        tap(&mut colours, pos2(square.right() - 4.0, square.top() + 40.0));
+        let sphere = colours.sphere.clone().unwrap();
+        assert!(sphere.custom_enabled());
+        let before = sphere.tone_rgb(SphereTone::Highlight);
+        let last = square.top() + 2.0 * SPHERE_CONTROL_GAP + SPHERE_MODE_HEIGHT + SPHERE_TONE_HEIGHT;
+        tap(&mut colours, pos2(square.right() - 4.0, last - 4.0));
+        assert_eq!(colours.sphere_edit.map(|(tone, _)| tone), Some(SphereTone::Highlight));
+        let editor = square.translate(vec2(0.0, colours.sphere_controls_height()));
+        tap(&mut colours, pos2(editor.left() + 114.0, editor.bottom() - 6.0 - SPHERE_SLIDER_HEIGHT * 0.5));
+        assert_ne!(sphere.tone_rgb(SphereTone::Highlight), before);
+        tap(&mut colours, pos2(editor.right() - 10.0, editor.top() + 40.0));
+        assert!(colours.sphere_edit.is_none());
+    }
+
+    #[test]
+    fn double_clicking_the_sphere_glides_from_the_sampled_point() {
+        use egui::{Event, Modifiers, PointerButton, RawInput};
+        let ctx = egui::Context::default();
+        let mut pickers = Pickers::default();
+        let model = pickers.model;
+        let sphere = ColourSphere::new(model, 0.6);
+        let mut hsv = [0.6, 1.0, 1.0];
+        let mut current = 0;
+        let rect = Rect::from_min_size(pos2(12.0, 12.0), vec2(PICKER, PICKER));
+        let (x, y) = (0.92, -0.31);
+        let at = rect.center() + DISC_RADIUS * vec2(x, y);
+        let target = sphere.snap(model, x, y).unwrap().target;
+        let mut frame = |time, press| {
+            let mut events = vec![Event::PointerMoved(at)];
+            if let Some(pressed) = press {
+                events.push(Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+            let mut output = ctx.run_ui(
+                RawInput { screen_rect: Some(rect.expand(8.0)), time: Some(time), events, ..RawInput::default() },
+                |ui| {
+                    if let Some(picked) = pickers.round_picker(ui, &mut hsv, rect, Some((&sphere, current))) {
+                        current = picked;
+                    }
+                },
+            );
+            output.textures_delta.clear();
+            sphere.marker(model)
+        };
+        frame(0.0, None);
+        frame(0.01, Some(true));
+        let first = frame(0.03, Some(false)).unwrap();
+        assert_eq!(frame(0.06, None), Some(first));
+        frame(0.10, Some(true));
+        assert_eq!(frame(0.12, Some(false)), Some(first));
+        let during = frame(0.22, None).unwrap();
+        assert!(target.x < during.x && during.x < first.x);
+        assert_eq!(frame(0.33, None), Some(target));
+    }
 
     #[test]
     fn harmony_keeps_its_hue_and_saturation_through_black() {

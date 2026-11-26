@@ -24,7 +24,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 22;
+const INTERFACE: u32 = 23;
 /// The first interface with features (several plugins' worth in one, each a switch of its own).
 const FEATURES_FROM: u32 = 16;
 /// The interface filter layers came in.

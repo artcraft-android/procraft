@@ -1,0 +1,18 @@
+[package]
+name = "sphere-picker"
+version = "1.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Adds a lighting sphere to ProCraft's colour panel"
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

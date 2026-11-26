@@ -19,6 +19,7 @@ pub(crate) const SLIDER_FROSTED: i32 = 1;
 /// either end, and whether its swatch shows the colour as the panel opened beside the colour now.
 pub(crate) const COLOUR_STEPS: i32 = 0;
 pub(crate) const COLOUR_BEFORE: i32 = 1;
+pub(crate) const COLOUR_SPHERE: i32 = 2;
 
 /// What the panel layout's hook asks (interface 20): how near the floating panels snap, whether they
 /// fold to a tab, whether those docked make room in the drawing area, and whether the interface's
@@ -820,7 +821,7 @@ impl Hooks {
     }
 
     /// The colour panel's hook (interface 12): whether a plugin on it says the panel does `part` of
-    /// what it may ([`COLOUR_STEPS`], [`COLOUR_BEFORE`]).
+    /// what it may ([`COLOUR_STEPS`], [`COLOUR_BEFORE`], [`COLOUR_SPHERE`]).
     pub(crate) fn colour_panel(&self, part: i32) -> bool {
         self.has(Hook::ColourPanel)
             && self.through(Hook::ColourPanel, false, |running, said| Ok(said || running.colour_panel(part)?))

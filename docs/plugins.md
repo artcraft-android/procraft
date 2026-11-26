@@ -977,11 +977,16 @@ procraft_colour_panel(part: i32) -> i32
 |---|---|
 | 0 | Its sliders step one unit at a tap on either end, within 18 points of it: a degree of hue, a percent of saturation or brightness, a level of red, green or blue. A drag goes where it's dragged, from an end too, and a tap between goes there, as without |
 | 1 | Its swatch of the colour in use shows, beside it, the colour as the panel opened; a tap on that goes back to it |
+| 2 | The colour panel and its floating window offer a Sphere picker tab (interface 23) |
 
 Answer 0 for a part you don't know: more may come. It's asked as the plugins change. With several
 plugins on this hook, a part is done if any says so.
 
-Infinite Plugins' Colour extras, which the app comes with, does each by a switch of its own.
+Infinite Plugins' Colour extras, which the app comes with, enables parts 0 and 1 by a switch each.
+The bundled Sphere picker enables part 2 on desktop, Android and iPad. In Single hue, the ring sets
+the base hue. In Custom, the three swatches set the shadow, midtone and highlight, and the ring
+rotates their hues together. Tap or drag on the sphere to sample its colour. Double-click or
+double-tap to glide to the nearest tonal point.
 
 ### `pin_panels`
 
@@ -2420,8 +2425,9 @@ layers' editors, interface 19 a feature taken from a plugin that stays (`takes`)
 brushes under a switch and given as a plugin's it takes the place of (`brushes`), and an artwork's
 values kept for one it takes the place of, interface 20 the `panel_layout` hook, and interface 22
 `folder` controls (one the whole plugin's, in a plugin of features) and the `artwork_saved`,
-`video_exported` and `gallery_opened` hooks. What comes under a switch at the top of the list (a menu and
-a row in the brush studio too), taking the place of other plugins, a menu of its own, and controls in
+`video_exported` and `gallery_opened` hooks. Interface 23 adds the Sphere tab to the `colour_panel` hook.
+What comes under a switch at the top of the list (a menu and a row in the brush studio too), taking
+the place of other plugins, a menu of its own, and controls in
 the Canvas tab, on a key or kept with each artwork need no newer interface: an older app shows every
 control, leaves the others where they are, shows no menu and keeps every control with the plugin. What a
 hook calls stays as it's written here, and the app keeps every interface's template, so a plugin

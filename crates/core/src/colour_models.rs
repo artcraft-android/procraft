@@ -493,7 +493,7 @@ fn hex([r, g, b]: [f32; 3]) -> u32 {
     byte(r) << 16 | byte(g) << 8 | byte(b)
 }
 
-fn luma([r, g, b]: [f32; 3]) -> f32 {
+pub(crate) fn luma([r, g, b]: [f32; 3]) -> f32 {
     LUMA[0] * r + LUMA[1] * g + LUMA[2] * b
 }
 

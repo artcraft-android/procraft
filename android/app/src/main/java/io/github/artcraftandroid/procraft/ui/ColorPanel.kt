@@ -1,5 +1,8 @@
 package io.github.artcraftandroid.procraft.ui
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import android.graphics.BlurMaskFilter
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -7,6 +10,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -71,6 +75,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -95,8 +100,11 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import io.github.artcraftandroid.procraft.core.ColourModel
 import io.github.artcraftandroid.procraft.core.ColourPlace
+import io.github.artcraftandroid.procraft.core.ColourSphere
 import io.github.artcraftandroid.procraft.core.ColourTrack
 import io.github.artcraftandroid.procraft.core.HueControl
+import io.github.artcraftandroid.procraft.core.SphereSnap
+import io.github.artcraftandroid.procraft.core.SphereTone
 import io.github.artcraftandroid.procraft.core.colourModelAlong
 import io.github.artcraftandroid.procraft.core.colourModelDiscKey
 import io.github.artcraftandroid.procraft.core.colourModelDiscPick
@@ -142,6 +150,14 @@ private val RingOuter = 182.dp
 private val RingInner = 124.dp
 private val DiscRadius = 105.dp
 private val HarmonyRadius = 149.dp
+private val SphereControlGap = 6.dp
+private val SphereModeHeight = 44.dp
+private val SphereToneHeight = 52.dp
+private val SphereSliderHeight = 48.dp
+private val SphereTones = listOf(SphereTone.SHADOW to "Shadow", SphereTone.MIDTONE to "Midtone", SphereTone.HIGHLIGHT to "Highlight")
+
+private fun sphereControlsHeight(custom: Boolean) =
+    SphereModeHeight + SphereControlGap * 2 + if (custom) SphereToneHeight + SphereControlGap else 0.dp
 
 // The hue controls are not linear in hue: the core keeps the hues measured at evenly spaced
 // points along each (the classic slider's 25, the disc's ring's 49), for drawing them
@@ -259,7 +275,7 @@ private fun ColourTrack.paints(): List<Color> = colours.map { rgbColor(it.toInt(
 fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modifier = Modifier, background: Boolean = false) {
     val short = screenHeight < ShortScreen
     // short, the disc reaches up into the header's last 7
-    val headerHeight = if (short && vm.colorMode == ColorMode.DISC) 57.dp else 64.dp
+    val headerHeight = if (short && (vm.colorMode == ColorMode.DISC || vm.colorMode == ColorMode.SPHERE)) 57.dp else 64.dp
     val c: ColorPick = if (background) {
         remember { HeldColor(vm.backgroundRgb()) { vm.setBackgroundRgb(it, done = false) } }
     } else {
@@ -270,6 +286,17 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
     // the disc, Classic and Value work in the colour model chosen (the background's colour with a place of its own)
     val place = if (background) remember { ColourPlace() } else vm.colourPlace
     val m = remember(c, vm.colourModel, place) { ModelColor(c, vm.colourModel, place) }
+    val sphere = if (vm.colorMode == ColorMode.SPHERE) {
+        if (background) remember(c) { ColourSphere(ColourModel.HSB, c.hue) } else vm.colourSphere
+    } else null
+    var paletteRevision by remember(sphere) { mutableStateOf(0u) }
+    val selectSwatch: (Int) -> Unit = { rgb ->
+        c.setRgb(rgb)
+        if (sphere != null) {
+            sphere.setBaseSwatch(m.model, rgb.toUInt())
+            paletteRevision = sphere.pictureRevision()
+        }
+    }
     // a swatch dragged out and let go over the panel itself fills nothing
     if (!background) androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.dropAvoid = null } }
     // (on the canvas: in the window, less what the interface keeps clear of)
@@ -325,17 +352,18 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
                 ColorMode.DISC -> Disc(c, short = short, m = m)
                 ColorMode.VALUE -> Value(c, short = short, inks = vm.inks, m = m)
                 ColorMode.HARMONY -> Harmony(vm, c, short = short)
+                ColorMode.SPHERE -> ModelDisc(m, compact = false, short = short, sphere = sphere, paletteRevision = paletteRevision)
                 else -> Classic(c, square = if (short) (screenHeight - ShortClassicRest).coerceIn(150.dp, 344.dp) else 344.dp, m = m)
             }
             if (short) {
-                ShortBottom(vm, c)
+                ShortBottom(vm, c, selectSwatch)
             } else {
                 History(vm, c)
                 vm.palettes.getOrNull(vm.defaultPalette)?.let { p ->
                     Box(Modifier.fillMaxWidth().height(44.dp)) {
                         Text(p.name, color = Pc.PanelTitle, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 21.dp, top = 13.dp))
                     }
-                    SwatchGrid(vm, c, vm.defaultPalette, p, Modifier.padding(horizontal = 8.dp))
+                    SwatchGrid(vm, c, vm.defaultPalette, p, Modifier.padding(horizontal = 8.dp), onSelect = selectSwatch)
                 }
             }
         }
@@ -406,11 +434,17 @@ fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
     val m = remember(c, vm.colourModel) { ModelColor(c, vm.colourModel, vm.colourPlace) }
     val k = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING)
     val ringed = vm.colourModel == ColourModel.HSB && Pc.picker?.huePoint?.invoke(c.hue) != null
-    val height = when {
+    var sphereCustom by remember(vm, vm.colorMode) {
+        mutableStateOf(vm.colorMode == ColorMode.SPHERE && vm.colourSphere.customEnabled())
+    }
+    val requestedHeight = when {
         Pc.floatingPickerOnly -> FloatingPickerTop + 248.dp + (if (ringed) 0.dp else 40.dp) + 6.dp
+        vm.colorMode == ColorMode.SPHERE -> 351.dp + sphereControlsHeight(sphereCustom)
         vm.colorMode == ColorMode.DISC -> 351.dp
         else -> 390.dp
     }
+    val sphereScroll = !Pc.floatingPickerOnly && vm.colorMode == ColorMode.SPHERE && requestedHeight * k > maxHeight
+    val height = if (sphereScroll) maxHeight / k else requestedHeight
     // while a plugin lays the panels out, where the layout has it (folded, its tab)
     val at = if (vm.layoutLook.on) {
         vm.panelLayout.setColoursSize(FloatingWidth.value, height.value)
@@ -474,7 +508,8 @@ fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
             if (vm.layoutLook.on) {
                 FloatingMenuButton(Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 84.dp), windowMenu(vm, io.github.artcraftandroid.procraft.core.LayoutPiece.COLOURS))
             }
-            Column(Modifier.padding(top = 44.dp)) {
+            val scroll = if (sphereScroll) Modifier.verticalScroll(rememberScrollState()) else Modifier
+            Column(Modifier.padding(top = 44.dp).then(scroll)) {
                 when (vm.colorMode) {
                     ColorMode.DISC -> {
                         Spacer(Modifier.height(5.dp))
@@ -493,10 +528,14 @@ fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
                         CompactValue(c, FloatingGroup, FloatingField)
                     }
                     ColorMode.PALETTES -> FloatingPalettes(vm, c)
+                    ColorMode.SPHERE -> {
+                        Spacer(Modifier.height(5.dp))
+                        ModelDisc(m, compact = true, short = false, sphere = vm.colourSphere) { sphereCustom = it }
+                    }
                 }
             }
         }
-        CompactTabs(vm.colorMode) { vm.colorMode = it }
+        CompactTabs(vm.colorMode, sphere = Pc.spherePicker) { vm.colorMode = it }
     }
     }
 }
@@ -679,9 +718,9 @@ internal fun CompactBody(vm: CanvasViewModel, c: ColorPick, mode: ColorMode) {
 
 /** The compact picker's modes as a row of icons, the chosen one blue. */
 @Composable
-internal fun CompactTabs(mode: ColorMode, onMode: (ColorMode) -> Unit) {
+internal fun CompactTabs(mode: ColorMode, sphere: Boolean = false, onMode: (ColorMode) -> Unit) {
     Row(Modifier.fillMaxWidth().height(52.dp)) {
-        for ((m, icon, label) in Modes) {
+        for ((m, icon, label) in modes(sphere)) {
             Box(Modifier.weight(1f).fillMaxSize().clickable { onMode(m) }, contentAlignment = Alignment.Center) {
                 // the tabs' 36-unit glyphs, a little smaller here
                 Icon(icon, contentDescription = label, tint = if (m == mode) Pc.Accent else Pc.PanelTitle, modifier = Modifier.requiredSize(33.dp))
@@ -1018,7 +1057,10 @@ private fun Disc(c: ColorPick, compact: Boolean = false, short: Boolean = false,
  * HSY′'s saturation and luma follow on sliders under it.
  */
 @Composable
-private fun ModelDisc(m: ModelColor, compact: Boolean, short: Boolean) {
+private fun ModelDisc(
+    m: ModelColor, compact: Boolean, short: Boolean, sphere: ColourSphere? = null,
+    paletteRevision: UInt = 0u, onSphereModeChange: (Boolean) -> Unit = {},
+) {
     val model = m.model
     val coords = m.coords()
     val now by rememberUpdatedState(coords)
@@ -1030,42 +1072,114 @@ private fun ModelDisc(m: ModelColor, compact: Boolean, short: Boolean) {
     val ringInner = RingInner * k
     val ringOuter = RingOuter * k
     val (h, s, t) = Triple(coords[0], coords[1], coords[2])
-    val disc = rememberPickerPicture(model to colourModelDiscKey(model, h, s, t), with(density) { (discRadius * 2).roundToPx() }, CanvasSpace.p3) { n ->
-        colourModelDiscPicture(model, h, s, t, n.toUInt())
+    var sphereRevision by remember(sphere, paletteRevision) { mutableStateOf(sphere?.pictureRevision() ?: 0u) }
+    var marker by remember(sphere, model, paletteRevision) { mutableStateOf(sphere?.marker(model)) }
+    var snap by remember(sphere, model, paletteRevision) { mutableStateOf<SphereSnap?>(null) }
+    var editing by remember(sphere, paletteRevision) { mutableStateOf<SphereTone?>(null) }
+    val custom = remember(sphere, sphereRevision) { sphere?.customEnabled() ?: false }
+    fun lightingChanged() {
+        sphereRevision = sphere?.pictureRevision() ?: 0u
+        marker = null
+        snap = null
+    }
+    LaunchedEffect(sphere, model, snap) {
+        val glide = snap ?: return@LaunchedEffect
+        if (sphere == null) return@LaunchedEffect
+        animate(0f, glide.durationMs.toFloat(), animationSpec = tween(glide.durationMs.toInt(), easing = LinearEasing)) { elapsed, _ ->
+            if (snap == glide && marker?.rgb?.toInt() == pick.c.rgb()) {
+                sphere.sampleSnap(model, glide, elapsed)?.let { sample ->
+                    marker = sample
+                    if (sample.rgb.toInt() != pick.c.rgb()) pick.c.setRgb(sample.rgb.toInt())
+                }
+            } else if (snap == glide) {
+                snap = null
+            }
+        }
+        if (snap == glide) snap = null
+    }
+    val ringHue = if (sphere == null) h else remember(sphere, model, sphereRevision) { sphere.hue(model) }
+    val discSide = with(density) { (discRadius * 2).roundToPx() }
+    val disc = if (sphere == null) {
+        rememberPickerPicture(model to colourModelDiscKey(model, h, s, t), discSide, CanvasSpace.p3) { n ->
+            colourModelDiscPicture(model, h, s, t, n.toUInt())
+        }
+    } else {
+        val picture = remember(sphere, CanvasSpace.p3) { PickerPicture(sphere.imageSide().toInt()) }
+        remember(picture, model, sphereRevision) { picture.fill(sphere.picture(model)) }
+        picture
     }
     val ring = remember(model) {
         val colours = colourModelRing(model, RingHues.size.toUInt())
         val stops = Array(colours.size) { i -> (1f - i / (colours.size - 1f)) to rgbColor(colours[i].toInt()) }
         Brush.sweepGradient(*stops.reversedArray())
     }
-    val turn = colourModelRingTurn(model, h) * 2f * PI.toFloat()
-    val pure = rgbColor(colourModelPure(model, h).toInt())
+    val turn = colourModelRingTurn(model, ringHue) * 2f * PI.toFloat()
+    val pure = rgbColor(colourModelPure(model, ringHue).toInt())
     val at = colourModelDiscPoint(model, h, s, t)
     val current = rgbColor(m.c.rgb())
     val luma = model == ColourModel.HSY && !compact
-    Box(
-        Modifier.then(
-            when {
-                compact -> Modifier.padding(start = 10.dp, top = 4.dp, bottom = 6.dp)
-                // HSY′'s sliders start 4 under the picker
-                short -> Modifier.padding(start = 6.dp, bottom = if (luma) 4.dp else 3.dp)
-                else -> Modifier.padding(start = 6.dp, top = 8.dp, bottom = if (luma) 4.dp else 17.dp)
+    val across = 364.dp * k
+    val frame = when {
+        compact -> Modifier.padding(start = 10.dp, top = 4.dp, bottom = 6.dp)
+        // HSY′'s sliders start 4 under the picker
+        short -> Modifier.padding(start = 6.dp, bottom = if (luma) 4.dp else 3.dp)
+        else -> Modifier.padding(start = 6.dp, top = 8.dp, bottom = if (luma) 4.dp else 17.dp)
+    }.size(across)
+    if (sphere != null) {
+        SphereControls(
+            sphere, custom, editing, sphereRevision,
+            changeMode = {
+                sphere.setCustomEnabled(model, it)
+                editing = null
+                lightingChanged()
+                onSphereModeChange(it)
             },
-        ).size(364.dp * k)
-            .pointerInput(model) {
+            editTone = { editing = it; snap = null },
+        )
+    }
+    val tone = editing
+    if (sphere != null && custom && tone != null) {
+        SphereToneEditor(sphere, tone, disc, across, frame, onDone = { editing = null }, onChange = { lightingChanged() })
+    } else Box(
+        frame
+            .pointerInput(model, sphere, paletteRevision) {
+                var lastTap: Pair<Offset, Long>? = null
                 awaitEachGesture {
                     val down = awaitFirstDown()
                     down.consume()
+                    snap = null
+                    val previousTap = lastTap
+                    lastTap = null
                     val centre = Offset(size.width / 2f, size.height / 2f)
+                    val r = discRadius.toPx()
+                    val start = down.position - centre
                     val onRing = (down.position - centre).getDistance() > ((discRadius + ringInner) / 2).toPx()
+                    var isTap = sphere != null && start.getDistance() <= r
+                    var previousTurn: Float? = null
                     fun send(p: Offset) {
                         val d = p - centre
                         val was = now
                         if (onRing) {
                             val turnAt = (atan2(-d.y, d.x) / (2f * PI.toFloat()) + 1f) % 1f
-                            pick.set(floatArrayOf(colourModelRingHue(model, turnAt), was[1], was[2]))
+                            val nextHue = colourModelRingHue(model, turnAt)
+                            if (sphere == null) {
+                                pick.set(floatArrayOf(nextHue, was[1], was[2]))
+                            } else {
+                                if (sphere.customEnabled()) {
+                                    previousTurn?.let { sphere.rotateHues(turnAt - it) }
+                                    previousTurn = turnAt
+                                } else {
+                                    sphere.setHue(model, nextHue)
+                                }
+                                sphereRevision = sphere.pictureRevision()
+                                marker = sphere.marker(model)
+                            }
+                        } else if (sphere != null) {
+                            sphere.sample(model, d.x / r, d.y / r)?.let { sample ->
+                                marker = sample
+                                pick.c.setRgb(sample.rgb.toInt())
+                            }
                         } else {
-                            val r = discRadius.toPx()
                             pick.set(colourModelDiscPick(model, was[0], was[1], was[2], d.x / r, d.y / r).toFloatArray())
                         }
                     }
@@ -1073,7 +1187,24 @@ private fun ModelDisc(m: ModelColor, compact: Boolean, short: Boolean) {
                     while (true) {
                         val event = awaitPointerEvent()
                         val ch = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (!ch.pressed) break
+                        isTap = isTap && !ch.isConsumed && (ch.position - down.position).getDistance() <= viewConfiguration.touchSlop &&
+                            event.changes.none { it.id != down.id && it.pressed }
+                        if (!ch.pressed) {
+                            if (isTap && ch.uptimeMillis - down.uptimeMillis < viewConfiguration.longPressTimeoutMillis) {
+                                val doubleTap = previousTap != null &&
+                                    down.uptimeMillis - previousTap.second in
+                                    viewConfiguration.doubleTapMinTimeMillis..viewConfiguration.doubleTapTimeoutMillis &&
+                                    (down.position - previousTap.first).getDistance() <= r * 0.18f
+                                val released = (ch.position - centre) / r
+                                if (doubleTap && released.getDistance() <= 1f) {
+                                    send(ch.position)
+                                    snap = sphere?.snap(model, released.x, released.y)
+                                } else {
+                                    lastTap = down.position to ch.uptimeMillis
+                                }
+                            }
+                            break
+                        }
                         send(ch.position)
                         ch.consume()
                     }
@@ -1086,16 +1217,121 @@ private fun ModelDisc(m: ModelColor, compact: Boolean, short: Boolean) {
                 drawCircle(ring, (inner + outer) / 2f, o, style = Stroke(outer - inner))
                 val r = discRadius.toPx()
                 disc.version
-                drawImage(disc.image, topLeft = Offset(o.x - r, o.y - r))
+                if (sphere == null) {
+                    drawImage(disc.image, topLeft = Offset(o.x - r, o.y - r))
+                } else {
+                    drawImage(disc.image, dstOffset = IntOffset((o.x - r).roundToInt(), (o.y - r).roundToInt()), dstSize = IntSize(discSide, discSide))
+                }
                 // the ring knob sits on the middle of the ring, where the hue is
                 val mid = (inner + outer) / 2f
                 knob(o + Offset(cos(turn) * mid, -sin(turn) * mid), 26.2.dp.toPx() * k, pure)
-                knob(o + Offset(at[0] * r, at[1] * r), 10.75.dp.toPx(), current)
+                if (sphere == null) {
+                    knob(o + Offset(at[0] * r, at[1] * r), 10.75.dp.toPx(), current)
+                } else {
+                    marker?.takeIf { it.rgb.toInt() == pick.c.rgb() }?.let {
+                        knob(o + Offset(it.x * r, it.y * r), 10.75.dp.toPx(), current)
+                    }
+                }
             },
     )
     if (luma) {
         LumaSliders(m, coords)
         Spacer(Modifier.height(if (short) 3.dp else 17.dp))
+    }
+}
+
+@Composable
+private fun SphereControls(
+    sphere: ColourSphere, custom: Boolean, editing: SphereTone?, revision: UInt,
+    changeMode: (Boolean) -> Unit, editTone: (SphereTone) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().height(sphereControlsHeight(custom)).padding(horizontal = 10.dp, vertical = SphereControlGap)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(SphereControlGap)) {
+            for ((enabled, label) in listOf(false to "Single hue", true to "Custom")) {
+                val selected = enabled == custom
+                Box(
+                    Modifier.weight(1f).height(SphereModeHeight).clip(RoundedCornerShape(9.dp))
+                        .background(if (selected) Pc.Accent else Pc.HexRow)
+                        .selectable(selected, role = Role.Button) { if (!selected) changeMode(enabled) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(label, color = if (selected) Color.White else Pc.PanelTitle, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+        if (custom) {
+            Spacer(Modifier.height(SphereControlGap))
+            Row(horizontalArrangement = Arrangement.spacedBy(SphereControlGap)) {
+                for ((tone, title) in SphereTones) {
+                    val rgb = remember(sphere, revision, tone) { sphere.toneRgb(tone) } ?: continue
+                    val selected = editing == tone
+                    val shape = RoundedCornerShape(9.dp)
+                    Column(
+                        Modifier.weight(1f).height(SphereToneHeight).clip(shape).background(Pc.HexRow)
+                            .then(if (selected) Modifier.border(2.dp, Pc.Accent, shape) else Modifier)
+                            .selectable(selected, role = Role.Button) { editTone(tone) }.padding(horizontal = 8.dp, vertical = 5.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.SpaceEvenly,
+                    ) {
+                        Box(Modifier.fillMaxWidth().height(21.dp).clip(RoundedCornerShape(5.dp)).background(rgbColor(rgb.toInt())))
+                        Text(title, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Pc.PanelTitle, maxLines = 1)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SphereToneEditor(
+    sphere: ColourSphere, tone: SphereTone, picture: PickerPicture, across: Dp, modifier: Modifier,
+    onDone: () -> Unit, onChange: () -> Unit,
+) {
+    val changed by rememberUpdatedState(onChange)
+    val editor = remember(sphere, tone) {
+        HeldColor(sphere.toneRgb(tone)?.toInt() ?: 0) {
+            sphere.setToneRgb(tone, it.toUInt())
+            changed()
+        }
+    }
+    val previewBand = across - SphereSliderHeight * 3 - 6.dp
+    val side = minOf(across * 0.46f, previewBand - 18.dp)
+    val tracks = listOf(
+        huePosition(HueControl.SLIDER, editor.hue) to SliderHues.map { hsvColor(it / 360f, 1f, 1f) },
+        editor.saturation to listOf(hsvColor(editor.hue, 0f, editor.brightness), hsvColor(editor.hue, 1f, editor.brightness)),
+        editor.brightness to listOf(Color.Black, hsvColor(editor.hue, editor.saturation, 1f)),
+    )
+    Box(modifier) {
+        Box(
+            Modifier.align(Alignment.TopCenter).padding(top = (previewBand - side) / 2).size(side).drawBehind {
+                picture.version
+                drawImage(picture.image, dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()))
+            },
+        )
+        Box(
+            Modifier.align(Alignment.TopEnd).padding(6.dp).size(62.dp, 44.dp).clip(RoundedCornerShape(9.dp))
+                .background(Pc.Accent).clickable(role = Role.Button, onClick = onDone),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("Done", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 6.dp)) {
+            for ((i, label) in listOf("Hue", "Saturation", "Brightness").withIndex()) {
+                val (value, colours) = tracks[i]
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(label, Modifier.width(74.dp), color = Pc.PanelTitle, fontSize = 13.sp)
+                    Box(Modifier.weight(1f)) {
+                        SliderRow(value, colours, height = SphereSliderHeight) {
+                            when (i) {
+                                0 -> editor.setHsv(hueAt(HueControl.SLIDER, it), editor.saturation, editor.brightness)
+                                1 -> editor.setHsv(editor.hue, it, editor.brightness)
+                                else -> editor.setHsv(editor.hue, editor.saturation, it)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1234,12 +1470,12 @@ private val BrightnessTrack = listOf(Color.Black, Color.White)
  * Touching anywhere on the row moves the pill there.
  */
 @Composable
-private fun SliderRow(value: Float, colours: List<Color>, unit: Float = 0.01f, onChange: (Float) -> Unit) {
+private fun SliderRow(value: Float, colours: List<Color>, unit: Float = 0.01f, height: Dp = 36.dp, onChange: (Float) -> Unit) {
     val change by rememberUpdatedState(onChange)
     val now by rememberUpdatedState(value)
     val steps = Pc.colourSteps
     Box(
-        Modifier.fillMaxWidth().height(36.dp)
+        Modifier.fillMaxWidth().height(height)
             .pointerInput(steps, unit) {
                 // a plugin's: a tap at either end steps one unit
                 if (steps) trackStepping(StepEnd.toPx(), unit, { now }) { change(it) } else track { x, _ -> change(x) }
@@ -1546,7 +1782,11 @@ private fun NewPaletteButton(vm: CanvasViewModel) {
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SwatchGrid(vm: CanvasViewModel, c: ColorPick, index: Int, p: Palette, modifier: Modifier, droppable: Boolean = true) {
+private fun SwatchGrid(
+    vm: CanvasViewModel, c: ColorPick, index: Int, p: Palette, modifier: Modifier,
+    droppable: Boolean = true, onSelect: (Int) -> Unit = c::setRgb,
+) {
+    val selected by rememberUpdatedState(onSelect)
     Column(modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))) {
         for (row in 0 until 3) {
             Row {
@@ -1554,10 +1794,10 @@ private fun SwatchGrid(vm: CanvasViewModel, c: ColorPick, index: Int, p: Palette
                     val slot = row * 10 + col
                     val rgb = p.colors[slot]
                     val touch = if (rgb != null && droppable && c is BrushColor) {
-                        Modifier.dropSource(vm, swatch = { rgb }, onHold = { vm.setSwatch(index, slot, null) }) { c.setRgb(rgb) }
+                        Modifier.dropSource(vm, swatch = { rgb }, onHold = { vm.setSwatch(index, slot, null) }) { selected(rgb) }
                     } else {
                         Modifier.combinedClickable(
-                            onClick = { if (rgb != null) c.setRgb(rgb) else vm.setSwatch(index, slot, c.rgb()) },
+                            onClick = { if (rgb != null) selected(rgb) else vm.setSwatch(index, slot, c.rgb()) },
                             onLongClick = { if (rgb != null) vm.setSwatch(index, slot, null) },
                         )
                     }
@@ -1786,7 +2026,7 @@ private fun ValueRow(letter: String, value: Float, colours: List<Color>, shown: 
     Box(Modifier.fillMaxWidth().height(44.dp)) {
         Text(letter, color = Pc.PanelTitle, fontSize = 15.sp, modifier = Modifier.align(Alignment.CenterStart).padding(start = 13.dp))
         Box(Modifier.padding(start = 32.dp).width(264.dp).align(Alignment.CenterStart)) {
-            SliderRow(value, colours, unit, onChange)
+            SliderRow(value, colours, unit, onChange = onChange)
         }
         Box(Modifier.align(Alignment.CenterStart).padding(start = 304.dp).width(45.dp), contentAlignment = Alignment.Center) {
             Text(shown, color = Pc.PanelTitle, fontSize = 15.sp, maxLines = 1)
@@ -1932,7 +2172,7 @@ private fun HistoryStrip(vm: CanvasViewModel, c: ColorPick) {
  * palette (a 34 header and its grid), whichever its "•••" menu picked.
  */
 @Composable
-private fun ShortBottom(vm: CanvasViewModel, c: ColorPick) {
+private fun ShortBottom(vm: CanvasViewModel, c: ColorPick, selectSwatch: (Int) -> Unit) {
     val palette = vm.palettes.getOrNull(vm.defaultPalette)
     val history = vm.colorHistoryShown || palette == null
     Box(Modifier.fillMaxWidth().height(if (history) 44.dp else 34.dp)) {
@@ -1949,7 +2189,7 @@ private fun ShortBottom(vm: CanvasViewModel, c: ColorPick) {
     if (history) {
         HistoryStrip(vm, c)
     } else if (palette != null) {
-        SwatchGrid(vm, c, vm.defaultPalette, palette, Modifier.padding(horizontal = 8.dp))
+        SwatchGrid(vm, c, vm.defaultPalette, palette, Modifier.padding(horizontal = 8.dp), onSelect = selectSwatch)
     }
 }
 
@@ -2020,14 +2260,17 @@ private val Modes = listOf(
     Triple(ColorMode.DISC, PcIcons.ModeDisc, "Disc"),
     Triple(ColorMode.CLASSIC, PcIcons.ModeClassic, "Classic"),
     Triple(ColorMode.HARMONY, PcIcons.ModeHarmony, "Harmony"),
+    Triple(ColorMode.SPHERE, PcIcons.ModeSphere, "Sphere"),
     Triple(ColorMode.VALUE, PcIcons.ModeValue, "Value"),
     Triple(ColorMode.PALETTES, PcIcons.ModePalettes, "Palettes"),
 )
 
+private fun modes(sphere: Boolean) = if (sphere) Modes else Modes.filter { it.first != ColorMode.SPHERE }
+
 @Composable
 private fun ModeTabs(vm: CanvasViewModel) {
     Row(Modifier.fillMaxWidth().height(70.dp)) {
-        for ((mode, icon, label) in Modes) {
+        for ((mode, icon, label) in modes(Pc.spherePicker)) {
             ModeTab(icon, label, selected = vm.colorMode == mode, Modifier.weight(1f)) { vm.colorMode = mode }
         }
     }

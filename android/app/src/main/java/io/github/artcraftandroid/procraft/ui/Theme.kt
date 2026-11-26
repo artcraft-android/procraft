@@ -24,6 +24,7 @@ object Pc {
 
     /** A plugin has the colour panel's sliders step one unit at a tap on either end. */
     var colourSteps by mutableStateOf(false)
+    var spherePicker by mutableStateOf(false)
 
     /** A plugin has the colour panel's swatch show the colour as the panel opened beside the colour now. */
     var colourBefore by mutableStateOf(false)

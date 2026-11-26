@@ -17,6 +17,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("layer-toolbox", include_bytes!("../bundled-plugins/layer-toolbox.procraft-plugin")),
     ("pop-up-palette", include_bytes!("../bundled-plugins/pop-up-palette.procraft-plugin")),
     ("radial-segments", include_bytes!("../bundled-plugins/radial-segments.procraft-plugin")),
+    ("sphere-picker", include_bytes!("../bundled-plugins/sphere-picker.procraft-plugin")),
     ("storage-folder", include_bytes!("../bundled-plugins/storage-folder.procraft-plugin")),
     ("tweening", include_bytes!("../bundled-plugins/tweening.procraft-plugin")),
     ("vector-layers", include_bytes!("../bundled-plugins/vector-layers.procraft-plugin")),

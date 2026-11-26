@@ -37,11 +37,11 @@ pub(crate) fn rgb_to_hsv([r, g, b]: [f32; 3]) -> [f32; 3] {
     [h / 6.0, if max > 0.0 { d / max } else { 0.0 }, max]
 }
 
-fn to_linear(c: f32) -> f32 {
+pub(crate) fn to_linear(c: f32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
-fn to_encoded(c: f32) -> f32 {
+pub(crate) fn to_encoded(c: f32) -> f32 {
     if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
@@ -49,7 +49,7 @@ pub(crate) fn byte(c: f32) -> u32 {
     (c.clamp(0.0, 1.0) * 255.0).round() as u32
 }
 
-fn of_hex(v: u32) -> [f32; 3] {
+pub(crate) fn of_hex(v: u32) -> [f32; 3] {
     [16, 8, 0].map(|shift| ((v >> shift) & 0xff) as f32 / 255.0)
 }
 
