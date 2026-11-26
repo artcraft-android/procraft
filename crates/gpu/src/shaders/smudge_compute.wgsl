@@ -1,53 +1,5 @@
-// Smudge's passes as compute passes (see smudge.wgsl): the window is a buffer of packed
-// premultiplied RGBA8 pixels, read and written in place, and what the brush carries a buffer of
-// its own.
-
-@group(0) @binding(1) var<storage, read_write> work: array<u32>;
+// Smudge's compute passes share their math and use either window buffers or resident textures.
 @group(0) @binding(2) var<storage, read_write> carry: array<vec4<f32>>;
-// wet paint laid apart: the colour its stamps mixed at each pixel, at full strength (see `as_laid`)
-@group(0) @binding(3) var<storage, read_write> grained: array<u32>;
-// wet paint in the modulated mode: how much each pixel has taken so far; and (its second half) how
-// much of the paint laid apart shows
-@group(0) @binding(4) var<storage, read_write> amount: array<f32>;
-
-// where canvas pixel `p` is in the window's buffers
-fn window_index(p: vec2<i32>) -> u32 {
-    return u32(p.y - st.origin_y) * st.stride + u32(p.x - st.origin_x);
-}
-
-// A read past the end of a buffer gives nothing (zero), as Vulkan's and the others' do: OpenGL
-// ES's (in wgpu) aren't checked, and one there reads whatever memory lies past the buffer, or
-// faults.
-fn work_at(p: vec2<i32>) -> vec4<f32> {
-    let i = window_index(p);
-    if (i >= arrayLength(&work)) {
-        return vec4<f32>(0.0);
-    }
-    return unpack4x8unorm(work[i]);
-}
-
-fn grained_at(p: vec2<i32>) -> vec4<f32> {
-    let i = window_index(p);
-    if (i >= arrayLength(&grained)) {
-        return vec4<f32>(0.0);
-    }
-    return unpack4x8unorm(grained[i]);
-}
-
-fn amount_word(i: u32) -> f32 {
-    if (i >= arrayLength(&amount)) {
-        return 0.0;
-    }
-    return amount[i];
-}
-
-fn amount_at(p: vec2<i32>) -> f32 {
-    return amount_word(window_index(p));
-}
-
-fn shown_at(p: vec2<i32>) -> f32 {
-    return amount_word(st.stride * st.rows + window_index(p));
-}
 
 fn carry_word(i: u32) -> vec4<f32> {
     if (i >= arrayLength(&carry)) {
@@ -124,22 +76,21 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     if (!in_bbox(dab, p)) {
         return;
     }
-    let d = deposit(dab, p, found_at(p));
+    let d = deposit(dab, p, found_at(p), selected_at(p));
     if (!d.laid) {
         return;
     }
-    let k = window_index(p);
     if (d.amount_set) {
-        amount[k] = d.amount;
+        put_amount(p, d.amount);
     }
     if (d.shown_set) {
-        amount[st.stride * st.rows + k] = d.shown;
+        put_shown(p, d.shown);
     }
     if (d.into_grained) {
-        grained[k] = pack4x8unorm(d.out);
+        put_grained(p, pack4x8unorm(d.out));
         return;
     }
-    work[k] = pack4x8unorm(d.out);
+    put_work(p, pack4x8unorm(d.out));
 }
 
 // A run of a pass's stamps (`st.run`, as `wet_pass` lists them) laid at once over all their bounds
@@ -152,6 +103,10 @@ fn cs_deposit_run(@builtin(global_invocation_id) id: vec3<u32>) {
     if (any(p >= st.bbox.zw)) {
         return;
     }
+    let selection = selected_at(p);
+    if (selection <= 0.0) {
+        return;
+    }
     var found = found_at(p);
     var laid = false;
     var amount_set = false;
@@ -162,7 +117,7 @@ fn cs_deposit_run(@builtin(global_invocation_id) id: vec3<u32>) {
         if (any(p < bbox.xy) || any(p >= bbox.zw)) {
             continue;
         }
-        let d = deposit(pass_dab(k), p, found);
+        let d = deposit(pass_dab(k), p, found, selection);
         if (!d.laid) {
             continue;
         }
@@ -186,17 +141,16 @@ fn cs_deposit_run(@builtin(global_invocation_id) id: vec3<u32>) {
     if (!laid) {
         return;
     }
-    let i = window_index(p);
     if (amount_set) {
-        amount[i] = found.amount;
+        put_amount(p, found.amount);
     }
     if (shown_set) {
-        amount[st.stride * st.rows + i] = found.shown;
+        put_shown(p, found.shown);
     }
     if (st.laid_apart == 2u) {
-        grained[i] = word;
+        put_grained(p, word);
     } else {
-        work[i] = word;
+        put_work(p, word);
     }
 }
 
@@ -206,7 +160,7 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     if (!in_bbox(own_dab(), p) || left_out(p)) {
         return;
     }
-    work[window_index(p)] = pack4x8unorm(synthesized(p));
+    put_work(p, pack4x8unorm(synthesized(p)));
 }
 
 @compute @workgroup_size(8, 8)

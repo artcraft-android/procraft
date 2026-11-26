@@ -9,7 +9,7 @@ use procraft_engine::document::LayerId;
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::Sample;
 use procraft_engine::quickshape::{Anchor, Shape, ShapeKind, end_hook_reach, fit_ellipse, recognise, without_end_hook};
-use procraft_engine::stroke::StrokeBuilder;
+use procraft_engine::stroke::{Stamp, StrokeBuilder};
 use procraft_gpu::{Canvas, SecondStroke, StrokeStyle};
 
 use crate::{CanvasSession, PointerKind, State};
@@ -107,6 +107,8 @@ pub(crate) struct ShapeEdit {
     /// Moved since its stroke was last drawn: drawn again as the next frame is, or as it is kept.
     /// A drag's moves come faster than frames, and each would lay the whole stroke again.
     stale: bool,
+    plots: Option<ShapePlots>,
+    moved_plots: bool,
 }
 
 impl ShapeEdit {
@@ -121,7 +123,21 @@ impl ShapeEdit {
         let first = shape.clone();
         let modes = initial_curve_modes(&shape);
         let (earlier, later) = (Vec::new(), Vec::new());
-        ShapeEdit { shape, first, earlier, later, choices, drawn, along, modes, held, stroke, stale: false }
+        ShapeEdit {
+            shape,
+            first,
+            earlier,
+            later,
+            choices,
+            drawn,
+            along,
+            modes,
+            held,
+            stroke,
+            stale: false,
+            plots: None,
+            moved_plots: false,
+        }
     }
 
     /// A drag undone can be done again.
@@ -145,6 +161,100 @@ impl ShapeEdit {
     /// Its kind as a plugin is told it, and its nodes (canvas pixels).
     pub(crate) fn geometry(&self) -> (u8, Vec<Vec2>) {
         (u8::try_from(shape_number(self.shape.kind)).unwrap_or(0), self.shape.nodes.clone())
+    }
+}
+
+/// The two native stamp plots at the last rebuild, before applying symmetry.
+struct ShapePlots {
+    shape: Shape,
+    scale: f32,
+    primary: Vec<Stamp>,
+    secondary: Option<Vec<Stamp>>,
+}
+
+struct PlotMove {
+    from: Vec2,
+    to: Vec2,
+    basis: PlotBasis,
+}
+
+enum PlotBasis {
+    Similarity { factor: Vec2, turn: f32 },
+    Ellipse { from: [Vec2; 2], to: [Vec2; 2], determinant: f32 },
+}
+
+impl PlotMove {
+    fn between(from: &Shape, to: &Shape) -> Option<Self> {
+        if from.kind != to.kind || from.nodes.len() != to.nodes.len() {
+            return None;
+        }
+        let (start, end) = (*from.nodes.first()?, *to.nodes.first()?);
+        // Use the longest span from the first node to keep rounding errors small.
+        let (a, b) = from
+            .nodes
+            .iter()
+            .zip(&to.nodes)
+            .map(|(&a, &b)| (a - start, b - end))
+            .max_by(|(a, _), (b, _)| a.dot(*a).total_cmp(&b.dot(*b)))?;
+        let length = a.dot(a);
+        if length < 1.0 {
+            return None;
+        }
+        let in_range = |square: f32| (0.8f32.powi(2)..=1.25f32.powi(2)).contains(&square);
+        let factor = Vec2::new(a.dot(b) / length, a.cross(b) / length);
+        let basis = PlotBasis::Similarity { factor, turn: factor.y.atan2(factor.x) };
+        let moved = Self { from: start, to: end, basis };
+        if in_range(factor.dot(factor))
+            && from.nodes.iter().zip(&to.nodes).all(|(&a, &b)| moved.place_point(a).0.distance(b) <= 0.002)
+        {
+            return Some(moved);
+        }
+        // An ellipse's handles can resize its axes independently. Keep the same points around
+        // its outline and turn each dab with its local tangent. Large changes refresh spacing.
+        if from.kind != ShapeKind::Ellipse {
+            return None;
+        }
+        let axes = |shape: &Shape, center| Some([*shape.nodes.get(1)? - center, *shape.nodes.get(2)? - center]);
+        let [a, b] = axes(from, start)?;
+        let [c, d] = axes(to, end)?;
+        let determinant = a.cross(b);
+        if determinant.abs() < 1.0
+            || determinant * c.cross(d) <= 0.0
+            || !in_range(c.dot(c) / a.dot(a))
+            || !in_range(d.dot(d) / b.dot(b))
+        {
+            return None;
+        }
+        Some(Self { from: start, to: end, basis: PlotBasis::Ellipse { from: [a, b], to: [c, d], determinant } })
+    }
+
+    fn place_point(&self, at: Vec2) -> (Vec2, f32) {
+        let p = at - self.from;
+        match self.basis {
+            PlotBasis::Similarity { factor, turn } => {
+                (self.to + Vec2::new(p.x * factor.x - p.y * factor.y, p.x * factor.y + p.y * factor.x), turn)
+            }
+            PlotBasis::Ellipse { from: [a, b], to: [c, d], determinant } => {
+                let u = p.cross(b) / determinant;
+                let v = a.cross(p) / determinant;
+                let before = b * u - a * v;
+                let after = d * u - c * v;
+                (self.to + c * u + d * v, before.cross(after).atan2(before.dot(after)))
+            }
+        }
+    }
+
+    fn place(&self, stamps: &[Stamp], builder: &StrokeBuilder) -> Vec<Stamp> {
+        let follow = builder.path_angle_share();
+        let grain = builder.brush().setting("grain_rotation");
+        stamps
+            .iter()
+            .map(|&stamp| {
+                let (center, turn) = self.place_point(stamp.center);
+                let turn = turn * follow;
+                Stamp { center, angle: stamp.angle + turn, grain_turn: stamp.grain_turn + turn * grain, ..stamp }
+            })
+            .collect()
     }
 }
 
@@ -350,17 +460,18 @@ impl State {
     fn draw_shape(&mut self) {
         if let Some(edit) = self.shape.as_mut() {
             edit.stale = false;
+            edit.moved_plots = false;
         }
         let (Some(edit), Some(old)) = (self.shape.as_ref(), self.stroke.as_ref()) else { return };
+        let scale = self.brush_scale();
         // the outline is the path: nothing smooths it, or round its corners
         let builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), SHAPE_SEED)
-            .scaled(self.brush_scale())
+            .scaled(scale)
             .exact_path()
             .drawn_like(old);
         let builder = crate::pressure::pressed_like(builder, old);
         let samples = edit.samples();
         // a dual brush's second drawn along it too, as the stroke drew it
-        let scale = self.brush_scale();
         let mut second = edit.stroke.as_ref().and_then(|s| s.second.as_ref()).map(|s| {
             let fresh = &s.fresh;
             let builder =
@@ -378,29 +489,71 @@ impl State {
         let mut builder = self.engine_again(builder, self.doc.current(), SHAPE_SEED);
         builder.add(&samples);
         let stamps = builder.finish();
+        self.show_shape_plots(&stamps, second_stamps.as_deref());
+        if let Some(edit) = self.shape.as_mut() {
+            edit.plots = (!builder.is_outside() && self.recording.is_none()).then(|| ShapePlots {
+                shape: edit.shape.clone(),
+                scale,
+                primary: stamps,
+                secondary: second_stamps,
+            });
+        }
+        self.stroke = Some(Box::new(builder));
+        self.second = second.map(Box::new);
+    }
+
+    fn show_shape_plots(&mut self, primary: &[Stamp], secondary: Option<&[Stamp]>) {
         // with a symmetry guide on, its copies too, as the stroke had them and as it is kept
         let guide = self.doc.stroke_guide();
         if let Some(canvas) = self.canvas.as_mut() {
             // nothing drawn ahead of the pen before it snapped stays over the shape
             canvas.set_prediction(&[]);
             canvas.set_tip(&[]);
-            match &second_stamps {
-                Some(second) => canvas.replace_second_stamps(&crate::guide::mirrored(&guide, second)),
-                // (a brush engine's dual brush goes on as its first alone)
-                None => canvas.drop_second(),
-            }
-            canvas.replace_stamps(&crate::guide::mirrored(&guide, &stamps));
+            let second = secondary.map(|second| crate::guide::mirrored(&guide, second));
+            canvas.replace_shape_stamps(&crate::guide::mirrored(&guide, primary), second.as_deref());
         }
-        self.stroke = Some(Box::new(builder));
-        self.second = second.map(Box::new);
     }
 
-    /// Redraws the open stroke along the shape if it moved since it was last drawn: as a frame is
-    /// drawn, and before it is kept (see [`ShapeEdit::stale`]).
-    pub(crate) fn draw_moved_shape(&mut self) {
-        if self.shape.as_ref().is_some_and(|edit| edit.stale) {
+    /// Reposition both plots for a drag preview. The committed outline is spaced afresh.
+    fn move_shape_plots(&mut self) -> Option<()> {
+        let scale = self.brush_scale();
+        let edit = self.shape.as_mut()?;
+        let plots = edit.plots.as_ref().filter(|plots| plots.scale == scale)?;
+        let moved = PlotMove::between(&plots.shape, &edit.shape)?;
+        let primary = moved.place(&plots.primary, self.stroke.as_ref()?);
+        let secondary = match &plots.secondary {
+            Some(plot) => Some(moved.place(plot, self.second.as_ref()?)),
+            None => None,
+        };
+        edit.stale = false;
+        edit.moved_plots = true;
+        self.show_shape_plots(&primary, secondary.as_deref());
+        Some(())
+    }
+
+    /// Redraws the open stroke if it moved since the last frame. Returns whether a move is
+    /// waiting for the previous replay to finish.
+    pub(crate) fn draw_moved_shape(&mut self) -> bool {
+        if !self.shape.as_ref().is_some_and(|edit| edit.stale) {
+            return false;
+        }
+        // Replacing a replay partway through can leave an ellipse restarting on every
+        // pointer move, so only the old outline ever reaches the screen.
+        if self.canvas.as_ref().is_some_and(|canvas| canvas.relaying() || canvas.catching_up()) {
+            return true;
+        }
+        if self.move_shape_plots().is_none() {
             self.draw_shape();
         }
+        false
+    }
+
+    pub(crate) fn draw_shape_for_commit(&mut self) -> bool {
+        let redraw = self.shape.as_ref().is_some_and(|edit| edit.stale || edit.moved_plots);
+        if redraw {
+            self.draw_shape();
+        }
+        redraw
     }
 
     /// The pen still down after a snap moved to `to` (canvas point): the shape turns and grows
@@ -429,10 +582,11 @@ impl State {
     }
 
     /// The pen that drew the snapped shape lifted: it stays where it is, open to be edited.
-    pub(crate) fn let_go_shape(&mut self) {
+    pub(crate) fn let_go_shape(&mut self) -> bool {
         if let Some(edit) = self.shape.as_mut() {
             edit.held = None;
         }
+        self.draw_shape_for_commit()
     }
 
     /// The stroke just kept is remembered, for QuickShape on the last stroke. It is laid by the next
@@ -991,7 +1145,9 @@ impl CanvasSession {
     /// The drag on the outline (or the pen) let go: the shape stays as it shows.
     pub fn quickshape_unpin(&self) -> Option<QuickShapeInfo> {
         let mut guard = self.shared.lock();
-        guard.let_go_shape();
+        if guard.let_go_shape() {
+            self.shared.frame(&mut guard);
+        }
         guard.shape_info()
     }
 
@@ -1028,6 +1184,45 @@ mod tests {
     use procraft_engine::input::Pointer;
 
     use super::*;
+
+    #[test]
+    fn a_shape_move_places_both_stamp_plots_with_their_own_tip_dynamics() {
+        let from = Shape { kind: ShapeKind::Line, nodes: vec![Vec2::ZERO, Vec2::new(100.0, 0.0)] };
+        let to = Shape { kind: ShapeKind::Line, nodes: vec![Vec2::new(10.0, 20.0), Vec2::new(10.0, 130.0)] };
+        let moved = PlotMove::between(&from, &to).unwrap();
+        let mut follows = Brush::round_pen();
+        follows.set_setting("shape_rotation", 1.0);
+        let primary = StrokeBuilder::new(follows, 12.0, Pointer::Finger);
+        let secondary = StrokeBuilder::new(Brush::round_pen(), 5.0, Pointer::Finger);
+        for (x, y, builder, turn) in [(20.0, 42.0, &primary, PI / 2.0), (40.0, 64.0, &secondary, 0.0)] {
+            let stamp =
+                Stamp { time_ms: 70.0, distance: x, ..Stamp::round(Vec2::new(x, 0.0), builder.diameter() * 0.5, 0.4) };
+            let placed = moved.place(&[stamp], builder);
+            assert_eq!(placed, [Stamp { center: Vec2::new(10.0, y), angle: turn, ..stamp }]);
+        }
+        let stretched = Shape { kind: ShapeKind::Line, nodes: vec![Vec2::ZERO, Vec2::new(150.0, 0.0)] };
+        assert!(PlotMove::between(&from, &stretched).is_none());
+    }
+
+    #[test]
+    fn an_ellipse_axis_edit_reuses_dabs_and_follows_the_new_tangent() {
+        let ellipse =
+            |x, y| Shape { kind: ShapeKind::Ellipse, nodes: vec![Vec2::ZERO, Vec2::new(x, 0.0), Vec2::new(0.0, y)] };
+        let moved = PlotMove::between(&ellipse(100.0, 80.0), &ellipse(120.0, 68.0)).unwrap();
+        let mut brush = Brush::round_pen();
+        brush.set_setting("shape_rotation", 1.0);
+        let builder = StrokeBuilder::new(brush, 10.0, Pointer::Finger);
+        let original = Stamp::round(Vec2::new(60.0, 64.0), 5.0, 0.7);
+        let placed = moved.place(&[original], &builder);
+        let stamp = placed.first().unwrap();
+        let turn = Vec2::new(-80.0, 48.0);
+        let next = Vec2::new(-96.0, 40.8);
+        let expected =
+            Stamp { center: Vec2::new(72.0, 54.4), angle: turn.cross(next).atan2(turn.dot(next)), ..original };
+        assert!(stamp.center.distance(expected.center) < 0.0001);
+        assert!((stamp.angle - expected.angle).abs() < 0.0001);
+        assert_eq!(Stamp { center: expected.center, angle: expected.angle, ..*stamp }, expected);
+    }
 
     /// A hand's circle about (500, 400) from its right: `round` times round, a little off true.
     fn circle(round: f32, step_ms: f64) -> Vec<Sample> {

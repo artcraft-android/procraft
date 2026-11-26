@@ -102,6 +102,7 @@ struct Mark {
 struct Saved {
     layer: wgpu::Texture,
     kept: [Option<wgpu::Texture>; 3],
+    rect: IRect,
 }
 
 impl Saved {
@@ -335,7 +336,8 @@ impl Canvas {
         for at in touched {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
             // past the most it keeps: this mark can't be gone back to
-            let Some(saved) = keep_tile(gpu, encoder, rewind, (&layer.texture, tile), (at, side, full)) else {
+            let rect = tile_rect(at, side).intersect(full);
+            let Some(saved) = keep_tile(gpu, encoder, rewind, (&layer.texture, tile), rect, rect) else {
                 rewind.drop_newest();
                 return;
             };
@@ -411,7 +413,9 @@ impl Canvas {
                 tip.made.insert(at);
                 continue;
             };
-            let Some(saved) = keep_tile(gpu, encoder, rewind, (&layer.texture, tile), (at, side, full)) else {
+            let bounds = tile_rect(at, side).intersect(full);
+            let Some(saved) = keep_tile(gpu, encoder, rewind, (&layer.texture, tile), bounds, bounds.intersect(writes))
+            else {
                 tip.let_go(&mut rewind.free, &mut rewind.free_carries);
                 return false;
             };
@@ -421,42 +425,46 @@ impl Canvas {
         true
     }
 
-    /// The tiles `writes` reach, about to be written while the open stroke lays its tip in place:
-    /// kept for it as they are where it doesn't keep them yet (none, but where a pass reached past
-    /// what the tip was told it writes), those not made yet noted as made since.
-    pub(super) fn keep_for_tip(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, writes: &[IRect]) {
+    /// Saves any part of a window's writeback that extends past the tip's existing snapshots.
+    pub(super) fn keep_for_tip(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, writes: IRect) {
         let full = self.full();
         let Some(smudge) = self.smudge.as_mut() else { return };
         let Some(layer) = self.layers.get(&smudge.into) else { return };
         let side = smudge.tile;
         let Some(rewind) = smudge.rewind.as_mut() else { return };
-        let Some(tip) = rewind.tip.as_ref() else { return };
-        let mut touched: Vec<(u32, u32)> = writes.iter().flat_map(|w| tiles_of(*w, side)).collect();
-        touched.sort_unstable();
-        touched.dedup();
-        touched.retain(|t| !tip.saved.contains_key(t) && !tip.made.contains(t));
-        for at in touched {
-            let saved = match smudge.tiles.get(&at) {
-                Some(tile) => match keep_tile(gpu, encoder, rewind, (&layer.texture, tile), (at, side, full)) {
-                    Some(saved) => Some(saved),
-                    None => {
-                        log::error!("a stroke's tip laid in place couldn't keep a tile it writes");
-                        continue;
-                    }
-                },
-                None => None,
+        let Some(mut tip) = rewind.tip.take() else { return };
+        for at in tiles_of(writes, side) {
+            if tip.made.contains(&at) {
+                continue;
+            }
+            let Some(tile) = smudge.tiles.get(&at) else {
+                tip.made.insert(at);
+                continue;
             };
-            if let Some(tip) = rewind.tip.as_mut() {
-                match saved {
-                    Some(saved) => {
-                        tip.saved.insert(at, saved);
+            let bounds = tile_rect(at, side).intersect(full);
+            let rect = bounds.intersect(writes);
+            if let Some(saved) = tip.saved.get_mut(&at) {
+                let old = saved.rect;
+                let union = old.union(rect);
+                if union != old {
+                    // Only copy newly reached pixels. The tip may already have painted the old ones.
+                    for strip in [
+                        IRect::new(union.x0, union.y0, union.x1, old.y0),
+                        IRect::new(union.x0, old.y1, union.x1, union.y1),
+                        IRect::new(union.x0, old.y0, old.x0, old.y1),
+                        IRect::new(old.x1, old.y0, union.x1, old.y1),
+                    ] {
+                        saved.copy_from(gpu, encoder, (&layer.texture, tile), bounds, strip);
                     }
-                    None => {
-                        tip.made.insert(at);
-                    }
+                    saved.rect = union;
                 }
+            } else if let Some(saved) = keep_tile(gpu, encoder, rewind, (&layer.texture, tile), bounds, rect) {
+                tip.saved.insert(at, saved);
+            } else {
+                log::error!("a stroke's tip laid in place couldn't keep a tile it writes");
             }
         }
+        rewind.tip = Some(tip);
     }
 
     /// Takes the open stroke's tip laid in place off (see [`Canvas::save_in_place_tip`]): the tiles
@@ -476,27 +484,19 @@ impl Canvas {
             let r = tile_rect(*at, side).intersect(full);
             gpu.copy_texture_to_texture(
                 encoder,
-                copy_at(&made.before, 0, 0),
+                copy_at(&made.before, made.origin[0], made.origin[1]),
                 copy_at(&layer.texture, r.x0, r.y0),
                 extent(r.width(), r.height()),
             );
+            if let Some(wet) = &smudge.wet_textures {
+                wet.clear_tile(gpu, encoder, r);
+            }
             changed = changed.union(r);
         }
         for (at, saved) in &tip.saved {
             let Some(tile) = smudge.tiles.get(at) else { continue };
-            let r = tile_rect(*at, side).intersect(full);
-            gpu.copy_texture_to_texture(
-                encoder,
-                copy_at(&saved.layer, 0, 0),
-                copy_at(&layer.texture, r.x0, r.y0),
-                extent(r.width(), r.height()),
-            );
-            for (from, into) in saved.kept.iter().zip([&tile.grained, &tile.amount, &tile.shown]) {
-                if let (Some(from), Some(into)) = (from, into) {
-                    gpu.copy_texture_to_texture(encoder, copy_at(from, 0, 0), copy_at(into, 0, 0), extent(side, side));
-                }
-            }
-            changed = changed.union(r);
+            saved.restore(gpu, encoder, (&layer.texture, tile), tile_rect(*at, side));
+            changed = changed.union(saved.rect);
         }
         if let (Some(from), Some(into)) = (tip.carry.as_ref(), smudge.carry.as_ref()) {
             encoder.copy_buffer_to_buffer(from, 0, into, 0, CARRIED_BYTES);
@@ -616,27 +616,19 @@ impl Canvas {
             let r = tile_rect(*at, side).intersect(full);
             gpu.copy_texture_to_texture(
                 encoder,
-                copy_at(&tile.before, 0, 0),
+                copy_at(&tile.before, tile.origin[0], tile.origin[1]),
                 copy_at(&layer.texture, r.x0, r.y0),
                 extent(r.width(), r.height()),
             );
+            if let Some(wet) = &smudge.wet_textures {
+                wet.clear_tile(gpu, encoder, r);
+            }
             changed = changed.union(r);
         }
         for (at, saved) in first {
             let Some(tile) = smudge.tiles.get(&at) else { continue };
-            let r = tile_rect(at, side).intersect(full);
-            gpu.copy_texture_to_texture(
-                encoder,
-                copy_at(&saved.layer, 0, 0),
-                copy_at(&layer.texture, r.x0, r.y0),
-                extent(r.width(), r.height()),
-            );
-            for (from, into) in saved.kept.iter().zip([&tile.grained, &tile.amount, &tile.shown]) {
-                if let (Some(from), Some(into)) = (from, into) {
-                    gpu.copy_texture_to_texture(encoder, copy_at(from, 0, 0), copy_at(into, 0, 0), extent(side, side));
-                }
-            }
-            changed = changed.union(r);
+            saved.restore(gpu, encoder, (&layer.texture, tile), tile_rect(at, side));
+            changed = changed.union(saved.rect);
         }
         let mut since = since.into_iter();
         let Some(mark) = since.next() else { return };
@@ -660,14 +652,14 @@ impl Canvas {
     }
 }
 
-/// Keeps tile `at` of the stroke's layer (`layer`) and what the stroke keeps of it (`tile`) as they
-/// are, in pictures `rewind` takes: none if it can't take them all (those it took given back).
+/// Keeps `rect` in the stroke's layer and its tile, using pictures from the rewind pool.
 fn keep_tile(
     gpu: &Gpu,
     encoder: &mut wgpu::CommandEncoder,
     rewind: &mut Rewind,
     (layer, tile): (&wgpu::Texture, &Tile),
-    (at, side, full): ((u32, u32), u32, IRect),
+    bounds: IRect,
+    rect: IRect,
 ) -> Option<Saved> {
     let kept = [&tile.grained, &tile.amount, &tile.shown];
     let wanted = 1 + kept.iter().filter(|k| k.is_some()).count();
@@ -682,24 +674,61 @@ fn keep_tile(
         rewind.free.extend(taken);
         return None;
     }
-    let r = tile_rect(at, side).intersect(full);
     let mut taken = taken.into_iter();
-    let picture = taken.next()?;
-    gpu.copy_texture_to_texture(
-        encoder,
-        copy_at(layer, r.x0, r.y0),
-        copy_at(&picture, 0, 0),
-        extent(r.width(), r.height()),
-    );
-    let mut saved = Saved { layer: picture, kept: [None, None, None] };
-    for (from, into) in kept.into_iter().zip(saved.kept.iter_mut()) {
-        if let Some(from) = from {
-            let Some(t) = taken.next() else { break };
-            gpu.copy_texture_to_texture(encoder, copy_at(from, 0, 0), copy_at(&t, 0, 0), extent(side, side));
-            *into = Some(t);
+    let saved = Saved { layer: taken.next()?, kept: kept.map(|kept| kept.as_ref().and_then(|_| taken.next())), rect };
+    saved.copy_from(gpu, encoder, (layer, tile), bounds, rect);
+    Some(saved)
+}
+
+impl Saved {
+    fn copy_from(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        (layer, tile): (&wgpu::Texture, &Tile),
+        bounds: IRect,
+        rect: IRect,
+    ) {
+        if rect.is_empty() {
+            return;
+        }
+        let (x, y) = (rect.x0 - bounds.x0, rect.y0 - bounds.y0);
+        let size = extent(rect.width(), rect.height());
+        gpu.copy_texture_to_texture(encoder, copy_at(layer, rect.x0, rect.y0), copy_at(&self.layer, x, y), size);
+        for (from, into) in [&tile.grained, &tile.amount, &tile.shown].into_iter().zip(&self.kept) {
+            if let (Some(from), Some(into)) = (from, into) {
+                gpu.copy_texture_to_texture(
+                    encoder,
+                    copy_at(from, x + tile.origin[0], y + tile.origin[1]),
+                    copy_at(into, x, y),
+                    size,
+                );
+            }
         }
     }
-    Some(saved)
+
+    fn restore(
+        &self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        (layer, tile): (&wgpu::Texture, &Tile),
+        bounds: IRect,
+    ) {
+        let rect = self.rect;
+        let (x, y) = (rect.x0 - bounds.x0, rect.y0 - bounds.y0);
+        let size = extent(rect.width(), rect.height());
+        gpu.copy_texture_to_texture(encoder, copy_at(&self.layer, x, y), copy_at(layer, rect.x0, rect.y0), size);
+        for (from, into) in self.kept.iter().zip([&tile.grained, &tile.amount, &tile.shown]) {
+            if let (Some(from), Some(into)) = (from, into) {
+                gpu.copy_texture_to_texture(
+                    encoder,
+                    copy_at(from, x, y),
+                    copy_at(into, x + tile.origin[0], y + tile.origin[1]),
+                    size,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

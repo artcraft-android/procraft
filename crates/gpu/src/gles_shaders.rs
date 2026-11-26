@@ -33,6 +33,7 @@ const SHADERS: &[(&str, &str)] = &[
         concat!(
             include_str!("shaders/blend.wgsl"),
             include_str!("shaders/smudge.wgsl"),
+            include_str!("shaders/smudge_window.wgsl"),
             include_str!("shaders/smudge_compute.wgsl")
         ),
     ),

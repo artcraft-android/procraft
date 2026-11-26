@@ -789,6 +789,7 @@ pub(crate) struct State {
     pub(crate) engine_asking: plugin_brushes::Asking,
     /// Brush files' grains at their own size.
     pub(crate) grain_store: grain_store::GrainStore,
+    wet_pictures: [[big_pictures::PictureChoice; 2]; 2],
     /// Where the library was last kept or read whole, and what it held then (see
     /// `brush_library::Images::Told`): kept again only once that changes.
     pub(crate) library_kept: Option<(std::path::PathBuf, u64)>,
@@ -1090,7 +1091,7 @@ impl State {
             return;
         }
         // a shape kept as it shows, moved since the last frame or not
-        self.draw_moved_shape();
+        self.draw_shape_for_commit();
         let shape = self.shape.take();
         // a stroke on a model ends there, as the pen lifting would end it
         if self.scene_shown() && self.scene.as_ref().is_some_and(|s| s.stroking) {
@@ -1216,7 +1217,8 @@ impl State {
         }
         self.use_full_grain(&mut style, &brush);
         self.use_full_shape(&mut style, &brush);
-        self.use_big_pictures(&mut style, &brush, diameter);
+        let wet_tip = (style.wet_pull.is_some() && !preview).then_some(0);
+        self.use_big_pictures(&mut style, &brush, diameter, wet_tip);
         (brush, style, diameter)
     }
 
@@ -1224,7 +1226,7 @@ impl State {
     /// `diameter` canvas pixels across (its grain's tile from that) bigger than brushes hold them,
     /// if those are made: none is drawn here (see `big_pictures.rs`). A brush file's own big images
     /// go their own way.
-    fn use_big_pictures(&mut self, style: &mut StrokeStyle, brush: &Brush, diameter: f32) {
+    fn use_big_pictures(&mut self, style: &mut StrokeStyle, brush: &Brush, diameter: f32, wet_tip: Option<usize>) {
         use crate::big_pictures::{grain_of, grain_tile, past_held, ready, shape_of};
         if self.canvas.is_none() || self.gpu.is_none() {
             return;
@@ -1233,8 +1235,16 @@ impl State {
         let grain = (style.full_grain.is_none() && style.grain.is_some() && past_held(grain_tile(brush, diameter)))
             .then(|| grain_of(brush))
             .flatten();
-        let shape = shape.and_then(|big| Some((big.id, ready(&big)?)));
-        let grain = grain.and_then(|big| Some((big.id, ready(&big)?)));
+        let mut picture = |kind: usize, big: Option<big_pictures::Big>| {
+            let big = big?;
+            let image = if let Some(choices) = wet_tip.and_then(|tip| self.wet_pictures.get_mut(tip)) {
+                choices.get_mut(kind)?.get(&big)
+            } else {
+                ready(&big)
+            }?;
+            Some((big.id, image))
+        };
+        let (shape, grain) = (picture(0, shape), picture(1, grain));
         let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return };
         if let Some((id, picture)) = shape {
             canvas.use_full_shape_levels(gpu, style, id, picture.side, &picture.levels);
@@ -1249,6 +1259,7 @@ impl State {
     /// file's own images at their own size read from their files, so that its first stroke has
     /// them (see `big_pictures.rs`).
     pub(crate) fn load_brush_pictures(&mut self) {
+        self.wet_pictures = Default::default();
         let brush = self.brush(self.tool);
         crate::big_pictures::load(crate::big_pictures::reached_by(brush), true);
         let fulls: Vec<procraft_engine::brush::FullGrain> = std::iter::once(brush)
@@ -1334,7 +1345,8 @@ impl State {
         }
         self.use_full_grain(&mut style, &second);
         self.use_full_shape(&mut style, &second);
-        self.use_big_pictures(&mut style, &second, diameter);
+        let wet_tip = (first_style.wet_pull.is_some() && !first_style.preview).then_some(1);
+        self.use_big_pictures(&mut style, &second, diameter, wet_tip);
         let mode = first.setting("dual_blend").round().max(0.0) as u32;
         let classic = first.setting("classic_combine") >= 0.5;
         Some((second, SecondStroke { style, mode, threshold: style.alpha_threshold, classic }, diameter))
@@ -2331,6 +2343,7 @@ impl CanvasSession {
             filling: None,
             engine_asking: plugin_brushes::Asking::default(),
             grain_store: grain_store::GrainStore::default(),
+            wet_pictures: Default::default(),
             library_kept: None,
             plugin_stepping: 0,
             engine_studio: None,

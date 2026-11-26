@@ -1217,6 +1217,7 @@ impl Canvas {
                 .iter()
                 .map(|&at| {
                     let tile = smudge::Tile {
+                        origin: [0, 0],
                         before: tile("smudge before", LAYER_FORMAT),
                         grained: keeps.grained.then(|| tile("smudge grained", LAYER_FORMAT)),
                         amount: keeps.amount.then(|| tile("smudge amount", AMOUNT_FORMAT)),

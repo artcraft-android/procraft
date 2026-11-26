@@ -750,10 +750,12 @@ struct Found {
 // on a GPU that doesn't keep reads within a buffer, OpenGL ES's)
 fn found_at(p: vec2<i32>) -> Found {
     var f: Found;
-    f.work = work_at(p);
-    f.grained = f.work;
     if (st.laid_apart == 2u) {
+        f.work = vec4<f32>(0.0);
         f.grained = grained_at(p);
+    } else {
+        f.work = work_at(p);
+        f.grained = f.work;
     }
     f.amount = 0.0;
     f.shown = 0.0;
@@ -773,13 +775,13 @@ fn in_bbox(d: Dab, p: vec2<i32>) -> bool {
 }
 
 // what stamp `d` lays at canvas pixel `p`, finding `found` there
-fn deposit(d: Dab, p: vec2<i32>, found: Found) -> Deposit {
+fn deposit(d: Dab, p: vec2<i32>, found: Found, selection: f32) -> Deposit {
     var dep: Deposit;
     dep.laid = false;
     dep.into_grained = st.laid_apart == 2u;
     dep.amount_set = false;
     dep.shown_set = false;
-    if (!in_bbox(d, p) || left_out(p)) {
+    if (!in_bbox(d, p) || selection <= 0.0) {
         return dep;
     }
     // into the stamp's frame
@@ -866,7 +868,7 @@ fn deposit(d: Dab, p: vec2<i32>, found: Found) -> Deposit {
             out = out * (w.a / max(out.a, 1e-6));
         }
         // outside the selection the layer stays as it is
-        out = mix(w, out, selected_at(p));
+        out = mix(w, out, selection);
     }
     // rounded to 8 bits up or down at random, in proportion to the remainder, so that faint stamps
     // add up as they should instead of rounding away (wet paint laid apart is kept as the colour
@@ -1097,8 +1099,13 @@ fn wet_walk_start(t: vec2<f32>) -> WetWalk {
 // the walk on past the pass's stamp `k`
 fn wet_walk_on(walk: WetWalk, k: u32, t: vec2<f32>) -> WetWalk {
     let w = wet_pass.stamps[k];
+    // The first stamp's sample has already been read to seed this pass.
+    var under = walk.under_first;
+    if (k != 0u) {
+        under = to_mix(layer_at(plot_point(w, t)));
+    }
     var on = walk;
-    on.carried = mix(to_mix(layer_at(plot_point(w, t))), on.carried, w.mixing.y);
+    on.carried = mix(under, on.carried, w.mixing.y);
     on.carried = mix(on.carried, to_mix(w.paint), w.mixing.z);
     on.out = mix(on.under_first, on.carried, w.mixing.w);
     return on;

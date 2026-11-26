@@ -1,11 +1,8 @@
-//! A smudge stroke's work (smudging and paint laid in place) done a window at a time: its compute
-//! passes reach the layer through buffers that hold only the part of it they read and write,
-//! copied in before them and back after, so that what is bound never grows with the canvas and a
-//! stroke begins without copying its layer. What the stroke keeps of the layer (the layer as it
-//! was, and wet paint's stroke as laid and how much each pixel has taken) is kept in tiles, each
-//! made as the stroke first writes to it. A stroke laying paint into its layer's store (see
-//! `store.rs`) works in the store's paint, and its tiles keep the layer and the height as they were
-//! too.
+//! Smudge and wet-paint passes work over bounded regions. Wet paint laid apart can keep color and
+//! coverage in storage textures across passes and synthesize directly into its layer. Other strokes
+//! use window buffers with only the pixels a batch reads or writes, copied in and out. Both paths
+//! snapshot the layer a tile at a time, as the stroke first writes there. A stroke painting into a
+//! layer's store (`store.rs`) also keeps the layer and height as they were.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -85,11 +82,19 @@ impl Keeps {
 /// the paint shows (these two f32s a pixel, as their bytes); and the textures it changes besides
 /// the one it works in as they were (see [`Canvas::smudge_also`]).
 pub(super) struct Tile {
+    /// The tile's first pixel in its backing textures. Resident tiles share a texture region.
+    pub(super) origin: [i32; 2],
     pub(super) before: wgpu::Texture,
     pub(super) grained: Option<wgpu::Texture>,
     pub(super) amount: Option<wgpu::Texture>,
     pub(super) shown: Option<wgpu::Texture>,
     pub(super) more: Vec<wgpu::Texture>,
+}
+
+impl Tile {
+    pub(super) fn independent(&self, side: u32) -> bool {
+        self.origin == [0, 0] && self.before.width() <= side && self.before.height() <= side
+    }
 }
 
 /// What of a tile a kind of what the stroke keeps is in (none where the stroke doesn't keep it).
@@ -106,6 +111,202 @@ pub(super) struct Window {
     before_view: wgpu::TextureView,
     /// Bytes the work buffer holds (each of the amount's halves as many).
     bytes: u64,
+}
+
+pub(super) struct WetPipelines {
+    layout: wgpu::BindGroupLayout,
+    deposit: wgpu::ComputePipeline,
+    deposit_run: wgpu::ComputePipeline,
+    synthesize: wgpu::ComputePipeline,
+    plots: wgpu::ComputePipeline,
+}
+
+impl WetPipelines {
+    pub(super) fn new(
+        device: &wgpu::Device,
+        brush_layout: &wgpu::BindGroupLayout,
+        window_entries: &[wgpu::BindGroupLayoutEntry],
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> Option<Self> {
+        if !device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+            || device.limits().max_storage_textures_per_shader_stage < 4
+        {
+            return None;
+        }
+        let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut entries: Vec<_> = window_entries.iter().copied().filter(|e| !matches!(e.binding, 1 | 3 | 4)).collect();
+        for (binding, access) in [
+            (1, wgpu::StorageTextureAccess::WriteOnly),
+            (3, wgpu::StorageTextureAccess::ReadWrite),
+            (4, wgpu::StorageTextureAccess::ReadWrite),
+            (10, wgpu::StorageTextureAccess::ReadWrite),
+        ] {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access,
+                    format: LAYER_FORMAT,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            });
+        }
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("resident wet paint"),
+            entries: &entries,
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("resident wet paint"),
+            bind_group_layouts: &[Some(&layout), Some(brush_layout)],
+            immediate_size: 0,
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("resident wet paint"),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../shaders/blend.wgsl"),
+                    include_str!("../shaders/smudge.wgsl"),
+                    include_str!("../shaders/smudge_resident.wgsl"),
+                    include_str!("../shaders/smudge_compute.wgsl")
+                )
+                .into(),
+            ),
+        });
+        let pass = |entry| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("resident wet paint"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache,
+            })
+        };
+        let deposit = pass("cs_deposit");
+        let deposit_run = pass("cs_deposit_run");
+        let synthesize = pass("cs_synthesize");
+        let plots = pass("cs_wet_plots");
+        if let Some(error) = pollster::block_on(invalid.pop()) {
+            log::warn!("resident wet paint is unavailable: {error}");
+            return None;
+        }
+        Some(Self { layout, deposit, deposit_run, synthesize, plots })
+    }
+}
+
+/// Paint and coverage shared by the whole stroke. Only tiles the stroke touches are initialized.
+pub(super) struct WetTextures {
+    bounds: IRect,
+    before: wgpu::TextureView,
+    grained: wgpu::TextureView,
+    amount: wgpu::TextureView,
+    shown: wgpu::TextureView,
+    zero: wgpu::Texture,
+    has_amount: bool,
+}
+
+impl WetTextures {
+    fn fits(size: IRect, has_amount: bool, low_memory: bool) -> bool {
+        let bytes = u64::from(size.width()) * u64::from(size.height()) * if has_amount { 16 } else { 12 };
+        let limit = if low_memory { 32 << 20 } else { 64 << 20 };
+        bytes <= limit
+    }
+
+    fn new(gpu: &Gpu, size: IRect, side: u32, has_amount: bool) -> Option<Self> {
+        let memory = gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let invalid = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let make = |label, width, height| {
+            gpu.texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: extent(width, height),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: LAYER_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let (w, h) = (size.width(), size.height());
+        let before = make("wet paint before", w, h);
+        let grained = make("wet paint color", w, h);
+        let amount = if has_amount { make("wet paint amount", w, h) } else { make("unused wet amount", 1, 1) };
+        let shown = make("wet paint coverage", w, h);
+        let zero = texture(gpu, "wet paint zero tile", side, side, LAYER_FORMAT);
+        let invalid = pollster::block_on(invalid.pop());
+        let memory = pollster::block_on(memory.pop());
+        if let Some(error) = invalid.or(memory) {
+            log::warn!("using windowed wet paint: {error}");
+            return None;
+        }
+        Some(Self { bounds: size, before, grained, amount, shown, zero, has_amount })
+    }
+
+    fn tile(&self, rect: IRect) -> Tile {
+        Tile {
+            origin: self.origin_of(rect),
+            before: self.before.texture().clone(),
+            grained: Some(self.grained.texture().clone()),
+            amount: self.has_amount.then(|| self.amount.texture().clone()),
+            shown: Some(self.shown.texture().clone()),
+            more: Vec::new(),
+        }
+    }
+
+    fn origin_of(&self, rect: IRect) -> [i32; 2] {
+        [rect.x0 - self.bounds.x0, rect.y0 - self.bounds.y0]
+    }
+
+    fn copy_into(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, next: &Self, rect: IRect) {
+        let [fx, fy] = self.origin_of(rect);
+        let [tx, ty] = next.origin_of(rect);
+        let size = extent(rect.width(), rect.height());
+        let planes = [(&self.before, &next.before), (&self.grained, &next.grained), (&self.shown, &next.shown)];
+        for (from, into) in planes.into_iter().chain(self.has_amount.then_some((&self.amount, &next.amount))) {
+            gpu.copy_texture_to_texture(
+                encoder,
+                copy_at(from.texture(), fx, fy),
+                copy_at(into.texture(), tx, ty),
+                size,
+            );
+        }
+    }
+
+    pub(super) fn clear_tile(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, rect: IRect) {
+        let [x, y] = self.origin_of(rect);
+        for into in std::iter::once(&self.shown).chain(self.has_amount.then_some(&self.amount)) {
+            gpu.copy_texture_to_texture(
+                encoder,
+                copy_at(&self.zero, 0, 0),
+                copy_at(into.texture(), x, y),
+                extent(rect.width(), rect.height()),
+            );
+        }
+    }
+
+    pub(super) fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
+        for view in std::iter::once(&self.shown).chain(self.has_amount.then_some(&self.amount)) {
+            drop(super::render_pass(
+                encoder,
+                "reset wet paint coverage",
+                view,
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            ));
+        }
+    }
+
+    fn textures(&self) -> impl Iterator<Item = &wgpu::Texture> {
+        [&self.before, &self.grained, &self.amount, &self.shown]
+            .into_iter()
+            .map(wgpu::TextureView::texture)
+            .chain(std::iter::once(&self.zero))
+    }
 }
 
 /// What a dispatch of a smudge stroke runs.
@@ -557,12 +758,27 @@ impl Canvas {
             p.uniforms.iter().any(|u| u.source_before == 1 || u.laid_apart == 2)
                 || p.dispatches.iter().any(|d| matches!(d.0, Pipe::Synthesize))
         });
-        if !self.window_in(gpu, encoder, (reach, before), &each) {
+        // Paint laid apart uses the saved layer and the stroke's own colour and coverage.
+        // If the final synthesis writes every pixel we copy back, it can write into an empty
+        // work buffer. A selection can leave holes, so keep those pixels from the layer.
+        let rebuilds_work = pieces.iter().all(|p| p.uniforms.iter().all(|u| u.mode == 1 && u.laid_apart == 2))
+            && (!work
+                || (self.selection.is_none()
+                    && pieces.last().is_some_and(|p| {
+                        p.writes == writes && matches!(p.dispatches.as_slice(), [(Pipe::Synthesize, _, _)])
+                    })));
+        self.keep_for_tip(gpu, encoder, writes);
+        let resident_textures = self.reserve_wet_region(gpu, encoder, reach);
+        let ready = if resident_textures {
+            self.wet_textures_in(gpu, encoder, reach, &each)
+        } else {
+            self.window_in(gpu, encoder, reach, &each, before, !rebuilds_work)
+        };
+        if !ready {
             return false;
         }
         let from_image = pieces.iter().any(|p| p.uniforms.iter().any(|u| u.source_image == 1));
         let Some(smudge) = self.smudge.as_ref() else { return false };
-        let Some(window) = smudge.window.as_ref() else { return false };
         // (never begun without them: see `Canvas::smudges`)
         let Some(compute) = self.pipelines.compute.as_ref() else { return false };
         let Some(carry) = smudge.carry.as_ref() else { return false };
@@ -578,50 +794,52 @@ impl Canvas {
             }),
         };
         let spare = &self.smudge_spare;
+        let view = |binding, tex| wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(tex) };
+        let (layout, pipelines, before_view, mut entries) =
+            if let (Some(wet), Some(pipelines)) = (&smudge.wet_textures, &compute.wet_textures) {
+                let Some(layer) = self.layers.get(&smudge.into) else { return false };
+                (
+                    &pipelines.layout,
+                    Some(pipelines),
+                    &wet.before,
+                    vec![view(1, &layer.view), view(3, &wet.grained), view(4, &wet.amount), view(10, &wet.shown)],
+                )
+            } else {
+                let Some(window) = smudge.window.as_ref() else { return false };
+                (
+                    &compute.smudge_layout,
+                    None,
+                    &window.before_view,
+                    vec![
+                        wgpu::BindGroupEntry { binding: 1, resource: window.work.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: window.grained.as_ref().unwrap_or(&spare[0]).as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: window.amount.as_ref().unwrap_or(&spare[1]).as_entire_binding(),
+                        },
+                    ],
+                )
+            };
+        entries.extend([
+            uniform(0, &self.smudge_params, SMUDGE_UNIFORM_SIZE),
+            wgpu::BindGroupEntry { binding: 2, resource: carry.as_entire_binding() },
+            uniform(5, &self.wet_params, super::WET_PASS_SIZE),
+            view(6, second.unwrap_or(before_view)),
+            view(7, before_view),
+            view(8, smudge.passed.as_ref().map_or(before_view, |p| &p.1)),
+            view(9, if from_image { &self.composite_view } else { before_view }),
+            view(11, &self.paper_view),
+        ]);
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("smudge"),
-            layout: &compute.smudge_layout,
-            entries: &[
-                uniform(0, &self.smudge_params, SMUDGE_UNIFORM_SIZE),
-                wgpu::BindGroupEntry { binding: 1, resource: window.work.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: carry.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: window.grained.as_ref().unwrap_or(&spare[0]).as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: window.amount.as_ref().unwrap_or(&spare[1]).as_entire_binding(),
-                },
-                uniform(5, &self.wet_params, super::WET_PASS_SIZE),
-                // a dual brush's second (else anything: not read)
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(second.unwrap_or(&window.before_view)),
-                },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&window.before_view) },
-                // the layer as a smudge's last pass left it (else anything: not read)
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: wgpu::BindingResource::TextureView(
-                        smudge.passed.as_ref().map_or(&window.before_view, |p| &p.1),
-                    ),
-                },
-                // the image as last shown, for a stroke that picks up from it (else anything: not
-                // read)
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::TextureView(if from_image {
-                        &self.composite_view
-                    } else {
-                        &window.before_view
-                    }),
-                },
-                // the paper's tile, which wet paint takes
-                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&self.paper_view) },
-            ],
+            layout,
+            entries: &entries,
         });
         let stride = row_bytes(reach.width()) / 4;
+        let origin = smudge.wet_textures.as_ref().map_or([reach.x0, reach.y0], |w| [w.bounds.x0, w.bounds.y0]);
         // the paper as it is now, which each wet stamp takes as it lays
         let paper = self.paper_look();
         let begin = |encoder: &mut wgpu::CommandEncoder| {
@@ -641,15 +859,7 @@ impl Canvas {
             let offsets: Vec<u32> = piece
                 .uniforms
                 .iter()
-                .map(|u| {
-                    params.push(&SmudgeUniform {
-                        origin: [reach.x0, reach.y0],
-                        stride,
-                        rows: reach.height(),
-                        paper,
-                        ..*u
-                    })
-                })
+                .map(|u| params.push(&SmudgeUniform { origin, stride, rows: reach.height(), paper, ..*u }))
                 .collect();
             for &(pipe, which, [x, y]) in &piece.dispatches {
                 let Some(&offset) = offsets.get(which) else { continue };
@@ -659,10 +869,10 @@ impl Canvas {
                     Pipe::Dull => &compute.smudge_dull,
                     Pipe::BlurDown => &compute.smudge_blur_down,
                     Pipe::BlurAcross => &compute.smudge_blur_across,
-                    Pipe::Deposit => &compute.smudge_deposit,
-                    Pipe::DepositRun => &compute.smudge_deposit_run,
-                    Pipe::Synthesize => &compute.smudge_synthesize,
-                    Pipe::WetPlots => &compute.smudge_wet_plots,
+                    Pipe::Deposit => pipelines.map_or(&compute.smudge_deposit, |p| &p.deposit),
+                    Pipe::DepositRun => pipelines.map_or(&compute.smudge_deposit_run, |p| &p.deposit_run),
+                    Pipe::Synthesize => pipelines.map_or(&compute.smudge_synthesize, |p| &p.synthesize),
+                    Pipe::WetPlots => pipelines.map_or(&compute.smudge_wet_plots, |p| &p.plots),
                 });
                 pass.dispatch_workgroups(x, y, 1);
                 self.dispatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -672,7 +882,87 @@ impl Canvas {
         if let Some(smudge) = self.smudge.as_mut() {
             smudge.resident = resident;
         }
-        self.window_out(gpu, encoder, reach, writes, (work, kept));
+        if resident_textures {
+            if work {
+                self.dirty = self.dirty.union(writes);
+            }
+        } else {
+            self.window_out(gpu, encoder, reach, writes, (work, kept));
+        }
+        true
+    }
+
+    /// Keeps the paint near its stroke when a whole canvas does not fit the resident budget.
+    /// A growing region carries its tiles over intact. If it outgrows the budget, the windowed
+    /// renderer can still use those same tiles at their existing texture offsets.
+    fn reserve_wet_region(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, reach: IRect) -> bool {
+        let full = self.full();
+        let low_memory = self.low_memory();
+        let Some(smudge) = self.smudge.as_mut().filter(|s| s.may_reside_wet && !s.stalled) else { return false };
+        let side = smudge.tile;
+        let step = side as i32;
+        let lower = |n: i32| n - n.rem_euclid(step);
+        let upper = |n: i32| lower(n.saturating_sub(1)).saturating_add(step);
+        let reached = IRect::new(lower(reach.x0), lower(reach.y0), upper(reach.x1), upper(reach.y1)).intersect(full);
+        if smudge.wet_textures.as_ref().is_some_and(|wet| wet.bounds.intersect(reached) == reached) {
+            return true;
+        }
+        let kept = smudge.tiles.keys().fold(IRect::EMPTY, |all, &at| all.union(tile_rect(at, side))).intersect(full);
+        let need = reached.union(kept);
+        let spare = IRect::new(need.x0 - step, need.y0 - step, need.x1 + step, need.y1 + step).intersect(full);
+        let amount = smudge.keeps.amount;
+        let next = [full, spare, need]
+            .into_iter()
+            .find(|&r| WetTextures::fits(r, amount, low_memory))
+            .and_then(|r| WetTextures::new(gpu, r, side, amount));
+        let previous = smudge.wet_textures.take();
+        let Some(next) = next else {
+            smudge.may_reside_wet = false;
+            return false;
+        };
+        if let Some(previous) = previous {
+            if !kept.is_empty() {
+                previous.copy_into(gpu, encoder, &next, kept);
+            }
+            for (&at, tile) in &mut smudge.tiles {
+                *tile = next.tile(tile_rect(at, side).intersect(full));
+            }
+        }
+        smudge.wet_textures = Some(next);
+        true
+    }
+
+    /// Snapshot each new tile before writing. A pass that only reads an untouched
+    /// tile sees the current layer, as it does in a window.
+    fn wet_textures_in(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        reach: IRect,
+        writes: &[IRect],
+    ) -> bool {
+        self.keep_for_mark(gpu, encoder, writes);
+        let full = self.full();
+        let Some(smudge) = self.smudge.as_mut().filter(|s| !s.stalled) else { return false };
+        let Some(wet) = smudge.wet_textures.as_ref() else { return false };
+        let Some(layer) = self.layers.get(&smudge.into) else { return false };
+        for at in tiles_of(reach, smudge.tile) {
+            if smudge.tiles.contains_key(&at) {
+                continue;
+            }
+            let tile = tile_rect(at, smudge.tile).intersect(full);
+            let written = writes.iter().any(|w| !w.intersect(tile).is_empty());
+            let rect = if written { tile } else { tile.intersect(reach) };
+            let [x, y] = wet.origin_of(rect);
+            let from = copy_at(&layer.texture, rect.x0, rect.y0);
+            let size = extent(rect.width(), rect.height());
+            gpu.copy_texture_to_texture(encoder, from.clone(), copy_at(wet.before.texture(), x, y), size);
+            if written {
+                gpu.copy_texture_to_texture(encoder, from, copy_at(wet.grained.texture(), x, y), size);
+                smudge.tiles.insert(at, wet.tile(tile));
+            }
+        }
+        smudge.laid = true;
         true
     }
 
@@ -748,13 +1038,13 @@ impl Canvas {
         &mut self,
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
-        (reach, before): (IRect, bool),
+        reach: IRect,
         writes: &[IRect],
+        before: bool,
+        copy_layer: bool,
     ) -> bool {
         let device = &gpu.device;
-        // what the passes write, as it is before them, for the stroke's mark to go back to, and for
-        // its tip laid in place to be taken off
-        self.keep_for_tip(gpu, encoder, writes);
+        // what the passes write, as it is before them, for the stroke's mark to go back to
         self.keep_for_mark(gpu, encoder, writes);
         let full = self.full();
         let also = self.smudge_also();
@@ -778,8 +1068,12 @@ impl Canvas {
         missing.sort_unstable();
         missing.dedup();
         if small || !missing.is_empty() {
-            let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-            let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let allocates = small || missing.iter().any(|at| !smudge.redraw_tiles.contains_key(at));
+            let scopes = allocates.then(|| {
+                let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+                let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                (invalid, memory)
+            });
             let window = small.then(|| {
                 // grown in steps, so a stroke that reaches further doesn't make them every frame
                 let most = room / keeps.halves();
@@ -798,20 +1092,28 @@ impl Canvas {
                 }
             });
             let tile = |label| texture(gpu, label, side, side, LAYER_FORMAT);
-            let made: Vec<((u32, u32), Tile)> = missing
-                .iter()
-                .map(|&at| {
+            let made: Vec<_> = missing
+                .into_iter()
+                .map(|at| {
+                    if let Some(tile) = smudge.redraw_tiles.remove(&at) {
+                        return (at, tile, true);
+                    }
                     let tile = Tile {
+                        origin: [0, 0],
                         before: tile("smudge before"),
                         grained: keeps.grained.then(|| tile("smudge grained")),
                         amount: keeps.amount.then(|| tile("smudge amount")),
                         shown: keeps.shown.then(|| tile("smudge shown")),
                         more: also.iter().map(|_| tile("smudge kept")).collect(),
                     };
-                    (at, tile)
+                    (at, tile, false)
                 })
                 .collect();
-            let failed = pollster::block_on(invalid.pop()).or(pollster::block_on(memory.pop()));
+            let failed = scopes.and_then(|(invalid, memory)| {
+                let invalid = pollster::block_on(invalid.pop());
+                let memory = pollster::block_on(memory.pop());
+                invalid.or(memory)
+            });
             if let Some(e) = failed {
                 log::error!("smudging: {e}");
                 self.smudge_untold = true;
@@ -826,10 +1128,10 @@ impl Canvas {
             if let Some(window) = window {
                 smudge.window = Some(window);
             }
-            for (at, tile) in made {
+            for (at, tile, reused) in made {
                 // the layer there as it was: the stroke hasn't written to it yet
                 let r = tile_rect(at, side).intersect(full);
-                for into in std::iter::once(&tile.before).chain(&tile.grained) {
+                for into in core::iter::once(&tile.before).filter(|_| !reused).chain(&tile.grained) {
                     gpu.copy_texture_to_texture(
                         encoder,
                         copy_at(&layer.texture, r.x0, r.y0),
@@ -837,13 +1139,25 @@ impl Canvas {
                         extent(r.width(), r.height()),
                     );
                 }
-                for (from, into) in also.iter().zip(&tile.more) {
-                    gpu.copy_texture_to_texture(
-                        encoder,
-                        copy_at(from, r.x0, r.y0),
-                        copy_at(into, 0, 0),
-                        extent(r.width(), r.height()),
-                    );
+                if reused {
+                    for texture in tile.amount.iter().chain(&tile.shown) {
+                        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        drop(super::render_pass(
+                            encoder,
+                            "reset wet tile",
+                            &view,
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        ));
+                    }
+                } else {
+                    for (from, into) in also.iter().zip(&tile.more) {
+                        gpu.copy_texture_to_texture(
+                            encoder,
+                            copy_at(from, r.x0, r.y0),
+                            copy_at(into, 0, 0),
+                            extent(r.width(), r.height()),
+                        );
+                    }
                 }
                 smudge.tiles.insert(at, tile);
             }
@@ -853,9 +1167,8 @@ impl Canvas {
         let size = extent(width, height);
         // the layer as the stroke has left it, and as it was where the stroke hasn't been
         let from_layer = copy_at(&layer.texture, reach.x0, reach.y0);
-        gpu.copy_texture_to_buffer(encoder, from_layer, in_buffer(&window.work, 0, row, height), size);
-        if let Some(amount) = &window.amount {
-            encoder.clear_buffer(amount, 0, Some(bytes * keeps.halves()));
+        if copy_layer {
+            gpu.copy_texture_to_buffer(encoder, from_layer, in_buffer(&window.work, 0, row, height), size);
         }
         // the stroke's tiles under the window: each one's part of it (in the window), and where
         // that starts in the tile
@@ -864,7 +1177,7 @@ impl Canvas {
                 let tile = smudge.tiles.get(&at)?;
                 let t = tile_rect(at, side);
                 let r = t.intersect(reach);
-                (!r.is_empty()).then_some((tile, r, (r.x0 - t.x0, r.y0 - t.y0)))
+                (!r.is_empty()).then_some((tile, r, (r.x0 - t.x0 + tile.origin[0], r.y0 - t.y0 + tile.origin[1])))
             })
             .collect();
         // what the stroke keeps where it has been, a kind at a time: put together in the window's
@@ -888,10 +1201,22 @@ impl Canvas {
             let theirs: Vec<(&wgpu::Texture, IRect, (i32, i32))> =
                 parts.iter().filter_map(|&(tile, r, at)| Some((kept(tile)?, r, at))).collect();
             if theirs.is_empty() {
-                // (the amounts are cleared already)
                 if from_the_layer {
                     gpu.copy_texture_to_buffer(encoder, from_layer, in_buffer(buffer, start, row, height), size);
+                } else {
+                    encoder.clear_buffer(buffer, start, Some(bytes));
                 }
+                continue;
+            }
+            if let &[(texture, r, (x, y))] = theirs.as_slice()
+                && r == reach
+            {
+                gpu.copy_texture_to_buffer(
+                    encoder,
+                    copy_at(texture, x, y),
+                    in_buffer(buffer, start, row, height),
+                    size,
+                );
                 continue;
             }
             // (under what the tiles' parts don't cover)
@@ -971,7 +1296,9 @@ impl Canvas {
             if r.is_empty() {
                 continue;
             }
-            let (x, y, size) = (r.x0 - t.x0, r.y0 - t.y0, extent(r.width(), r.height()));
+            let x = r.x0 - t.x0 + tile.origin[0];
+            let y = r.y0 - t.y0 + tile.origin[1];
+            let size = extent(r.width(), r.height());
             let halves = [
                 (&tile.grained, &window.grained, 0),
                 (&tile.amount, &window.amount, 0),
@@ -992,26 +1319,29 @@ impl Canvas {
 
     /// Puts the open smudge stroke's layer back as it was wherever the stroke has written (and what
     /// it changes besides, as they were).
-    pub(super) fn smudge_put_back(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder) {
+    pub(super) fn smudge_put_back(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder) -> IRect {
         let full = self.full();
         let also = self.smudge_also();
-        let Some(smudge) = self.smudge.as_ref() else { return };
-        let Some(layer) = self.layers.get(&smudge.into) else { return };
+        let Some(smudge) = self.smudge.as_ref() else { return IRect::EMPTY };
+        let Some(layer) = self.layers.get(&smudge.into) else { return IRect::EMPTY };
         let also: Vec<Option<&wgpu::Texture>> = also.iter().map(|id| self.layers.get(id).map(|l| &l.texture)).collect();
+        let mut restored = IRect::EMPTY;
         for (&at, tile) in &smudge.tiles {
             let r = tile_rect(at, smudge.tile).intersect(full);
+            restored = restored.union(r);
             let back =
                 std::iter::once((&tile.before, Some(&layer.texture))).chain(tile.more.iter().zip(also.iter().copied()));
             for (kept, to) in back {
                 let Some(to) = to else { continue };
                 gpu.copy_texture_to_texture(
                     encoder,
-                    copy_at(kept, 0, 0),
+                    copy_at(kept, tile.origin[0], tile.origin[1]),
                     copy_at(to, r.x0, r.y0),
                     extent(r.width(), r.height()),
                 );
             }
         }
+        restored
     }
 
     /// The open smudge stroke's layer as it was over `rect` (within the canvas), into `into`.
@@ -1062,7 +1392,7 @@ impl Canvas {
             }
             gpu.copy_texture_to_texture(
                 encoder,
-                copy_at(kept, r.x0 - t.x0, r.y0 - t.y0),
+                copy_at(kept, r.x0 - t.x0 + tile.origin[0], r.y0 - t.y0 + tile.origin[1]),
                 copy_at(into, r.x0 - rect.x0, r.y0 - rect.y0),
                 extent(r.width(), r.height()),
             );
@@ -1111,6 +1441,7 @@ impl Canvas {
             .iter()
             .map(|&at| {
                 let tile = Tile {
+                    origin: [0, 0],
                     before: tile("smudge before"),
                     grained: keeps.grained.then(|| tile("smudge grained")),
                     amount: keeps.amount.then(|| amount_tile("smudge amount")),
@@ -1201,7 +1532,7 @@ impl super::Smudge {
     /// The textures the stroke holds: its tiles' and its window's (and in fragment passes, what
     /// the brush carries, and what its copies' carries are put aside in).
     pub(super) fn textures(&self) -> Vec<&wgpu::Texture> {
-        let tiles = self.tiles.values().flat_map(|t| {
+        let tiles = self.tiles.values().chain(self.redraw_tiles.values()).flat_map(|t| {
             std::iter::once(&t.before)
                 .chain(t.grained.iter())
                 .chain(t.amount.iter())
@@ -1220,6 +1551,7 @@ impl super::Smudge {
             .chain(asides);
         tiles
             .chain(self.window.as_ref().map(|w| &w.before))
+            .chain(self.wet_textures.iter().flat_map(WetTextures::textures))
             .chain(self.passed.as_ref().map(|p| &p.0))
             .chain(fragments)
             .chain(self.rewind.iter().flat_map(super::rewind::Rewind::textures))

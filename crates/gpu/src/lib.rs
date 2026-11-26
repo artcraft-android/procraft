@@ -599,10 +599,22 @@ impl Gpu {
         if drawn {
             log::info!("texture copies drawn on this GPU (PowerVR GL)");
         }
+        let wet_storage = !old
+            && !software
+            && info.backend != wgpu::Backend::Gl
+            && adapter
+                .get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm)
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::STORAGE_READ_WRITE);
+        let optional = wgpu::Features::PIPELINE_CACHE
+            | if wet_storage {
+                wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+            } else {
+                wgpu::Features::empty()
+            };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("procraft"),
-            // where the GPU has it: the pipelines' compiled form to keep between runs
-            required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
+            required_features: adapter.features() & optional,
             // the adapter's own limits, so large canvases fit where the GPU allows them
             required_limits:
                 within.clone().map_or_else(|| adapter.limits(), |l| l.or_worse_values_from(&adapter.limits())),
