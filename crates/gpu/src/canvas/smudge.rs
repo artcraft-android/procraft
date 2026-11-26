@@ -1191,10 +1191,11 @@ impl Canvas {
         let at_window = |r: IRect| copy_at(&window.before, r.x0 - reach.x0, r.y0 - reach.y0);
         let area = |r: IRect| u64::from(r.width()) * u64::from(r.height());
         let whole = u64::from(width) * u64::from(height);
+        let coverage = window.amount.as_ref();
         let kinds: [(Option<&wgpu::Buffer>, u64, KeptOf, bool); 3] = [
             (window.grained.as_ref(), 0, |t| t.grained.as_ref(), true),
-            (window.amount.as_ref(), 0, |t| t.amount.as_ref(), false),
-            (window.amount.as_ref(), bytes, |t| t.shown.as_ref(), false),
+            (coverage.filter(|_| keeps.amount), 0, |t| t.amount.as_ref(), false),
+            (coverage.filter(|_| keeps.shown), bytes, |t| t.shown.as_ref(), false),
         ];
         for (buffer, start, kept, from_the_layer) in kinds {
             let Some(buffer) = buffer else { continue };

@@ -38,6 +38,15 @@ const SHADERS: &[(&str, &str)] = &[
         ),
     ),
     (
+        "resident wet paint",
+        concat!(
+            include_str!("shaders/blend.wgsl"),
+            include_str!("shaders/smudge.wgsl"),
+            include_str!("shaders/smudge_resident.wgsl"),
+            include_str!("shaders/smudge_compute.wgsl")
+        ),
+    ),
+    (
         "stamp rule",
         concat!(
             include_str!("shaders/blend.wgsl"),
