@@ -820,6 +820,9 @@ impl Colours {
                     self.scrolled.release(-speed, overflow, extent, now);
                 } else if self.scrolled.advance(now) {
                     ui.request_repaint();
+                } else {
+                    // at rest in a window grown since: within its new reach
+                    self.scrolled.position = self.scrolled.position.clamp(0.0, overflow);
                 }
                 let wheel = if ui.rect_contains_pointer(view) {
                     ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
