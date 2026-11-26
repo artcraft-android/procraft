@@ -1273,6 +1273,51 @@ fn a_stroke_tip_shows_until_the_next_one_replaces_it() {
     assert_eq!(at(&mut canvas, &mut doc, 20), white);
 }
 
+#[test]
+fn paced_stamps_appear_as_soon_as_they_are_rendered() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let size = (620, 320);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (_screen, view) = window_target(&gpu, size, format);
+    let target = || shown_on(&view, format, size, procraft_engine::geom::Affine::IDENTITY, None);
+    let mut doc = Document::new(size.0, size.1);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    canvas.set_dry_paced(true, Some(1.0));
+    canvas.render(&gpu, &mut doc, Some(target()));
+
+    let mut paint = style(StrokeTool::Paint, 1.0);
+    paint.rendering = Rendering::Strongest;
+    canvas.begin_stroke(doc.current(), paint);
+    let at = |canvas: &Canvas, x, y| canvas.read_composite_pixel(&gpu, x, y).unwrap();
+    let (black, white) = ([0, 0, 0, 255], [255, 255, 255, 255]);
+    canvas.set_tip(&[dot(Vec2::new(550.0, 260.0), 8.0)]);
+    canvas.render(&gpu, &mut doc, Some(target()));
+    assert_eq!(at(&canvas, 550, 260), black);
+
+    // The large stamps fill the first frame's budget. The connecting stamps must wait.
+    let mut stamps = vec![dot(Vec2::new(170.0, 160.0), 135.0); 185];
+    stamps.extend((300..=530).step_by(10).map(|x| dot(Vec2::new(x as f32, 160.0), 24.0)));
+    canvas.add_stamps(&stamps);
+    canvas.set_tip(&[dot(Vec2::new(570.0, 160.0), 25.0)]);
+
+    canvas.render(&gpu, &mut doc, Some(target()));
+    assert!(canvas.catching_up());
+    assert_eq!(at(&canvas, 170, 160), black);
+    assert_eq!(at(&canvas, 525, 160), white, "still queued");
+    assert_eq!(at(&canvas, 550, 260), white, "old tip removed");
+
+    canvas.render(&gpu, &mut doc, Some(target()));
+    assert!(!canvas.catching_up());
+    assert_eq!(at(&canvas, 525, 160), black, "the deferred stamps show while the stroke is open");
+    assert_eq!(at(&canvas, 570, 160), black, "the deferred tip is visible");
+
+    canvas.end_stroke();
+    canvas.render_finished(&gpu, &mut doc);
+    assert_eq!(at(&canvas, 525, 160), black, "the same stamps are committed on lift");
+    assert_eq!(at(&canvas, 570, 160), white, "the temporary tip was removed");
+}
+
 /// A read beside the frames (a time-lapse frame, the autosave) waits for what they lay a share at
 /// a time only as far as the stroke still open: an ended stroke's queued end counts, the open
 /// stroke's own stamps don't (a read that counted them waited until that stroke ended).
