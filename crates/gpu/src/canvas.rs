@@ -9600,9 +9600,10 @@ impl Canvas {
                         // the stamps laid from their plots in runs, each run at once
                         let boxes: Vec<(usize, IRect)> = own.iter().map(|(_, b)| *b).enumerate().collect();
                         for (start, end, union) in deposit_runs(&boxes) {
-                            let Some(&(head, _)) = own.get(start) else { continue };
+                            let Some(stamps) = own.get(start..end) else { continue };
+                            let Some(&(head, _)) = stamps.first() else { continue };
                             let run = [u32::try_from(start).unwrap_or(0), u32::try_from(end).unwrap_or(0), 0, 0];
-                            let dispatch = own[start..end]
+                            let dispatch = stamps
                                 .iter()
                                 .fold(IRect::EMPTY, |r, (stamp, bounds)| r.union(wet_deposit_bounds(stamp, *bounds)));
                             let dispatch = if dispatch.is_empty() { union } else { dispatch };

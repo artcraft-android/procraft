@@ -956,7 +956,7 @@ impl Canvas {
             let [x, y] = wet.origin_of(rect);
             let from = copy_at(&layer.texture, rect.x0, rect.y0);
             let size = extent(rect.width(), rect.height());
-            gpu.copy_texture_to_texture(encoder, from.clone(), copy_at(wet.before.texture(), x, y), size);
+            gpu.copy_texture_to_texture(encoder, from, copy_at(wet.before.texture(), x, y), size);
             if written {
                 gpu.copy_texture_to_texture(encoder, from, copy_at(wet.grained.texture(), x, y), size);
                 smudge.tiles.insert(at, wet.tile(tile));

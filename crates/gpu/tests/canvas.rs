@@ -4471,7 +4471,7 @@ fn wet_paint_region_grows_on_a_large_canvas_and_can_return_to_windows() {
         let image = canvas.read_layer(&gpu, layer).unwrap();
         canvas.undo();
         canvas.render_finished(&gpu, &mut doc);
-        assert!(canvas.read_layer(&gpu, layer).unwrap().chunks_exact(4).all(|p| p == [126, 91, 56, 255]));
+        assert!(canvas.read_layer(&gpu, layer).unwrap().as_chunks::<4>().0.iter().all(|p| *p == [126, 91, 56, 255]));
         image
     };
     assert!(draw(true) == draw(false), "moving into and out of the resident region changed the painted layer");
