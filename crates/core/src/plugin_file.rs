@@ -3218,7 +3218,7 @@ pub(crate) mod tests {
             );
         }
         // a hook this app has, written to a later interface than it reads: for a newer app
-        assert_eq!(folders(23, folder, hooks).err(), Some(Refusal::Newer));
+        assert_eq!(folders(INTERFACE + 1, folder, hooks).err(), Some(Refusal::Newer));
     }
 
     #[test]

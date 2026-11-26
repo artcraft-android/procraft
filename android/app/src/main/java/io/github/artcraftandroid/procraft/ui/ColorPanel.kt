@@ -1104,9 +1104,9 @@ private fun ModelDisc(
             colourModelDiscPicture(model, h, s, t, n.toUInt())
         }
     } else {
-        val picture = remember(sphere, CanvasSpace.p3) { PickerPicture(sphere.imageSide().toInt()) }
-        remember(picture, model, sphereRevision) { picture.fill(sphere.picture(model)) }
-        picture
+        rememberPickerPicture(Triple(sphere, model, sphereRevision), sphere.imageSide().toInt(), CanvasSpace.p3) {
+            sphere.picture(model)
+        }
     }
     val ring = remember(model) {
         val colours = colourModelRing(model, RingHues.size.toUInt())
