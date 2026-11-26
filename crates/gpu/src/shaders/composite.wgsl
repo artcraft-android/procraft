@@ -1,5 +1,5 @@
 // Layer compositing, blend modes and stroke commits. Every texture here is the canvas's size, so
-// pixels are read with textureLoad at the fragment's own position: no filtering, no coordinates.
+// pixels usually read at the fragment's own position. A QuickShape drag resamples the open stroke.
 // Colours are premultiplied; blend modes work on straight colour (separable and non-separable
 // modes as usually defined for compositing).
 
@@ -61,6 +61,9 @@ struct LayerUniform {
     paper: vec4<f32>,
     // where the grain fixed to the canvas starts, in tiles (xy): a fill's place of its own
     grain_start: vec4<f32>,
+    stroke_from_x: vec4<f32>,
+    stroke_from_y: vec4<f32>,
+    stroke_source: vec4<f32>,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -93,10 +96,27 @@ fn vs_full(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
 }
 
+fn read_stroke(tex: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {
+    if (lu.stroke_from_x.w == 0.0) {
+        return textureLoad(tex, p, 0);
+    }
+    let at = vec3<f32>(vec2<f32>(p) + 0.5, 1.0);
+    let source = vec2<f32>(dot(lu.stroke_from_x.xyz, at), dot(lu.stroke_from_y.xyz, at));
+    if (any(source < lu.stroke_source.xy) || any(source >= lu.stroke_source.zw)) {
+        return vec4<f32>(0.0);
+    }
+    let corner = source - 0.5;
+    let i = vec2<i32>(floor(corner));
+    let f = fract(corner);
+    let top = mix(textureLoad(tex, i, 0), textureLoad(tex, i + vec2<i32>(1, 0), 0), f.x);
+    let bottom = mix(textureLoad(tex, i + vec2<i32>(0, 1), 0), textureLoad(tex, i + vec2<i32>(1, 1), 0), f.x);
+    return mix(top, bottom, f.y);
+}
+
 // the stroke's coverage at p moved by o, held at the edges
 fn stroke_alpha(p: vec2<i32>, o: vec2<i32>) -> f32 {
     let dims = vec2<i32>(textureDimensions(stroke_tex));
-    return textureLoad(stroke_tex, clamp(p + o, vec2<i32>(0), dims - 1), 0).a;
+    return read_stroke(stroke_tex, clamp(p + o, vec2<i32>(0), dims - 1)).a;
 }
 
 // a grain's value made lighter or darker and of more or less contrast
@@ -113,7 +133,7 @@ struct StrokePixel {
 // the stroke at a pixel: its build-up, its edges, the paper grain fixed to the canvas, its
 // threshold and its opacity
 fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
-    var s = textureLoad(stroke_tex, p, 0);
+    var s = read_stroke(stroke_tex, p);
     // what the stamps laid, before the edges, grain and second change it
     let laid = s.a;
     if (lu.wet < 0.0 && s.a > 0.0) {
@@ -171,7 +191,7 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
     // a dual brush's second: its coverage (cut at its threshold) combined with the first's by
     // the dual mode, or by Normal showing where the first doesn't
     if (lu.dual != 0u) {
-        let t = textureLoad(second_tex, p, 0);
+        let t = read_stroke(second_tex, p);
         var b = t.a;
         if (lu.dual_threshold >= 0.0) {
             b = select(0.0, 1.0, b > lu.dual_threshold);

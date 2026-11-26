@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 use procraft_engine::animation::{self, FrameLook};
 use procraft_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source, run_out};
 use procraft_engine::document::{BlendMode, Document, Layer, LayerId, LayerKind};
-use procraft_engine::geom::{Affine, IRect};
+use procraft_engine::geom::{Affine, IRect, Vec2};
 use procraft_engine::stroke::{MOST_ROUNDNESS, PickUp, Stamp};
 use procraft_engine::textures::{self, GrayImage, TEXTURE_SIZE};
 
@@ -53,7 +53,7 @@ const MULTIPLY_MODE: u32 = 1;
 const STROKE_LUMINANCE: u32 = 0x100;
 
 /// The largest uniform block a shader reads.
-const UNIFORM_SIZE: u64 = 176;
+const UNIFORM_SIZE: u64 = 224;
 const _: () = assert!(
     size_of::<LayerUniform>() as u64 <= UNIFORM_SIZE
         && size_of::<StampUniform>() as u64 <= UNIFORM_SIZE
@@ -1419,6 +1419,10 @@ struct LayerUniform {
     paper: [f32; 4],
     /// Where the grain fixed to the canvas starts, in tiles (x, y; the rest unused).
     grain_start: [f32; 4],
+    /// Maps the displayed pixel to the open stroke's texel during a QuickShape drag.
+    stroke_from_x: [f32; 4],
+    stroke_from_y: [f32; 4],
+    stroke_source: [f32; 4],
 }
 
 impl Default for LayerUniform {
@@ -1453,6 +1457,9 @@ impl Default for LayerUniform {
             scaled: [1.0, 0.0, 0.0, 0.0],
             paper: [0.0, 1.0, 0.0, 0.0],
             grain_start: [0.0; 4],
+            stroke_from_x: [0.0; 4],
+            stroke_from_y: [0.0; 4],
+            stroke_source: [0.0; 4],
         }
     }
 }
@@ -2523,6 +2530,11 @@ struct ActiveStroke {
     second: Option<SecondStroke>,
     /// Lays its pixels only within this (see [`Canvas::lay_within`]).
     within: Option<IRect>,
+}
+
+struct ShapePreview {
+    to_source: Affine,
+    bounds: IRect,
 }
 
 impl ActiveStroke {
@@ -3653,6 +3665,7 @@ pub struct Canvas {
     smudge_spare: [wgpu::Buffer; 2],
     /// Stamps of input that hasn't happened yet (predicted), drawn over the canvas for one frame.
     prediction: Vec<StampInstance>,
+    shape_preview: Option<ShapePreview>,
     /// The open stroke's stamps as laid so far, and a dual brush's second's, so that one redrawn
     /// whole with them still at its start lays only what comes after (see
     /// [`Canvas::replace_stamps`]); none past [`LAID_KEPT_MOST`].
@@ -4087,6 +4100,7 @@ impl Canvas {
             wet_params: wet_params(device, WET_PASSES_MADE),
             wet_capacity: WET_PASSES_MADE,
             prediction: Vec::new(),
+            shape_preview: None,
             laid: None,
             laid_second: None,
             laid_count: 0,
@@ -5143,7 +5157,39 @@ impl Canvas {
         );
     }
 
+    /// Shows the already painted open stroke at its new position, in its own layer. If the
+    /// source was clipped or the brush writes to the layer directly, the caller redraws it.
+    pub fn transform_shape_preview(&mut self, transform: Affine) -> bool {
+        let full = self.full();
+        let Some(stroke) = self
+            .active
+            .filter(|s| !s.pencil && !s.style.in_place() && s.within.is_none() && s.style.tool != StrokeTool::Laid)
+        else {
+            return false;
+        };
+        let r = stroke.bounds;
+        if self.selection.is_some() || r.is_empty() || r.x0 <= 0 || r.y0 <= 0 || r.x1 >= full.x1 || r.y1 >= full.y1 {
+            return false;
+        }
+        let Some(to_source) = transform.inverse().filter(|m| m.is_finite()) else { return false };
+        let bounds = [(r.x0, r.y0), (r.x1, r.y0), (r.x0, r.y1), (r.x1, r.y1)]
+            .into_iter()
+            .map(|(x, y)| transform.apply(Vec2::new(x as f32, y as f32)))
+            .fold(IRect::EMPTY, |bounds, p| bounds.union(IRect::around(p, 1.0)))
+            .intersect(full);
+        let previous = self.shape_preview.replace(ShapePreview { to_source, bounds });
+        self.dirty = self.dirty.union(previous.map_or(r, |p| p.bounds)).union(bounds);
+        true
+    }
+
+    pub fn clear_shape_preview(&mut self) {
+        if let Some(preview) = self.shape_preview.take() {
+            self.dirty = self.dirty.union(preview.bounds);
+        }
+    }
+
     pub fn end_stroke(&mut self) {
+        self.clear_shape_preview();
         self.prediction.clear();
         self.laid = None;
         self.laid_second = None;
@@ -5885,6 +5931,7 @@ impl Canvas {
 
     /// Drops the open stroke.
     pub fn cancel_stroke(&mut self) {
+        self.clear_shape_preview();
         self.prediction.clear();
         self.laid = None;
         self.laid_second = None;
@@ -11819,6 +11866,18 @@ impl Canvas {
         .with_paper(stroke.is_some(), self.paper_look())
         .with_dual(stroke.as_ref())
         .with_fill(fill, mask);
+        let uniform = if let (Some(stroke), Some(preview)) = (stroke, &self.shape_preview) {
+            let m = preview.to_source;
+            let r = stroke.bounds;
+            LayerUniform {
+                stroke_from_x: [m.a, m.c, m.e, 1.0],
+                stroke_from_y: [m.b, m.d, m.f, 0.0],
+                stroke_source: [r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32],
+                ..uniform
+            }
+        } else {
+            uniform
+        };
         let mask_view = mask_view.unwrap_or(&self.stroke_view);
         self.draw_onto(
             gpu,

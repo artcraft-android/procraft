@@ -6,10 +6,10 @@ use std::f32::consts::{PI, TAU};
 
 use procraft_engine::brush::Brush;
 use procraft_engine::document::LayerId;
-use procraft_engine::geom::Vec2;
+use procraft_engine::geom::{Affine, Vec2};
 use procraft_engine::input::Sample;
 use procraft_engine::quickshape::{Anchor, Shape, ShapeKind, end_hook_reach, fit_ellipse, recognise, without_end_hook};
-use procraft_engine::stroke::StrokeBuilder;
+use procraft_engine::stroke::{Stamp, StrokeBuilder};
 use procraft_gpu::{Canvas, SecondStroke, StrokeStyle};
 
 use crate::{CanvasSession, PointerKind, State};
@@ -104,9 +104,13 @@ pub(crate) struct ShapeEdit {
     held: Option<Held>,
     /// The stroke it was made of, for undo to go back to.
     stroke: Option<DrawnStroke>,
-    /// Moved since its stroke was last drawn: drawn again as the next frame is, or as it is kept.
-    /// A drag's moves come faster than frames, and each would lay the whole stroke again.
+    /// Geometry used by the last exact redraw, and the stamps it laid if a drag needs to replay them.
+    painted: Shape,
+    drag_stamps: Option<(Vec<Stamp>, Option<Vec<Stamp>>)>,
+    /// The displayed stroke needs updating at the next frame.
     stale: bool,
+    previewed: bool,
+    dragging: bool,
 }
 
 impl ShapeEdit {
@@ -119,9 +123,26 @@ impl ShapeEdit {
         stroke: Option<DrawnStroke>,
     ) -> ShapeEdit {
         let first = shape.clone();
+        let painted = shape.clone();
         let modes = initial_curve_modes(&shape);
         let (earlier, later) = (Vec::new(), Vec::new());
-        ShapeEdit { shape, first, earlier, later, choices, drawn, along, modes, held, stroke, stale: false }
+        ShapeEdit {
+            shape,
+            first,
+            earlier,
+            later,
+            choices,
+            drawn,
+            along,
+            modes,
+            held,
+            stroke,
+            painted,
+            drag_stamps: None,
+            stale: false,
+            previewed: false,
+            dragging: false,
+        }
     }
 
     /// A drag undone can be done again.
@@ -129,17 +150,19 @@ impl ShapeEdit {
         !self.later.is_empty()
     }
 
-    /// The samples its stroke is drawn along: its outline, the pen doing as it did along the stroke
-    /// it was made of. An ellipse goes where the stroke went, each of its points taken onto it: a
-    /// stroke that didn't close stays open there, as drawn, rather than meeting itself in a seam.
-    pub(crate) fn samples(&self) -> Vec<Sample> {
-        let outline = match self.shape.kind {
+    /// An ellipse follows the original stroke's angles, including its open ends or overlap.
+    fn outline(&self) -> Vec<Vec2> {
+        match self.shape.kind {
             ShapeKind::Ellipse | ShapeKind::Circle => {
                 along_ellipse(&self.shape.nodes, &self.drawn).unwrap_or_else(|| self.shape.outline())
             }
             _ => self.shape.outline(),
-        };
-        resample(&outline, &self.along)
+        }
+    }
+
+    /// The samples its stroke is drawn along, with the original pen dynamics.
+    pub(crate) fn samples(&self) -> Vec<Sample> {
+        resample(&self.outline(), &self.along)
     }
 
     /// Its kind as a plugin is told it, and its nodes (canvas pixels).
@@ -350,6 +373,9 @@ impl State {
     fn draw_shape(&mut self) {
         if let Some(edit) = self.shape.as_mut() {
             edit.stale = false;
+            edit.previewed = false;
+            edit.painted = edit.shape.clone();
+            edit.drag_stamps = None;
         }
         let (Some(edit), Some(old)) = (self.shape.as_ref(), self.stroke.as_ref()) else { return };
         // the outline is the path: nothing smooths it, or round its corners
@@ -382,6 +408,7 @@ impl State {
         let guide = self.doc.stroke_guide();
         if let Some(canvas) = self.canvas.as_mut() {
             // nothing drawn ahead of the pen before it snapped stays over the shape
+            canvas.clear_shape_preview();
             canvas.set_prediction(&[]);
             canvas.set_tip(&[]);
             match &second_stamps {
@@ -395,12 +422,59 @@ impl State {
         self.second = second.map(Box::new);
     }
 
-    /// Redraws the open stroke along the shape if it moved since it was last drawn: as a frame is
-    /// drawn, and before it is kept (see [`ShapeEdit::stale`]).
+    /// Restores the full brush stroke before the shape is kept or shown after a drag.
     pub(crate) fn draw_moved_shape(&mut self) {
-        if self.shape.as_ref().is_some_and(|edit| edit.stale) {
+        if self.shape.as_ref().is_some_and(|edit| edit.stale || edit.previewed) {
             self.draw_shape();
         }
+    }
+
+    pub(crate) fn draw_live_shape(&mut self) {
+        let Some(edit) = self.shape.as_mut() else { return };
+        if !edit.dragging {
+            self.draw_moved_shape();
+            return;
+        }
+        if !edit.stale {
+            return;
+        }
+        if let (Some(transform), Some(stroke), Some(canvas)) =
+            (shape_transform(&edit.painted, &edit.shape), self.stroke.as_mut(), self.canvas.as_mut())
+        {
+            let guide = self.doc.stroke_guide();
+            // Stroke pixels can be reused directly while they describe the last exact redraw.
+            // Once stamps have been replayed, the texture describes that preview instead.
+            let transformed = edit.drag_stamps.is_none()
+                && guide.copies(Vec2::ZERO).is_empty()
+                && canvas.transform_shape_preview(transform);
+            if transformed {
+                edit.stale = false;
+                edit.previewed = true;
+                return;
+            }
+            // Wet paint and smudge need to interact with the layer at the new location. Reuse
+            // the brush's finished dabs, including the second tip, and let it lay them there.
+            if !canvas.is_pencil() && !stroke.is_outside() {
+                let (stamps, second) = edit
+                    .drag_stamps
+                    .get_or_insert_with(|| (stroke.finish_from(0), self.second.as_mut().map(|b| b.finish_from(0))));
+                if !stamps.is_empty() {
+                    canvas.clear_shape_preview();
+                    canvas.set_prediction(&[]);
+                    canvas.set_tip(&[]);
+                    if let Some(second) = second {
+                        let moved = transform_stamps(second, transform);
+                        canvas.replace_second_stamps(&crate::guide::mirrored(&guide, &moved));
+                    }
+                    let moved = transform_stamps(stamps, transform);
+                    canvas.replace_stamps(&crate::guide::mirrored(&guide, &moved));
+                    edit.stale = false;
+                    edit.previewed = true;
+                    return;
+                }
+            }
+        }
+        self.draw_shape();
     }
 
     /// The pen still down after a snap moved to `to` (canvas point): the shape turns and grows
@@ -425,14 +499,15 @@ impl State {
         }
         edit.shape = shape;
         edit.stale = true;
+        edit.dragging = true;
         true
     }
 
     /// The pen that drew the snapped shape lifted: it stays where it is, open to be edited.
-    pub(crate) fn let_go_shape(&mut self) {
-        if let Some(edit) = self.shape.as_mut() {
-            edit.held = None;
-        }
+    pub(crate) fn let_go_shape(&mut self) -> bool {
+        let Some(edit) = self.shape.as_mut() else { return false };
+        edit.held = None;
+        std::mem::take(&mut edit.dragging)
     }
 
     /// The stroke just kept is remembered, for QuickShape on the last stroke. It is laid by the next
@@ -491,6 +566,74 @@ impl State {
         let nodes = self.hooks.as_ref()?.quickshape_curve(&points, best)?;
         Some(Shape { kind: ShapeKind::Curve, nodes: nodes.into_iter().map(|(x, y)| Vec2::new(x, y)).collect() })
     }
+}
+
+/// Finds a map between the two painted outlines. A local corner or curve edit that changes its
+/// geometry independently of the other nodes needs a new stroke.
+fn shape_transform(from: &Shape, to: &Shape) -> Option<Affine> {
+    if from.nodes.len() != to.nodes.len()
+        || (from.kind != to.kind
+            && !(matches!(from.kind, ShapeKind::Circle | ShapeKind::Ellipse)
+                && matches!(to.kind, ShapeKind::Circle | ShapeKind::Ellipse)))
+    {
+        return None;
+    }
+    let (&a, &b) = from.nodes.first().zip(to.nodes.first())?;
+    let offsets = || from.nodes.iter().zip(&to.nodes).skip(1).map(|(&p, &q)| (p - a, q - b));
+    let (u, v) = offsets().max_by(|(u, _), (v, _)| u.dot(*u).total_cmp(&v.dot(*v)))?;
+    let length2 = u.dot(u);
+    if length2 < 1e-6 {
+        return None;
+    }
+    let fit = |linear: Affine| {
+        let m = linear.then(Affine::translate(b - linear.apply(a)));
+        (m.is_finite()
+            && m.inverse().is_some()
+            && from.nodes.iter().zip(&to.nodes).all(|(&p, &q)| m.apply(p).distance(q) <= 0.025))
+        .then_some(m)
+    };
+    let re = u.dot(v) / length2;
+    let im = u.cross(v) / length2;
+    let similarity = Affine { a: re, b: im, c: -im, d: re, e: 0.0, f: 0.0 };
+    if let Some(m) = fit(similarity) {
+        return Some(m);
+    }
+    // An arc remains circular even when its middle handle changes. An affine map would bend it
+    // into an ellipse. Ellipses, polygons and Bézier outlines keep their geometry under the map.
+    if from.kind == ShapeKind::Arc {
+        return None;
+    }
+    let (p, q) = offsets().max_by(|(p, _), (q, _)| u.cross(*p).abs().total_cmp(&u.cross(*q).abs()))?;
+    let basis = Affine { a: u.x, b: u.y, c: p.x, d: p.y, e: 0.0, f: 0.0 };
+    let target = Affine { a: v.x, b: v.y, c: q.x, d: q.y, e: 0.0, f: 0.0 };
+    fit(basis.inverse()?.then(target))
+}
+
+fn transform_stamps(stamps: &[Stamp], m: Affine) -> Vec<Stamp> {
+    let determinant = m.determinant();
+    let grain_scale = determinant.abs().sqrt();
+    stamps
+        .iter()
+        .map(|stamp| {
+            let mut dab = *stamp;
+            let (sin, cos) = dab.angle.sin_cos();
+            let along = Vec2::new(m.a * cos + m.c * sin, m.b * cos + m.d * sin);
+            let scale = along.length().max(1e-6);
+            let angle = along.y.atan2(along.x);
+            dab.center = m.apply(dab.center);
+            dab.radius *= scale;
+            dab.roundness *= determinant.abs() / (scale * scale);
+            dab.grain_offset = dab.grain_offset * grain_scale;
+            dab.grain_size *= grain_scale;
+            dab.grain_turn -= angle - dab.angle;
+            dab.angle = angle;
+            if determinant < 0.0 {
+                dab.flip[1] = !dab.flip[1];
+                dab.grain_mirrored = !dab.grain_mirrored;
+            }
+            dab
+        })
+        .collect()
 }
 
 /// A shape's kind as a plugin is told it: its place among the kinds.
@@ -906,6 +1049,7 @@ impl CanvasSession {
         }
         refresh_corners(&mut edit.shape, &edit.modes);
         edit.stale = true;
+        edit.dragging = true;
         self.shared.frame(st);
         st.shape_info()
     }
@@ -991,7 +1135,9 @@ impl CanvasSession {
     /// The drag on the outline (or the pen) let go: the shape stays as it shows.
     pub fn quickshape_unpin(&self) -> Option<QuickShapeInfo> {
         let mut guard = self.shared.lock();
-        guard.let_go_shape();
+        if guard.let_go_shape() {
+            self.shared.frame(&mut guard);
+        }
         guard.shape_info()
     }
 
@@ -1005,6 +1151,7 @@ impl CanvasSession {
         edit.held = None;
         edit.shape = edit.shape.translated(by);
         edit.stale = true;
+        edit.dragging = true;
         self.shared.frame(st);
         st.shape_info()
     }
@@ -1178,5 +1325,113 @@ mod tests {
         let samples = resample(&shape, &StrokeAlong::of(&stroke, 5.0));
         let longest = samples.windows(2).map(|w| w[1].time_ms - w[0].time_ms).fold(0.0f64, f64::max);
         assert!(longest <= 2.0 / (5.0 / f64::from(PACE_MOST_OFF)) + 0.1, "{longest}");
+    }
+
+    #[test]
+    fn a_large_shape_drag_shows_the_brush_and_keeps_the_exact_stroke() {
+        use procraft_engine::brush::Taper;
+        use procraft_engine::profile::Profile;
+        use procraft_gpu::wgpu;
+
+        let side = 768;
+        let Some(s) = crate::tests::session(2048, side) else { return };
+        let target = s.shared.lock().gpu.as_ref().unwrap().device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("QuickShape drag"),
+            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let started = std::time::Instant::now();
+        let frame = || {
+            let mut st = s.shared.lock();
+            st.draw_frame(&view, wgpu::TextureFormat::Rgba8Unorm, (side, side), Profile::Srgb, started);
+            assert_eq!(st.gpu.as_ref().unwrap().errors(), 0);
+        };
+        let stamps_queued = || s.shared.lock().canvas.as_ref().unwrap().stamps_queued();
+        let pixels = || {
+            let mut st = s.shared.lock();
+            let st = &mut *st;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0);
+            canvas.read_composite(gpu).unwrap()
+        };
+        let pen: Vec<_> = (0..=100)
+            .map(|i| {
+                let angle = i as f32 / 100.0 * TAU;
+                crate::tests::sample(384.0 + 48.0 * angle.cos(), 384.0 + 48.0 * angle.sin(), i as f64 * 8.0)
+            })
+            .collect();
+        let blank = pixels();
+        for wet in [false, true] {
+            {
+                let mut st = s.shared.lock();
+                let tool = st.tool;
+                let brush = st.brush_mut(tool).unwrap();
+                *brush = Brush { spacing: 0.03, pen_taper: Taper::NONE, ..Brush::round_pen() };
+                if wet {
+                    brush.set_setting("wet_dilution", 0.6);
+                    brush.set_setting("wet_charge", 0.5);
+                    brush.set_setting("wet_pull", 0.5);
+                    brush.secondary = Some(Box::new(Brush::round_pen()));
+                    brush.set_setting("dual_blend", 1.0);
+                }
+            }
+            s.set_color(0.0, 0.0, 0.0);
+            s.set_brush_size(0.23);
+            let kept = |live: bool, release: bool| {
+                s.stroke_begin(PointerKind::Stylus, pen[..1].to_vec());
+                s.stroke_add(pen[1..].to_vec());
+                assert!(s.quickshape_hold().is_some());
+                s.stroke_end(vec![]);
+                frame();
+                s.quickshape_pin(432.0, 384.0, true).unwrap();
+                if live {
+                    let before = stamps_queued();
+                    for x in [704.0, 720.0] {
+                        s.quickshape_pin(x, 384.0, false).unwrap();
+                        frame();
+                        assert!(s.shared.lock().shape.as_ref().unwrap().previewed);
+                    }
+                    if wet {
+                        assert!(stamps_queued() > before, "wet paint is laid on the layer at its new location");
+                    } else {
+                        assert_eq!(stamps_queued(), before, "dry paint reuses the whole painted stroke");
+                    }
+                    assert!(pixels() != blank, "the actual brush stroke shows in the composite");
+                    let st = s.shared.lock();
+                    let shown = procraft_gpu::read_texture(st.gpu.as_ref().unwrap(), &target, side, side).unwrap();
+                    let right_edge = (369..=399).flat_map(|y| (700..=740).map(move |x| (y * side + x) as usize * 4));
+                    assert!(right_edge.into_iter().any(|i| shown[i] < 128 && shown[i + 1] < 128));
+                    // Measure opposite the start and end, which can meet on the right.
+                    let brush_width = (374..=394)
+                        .map(|y| (24..=72).filter(|&x| shown[((y * side + x) * 4) as usize] < 220).count())
+                        .max()
+                        .unwrap();
+                    assert!(brush_width >= 4, "the full brush width is visible, got {brush_width} pixels (wet={wet})");
+                } else {
+                    s.quickshape_pin(720.0, 384.0, false).unwrap();
+                }
+                if release {
+                    s.quickshape_unpin();
+                    frame();
+                    assert!(!s.shared.lock().shape.as_ref().unwrap().previewed);
+                }
+                s.quickshape_done();
+                let result = pixels();
+                assert!(result != blank, "the exact stroke was committed");
+                s.undo_step();
+                assert!(pixels() == blank, "the shape is a single undo step");
+                result
+            };
+            let exact = kept(false, false);
+            assert!(kept(true, false) == exact, "committing directly from preview changed pixels (wet={wet})");
+            assert!(kept(true, true) == exact, "releasing before committing changed pixels (wet={wet})");
+        }
     }
 }

@@ -118,9 +118,8 @@ impl State {
         self.needs_frame = false;
         self.frame_due = None;
         self.frame_drawn_at = Some(Instant::now());
-        // a shape moved since the last frame is drawn again where it is now, once however many
-        // moves came meanwhile
-        self.draw_moved_shape();
+        // When a shape moves, show its latest position once per frame.
+        self.draw_live_shape();
         // what runs ahead of the open stroke, once however many samples came since the last frame
         self.draw_ahead();
         // a fill's region as it has grown since, once however many samples came
