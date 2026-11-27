@@ -3606,8 +3606,10 @@ pub struct Canvas {
     /// Compute dispatches recorded for smudges, paint laid in place and stamps laid by their rule.
     dispatched: AtomicU64,
     /// Wet paint and paint laid in place go down a stamp a dispatch, as they did before runs of
-    /// stamps were laid at once (see [`Canvas::lay_stamp_by_stamp`]).
+    /// stamps were laid at once (see [`Canvas::lay_stamp_by_stamp`]); and whether wet paint may go
+    /// down in runs on this GPU (see [`Gpu::lays_wet_runs`]).
     stamp_by_stamp: bool,
+    wet_runs: bool,
     /// Strokes painting in place keep marks to go back to as they are laid again (see `rewind.rs`),
     /// within this many bytes (none: as the device's memory gives them); and the marks made and
     /// gone back to so far.
@@ -4119,6 +4121,7 @@ impl Canvas {
             paced_each: false,
             dispatched: AtomicU64::new(0),
             stamp_by_stamp: false,
+            wet_runs: gpu.lays_wet_runs(),
             rewinds: true,
             rewind_most: None,
             marks_made: 0,
@@ -9879,7 +9882,7 @@ impl Canvas {
                         changed = changed.union(bbox);
                         piece.writes = piece.writes.union(bbox);
                     }
-                    if self.stamp_by_stamp {
+                    if self.stamp_by_stamp || !self.wet_runs {
                         for &(u, bbox) in own.iter().filter(|(_, bbox)| !bbox.is_empty()) {
                             piece.dispatches.push((smudge::Pipe::Deposit, piece.uniforms.len(), groups(bbox)));
                             piece.uniforms.push(u);
@@ -9891,10 +9894,9 @@ impl Canvas {
                             let Some(stamps) = own.get(start..end) else { continue };
                             let Some(&(head, _)) = stamps.first() else { continue };
                             let run = [u32::try_from(start).unwrap_or(0), u32::try_from(end).unwrap_or(0), 0, 0];
-                            // (over the stamps' turned quads; on OpenGL over the run's whole box, as
-                            // before: from the tighter one an Adreno's OpenGL ES laid faint wet paint a
-                            // few levels heavier, every time, though the pixels it leaves out lay
-                            // nothing)
+                            // (over the stamps' turned quads; on OpenGL over the run's whole box, as it
+                            // was there before: the tighter box changed what an Adreno's OpenGL ES laid,
+                            // which now lays a stamp a dispatch, see `Gpu::lays_wet_runs`)
                             let dispatch = stamps
                                 .iter()
                                 .fold(IRect::EMPTY, |r, (stamp, bounds)| r.union(wet_deposit_bounds(stamp, *bounds)));
@@ -17367,7 +17369,8 @@ mod tests {
                         gpu.old
                     );
                     assert_ne!(runs, patches(150, 110), "{name}: painted");
-                    if gpu.computes() && most.is_none() {
+                    // (wet paint a stamp a dispatch either way where it isn't laid in runs)
+                    if gpu.computes() && most.is_none() && (gpu.lays_wet_runs() || style.wet_pull.is_none()) {
                         assert!(fewer < more, "{name}: {fewer} dispatches against {more}");
                     }
                 }

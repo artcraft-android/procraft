@@ -954,6 +954,16 @@ impl Gpu {
         self.adapter.get_info().backend == wgpu::Backend::Gl
     }
 
+    /// Whether wet paint's stamps can go down a run at a time, a dispatch for each run (see
+    /// `Canvas::lay_wet`): not on an Adreno's OpenGL ES, where the run pass laid paint a few levels
+    /// off, the same each time, and in other places as the run's box moved (a Legion, 2026-11: four
+    /// wet tests failed so, two others with a tighter box; all six passed a stamp a dispatch). There
+    /// each stamp is a dispatch of its own.
+    pub fn lays_wet_runs(&self) -> bool {
+        let info = self.adapter.get_info();
+        !(info.backend == wgpu::Backend::Gl && info.name.to_ascii_lowercase().contains("adreno"))
+    }
+
     /// Whether the GPU draws into half floats, blended and filtered: strokes build up in them, and
     /// liquify's field and 3D painting's lighting are drawn in them. An old GPU's OpenGL ES
     /// without `EXT_color_buffer_half_float` (or `_float`) can only read them.
