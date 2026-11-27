@@ -1424,3 +1424,72 @@ fn a_heavy_shape_shows_its_stroke_in_every_frame_as_its_drag_begins_and_ends() {
         "a frame showed {least:?} pixels of ink (as it began, through it, once let go), against {before} before the drag"
     );
 }
+
+/// While a snapped shape is edited (its handles shown), a pen stroke away from it keeps the shape
+/// as it is and paints: the shape no longer edited, the stroke painted where it went, the shape's
+/// stroke where it was. (It moved the whole shape by the stroke's way instead.) A tap away from it
+/// only ends the editing, painting nothing; a drag inside it still moves it.
+#[test]
+fn a_stroke_away_from_an_edited_shape_keeps_it_and_paints() {
+    let Some(s) = session(400, 400) else { return };
+    s.set_brush_size(0.05);
+    s.set_color(0.1, 0.2, 0.6);
+    let pen =
+        |x: f32, y: f32, t: f64| PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: t, roll: 0.0 };
+    let snap = |s: &CanvasSession, cx: f32, cy: f32, t0: f64| {
+        let round: Vec<PenSample> = (0..=100)
+            .map(|i| {
+                let a = i as f32 / 100.0 * TAU;
+                pen(cx + 50.0 * a.cos(), cy + 50.0 * a.sin(), t0 + f64::from(i) * 8.0)
+            })
+            .collect();
+        s.stroke_begin(PointerKind::Stylus, round[..1].to_vec());
+        s.stroke_add(round[1..].to_vec());
+        let info = s.quickshape_hold();
+        s.stroke_end(vec![]);
+        info
+    };
+    // whether the current layer has paint within three pixels of (`x`, `y`)
+    let painted = |s: &CanvasSession, x: u32, y: u32| -> bool {
+        let current = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+        let layer = s.shared.lock().layer_pixels(procraft_engine::document::LayerId(current)).unwrap_or_default();
+        (y - 3..=y + 3)
+            .any(|y| (x - 3..=x + 3).any(|x| layer.get(((y * 400 + x) * 4 + 3) as usize).is_some_and(|&a| a > 64)))
+    };
+    // a circle about (120, 120), edited; a pen stroke from (300, 300) to (360, 300)
+    // (the layer read only once the shape is kept: a read keeps it)
+    if snap(&s, 120.0, 120.0, 0.0).is_none() {
+        return;
+    }
+    s.set_shape_editing(true);
+    s.touch_down(9, PointerKind::Stylus, vec![pen(300.0, 300.0, 2000.0)]);
+    for i in 1..=12 {
+        s.touch_move(9, vec![pen(300.0 + 5.0 * i as f32, 300.0, 2000.0 + f64::from(i) * 8.0)]);
+    }
+    s.touch_up(9, vec![]);
+    assert!(s.quickshape_info().is_none(), "the shape still edited");
+    assert!(painted(&s, 330, 300), "the stroke didn't paint");
+    assert!(painted(&s, 170, 120), "the shape's stroke isn't where it was");
+    assert!(!painted(&s, 230, 120), "the shape moved by the stroke's way");
+    // a circle about (120, 300), edited; a pen tap at (300, 120): the editing ends, nothing painted
+    if snap(&s, 120.0, 300.0, 3000.0).is_none() {
+        return;
+    }
+    s.set_shape_editing(true);
+    s.touch_down(10, PointerKind::Stylus, vec![pen(300.0, 120.0, 5000.0)]);
+    s.touch_up(10, vec![pen(300.0, 120.0, 5060.0)]);
+    assert!(s.quickshape_info().is_none(), "a tap didn't end the editing");
+    assert!(!painted(&s, 300, 120), "a tap ending the editing painted");
+    assert!(painted(&s, 170, 300), "the shape tapped away from isn't kept");
+    // a circle about (300, 120), edited; the pen dragged from its middle: it moves (a finger this
+    // soon after the pen would be taken for the hand)
+    let Some(info) = snap(&s, 300.0, 120.0, 6000.0) else { return };
+    s.set_shape_editing(true);
+    s.touch_down(11, PointerKind::Stylus, vec![pen(300.0, 120.0, 8000.0)]);
+    for i in 1..=12 {
+        s.touch_move(11, vec![pen(300.0, 120.0 + 5.0 * i as f32, 8000.0 + f64::from(i) * 16.0)]);
+    }
+    s.touch_up(11, vec![]);
+    let moved = s.quickshape_info().expect("still edited after a drag on it");
+    assert!(moved.handles[1] > info.handles[1] + 10.0, "{:?} against {:?}", moved.handles, info.handles);
+}

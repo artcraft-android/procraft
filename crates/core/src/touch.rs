@@ -584,6 +584,9 @@ pub(crate) struct Touches {
     shape_editing: bool,
     shape_dragged: bool,
     shape_last: (f32, f32),
+    /// Where the touch landed that ended a shape's editing away from it: a stroke there paints, a
+    /// tap only ends the editing (its dot taken back). None once it has gone past a tap's slop.
+    shape_tap: Option<(f32, f32)>,
     /// Continue filling is on: each touch fills; the fill's threshold as slid, and the touch's
     /// last place and time.
     filling: Option<Fill>,
@@ -733,6 +736,7 @@ impl Default for Touches {
             shape_editing: false,
             shape_dragged: false,
             shape_last: (0.0, 0.0),
+            shape_tap: None,
             filling: None,
             selecting: None,
             select_moved: false,
@@ -1598,6 +1602,9 @@ impl CanvasSession {
         let slop = TAP_SLOP * t.scale;
         match t.mode {
             Mode::Pen | Mode::Finger if id == t.stroke_pointer => {
+                if t.shape_tap.is_some_and(|from| dist(at, from) > slop) {
+                    t.shape_tap = None;
+                }
                 // moving on restarts the waits for a hold and for draw and hold (none while a shape
                 // it snapped to is being held)
                 let shapes = t.settings.draw_and_hold;
@@ -2099,6 +2106,7 @@ impl CanvasSession {
         t.tap_pointers = 1;
         t.tap_moved = 0.0;
         t.tap_done = false;
+        t.shape_tap = None;
         let id = t.down.first().map_or(0, |d| d.id);
         // the guide editor: the touch takes the handle it lands on, and nothing else (a tap adds a
         // perspective guide's point when it lifts)
@@ -2144,11 +2152,13 @@ impl CanvasSession {
             return;
         }
         // a snapped shape's handle is dragged; while it is edited, a drag on its outline turns and
-        // resizes it, one elsewhere moves it (a tap ends the editing); anything else keeps the
-        // shape and draws on
+        // resizes it, one on it (inside a closed one, or along a line) moves it (a tap ends the
+        // editing); anything else, a stroke elsewhere among them, keeps the shape and draws on
         let grab = QUICKSHAPE_GRAB * t.handle_scale;
         if t.shape_editing
             && let Some(info) = self.quickshape_info()
+            && (self.quickshape_over(at.0, at.1, grab)
+                || info.handles.as_chunks::<2>().0.iter().any(|&[x, y]| dist((x, y), at) <= grab))
         {
             let handle = info
                 .handles
@@ -2176,6 +2186,9 @@ impl CanvasSession {
                 t.mode = Mode::ShapeMove;
             }
             return;
+        }
+        if t.shape_editing && self.shared.lock().shape.is_some() {
+            t.shape_tap = Some(at);
         }
         self.end_shape_with(t, out);
         let adjusting = self.shared.lock().adjust.open();
@@ -2649,8 +2662,10 @@ impl CanvasSession {
                 // into the history
                 let before = t.tool_before.take();
                 self.end_stroke_tools(&mut t);
+                // (a tap that ended a shape's editing away from it only ended it)
+                let ended_editing = t.shape_tap.take().is_some() && now - t.tap_start <= TAP_MS;
                 drop(t);
-                if cancelled {
+                if cancelled || ended_editing {
                     self.stroke_cancel();
                 } else {
                     self.stroke_end(samples);

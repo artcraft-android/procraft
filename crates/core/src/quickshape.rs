@@ -456,6 +456,20 @@ impl LastStroke {
     }
 }
 
+/// Whether `p` is inside the closed `outline` (its last point joined to its first): crossed an odd
+/// number of times by a ray from it.
+fn inside(outline: &[Vec2], p: Vec2) -> bool {
+    let mut odd = false;
+    let n = outline.len();
+    for i in 0..n {
+        let (Some(&a), Some(&b)) = (outline.get(i), outline.get((i + 1) % n)) else { continue };
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+            odd = !odd;
+        }
+    }
+    odd
+}
+
 /// What a shape's stroke's randomness is seeded with, and its second's (a dual brush's).
 pub(crate) const SHAPE_SEED: u32 = 0x5eed_1234;
 const SECOND_SHAPE_SEED: u32 = SHAPE_SEED ^ 0x5eed_0002;
@@ -1403,6 +1417,17 @@ impl CanvasSession {
         let (Some(edit), Some(view)) = (st.shape.as_ref(), st.view) else { return false };
         let Some(p) = view.screen_to_canvas(Vec2::new(x, y)) else { return false };
         edit.shape.turns_from_edge() && edit.shape.edge_distance(p) * view.zoom() <= reach
+    }
+
+    /// Whether window point (`x`, `y`) is on the snapped shape: within `reach` (window pixels) of its
+    /// outline, or inside it where it closes (an ellipse, a rectangle, a closed curve). A drag there
+    /// moves it while it is edited; one elsewhere keeps it and draws (see `touch.rs`).
+    pub(crate) fn quickshape_over(&self, x: f32, y: f32, reach: f32) -> bool {
+        let st = self.shared.lock();
+        let (Some(edit), Some(view)) = (st.shape.as_ref(), st.view) else { return false };
+        let Some(p) = view.screen_to_canvas(Vec2::new(x, y)) else { return false };
+        edit.shape.edge_distance(p) * view.zoom() <= reach
+            || (edit.shape.turns_from_edge() && inside(&edit.shape.outline(), p))
     }
 
     /// A drag on the edited shape's outline, from window point (`x`, `y`) (`begin`) or on to it:
