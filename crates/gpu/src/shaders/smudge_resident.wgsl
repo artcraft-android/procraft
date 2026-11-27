@@ -2,10 +2,9 @@
 // colour and coverage in storage textures over its region, the layer as it was read from the
 // region's copy of it, and the paint put together written straight into the layer. The accessors
 // smudge.wgsl reads through, and the passes such a stroke takes (smudge_compute.wgsl's, as they lay
-// wet paint, writing through the textures). The window buffers' passes stay in smudge_compute.wgsl
-// as they were: with them rewritten (the same sums), an Adreno's OpenGL ES laid two wet tests' paint
-// a few levels past their bounds. (This path is never taken there: it needs read-write storage
-// textures, which wgpu's OpenGL doesn't give.)
+// wet paint, writing through the textures); the window buffers' passes stay in smudge_compute.wgsl
+// as they were. (Never taken on OpenGL: it needs read-write storage textures, which wgpu's OpenGL
+// doesn't give.)
 @group(0) @binding(1) var layer_out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(2) var<storage, read_write> carry: array<vec4<f32>>;
 @group(0) @binding(3) var grained_tex: texture_storage_2d<rgba8unorm, read_write>;

@@ -9671,6 +9671,7 @@ impl Canvas {
         let brush = self.full_grain_bind(device, style).unwrap_or_else(|| self.brush_bind.clone());
         let dual = self.smudge.as_ref().and_then(|s| s.apart.as_ref()).is_some_and(|a| a.1 != 0);
         let second = dual.then(|| self.second_stroke.get(gpu).1.clone());
+        let gl = gpu.is_gl();
         let Some(smudge) = self.smudge.as_ref() else { return };
         let grain_once = if grain_once(style) { 1.0 } else { 0.0 };
         let modulated = u32::from(smudge.keeps.amount && style.rendering == Rendering::Gradual);
@@ -9890,10 +9891,14 @@ impl Canvas {
                             let Some(stamps) = own.get(start..end) else { continue };
                             let Some(&(head, _)) = stamps.first() else { continue };
                             let run = [u32::try_from(start).unwrap_or(0), u32::try_from(end).unwrap_or(0), 0, 0];
+                            // (over the stamps' turned quads; on OpenGL over the run's whole box, as
+                            // before: from the tighter one an Adreno's OpenGL ES laid faint wet paint a
+                            // few levels heavier, every time, though the pixels it leaves out lay
+                            // nothing)
                             let dispatch = stamps
                                 .iter()
                                 .fold(IRect::EMPTY, |r, (stamp, bounds)| r.union(wet_deposit_bounds(stamp, *bounds)));
-                            let dispatch = if dispatch.is_empty() { union } else { dispatch };
+                            let dispatch = if dispatch.is_empty() || gl { union } else { dispatch };
                             let bbox = [dispatch.x0, dispatch.y0, dispatch.x1, dispatch.y1];
                             piece.dispatches.push((smudge::Pipe::DepositRun, piece.uniforms.len(), groups(dispatch)));
                             piece.uniforms.push(SmudgeUniform { run, bbox, ..head });
