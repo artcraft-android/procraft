@@ -90,6 +90,7 @@ mod pacing;
 mod palettes;
 mod pick;
 mod pickers;
+mod scroll;
 /// A picker plugin's picture compiled: whose it is, its code, the keys it reads its controls by.
 pub(crate) type PickerProgram = (String, Arc<str>, Option<Arc<[String]>>, Arc<procraft_gpu::PictureProgram>);
 #[cfg(test)]
@@ -186,7 +187,7 @@ pub use app_log::process_line;
 pub use bars::{BarHang, BarLayout, BarPlace, BarSides, EdgeCollapse, HangSide, LayoutBar, WindowEdge, bar_layout_key};
 pub use big_pictures::{big_pictures_left, wait_for_big_pictures};
 pub use blend_wheel::{
-    BLEND_TAP_SECONDS, BlendCoast, BlendStep, blend_centred, blend_coast, blend_coast_at, blend_pull_for, blend_pulled,
+    BLEND_TAP_SECONDS, BlendStep, blend_centred, blend_coast, blend_coast_at, blend_pull_for, blend_pulled,
     blend_stretch, blend_tap, blend_tap_at, blend_unstretch,
 };
 pub use brush_files::BrushEngines;
@@ -310,6 +311,10 @@ pub use run_ends::{
 pub use scene3d::{
     ModelFile, ModelInfo, ModelLight, ModelTextureFile, ModelWarning, SubmeshInfo, Turntable, model_warning_name,
     unpack_model_artwork, zip_model_name,
+};
+pub use scroll::{
+    ScrollMotion, ScrollSample, scroll_coast_at, scroll_coast_velocity, scroll_drag, scroll_drag_velocity,
+    scroll_fling_velocity, scroll_motion, scroll_motion_at, scroll_pull_distance,
 };
 pub use selection::{SelectionDisplay, SelectionJoin};
 pub use side_bar::{

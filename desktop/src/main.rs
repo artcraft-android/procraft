@@ -58,6 +58,7 @@ mod quick_menu;
 mod recolor;
 mod reference;
 mod screen;
+mod scroll;
 mod selection;
 mod settings;
 mod shortcuts;

@@ -4,9 +4,10 @@
 //! third-party crates (Android's does), so they follow here (desktop/licenses.txt, written by
 //! tools/licenses.py).
 
+use crate::scroll::ScrollArea;
 use std::sync::{Arc, OnceLock};
 
-use egui::{Align2, Color32, Id, Order, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
+use egui::{Align2, Color32, Id, Order, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
 
 use crate::look::{Weight, argb, pc, text};
 

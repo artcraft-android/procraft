@@ -27,7 +27,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -593,6 +592,8 @@ private fun BlendModeList(modes: List<io.github.artcraftandroid.procraft.core.Bl
         androidx.compose.foundation.lazy.LazyColumn(
             Modifier.size(ModeListWidth, height).shadow(24.dp, RoundedCornerShape(13.dp)).clip(RoundedCornerShape(13.dp)).background(ModeListFill),
             state = list,
+            flingBehavior = rememberScrollFling(),
+            overscrollEffect = rememberScrollEdges(),
         ) {
             items(modes.size) { i ->
                 val m = modes[i]
@@ -709,7 +710,7 @@ private fun Studio(vm: CanvasViewModel) {
 @Composable
 private fun StudioRail(vm: CanvasViewModel) {
     // scrolling where the window is too short for all of them (a phone held sideways)
-    Column(Modifier.width(TabsWidth).fillMaxHeight().background(StudioTabs).verticalScroll(rememberScrollState()).padding(top = 46.dp)) {
+    Column(Modifier.width(TabsWidth).fillMaxHeight().background(StudioTabs).kineticVerticalScroll(rememberScrollState()).padding(top = 46.dp)) {
         STUDIO_TABS.forEachIndexed { i, tab ->
             val on = vm.studioTab == i
             Box(
@@ -734,7 +735,7 @@ private fun StudioPagesCard(vm: CanvasViewModel) {
     ) {
         Text("Brush Studio", color = StudioCardTitle, fontSize = 23.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 24.dp, top = 19.dp))
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 8.dp, end = 8.dp, top = 17.dp, bottom = 8.dp),
+            Modifier.fillMaxSize().kineticVerticalScroll(rememberScrollState()).padding(start = 8.dp, end = 8.dp, top = 17.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             if (vm.studioDual) StudioParts(vm)
@@ -806,7 +807,7 @@ private fun StudioPad(vm: CanvasViewModel, modifier: Modifier) {
 private fun StudioSettings(vm: CanvasViewModel, modifier: Modifier) {
     val tab = STUDIO_TABS.getOrNull(vm.studioTab) ?: return
     // each section opens at its top
-    Column(modifier.verticalScroll(remember(vm.studioTab) { androidx.compose.foundation.ScrollState(0) }).padding(start = 20.dp, end = 20.dp, bottom = 77.dp)) {
+    Column(modifier.kineticVerticalScroll(remember(vm.studioTab) { androidx.compose.foundation.ScrollState(0) }).padding(start = 20.dp, end = 20.dp, bottom = 77.dp)) {
         // what the space above each thing follows: a control, a title, or the top
         var above: Any = Edge.TOP
         tab.sections.forEachIndexed { k, section ->

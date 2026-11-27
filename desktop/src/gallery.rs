@@ -5,14 +5,13 @@
 //! share, duplicate or delete. The artworks are the core's store (gallery.rs), kept in the app's folder; the presets
 //! are the core's too, kept as the Android app keeps them.
 
+use crate::scroll::ScrollArea;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{
-    Align2, Color32, Id, Order, Pos2, Rect, ScrollArea, Sense, Stroke, TextureHandle, Ui, UiBuilder, Vec2, pos2, vec2,
-};
+use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, TextureHandle, Ui, UiBuilder, Vec2, pos2, vec2};
 use procraft_core::{
     ArtworkStore, CanvasPreset, DragRest, GalleryAction, GalleryArtwork, GalleryEntry, GalleryHeaderFit, GalleryPick,
     P3, gallery_columns, gallery_header_fit, gallery_pick, preset_label, presets_from_json, profile_chip,
@@ -1382,7 +1381,10 @@ impl Gallery {
             self.opening_stack = None;
         }
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-            ScrollArea::vertical().id_salt("gallery grid").show(ui, |ui| {
+            let grid = ScrollArea::vertical()
+                .id_salt("gallery grid")
+                .scroll_child_drags(self.lifted.is_none() && self.spreading.is_none());
+            grid.show(ui, |ui| {
                 let (all, _) = ui.allocate_exact_size(vec2(rect.width(), rows as f32 * pitch + 24.0), Sense::hover());
                 for (i, entry) in entries.iter().enumerate() {
                     let (row, column) = (i / columns, i % columns);
@@ -2183,7 +2185,7 @@ impl Gallery {
             let presets = self.presets.clone();
             ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
                 ui.set_clip_rect(list);
-                ScrollArea::vertical().id_salt("presets").show(ui, |ui| {
+                ScrollArea::vertical().id_salt("presets").scroll_child_drags(true).show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                     for (i, p) in presets.iter().enumerate() {
                         let (line, response) =

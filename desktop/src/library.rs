@@ -12,9 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
-use egui::{
-    Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, pos2, vec2,
-};
+use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, pos2, vec2};
 use procraft_core::{
     BRUSH_MENU_HOLD, BrushDrop, BrushDropOver, BrushFileReading, BrushHoldMove, BrushInfo, BrushSetInfo, CanvasSession,
     LibraryScroll, ReadBrushes, brush_hold_move, read_brushes_from,
@@ -25,6 +23,7 @@ use crate::icons;
 use crate::look::{Look, Shade, Themed, Weight, argb, pc, text};
 use crate::menu::{self, Entry, Menu};
 use crate::panel::{self, PANEL_GLYPH, PANEL_TITLE};
+use crate::scroll::ScrollArea;
 
 mod libraries;
 

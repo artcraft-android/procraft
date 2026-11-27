@@ -5,7 +5,8 @@
 //! feedback sounds and tap assistance; and, on a computer of several GPUs, which to draw with.
 //! Kept with the Prefs tab's.
 
-use egui::{Align2, Color32, Id, Order, Rect, ScrollArea, Sense, Stroke, UiBuilder, Vec2, pos2, vec2};
+use crate::scroll::ScrollArea;
+use egui::{Align2, Color32, Id, Order, Rect, Sense, Stroke, UiBuilder, Vec2, pos2, vec2};
 
 use crate::look::{Weight, argb, text};
 use crate::prefs::{DRAG_FORMATS, DRAG_IMAGE_FORMATS, Prefs};
