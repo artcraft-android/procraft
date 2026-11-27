@@ -412,8 +412,10 @@ fn by_speed(amount: f32, speed: f32) -> f32 {
     if amount >= 0.0 { 1.0 - amount * speed } else { 1.0 + amount * (1.0 - speed) }
 }
 
-/// At full strength stabilisation averages up to 100 ms of input on either side of each point.
-const STABILIZATION_HALF_WINDOW_MS: f64 = 100.0;
+/// Stabilisation averages each point with those either side of it: at full strength this many
+/// samples' worth each way (at the rate above), fewer as the strength to this power falls.
+const MOST_AVERAGED: f32 = 120.0;
+const STABILIZATION_POWER: f32 = 2.2;
 /// Motion filtering lets through what moves slower than its cut and takes out what shakes faster:
 /// at full strength the cut is this, in hertz. Below that it rises to the input's own rate with
 /// the strength to this power, so a little is strong already.
@@ -2555,15 +2557,16 @@ impl StrokeBuilder {
         motion_weights(amount, expression, rate)
     }
 
-    /// How many samples each way cover the stabilisation window at this pointer's tuned rate.
-    /// Uses the stronger of the app's and the brush's settings (see [`StrokeBuilder::with_input`]),
-    /// or the app's alone for an outside brush engine.
+    /// How many samples each way stabilisation averages: the stronger of the app's and the
+    /// brush's (see [`StrokeBuilder::with_input`]), the app's alone where the brush's own smoothing
+    /// doesn't count. As many samples for a pen as for a finger: at their tuned rates, a finger's
+    /// stand for twice the time.
     fn stabilised(&self) -> usize {
         if self.exact || self.steady {
             return 0;
         }
         let amount = if self.own_smoothing() { self.extras.stabilization } else { self.input.stabilization };
-        (f64::from(amount.clamp(0.0, 1.0)) * STABILIZATION_HALF_WINDOW_MS / self.tuned_interval()).round() as usize
+        (amount.clamp(0.0, 1.0).powf(STABILIZATION_POWER) * MOST_AVERAGED) as usize
     }
 
     /// Takes the path on to `to`: input read in whole pixels evened out first (see
@@ -6755,36 +6758,41 @@ mod tests {
         assert!(stamps[stamps.len() - 1].center.distance(few[3].pos) < 2.0);
     }
 
+    /// Stabilisation averages as many samples each way for a pen as for a finger, at their tuned
+    /// rates (240 and 120 a second): a finger's settled stamps trail twice as far behind, by the
+    /// app's setting or the brush's. (Half a second of a pen's at full strength, a second of a
+    /// finger's.)
     #[test]
-    fn stabilisation_uses_the_same_time_window_for_pen_and_touch() {
-        for (pointer, rate) in [(Pointer::Stylus, PEN_RATE), (Pointer::Finger, FINGER_RATE)] {
-            let samples: Vec<Sample> = (0..=(rate * 0.8) as usize)
+    fn stabilisation_averages_as_many_samples_for_a_pen_as_for_a_finger() {
+        let trail = |pointer: Pointer, rate: f64, amount: f32, global: bool| -> f32 {
+            let samples: Vec<Sample> = (0..=(rate * 1.6) as usize)
                 .map(|i| {
                     let ms = i as f64 * 1000.0 / rate;
                     Sample::at(Vec2::new(ms as f32, 50.0), 1.0, ms)
                 })
                 .collect();
             let end = samples.last().unwrap().pos.x;
-            for amount in [0.5, 1.0] {
-                for global in [false, true] {
-                    let mut brush = plain();
-                    let mut input = InputSettings::default();
-                    if global {
-                        input.stabilization = amount;
-                    } else {
-                        brush.set_setting("stabilization", amount);
-                    }
-                    let mut stroke = StrokeBuilder::new(brush, 4.0, pointer).with_input(input);
-                    stroke.add(&samples);
-                    // The line advances one pixel per millisecond. Measure settled stamps, which
-                    // are all a brush that paints in place can show while the stroke is open.
-                    let lag = end - stroke.newest_stamp().unwrap().center.x;
-                    let expected = 100.0 * amount;
-                    assert!(
-                        (expected - 5.0..expected + 20.0).contains(&lag),
-                        "{pointer:?}, amount {amount}, global {global}: trails {lag} ms"
-                    );
-                }
+            let mut brush = plain();
+            let mut input = InputSettings::default();
+            if global {
+                input.stabilization = amount;
+            } else {
+                brush.set_setting("stabilization", amount);
+            }
+            let mut stroke = StrokeBuilder::new(brush, 4.0, pointer).with_input(input);
+            stroke.add(&samples);
+            // (the line goes a pixel a millisecond)
+            end - stroke.newest_stamp().unwrap().center.x
+        };
+        for amount in [0.5, 1.0] {
+            for global in [false, true] {
+                let pen = trail(Pointer::Stylus, PEN_RATE, amount, global);
+                let finger = trail(Pointer::Finger, FINGER_RATE, amount, global);
+                let samples = (amount.powf(STABILIZATION_POWER) * MOST_AVERAGED).floor();
+                println!("amount {amount}, global {global}: pen {pen} ms, finger {finger} ms ({samples} samples)");
+                let pen_ms = samples * (1000.0 / PEN_RATE as f32);
+                assert!((pen - pen_ms).abs() <= 10.0, "pen trails {pen} ms, not {pen_ms}");
+                assert!((finger - 2.0 * pen).abs() <= 12.0, "finger trails {finger} ms, pen {pen}");
             }
         }
     }
@@ -6810,7 +6818,7 @@ mod tests {
             (800.0 - last.center.x, last.radius)
         };
         let close = |a: f32, b: f32, share: f32| (a - b).abs() <= share * a.abs().max(b.abs());
-        for (setting, amount, behind) in [("stabilization", 1.0, 60.0), ("motion_filtering", 0.25, 15.0)] {
+        for (setting, amount, behind) in [("stabilization", 1.0, 200.0), ("motion_filtering", 0.25, 15.0)] {
             let mut b = plain();
             b.set_setting(setting, amount);
             let (slow, fast) = (end(&b, PEN_RATE).0, end(&b, PEN_RATE * 3.0).0);
