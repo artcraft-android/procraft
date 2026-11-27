@@ -14,6 +14,8 @@ use procraft_gpu::{Canvas, SecondStroke, StrokeStyle};
 
 use crate::{CanvasSession, PointerKind, State};
 
+mod provisional;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum QuickShapeKind {
     Line,
@@ -119,6 +121,10 @@ pub(crate) struct ShapeEdit {
     /// whether the stroke laid now is those moved, spaced afresh once the shape stops moving.
     plots: Option<ShapePlots>,
     moved_plots: bool,
+    /// Its stroke shown from a smaller canvas while it is moved about (see `provisional.rs`), and
+    /// whether it couldn't be.
+    provisional: Option<Box<provisional::ShapeProvisional>>,
+    provisional_refused: bool,
 }
 
 /// A shape's stroke being made again on a thread of its own as the shape is dragged about: the
@@ -207,6 +213,8 @@ impl ShapeEdit {
             dragging: false,
             plots: None,
             moved_plots: false,
+            provisional: None,
+            provisional_refused: false,
         }
     }
 
@@ -276,7 +284,13 @@ enum PlotBasis {
 }
 
 impl PlotMove {
+    #[cfg(test)]
     fn between(from: &Shape, to: &Shape) -> Option<Self> {
+        Self::between_by(from, to, 1.25)
+    }
+
+    /// [`PlotMove::between`], the move grown or shrunk by up to `most` (and down to its inverse).
+    fn between_by(from: &Shape, to: &Shape, most: f32) -> Option<Self> {
         if from.kind != to.kind || from.nodes.len() != to.nodes.len() {
             return None;
         }
@@ -292,7 +306,7 @@ impl PlotMove {
         if length < 1.0 {
             return None;
         }
-        let in_range = |square: f32| (0.8f32.powi(2)..=1.25f32.powi(2)).contains(&square);
+        let in_range = |square: f32| (most.recip().powi(2)..=most.powi(2)).contains(&square);
         let factor = Vec2::new(a.dot(b) / length, a.cross(b) / length);
         let basis = PlotBasis::Similarity { factor, turn: factor.y.atan2(factor.x) };
         let moved = Self { from: start, to: end, basis };
@@ -620,9 +634,14 @@ impl State {
     /// [`PlotMove`]), its first's and a dual brush's second's: none where they can't be (no stamps
     /// kept, the brush's size changed, or a move that isn't one).
     fn moved_shape_stamps(&self) -> Option<(Vec<Stamp>, Option<Vec<Stamp>>)> {
+        self.moved_shape_stamps_by(1.25)
+    }
+
+    /// [`State::moved_shape_stamps`], the move grown or shrunk by up to `most`.
+    fn moved_shape_stamps_by(&self, most: f32) -> Option<(Vec<Stamp>, Option<Vec<Stamp>>)> {
         let edit = self.shape.as_ref()?;
         let plots = edit.plots.as_ref().filter(|plots| plots.scale == self.brush_scale())?;
-        let moved = PlotMove::between(&plots.shape, &edit.shape)?;
+        let moved = PlotMove::between_by(&plots.shape, &edit.shape, most)?;
         let first = moved.place(&plots.primary, self.stroke.as_ref()?);
         let second = match &plots.secondary {
             Some(plot) => Some(moved.place(plot, self.second.as_ref()?)),
@@ -664,6 +683,10 @@ impl State {
     /// make (a third of a second for a wet brush round a whole canvas). A brush engine's (a plugin's)
     /// is made here.
     pub(crate) fn draw_moved_shape(&mut self) {
+        // a heavy shape moved about: shown from a smaller canvas (see `provisional.rs`)
+        if self.provisional_frame() {
+            return;
+        }
         let busy = self.canvas.as_ref().is_some_and(|canvas| canvas.relaying() || canvas.catching_up());
         // stamps moved along with a drag now over are made afresh for where it stopped
         if let Some(edit) = self.shape.as_mut()
@@ -716,11 +739,18 @@ impl State {
             }
             return;
         }
-        let Some(build) = self.shape_build() else { return };
-        if build.first.is_outside() {
-            let made = build.make();
+        if let Some(made) = self.make_shape_elsewhere() {
             self.lay_made(made);
-            return;
+        }
+    }
+
+    /// The stroke along the shape's outline made on a thread of its own, laid by the first frame to
+    /// find it made (see [`State::draw_moved_shape`]); made here, and given, where it can't be (a brush
+    /// engine's, which draws it here, or no thread to be had).
+    fn make_shape_elsewhere(&mut self) -> Option<Made> {
+        let build = self.shape_build()?;
+        if build.first.is_outside() {
+            return Some(build.make());
         }
         let moves = build.moves;
         let (send, made) = std::sync::mpsc::channel();
@@ -734,10 +764,11 @@ impl State {
                     edit.replot = Some(Replot { moves, made });
                 }
                 self.needs_frame = true;
+                None
             }
             Err(e) => {
                 log::warn!("making a shape's stroke elsewhere: {e}");
-                self.draw_shape();
+                self.shape_build().map(ShapeBuild::make)
             }
         }
     }
@@ -759,6 +790,8 @@ impl State {
     /// The open stroke along the shape as it is now, laid before this returns: the stroke being made
     /// for it elsewhere waited for, or one made here if it has moved since (before it is kept).
     pub(crate) fn draw_shape_now(&mut self) {
+        // (shown from a smaller canvas: laid as itself, here)
+        self.end_provisional_shape();
         let pending = self.shape.as_mut().and_then(|e| e.replot.take().map(|r| (r, e.moves, e.stale)));
         let waited = pending.is_some();
         if let Some((replot, moves, stale)) = pending

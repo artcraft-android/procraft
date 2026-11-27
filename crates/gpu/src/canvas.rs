@@ -23,6 +23,7 @@ pub(crate) mod filter_layers;
 mod fragments;
 pub(crate) mod plugin_filter;
 pub(crate) mod plugin_picture;
+mod provisional;
 mod rewind;
 mod second_marks;
 mod smudge;
@@ -2691,6 +2692,13 @@ enum Op {
     },
     /// What its tip laid in place wrote comes back as it was, and what it carried.
     UntipInPlace(IRect),
+    /// A stroke on a smaller canvas, its layer `small` as it is now, shown in its layer over `rect`
+    /// (see `provisional.rs`); and that ended, the layer put back as it was.
+    ShowProvisional {
+        small: wgpu::TextureView,
+        rect: IRect,
+    },
+    EndProvisional,
     /// The open stroke painting in place into `layer` in `style` lays the stamps it holds for the
     /// rest of their display frame (see [`Canvas::lay_held`]).
     LayHeld {
@@ -3373,6 +3381,8 @@ pub(crate) struct Pipelines {
     /// (see [`Canvas::row_ends`]).
     row_ends: wgpu::RenderPipeline,
     row_ends_masked: wgpu::RenderPipeline,
+    /// A stroke on a smaller canvas shown in its layer (see `provisional.rs`).
+    provisional: Option<provisional::ProvisionalPipelines>,
     /// A layer mirrored left to right, and top to bottom.
     flip_across: wgpu::RenderPipeline,
     flip_down: wgpu::RenderPipeline,
@@ -3727,6 +3737,8 @@ pub struct Canvas {
     scaled: Option<([f32; 2], f32)>,
     /// Part of the canvas drawn again sharper, shown over it in its place.
     sharp: Option<Sharp>,
+    /// A stroke shown from a smaller canvas while it moves (see `provisional.rs`).
+    provisional: Option<Box<provisional::Provisional>>,
     /// The picture round the canvas, by the id it was given, bound to be drawn.
     surround_picture: Option<(u64, wgpu::BindGroup)>,
     smudge_params: wgpu::Buffer,
@@ -4182,6 +4194,7 @@ impl Canvas {
             last_ended: None,
             scaled: None,
             sharp: None,
+            provisional: None,
             surround_picture: None,
             smudge_params: smudge_params(device, SMUDGE_SLOTS_MADE),
             smudge_spare: [spare_buffer(device), spare_buffer(device)],
@@ -6153,6 +6166,8 @@ impl Canvas {
 
     /// Drops the open stroke.
     pub fn cancel_stroke(&mut self) {
+        // (a stroke shown from a smaller canvas goes with it, see `provisional.rs`)
+        self.end_provisional();
         self.prediction.clear();
         self.laid = None;
         self.laid_second = None;
@@ -7934,6 +7949,8 @@ impl Canvas {
                     }
                 }
                 Op::UntipInPlace(_) => self.untip_in_place_now(gpu, &mut encoder),
+                Op::ShowProvisional { small, rect } => self.draw_provisional(gpu, &mut encoder, &small, rect),
+                Op::EndProvisional => self.drop_provisional(gpu, &mut encoder),
                 Op::LayHeld { layer, style } => {
                     if self.smudge.as_ref().is_some_and(|s| s.layer == layer && !s.pending.is_empty()) {
                         let uniforms = (&mut smudge_uniforms, &mut wet_uniforms);
@@ -12026,6 +12043,8 @@ impl Canvas {
             | Op::RewindInPlace(_)
             | Op::RewindSecond(_)
             | Op::SecondReached(_)
+            | Op::ShowProvisional { .. }
+            | Op::EndProvisional
             | Op::Mark
             | Op::Name(_)
             | Op::OutsideChange(_)
@@ -14574,6 +14593,7 @@ impl Pipelines {
             changed_columns,
             row_ends,
             row_ends_masked,
+            provisional: Some(provisional::ProvisionalPipelines::new(device, kept)),
             flip_across,
             flip_down,
             invert,
