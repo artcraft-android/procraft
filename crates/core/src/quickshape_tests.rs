@@ -550,7 +550,7 @@ enum ShapePace {
 
 /// What [`heavy_shape`] measured (ms): the longest any frame held the canvas, and the longest a
 /// frame's GPU work took after it (waited for); each frame's hold; the drag's frames, in how many
-/// the picture changed and how many showed the shape by its preview; the frames and the time from
+/// the picture changed; the frames and the time from
 /// the lift until the shape's stroke was all laid, and from keeping it until it was in its layer;
 /// the most GPU time a frame gave the stamps by the rates it went by (ms); the stamps along the
 /// shape; and the layer as kept.
@@ -560,7 +560,6 @@ struct HeavyShape {
     holds: Vec<f64>,
     drag_frames: usize,
     drag_shown: usize,
-    drag_previewed: usize,
     spent_most: f64,
     drag_moves_behind: u64,
     settle_frames: usize,
@@ -634,7 +633,7 @@ fn heavy_shape(brush: &str, pace: ShapePace) -> Option<HeavyShape> {
     let started = Instant::now();
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     let (mut longest_hold, mut longest_gpu, mut holds) = (0.0f64, 0.0f64, Vec::new());
-    let (changed, previewed) = (std::cell::Cell::new(false), std::cell::Cell::new(false));
+    let changed = std::cell::Cell::new(false);
     // a frame drawn (timed under the lock) and its GPU work waited for; whether more are wanted
     let mut frame = |s: &CanvasSession| -> bool {
         let more = {
@@ -645,7 +644,6 @@ fn heavy_shape(brush: &str, pace: ShapePace) -> Option<HeavyShape> {
             st.draw_frame(&view, format, (width, height), Profile::Srgb, started);
             let held = ms(t.elapsed());
             changed.set(st.canvas.as_ref().map_or(0, |c| c.composites()) != before);
-            previewed.set(st.shape.as_ref().is_some_and(|e| e.previewing()));
             if held > 200.0 && std::env::var("HEAVY_SHAPE_SAY").is_ok() {
                 println!("  frame {} held {held:.0} ms; queued before it: {queued}", holds.len());
             }
@@ -685,7 +683,7 @@ fn heavy_shape(brush: &str, pace: ShapePace) -> Option<HeavyShape> {
     let drag_began = Instant::now();
     let mut sent = 0;
     let mut drag_frames = 0;
-    let (mut drag_shown, mut drag_previewed) = (0, 0);
+    let mut drag_shown = 0;
     let mut drag_moves_behind = 0;
     while sent < drag.len() {
         let due = ((ms(drag_began.elapsed()) / 8.0) as usize + 1).min(drag.len());
@@ -696,7 +694,6 @@ fn heavy_shape(brush: &str, pace: ShapePace) -> Option<HeavyShape> {
         frame(&s);
         drag_frames += 1;
         drag_shown += usize::from(changed.get());
-        drag_previewed += usize::from(previewed.get());
         drag_moves_behind = drag_moves_behind.max(s.shared.lock().shape.as_ref().map_or(0, |e| e.moves_behind()));
         if drag_began.elapsed() > Duration::from_secs(300) {
             break;
@@ -741,7 +738,6 @@ fn heavy_shape(brush: &str, pace: ShapePace) -> Option<HeavyShape> {
         holds,
         drag_frames,
         drag_shown,
-        drag_previewed,
         spent_most,
         drag_moves_behind,
         settle_frames,
@@ -757,7 +753,8 @@ fn heavy_shape(brush: &str, pace: ShapePace) -> Option<HeavyShape> {
 /// `HEAVY_SHAPE_BRUSH` names another: what each frame holds the canvas for, how the picture follows
 /// the drag, how long the stroke takes to be laid and kept, and whether it is kept as laid at once.
 /// Bounds: no frame holds the canvas a second; the shape is laid within 30 s of the lift and kept
-/// within 10 s; the picture changes in half the drag's frames; a slow GPU's frames give the stamps
+/// within 10 s; the picture changes through the drag (its stroke laid as itself at the GPU's pace,
+/// each time the last is laid, so on a slow GPU not every frame); a slow GPU's frames give the stamps
 /// at most 200 ms (150 ms and the least lot of each part); kept as laid at once, bit for bit.
 /// (Before: one frame held it 2.1 s, the picture never changed through the drag, and the stroke
 /// was laid 97 s after the lift, 28 moves of it queued and laid in turn.)
@@ -784,7 +781,7 @@ fn heavy_shape_frames() {
         let top: Vec<String> = sorted.iter().rev().take(6).map(|v| format!("{v:.0}")).collect();
         println!(
             "{brush} {pace:?}: {} stamps; longest hold {:.0} ms (top {}), longest GPU wait {:.0} ms; drag {} frames, \
-             the picture changed in {}, {} by the preview, {} moves behind at most; settled {} frames {:.0} ms after the \
+             the picture changed in {}, {} moves behind at most; settled {} frames {:.0} ms after the \
              lift; kept {} frames {:.0} ms; {} frames; a frame gave the stamps {:.0} ms of the GPU at most by its rates",
             h.stamps,
             h.longest_hold,
@@ -792,7 +789,6 @@ fn heavy_shape_frames() {
             h.longest_gpu,
             h.drag_frames,
             h.drag_shown,
-            h.drag_previewed,
             h.drag_moves_behind,
             h.settle_frames,
             h.settle_ms,
@@ -807,7 +803,7 @@ fn heavy_shape_frames() {
         if h.settle_ms >= 30_000.0 || h.keep_ms >= 10_000.0 {
             wrong.push(format!("{pace:?}: laid {:.0} ms after the lift, kept {:.0} ms after", h.settle_ms, h.keep_ms));
         }
-        if pace != ShapePace::AtOnce && h.drag_shown * 2 < h.drag_frames {
+        if pace != ShapePace::AtOnce && h.drag_shown < 3 {
             wrong.push(format!("{pace:?}: the picture changed in {} of {} drag frames", h.drag_shown, h.drag_frames));
         }
         if pace == ShapePace::SlowGpu && h.spent_most > 200.0 {
@@ -828,16 +824,16 @@ fn heavy_shape_frames() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
-/// What one drag of a heavy shape did (see [`drag_heavy_shape`]): the drag's frames, how many of
-/// them showed the shape by its preview, how many of its moves were shown by the frame that laid
-/// their stroke, and the most frames a move took to be laid; the frames after the lift until its stroke was laid as itself, and
-/// after it was kept until it was in its layer; the most GPU time a frame was taken to give the
-/// stroke's stamps (ms, by the rates set), and the most stamps queued after a frame (first, second);
-/// the stamps renders that showed nothing laid from the lift on, and the time-lapse frames taken;
-/// whether it was still shown by its preview once laid; the layer as kept.
+/// What one drag of a heavy shape did (see [`drag_heavy_shape`]): the drag's frames, in how many the
+/// picture changed, how many of its moves were shown once their stroke was laid, and the most frames
+/// a move took to be laid; the frames after the lift until its stroke was laid, and after it was
+/// kept until it was in its layer; the most GPU time a frame was taken to give the stroke's stamps
+/// (ms, by the rates set), and the most stamps queued after a frame (first, second); the stamps
+/// renders that showed nothing laid from the lift on, and the time-lapse frames taken; the layer as
+/// kept.
 struct HeavyDrag {
     drag_frames: usize,
-    previewed: usize,
+    drag_changed: usize,
     moves_shown: usize,
     most_frames_a_move: usize,
     settle_frames: usize,
@@ -846,7 +842,6 @@ struct HeavyDrag {
     queued_most: (usize, usize),
     laid_unshown: u64,
     lapse_frames: u32,
-    preview_left: bool,
     layer: Vec<u8>,
 }
 
@@ -856,8 +851,9 @@ struct HeavyDrag {
 /// waited for) after each until the stroke laid is made for it; lifted, and frames drawn until its
 /// stroke is laid (a time-lapse frame asked for as it lifts, as the app asks); kept, and frames
 /// drawn until it is in its layer. `slow`: the canvas lays its stamps as a slow GPU's pace allows (two million
-/// work a millisecond, each frame its share of 150 ms), else all of them in each frame.
-fn drag_heavy_shape(slow: bool) -> Option<HeavyDrag> {
+/// work a millisecond, each frame its share of 150 ms), else all of them in each frame. `hurried`:
+/// dragged out as far in 40 moves, a move every frame however far behind the stroke laid is.
+fn drag_heavy_shape(slow: bool, hurried: bool) -> Option<HeavyDrag> {
     use procraft_engine::brush::{Brush, Taper};
     use procraft_engine::profile::Profile;
     use procraft_gpu::wgpu;
@@ -902,9 +898,9 @@ fn drag_heavy_shape(slow: bool) -> Option<HeavyDrag> {
     let view = target.create_view(&Default::default());
     let started = Instant::now();
     let mut queued_most = (0, 0);
-    // a frame drawn and its GPU work waited for: whether it showed the preview, whether the picture
-    // changed, how many moves the stroke trails, and whether more frames are wanted
-    let mut frame = |s: &CanvasSession| -> Option<(bool, bool, u64, bool)> {
+    // a frame drawn and its GPU work waited for: whether the picture changed, how many moves the
+    // stroke trails, whether more frames are wanted, and whether the canvas is still laying it
+    let mut frame = |s: &CanvasSession| -> Option<(bool, u64, bool, bool)> {
         let mut st = s.shared.lock();
         let before = st.canvas.as_ref()?.composites();
         st.draw_frame(&view, wgpu::TextureFormat::Rgba8Unorm, (SIDE, SIDE), Profile::Srgb, started);
@@ -913,12 +909,11 @@ fn drag_heavy_shape(slow: bool) -> Option<HeavyDrag> {
         queued_most = (queued_most.0.max(queued.0), queued_most.1.max(queued.1));
         let changed = canvas.composites() != before;
         let laying = canvas.lays_over_frames() || canvas.catching_up() || canvas.relaying();
-        let edit = st.shape.as_ref();
-        let (preview, behind) = (edit.is_some_and(|e| e.previewing()), edit.map_or(0, |e| e.moves_behind()));
+        let behind = st.shape.as_ref().map_or(0, |e| e.moves_behind());
         let more = st.needs_frame || behind > 0 || laying;
         drop(st);
         gpu.wait().ok()?;
-        Some((preview, changed, behind, more))
+        Some((changed, behind, more, laying))
     };
     let (cx, cy, r0) = (256.0f32, 256.0f32, 60.0f32);
     let pen =
@@ -935,7 +930,7 @@ fn drag_heavy_shape(slow: bool) -> Option<HeavyDrag> {
     frame(&s)?;
     let mut drag = HeavyDrag {
         drag_frames: 0,
-        previewed: 0,
+        drag_changed: 0,
         moves_shown: 0,
         most_frames_a_move: 0,
         settle_frames: 0,
@@ -944,31 +939,39 @@ fn drag_heavy_shape(slow: bool) -> Option<HeavyDrag> {
         queued_most: (0, 0),
         laid_unshown: 0,
         lapse_frames: 0,
-        preview_left: false,
         layer: Vec::new(),
     };
-    for k in 1..=12 {
-        let x = cx + r0 + 80.0 * k as f32 / 12.0;
+    let moves = if hurried { 40 } else { 12 };
+    for k in 1..=moves {
+        let x = cx + r0 + 80.0 * k as f32 / moves as f32;
+        let before = s.shared.lock().canvas.as_ref()?.composites();
         s.stroke_add(vec![pen(x, cy, 1000.0 + f64::from(k) * 16.0)]);
-        // (frames until the stroke made for it is laid: whether that frame shows it)
+        if hurried {
+            // (the next move at the next frame, laid or not)
+            let (changed, _, _, _) = frame(&s)?;
+            drag.drag_frames += 1;
+            drag.drag_changed += usize::from(changed);
+            continue;
+        }
+        // (frames until the stroke made for it is laid: whether it then shows)
         let mut frames = 0;
-        let shown = loop {
-            let (preview, changed, behind, _) = frame(&s)?;
+        loop {
+            let (changed, behind, _, laying) = frame(&s)?;
             frames += 1;
-            drag.previewed += usize::from(preview);
-            if behind == 0 || frames >= 500 {
-                break changed;
+            drag.drag_changed += usize::from(changed);
+            if (behind == 0 && !laying) || frames >= 500 {
+                break;
             }
-        };
+        }
+        let shown = s.shared.lock().canvas.as_ref()?.composites() != before;
         drag.drag_frames += frames;
         drag.most_frames_a_move = drag.most_frames_a_move.max(frames);
         drag.moves_shown += usize::from(shown);
         if std::env::var("HEAVY_DRAG_SAY").is_ok() {
             let st = s.shared.lock();
             let c = st.canvas.as_ref()?;
-            let p = st.shape.as_ref().is_some_and(|e| e.previewing());
             println!(
-                "move {k}: {frames} frames, shown {shown}, preview {p}, relaying {} catching up {}; {}",
+                "move {k}: {frames} frames, shown {shown}, relaying {} catching up {}; {}",
                 c.relaying(),
                 c.catching_up(),
                 c.queued_work()
@@ -981,12 +984,11 @@ fn drag_heavy_shape(slow: bool) -> Option<HeavyDrag> {
     let unshown = s.shared.lock().canvas.as_ref()?.laid_unshown();
     s.stroke_end(vec![]);
     s.record_time_lapse(std::sync::Arc::clone(&lapse));
-    while drag.settle_frames < 3000 && frame(&s)?.3 {
+    while drag.settle_frames < 3000 && frame(&s)?.2 {
         drag.settle_frames += 1;
     }
-    drag.preview_left = s.shared.lock().shape.as_ref().is_some_and(|e| e.previewing());
     s.quickshape_done();
-    while drag.keep_frames < 3000 && frame(&s)?.3 {
+    while drag.keep_frames < 3000 && frame(&s)?.2 {
         drag.keep_frames += 1;
     }
     drag.laid_unshown = s.shared.lock().canvas.as_ref()?.laid_unshown() - unshown;
@@ -1002,29 +1004,33 @@ fn drag_heavy_shape(slow: bool) -> Option<HeavyDrag> {
 }
 
 /// A shape of a brush painting in place with a second, dragged out on a canvas that can't lay it
-/// whole again at each move within a frame (a slow GPU's pace, set): it follows the drag, shown by
-/// its preview (laid dry, without its second) until the drag ends, and is then laid as itself and
-/// kept exactly as it is laid all at once. Before, its stroke was begun again at every move before
-/// the last was laid, so the picture never changed through the drag, and each move's stroke was
-/// queued (none let go: the second is laid again first, so the first's stamps never came last) to be
-/// laid whole, one after another, after the lift: 28 moves of a big brush took a tablet a minute and
-/// a half, the frame that laid them holding the canvas the whole time (a time-lapse frame, asked for
-/// as the pen lifted, read the canvas with a render that laid all that was queued at once). Bounds:
-/// none of its stamps laid by a render that shows nothing (the time-lapse frame waits); every move
-/// shown by the frame that lays it, but the first whose stroke takes longer than a frame to lay
-/// whole (the shape growing as it is dragged out); no more than one move's stamps queued; no frame
-/// gives the stamps over 200 ms of the GPU (150 ms, and the least lot of each part a frame lays
-/// however little time is left); laid as itself within 400 frames of the lift.
+/// whole again at each move within a frame (a slow GPU's pace, set), is laid as itself through the
+/// drag, at the pace the GPU lays it: a move that comes while the last is still being laid waits for
+/// it, then the latest is laid, so it is never begun again before it shows. Before (#431), its
+/// stroke was begun again at every move before the last was laid, so the picture never changed
+/// through the drag, and each move's stroke was queued to be laid whole one after another after the
+/// lift (28 moves of a big brush took a tablet a minute and a half, the frame that laid them holding
+/// the canvas the whole time); and after that, a slow GPU showed the drag by a dry preview without
+/// its second. Bounds: every move shown as itself once laid (each waited for), and dragged a move a
+/// frame (faster than it is laid), the picture still changes through the drag; none of its stamps
+/// laid by a render that shows nothing (the time-lapse frame waits); no more than one move's stamps
+/// queued; no frame gives the stamps over 200 ms of the GPU (150 ms, and the least lot of each part
+/// a frame lays however little time is left); laid within 400 frames of the lift; kept exactly as
+/// it is laid all at once.
 #[test]
-fn a_heavy_shape_dragged_about_follows_the_drag_and_is_kept_as_laid_at_once() {
-    let (Some(at_once), Some(slow)) = (drag_heavy_shape(false), drag_heavy_shape(true)) else { return };
-    for (name, d) in [("at once", &at_once), ("slow", &slow)] {
+fn a_heavy_shape_dragged_about_shows_as_itself_at_its_own_pace_and_is_kept_as_laid_at_once() {
+    let (Some(at_once), Some(slow), Some(hurried)) =
+        (drag_heavy_shape(false, false), drag_heavy_shape(true, false), drag_heavy_shape(true, true))
+    else {
+        return;
+    };
+    for (name, d) in [("at once", &at_once), ("slow", &slow), ("slow, a move a frame", &hurried)] {
         println!(
-            "{name}: {} drag frames, {} by the preview; {} of 12 moves shown as laid, {} frames a move at most; \
+            "{name}: {} drag frames, the picture changed in {}; {} moves shown as laid, {} frames a move at most; \
              laid {} frames after the lift, kept {} frames after; {:.1} ms of the GPU a frame at most; {:?} stamps \
              queued at most; {} laid by renders showing nothing; {} time-lapse frames",
             d.drag_frames,
-            d.previewed,
+            d.drag_changed,
             d.moves_shown,
             d.most_frames_a_move,
             d.settle_frames,
@@ -1035,23 +1041,25 @@ fn a_heavy_shape_dragged_about_follows_the_drag_and_is_kept_as_laid_at_once() {
             d.lapse_frames
         );
     }
-    assert_eq!(at_once.previewed, 0, "laid all at once, it needs no preview");
-    // the time-lapse frame asked for as the pen lifted waited for the frames to lay the stroke (the
-    // render it is read with laid what was left at once)
-    assert_eq!(slow.laid_unshown, 0, "renders showing nothing laid stamps");
-    assert!(slow.lapse_frames >= 1, "no time-lapse frame");
-    assert!(slow.previewed > 0, "never shown by its preview");
-    assert!(!slow.preview_left, "still shown by its preview once laid");
-    // (all but the first whose stroke takes longer than a frame to lay, as the shape grows: from it
-    // on, the preview)
-    assert!(slow.moves_shown >= 11, "{} of 12 moves shown as laid", slow.moves_shown);
-    assert!(slow.settle_frames < 400, "laid {} frames after the lift", slow.settle_frames);
-    // one move's stamps queued (a dual brush's every move was)
-    let (first, second) = slow.queued_most;
-    assert!(first <= 3000 && second <= 3000, "{first} and {second} stamps queued");
-    assert!(slow.spent_most <= 200.0, "a frame gave the stamps {:.0} ms of the GPU", slow.spent_most);
-    let differ = at_once.layer.iter().zip(&slow.layer).filter(|(a, b)| a != b).count();
-    assert_eq!(differ, 0, "kept otherwise than laid all at once");
+    assert_eq!(at_once.moves_shown, 12, "laid all at once, every move shows");
+    assert_eq!(slow.moves_shown, 12, "{} of 12 moves shown once laid", slow.moves_shown);
+    assert!(slow.most_frames_a_move < 500, "a move took {} frames to be laid", slow.most_frames_a_move);
+    // the hurried drag's moves come faster than they are laid: some wait, but it shows through the drag
+    assert!(hurried.drag_changed >= 3, "the picture changed in {} of 40 drag frames", hurried.drag_changed);
+    for (name, d) in [("slow", &slow), ("hurried", &hurried)] {
+        // the time-lapse frame asked for as the pen lifted waited for the frames to lay the stroke
+        assert_eq!(d.laid_unshown, 0, "{name}: renders showing nothing laid stamps");
+        assert!(d.lapse_frames >= 1, "{name}: no time-lapse frame");
+        assert!(d.settle_frames < 400, "{name}: laid {} frames after the lift", d.settle_frames);
+        // one move's stamps queued (a dual brush's every move was)
+        let (first, second) = d.queued_most;
+        assert!(first <= 3000 && second <= 3000, "{name}: {first} and {second} stamps queued");
+        assert!(d.spent_most <= 200.0, "{name}: a frame gave the stamps {:.0} ms of the GPU", d.spent_most);
+    }
+    for (name, d) in [("slow", &slow), ("hurried", &hurried)] {
+        let differ = at_once.layer.iter().zip(&d.layer).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 0, "{name}: kept otherwise than laid all at once");
+    }
 }
 
 /// A shape of wet paint laid in place shows, while it is still open, as it is kept: its stroke is
