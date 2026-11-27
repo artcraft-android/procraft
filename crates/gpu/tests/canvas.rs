@@ -7227,3 +7227,153 @@ fn a_seconds_second_relay_queued_behind_the_first_ends_as_laid_whole() {
     // (both times: once to the mark at 80, then to it again, the later one let go by then)
     assert_eq!(rewound, 2, "went back {rewound} times");
 }
+
+/// What [`wet_dual_frames`] measured: each freehand frame's and each shape move's time (ms, its
+/// GPU work waited for), and the layer as the stroke left it.
+struct WetDualFrames {
+    freehand: Vec<f64>,
+    moves: Vec<f64>,
+    layer: Vec<u8>,
+}
+
+/// The middle and the ninth tenth of `ms`.
+fn median_and_p90(ms: &[f64]) -> (f64, f64) {
+    let mut sorted = ms.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let at = |share: f64| sorted.get(((sorted.len() as f64 - 1.0) * share).round() as usize).copied().unwrap_or(0.0);
+    (at(0.5), at(0.9))
+}
+
+/// A big wet dual brush on a 4096 square canvas, its wet paint kept on the GPU between passes
+/// (`resident`) or copied in and out of window buffers for each: a freehand stroke drawn a display
+/// frame's stamps at a time (eight at 240 Hz), then the same stroke redrawn as an ellipse moved
+/// about 24 times, as a QuickShape drag lays it, each frame drawn and its GPU work waited for.
+fn wet_dual_frames(gpu: &Gpu, resident: bool) -> WetDualFrames {
+    use std::time::Instant;
+    const SIDE: u32 = 4096;
+    let mut doc = Document::new(SIDE, SIDE);
+    let mut canvas = Canvas::new(gpu, &doc).unwrap();
+    let layer = doc.current();
+    canvas.set_wet_textures(resident);
+    canvas.fill_layer(layer, [164, 92, 72]);
+    canvas.render_finished(gpu, &mut doc);
+    gpu.wait().unwrap();
+    let paint = StrokeStyle::new(StrokeTool::Paint, [0.2, 0.4, 0.8], 1.0);
+    let wet = StrokeStyle { wet_pull: Some(0.85), wet_from_before: true, dilution: 0.5, load: 0.1, ..paint };
+    let second = procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0, classic: false };
+    let stamp = |at: Vec2, radius: f32, k: usize| Stamp {
+        time_ms: k as f64 * 1000.0 / 240.0,
+        distance: k as f32 * 12.0,
+        ..Stamp::round(at, radius, 0.5)
+    };
+    let timed = |canvas: &mut Canvas, doc: &mut Document| {
+        let started = Instant::now();
+        canvas.render_finished(gpu, doc);
+        gpu.wait().unwrap();
+        started.elapsed().as_secs_f64() * 1e3
+    };
+    // freehand: 480 stamps 120 pixels round along a wave 2000 pixels long (within what the wet
+    // paint kept on the GPU may take: a longer stroke goes on in windows)
+    canvas.begin_dual_stroke(layer, wet, second);
+    let path = |k: usize| {
+        let t = k as f32 / 480.0;
+        Vec2::new(800.0 + 2000.0 * t, 2048.0 + 500.0 * (t * std::f32::consts::TAU).sin())
+    };
+    let firsts: Vec<Stamp> = (0..480).map(|k| stamp(path(k), 120.0, k)).collect();
+    let seconds: Vec<Stamp> = (0..480).map(|k| stamp(path(k) + Vec2::new(4.0, 6.0), 90.0, k)).collect();
+    let mut freehand = Vec::new();
+    for (first, second) in firsts.chunks(8).zip(seconds.chunks(8)) {
+        canvas.add_second_stamps(second);
+        canvas.add_stamps(first);
+        freehand.push(timed(&mut canvas, &mut doc));
+    }
+    assert_eq!(canvas.uses_wet_textures(), resident, "freehand");
+    canvas.end_stroke();
+    canvas.render_finished(gpu, &mut doc);
+    // the same brush made a shape and dragged: 360 stamps round an ellipse, moved 24 times (a
+    // bigger one, past what the wet paint kept on the GPU may take, goes on in windows)
+    canvas.begin_dual_stroke(layer, wet, second);
+    let ellipse = |dx: f32, k: usize, radius: f32| {
+        let a = k as f32 / 360.0 * std::f32::consts::TAU;
+        stamp(Vec2::new(1800.0 + dx + 700.0 * a.cos(), 2048.0 + 450.0 * a.sin()), radius, k)
+    };
+    let mut moves = Vec::new();
+    for m in 0..=24 {
+        let dx = m as f32 * 12.0;
+        let first: Vec<Stamp> = (0..360).map(|k| ellipse(dx, k, 120.0)).collect();
+        let second: Vec<Stamp> = (0..360).map(|k| ellipse(dx + 4.0, k, 90.0)).collect();
+        canvas.replace_shape_stamps(&first, Some(&second));
+        let ms = timed(&mut canvas, &mut doc);
+        // (the first lays it whole: the moves after are what a drag costs)
+        if m > 0 {
+            moves.push(ms);
+        }
+    }
+    assert_eq!(canvas.uses_wet_textures(), resident, "dragged");
+    canvas.end_stroke();
+    canvas.render_finished(gpu, &mut doc);
+    let layer = canvas.read_layer(gpu, layer).unwrap();
+    WetDualFrames { freehand, moves, layer }
+}
+
+/// A big wet dual brush on a 4096 square canvas (a stroke within what the wet paint kept on the GPU
+/// may take) costs the GPU less a frame with its wet paint kept
+/// on the GPU than copied in and out of window buffers, freehand and as a QuickShape is dragged, and
+/// comes out the same bit for bit. Prints each way's frames (median and ninth tenth), and with
+/// `WET_BENCH_DUMP` set leaves the layer in the temporary folder to compare with another build.
+/// Bounds, each round's medians against the windows' of that round, the middle round of six: the
+/// freehand frame no slower, the shape move at most nine tenths of the windows'.
+/// `cargo test -p procraft-gpu --release --test canvas wet_dual_brush_frames -- --ignored --nocapture`
+#[test]
+#[ignore = "a bench: run alone, in release"]
+fn wet_dual_brush_frames() {
+    let Some(gpu) = gpu() else { return };
+    if !gpu.device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        || gpu.device.limits().max_storage_textures_per_shader_stage < 4
+    {
+        eprintln!("skipped: no resident wet paint on this GPU");
+        return;
+    }
+    let _check = NoErrors(&gpu);
+    // (each way once to warm up its pipelines, then six rounds of each in turn: the PC's GPU is
+    // shared, and a run's medians moved by half from one to the next, so each round's resident
+    // medians are taken against the windows' of the same round)
+    let _ = (wet_dual_frames(&gpu, false), wet_dual_frames(&gpu, true));
+    let (mut windows, mut resident) = (wet_dual_frames(&gpu, false), wet_dual_frames(&gpu, true));
+    let ratio = |w: &WetDualFrames, r: &WetDualFrames, part: fn(&WetDualFrames) -> &Vec<f64>| {
+        median_and_p90(part(r)).0 / median_and_p90(part(w)).0.max(1e-9)
+    };
+    let mut ratios = vec![(ratio(&windows, &resident, |f| &f.freehand), ratio(&windows, &resident, |f| &f.moves))];
+    for _ in 1..6 {
+        let (w, r) = (wet_dual_frames(&gpu, false), wet_dual_frames(&gpu, true));
+        assert!(w.layer == windows.layer && r.layer == resident.layer, "laid otherwise the next time");
+        ratios.push((ratio(&w, &r, |f| &f.freehand), ratio(&w, &r, |f| &f.moves)));
+        windows.freehand.extend(w.freehand);
+        windows.moves.extend(w.moves);
+        resident.freehand.extend(r.freehand);
+        resident.moves.extend(r.moves);
+    }
+    println!("on {:?}", gpu.backend());
+    for (name, f) in [("windows", &windows), ("resident", &resident)] {
+        let (free, free90) = median_and_p90(&f.freehand);
+        let (moved, moved90) = median_and_p90(&f.moves);
+        println!(
+            "{name}: freehand frame {free:.2} ms (p90 {free90:.2}), {} frames; shape move {moved:.2} ms (p90 {moved90:.2}), {} moves",
+            f.freehand.len(),
+            f.moves.len()
+        );
+        if std::env::var_os("WET_BENCH_DUMP").is_some() {
+            let path = std::env::temp_dir().join(format!("procraft-wet-bench-{name}.rgba"));
+            std::fs::write(&path, &f.layer).unwrap();
+            println!("{name}: layer left in {}", path.display());
+        }
+    }
+    let free: Vec<f64> = ratios.iter().map(|r| r.0).collect();
+    let moved: Vec<f64> = ratios.iter().map(|r| r.1).collect();
+    let (free, moved) = (median_and_p90(&free).0, median_and_p90(&moved).0);
+    println!("resident against windows, the middle round: freehand {free:.2}, shape moves {moved:.2} ({ratios:.2?})");
+    let differ = windows.layer.iter().zip(&resident.layer).filter(|(a, b)| a != b).count();
+    assert_eq!(differ, 0, "resident wet paint came out otherwise than windowed");
+    assert!(free <= 1.0, "freehand frames resident took {free:.2} of the windows' time");
+    assert!(moved <= 0.9, "shape moves resident took {moved:.2} of the windows' time");
+}
