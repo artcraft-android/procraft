@@ -105,6 +105,7 @@ impl State {
         // and when it ends: a frame that took long (a weak GPU's, a third of a second) still counts
         // as one being drawn, so a read beside the frames keeps leaving them what they lay
         self.frame_drawn_at = Some(Instant::now());
+        self.frame_thread = Some(std::thread::current().id());
     }
 
     fn lay_frame(
@@ -120,7 +121,7 @@ impl State {
         self.frame_drawn_at = Some(Instant::now());
         // a shape moved since the last frame is drawn again where it is now, once however many
         // moves came meanwhile
-        let shape_waiting = self.draw_moved_shape();
+        self.draw_moved_shape();
         // what runs ahead of the open stroke, once however many samples came since the last frame
         self.draw_ahead();
         // a fill's region as it has grown since, once however many samples came
@@ -235,7 +236,7 @@ impl State {
             );
             // caches still being remade: another frame soon, and the artwork isn't shown yet
             let busy = canvas.busy();
-            if canvas.wants_render() || shape_waiting {
+            if canvas.wants_render() {
                 self.needs_frame = true;
             } else if animating {
                 self.frame_due = Some(self.stripes_due());
