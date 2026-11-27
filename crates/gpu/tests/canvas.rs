@@ -7166,3 +7166,64 @@ fn a_dual_stroke_laid_again_holds_its_picture_until_both_parts_are_laid() {
     assert!(renders < 100);
     assert_ne!(canvas.read_composite(&gpu).unwrap(), before, "never shown laid again");
 }
+
+/// A dual brush's second laid again from scratch twice, the second time before the first's going
+/// back to a mark was laid (left to a later render, its stroke's own stamps before it taking that
+/// render's share), comes out as laid whole. The second going back was worked out from the marks
+/// and stamps as they were before the first was gone back to: it chose a later mark, which the first
+/// had let go by then, so it went back to none ("a second's mark at 90 went before it was gone back
+/// to") and laid its stamps from that mark over the second as the first left it, ten of them never
+/// laid.
+#[test]
+fn a_seconds_second_relay_queued_behind_the_first_ends_as_laid_whole() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let paint = StrokeStyle::new(StrokeTool::Paint, [0.2, 0.3, 0.7], 1.0);
+    let second = procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0, classic: false };
+    let stamp = |k: usize, radius: f32| Stamp {
+        time_ms: k as f64 * 4.0,
+        distance: k as f32 * 3.0,
+        ..Stamp::round(Vec2::new(20.0 + k as f32 * 3.0, 64.0), radius, 0.4)
+    };
+    // the second's 110 stamps, those from `from` on smaller (an end taper reaching back)
+    let tapered =
+        |from: usize| -> Vec<Stamp> { (0..110).map(|k| stamp(k, if k < from { 10.0 } else { 7.0 })).collect() };
+    let draw = |marks: bool| {
+        let mut doc = Document::new(512, 128);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.set_rewinds(marks, None);
+        canvas.begin_dual_stroke(doc.current(), paint, second);
+        // laid a display frame at a time, ten stamps (40 ms) each: a mark before each
+        let whole = tapered(110);
+        for chunk in whole.chunks(10) {
+            canvas.add_stamps(chunk);
+            canvas.add_second_stamps(chunk);
+            canvas.render_finished(&gpu, &mut doc);
+        }
+        // more of its own stamps and its second laid again from the 85th, four stamps a render
+        // shown: the going back to the mark at 80 waits behind the stamps for the next
+        canvas.set_stamps_at_once(4);
+        canvas.add_stamps(&(110..118).map(|k| stamp(k, 10.0)).collect::<Vec<_>>());
+        canvas.replace_second_stamps(&tapered(85));
+        let (_window, view) = window_target(&gpu, (512, 128), wgpu::TextureFormat::Rgba8Unorm);
+        let identity = procraft_engine::geom::Affine::IDENTITY;
+        canvas.render(
+            &gpu,
+            &mut doc,
+            Some(shown_on(&view, wgpu::TextureFormat::Rgba8Unorm, (512, 128), identity, None)),
+        );
+        // and again from the 95th before that is laid
+        canvas.replace_second_stamps(&tapered(95));
+        canvas.set_stamps_at_once(1 << 20);
+        canvas.end_stroke();
+        canvas.render_finished(&gpu, &mut doc);
+        (canvas.read_layer(&gpu, doc.current()).unwrap(), canvas.second_rewinds())
+    };
+    let (marked, (made, rewound, _)) = draw(true);
+    let (whole, _) = draw(false);
+    let differ = marked.chunks(4).zip(whole.chunks(4)).filter(|(a, b)| a != b).count();
+    println!("{made} marks, gone back to {rewound} times; {differ} pixels unlike the second laid whole");
+    assert_eq!(differ, 0, "{differ} pixels unlike the second laid whole");
+    // (both times: once to the mark at 80, then to it again, the later one let go by then)
+    assert_eq!(rewound, 2, "went back {rewound} times");
+}
