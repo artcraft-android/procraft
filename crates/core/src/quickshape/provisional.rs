@@ -4,8 +4,10 @@
 //! layer from there (see `procraft_gpu`'s `provisional.rs`); the canvas's own stroke let go of
 //! meanwhile. Laid again at each move at the canvas's resolution, such a shape trailed its handle
 //! (a big wet ellipse by seventy pixels on a tablet, a move shown every 30 ms); at a k-th of the
-//! pixels every frame shows the latest move. Once it stops moving, or is kept, the layer is put back
-//! as it was and the stroke laid at the canvas's resolution once, as it always was.
+//! pixels every frame shows the latest move. Once it stops moving it shows so until the stroke made
+//! for where it stopped is to be had; then the layer is put back as it was and that laid at the
+//! canvas's resolution once, as it always was, the picture held until it is laid. Kept, or redrawn
+//! for another reason, it is laid so at once.
 
 use procraft_engine::document::{Document, LayerId};
 use procraft_engine::geom::IRect;
@@ -56,17 +58,35 @@ impl State {
     }
 
     /// This frame's part in showing the shape's stroke from a smaller canvas: begun as it starts
-    /// moving, laid there for where it is now, and ended (the stroke laid as itself by the frames
-    /// after) once it stops. True if the frame shows it so, false to lay it as itself.
+    /// moving, once there is a stroke to lay there (the stroke laid here shown till then), laid there
+    /// for where it is now, and once it stops, shown so until the stroke made for where it stopped is
+    /// laid here in its place. No frame shows neither: each showed only the handles for a tenth of a
+    /// second or more on a tablet, as it began moving and as it stopped. True if the frame shows it
+    /// so (or the stroke laid here as it was), false to lay it as itself.
     pub(super) fn provisional_frame(&mut self) -> bool {
+        let shown = self.shape.as_ref().is_some_and(|e| e.provisional.is_some());
         if !self.provisional_wanted() {
-            self.end_provisional_shape();
+            return shown && self.finish_provisional_shape();
+        }
+        let Some((first, second)) = self.provisional_stamps() else {
+            // (nothing to lay there yet: what shows stays)
+            return true;
+        };
+        if !shown && !self.begin_provisional_shape() {
+            // (laid as itself, where it is now)
+            if let Some(edit) = self.shape.as_mut() {
+                edit.stale = true;
+            }
             return false;
         }
-        if !self.begin_provisional_shape() {
-            return false;
-        }
-        // a stroke made for it elsewhere: kept to move along with it (laid there, not here)
+        self.lay_provisional(first, second);
+        true
+    }
+
+    /// The shape's stamps for where it is now, if they are to be had this frame (and are new): a
+    /// stroke made for it elsewhere, or the stamps made before moved along (spaced afresh elsewhere
+    /// once the move stretches them far: shown stretched till then, every frame its latest move).
+    fn provisional_stamps(&mut self) -> Option<(Vec<Stamp>, Option<Vec<Stamp>>)> {
         let mut stamps = None;
         let waited = self.shape.as_ref().and_then(|e| e.replot.as_ref()).map(|r| r.made.try_recv());
         match waited {
@@ -87,9 +107,6 @@ impl State {
             }
             Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => {}
         }
-        // moved since: the stamps made before moved along (spaced afresh elsewhere once the move
-        // stretches them far: shown stretched till then, every frame its latest move), else made
-        // again elsewhere
         if self.shape.as_ref().is_some_and(|e| e.stale) {
             let near = self.moved_shape_stamps();
             let moved = near.clone().or_else(|| self.moved_shape_stamps_by(f32::INFINITY));
@@ -113,9 +130,37 @@ impl State {
                 self.needs_frame = true;
             }
         }
-        if let Some((first, second)) = stamps {
-            self.lay_provisional(first, second);
+        stamps
+    }
+
+    /// The shape stopped moving while shown from a smaller canvas: shown so until the stroke made for
+    /// where it stopped is to be had, then that laid here in its place (the picture held as it was
+    /// until it is laid, as a stroke laid again is). True: the frame is done with the shape.
+    fn finish_provisional_shape(&mut self) -> bool {
+        let waited = self.shape.as_ref().and_then(|e| e.replot.as_ref()).map(|r| r.made.try_recv());
+        let made = match waited {
+            Some(Ok(made)) if self.shape.as_ref().is_some_and(|e| e.moves == made.moves) => Some(made),
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => {
+                self.needs_frame = true;
+                return true;
+            }
+            // (none being made, or made for a move gone past: made afresh)
+            _ => {
+                if let Some(edit) = self.shape.as_mut() {
+                    edit.replot = None;
+                }
+                self.make_shape_elsewhere()
+            }
+        };
+        let Some(made) = made else {
+            self.needs_frame = true;
+            return true;
+        };
+        self.end_provisional_shape();
+        if let Some(edit) = self.shape.as_mut() {
+            (edit.stale, edit.replot) = (false, None);
         }
+        self.lay_made(made);
         true
     }
 
@@ -246,19 +291,15 @@ impl State {
     }
 
     /// Ends showing the shape's stroke from a smaller canvas, if it is: the layer put back as it was
-    /// and the canvas's stroke begun again, the shape's stroke made afresh for it and laid as itself
-    /// by the frames after.
-    pub(super) fn end_provisional_shape(&mut self) {
-        let Some(p) = self.shape.as_mut().and_then(|e| e.provisional.take()) else { return };
+    /// and the canvas's stroke begun again, its stroke to be laid in it. Whether it was shown.
+    pub(super) fn end_provisional_shape(&mut self) -> bool {
+        let Some(p) = self.shape.as_mut().and_then(|e| e.provisional.take()) else { return false };
         if let Some(main) = self.canvas.as_mut() {
             main.end_provisional();
             begin_again(main, p.main);
         }
-        if let Some(edit) = self.shape.as_mut() {
-            edit.stale = true;
-            edit.moved_plots = false;
-        }
         self.needs_frame = true;
+        true
     }
 }
 

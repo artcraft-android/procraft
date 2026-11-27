@@ -229,6 +229,13 @@ impl ShapeEdit {
         self.moves += 1;
     }
 
+    /// Lets go of the stamps it was last laid with, as a shape opened again has none to move along
+    /// (for tests).
+    #[cfg(test)]
+    pub(crate) fn forget_plots(&mut self) {
+        self.plots = None;
+    }
+
     /// How many of its moves the stroke laid trails behind (for tests).
     #[cfg(test)]
     pub(crate) fn moves_behind(&self) -> u64 {
@@ -564,8 +571,9 @@ impl State {
     }
 
     /// Redraws the open stroke along the shape's outline, here and now (a stroke still being made
-    /// for it elsewhere is let go).
+    /// for it elsewhere is let go, and one shown from a smaller canvas laid here instead).
     fn draw_shape(&mut self) {
+        self.end_provisional_shape();
         if let Some(build) = self.shape_build() {
             let made = build.make();
             self.lay_made(made);
@@ -791,7 +799,7 @@ impl State {
     /// for it elsewhere waited for, or one made here if it has moved since (before it is kept).
     pub(crate) fn draw_shape_now(&mut self) {
         // (shown from a smaller canvas: laid as itself, here)
-        self.end_provisional_shape();
+        let ended = self.end_provisional_shape();
         let pending = self.shape.as_mut().and_then(|e| e.replot.take().map(|r| (r, e.moves, e.stale)));
         let waited = pending.is_some();
         if let Some((replot, moves, stale)) = pending
@@ -804,7 +812,7 @@ impl State {
             }
             return;
         }
-        if waited || self.shape.as_ref().is_some_and(|edit| edit.stale || edit.moved_plots) {
+        if ended || waited || self.shape.as_ref().is_some_and(|edit| edit.stale || edit.moved_plots) {
             self.draw_shape();
         }
     }

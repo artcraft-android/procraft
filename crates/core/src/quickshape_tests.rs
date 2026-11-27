@@ -1296,3 +1296,131 @@ fn heavy_shape_drag_frames() {
     assert!(fast.every_move, "a frame showed an older move than the latest");
     assert!(median <= 40.0, "a drag frame took {median:.1} ms");
 }
+
+/// A heavy brush's shape (wet paint laid in place, a second) dragged out by the pen that drew it on
+/// a canvas laying its stamps at a slow GPU's pace, the stamps it was laid with not kept to move
+/// along (so the drag's first stroke is made afresh elsewhere first, as for a shape opened again),
+/// shows its stroke in every frame: as the drag begins (the stroke as laid until the smaller
+/// canvas has one), through it, and as it is let go (the smaller canvas's until the stroke made for
+/// where it stopped is laid). Each showed only the handles for a tenth of a second or more on a
+/// tablet. Bounds: no frame from the first move till it is laid shows under half the ink it showed
+/// before the drag; the drag shown from the smaller canvas at each move, and the stroke laid at the
+/// canvas's resolution in the end.
+#[test]
+fn a_heavy_shape_shows_its_stroke_in_every_frame_as_its_drag_begins_and_ends() {
+    use procraft_engine::brush::{Brush, Taper};
+    use procraft_engine::profile::Profile;
+    use procraft_gpu::wgpu;
+    use std::time::Instant;
+    const SIDE: u32 = 512;
+    let Some(s) = session(1024, SIDE) else { return };
+    let Some(gpu) = s.shared.lock().gpu.clone() else { return };
+    {
+        let mut st = s.shared.lock();
+        let Some(canvas) = st.canvas.as_mut() else { return };
+        canvas.set_in_place_rate(Some(2e6));
+        canvas.set_dry_paced(true, Some(2e6));
+        let tool = st.tool;
+        let Some(chosen) = st.brush_mut(tool) else { return };
+        *chosen = Brush { spacing: 0.03, pen_taper: Taper::NONE, ..Brush::round_pen() };
+        chosen.set_setting("wet_dilution", 0.6);
+        chosen.set_setting("wet_charge", 0.5);
+        chosen.set_setting("wet_pull", 0.5);
+        chosen.secondary = Some(Box::new(Brush::round_pen()));
+        chosen.set_setting("dual_blend", 1.0);
+    }
+    s.set_color(0.1, 0.2, 0.6);
+    s.set_brush_size(0.25);
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shape in every frame"),
+        size: wgpu::Extent3d { width: SIDE, height: SIDE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let started = Instant::now();
+    // a frame drawn and its GPU work waited for: the ink the picture shows (pixels well off white),
+    // whether it shows the shape from the smaller canvas, and whether more frames are wanted
+    let frame = |s: &CanvasSession| -> Option<(usize, bool, bool)> {
+        let mut st = s.shared.lock();
+        st.draw_frame(&view, wgpu::TextureFormat::Rgba8Unorm, (SIDE, SIDE), Profile::Srgb, started);
+        let more = st.needs_frame
+            || st.shape.as_ref().is_some_and(|e| e.moves_behind() > 0)
+            || st.canvas.as_ref().is_some_and(|c| c.lays_over_frames() || c.catching_up() || c.relaying());
+        let canvas = st.canvas.as_ref()?;
+        let small = canvas.shows_provisional();
+        let shown = canvas.read_composite(&gpu).ok()?;
+        drop(st);
+        gpu.wait().ok()?;
+        let ink = shown.chunks(4).filter(|p| p.first().is_some_and(|&r| r < 200)).count();
+        Some((ink, small, more))
+    };
+    let (cx, cy, r0) = (256.0f32, 256.0f32, 60.0f32);
+    let pen =
+        |x: f32, y: f32, t: f64| PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: t, roll: 0.0 };
+    let round: Vec<PenSample> = (0..=100)
+        .map(|i| {
+            let a = i as f32 / 100.0 * TAU;
+            pen(cx + r0 * a.cos(), cy + r0 * a.sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    s.stroke_begin(PointerKind::Stylus, round[..1].to_vec());
+    s.stroke_add(round[1..].to_vec());
+    assert!(s.quickshape_hold().is_some());
+    let mut before = 0;
+    for _ in 0..500 {
+        let Some((ink, _, more)) = frame(&s) else { return };
+        before = ink;
+        if !more {
+            break;
+        }
+    }
+    assert!(before > 1000, "the shape's stroke shows: {before} pixels of ink");
+    if let Some(edit) = s.shared.lock().shape.as_mut() {
+        edit.forget_plots();
+    }
+    // dragged out: frames until it shows from the smaller canvas, then a frame a move (the least
+    // ink as it began, through the drag, and from the lift till laid)
+    let (mut least, mut small_frames, mut waited) = ([usize::MAX; 3], 0, 0);
+    for k in 1..=8 {
+        let x = cx + r0 + 30.0 * k as f32 / 8.0;
+        s.stroke_add(vec![pen(x, cy, 1000.0 + f64::from(k) * 16.0)]);
+        for _ in 0..200 {
+            let Some((ink, small, _)) = frame(&s) else { return };
+            let phase = usize::from(small_frames > 0 || small);
+            least[phase] = least[phase].min(ink);
+            if small {
+                small_frames += 1;
+                break;
+            }
+            waited += 1;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    // let go: frames until it is laid as itself
+    s.stroke_end(vec![]);
+    let (mut frames, mut small_after) = (0, 0);
+    loop {
+        let Some((ink, small, more)) = frame(&s) else { return };
+        least[2] = least[2].min(ink);
+        frames += 1;
+        small_after += usize::from(small);
+        if !more || frames >= 1000 {
+            break;
+        }
+    }
+    let small_at_end = s.shared.lock().canvas.as_ref().is_some_and(|c| c.shows_provisional());
+    println!(
+        "{before} pixels of ink before the drag; the least in a frame as it began, through it and once let go {least:?}; {waited} frames waited for its first stroke; {small_after} of {frames} frames after the lift from the smaller canvas"
+    );
+    assert!(small_frames >= 8, "the drag showed from the smaller canvas in {small_frames} of 8 moves");
+    assert!(!small_at_end, "still shown from the smaller canvas");
+    assert!(
+        least.iter().all(|&least| least * 2 >= before),
+        "a frame showed {least:?} pixels of ink (as it began, through it, once let go), against {before} before the drag"
+    );
+}
