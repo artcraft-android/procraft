@@ -166,7 +166,7 @@ struct Deposited {
 @fragment
 fn fs_deposit(@builtin(position) pos: vec4<f32>) -> Deposited {
     let p = fragment_pixel(pos);
-    let d = deposit(own_dab(), p, found_at(p), selected_at(p));
+    let d = deposit(own_dab(), p, found_at(p));
     var o: Deposited;
     o.pixel = select(work_at(p), grained_at(p), d.into_grained);
     o.amount = bitcast<u32>(amount_at(p));
@@ -219,16 +219,12 @@ fn fs_deposit_run(@builtin(position) pos: vec4<f32>) -> Deposited {
     o.pixel = select(found.work, found.grained, st.laid_apart == 2u);
     o.amount = bitcast<u32>(amount_at(p));
     o.shown = bitcast<u32>(shown_at(p));
-    let selection = selected_at(p);
-    if (selection <= 0.0) {
-        return o;
-    }
     for (var k = st.run.x; k < st.run.y; k++) {
         let bbox = wet_pass.stamps[k].bbox;
         if (any(p < bbox.xy) || any(p >= bbox.zw)) {
             continue;
         }
-        let d = deposit(pass_dab(k), p, found, selection);
+        let d = deposit(pass_dab(k), p, found);
         if (!d.laid) {
             continue;
         }
