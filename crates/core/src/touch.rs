@@ -534,6 +534,9 @@ pub(crate) struct Touches {
     tool_before_eraser: Option<ToolKind>,
     /// The pen's button held down to erase (Erase's Pen button): see [`pen::HeldEraser`].
     held_eraser: Option<pen::HeldEraser>,
+    /// A pen button's quick press, held to erase and set to an action too, let go: its action and
+    /// where, done at the next tick.
+    pen_press_due: Option<(crate::QuickAction, (f32, f32))>,
     assisted: bool,
     down_at: (f32, f32),
     /// When the last finger of a tap landed (the only one, until another does), when the first
@@ -711,6 +714,7 @@ impl Default for Touches {
             tool_before: None,
             tool_before_eraser: None,
             held_eraser: None,
+            pen_press_due: None,
             assisted: false,
             down_at: (0.0, 0.0),
             tap_start: 0.0,
@@ -1377,7 +1381,9 @@ impl CanvasSession {
             if let Some(seen) = seen {
                 t.airbrush_next = seen;
             }
-            let due = [t.hold_due, t.quickshape_due, t.rapid_due, t.liquify_due, t.pen_wait_due]
+            // (a pen button's press let go: at once)
+            let press = t.pen_press_due.map(|_| 0.0);
+            let due = [t.hold_due, t.quickshape_due, t.rapid_due, t.liquify_due, t.pen_wait_due, press]
                 .into_iter()
                 .flatten()
                 .reduce(f64::min);
@@ -1556,6 +1562,10 @@ impl CanvasSession {
     pub(crate) fn take_down(&self, id: u64, kind: PointerKind, mut samples: Vec<PenSample>) -> Vec<TouchCommand> {
         let Some(first) = last_of(&samples).copied() else { return Vec::new() };
         let mut t = self.touches();
+        // a pen button held to erase is held, not pressed, once a touch comes meanwhile
+        if let Some(held) = t.held_eraser.as_mut() {
+            held.touched();
+        }
         if is_pen(kind) {
             Self::pen_input(&mut t, &mut samples);
             t.pen_unpressed = None;
@@ -1990,6 +2000,7 @@ impl CanvasSession {
     pub(crate) fn take_tick(&self, now_ms: f64) -> Vec<TouchCommand> {
         self.airbrush_tick(now_ms);
         let mut out = Vec::new();
+        self.pen_press_done(&mut out);
         // a pen not known to give a pressure, held still at none past its wait: one that gives none
         let waited = {
             let mut t = self.touches();
@@ -4324,8 +4335,9 @@ mod tests {
         assert_eq!(s.info().tool, ToolKind::Erase);
         assert_eq!(s.touch_pen_button(true, 10.0, 10.0), vec![TouchCommand::Undo]);
         assert_eq!(s.info().tool, ToolKind::Erase);
-        // set in Pen buttons, the button does that whatever Gesture controls say: redo, no action,
-        // or another of the QuickMenu's actions for the app, where the pen is
+        // set in Pen buttons, the button does that whatever else Gesture controls say: redo, no
+        // action, or another of the QuickMenu's actions for the app, where the pen is; held to
+        // erase there too, it erases while held and does its action when pressed (#432)
         s.set_touch_settings(TouchSettings {
             pen_button: Some(GestureAction::Erase),
             pen_button_does: Some(crate::QuickAction::Redo),
@@ -4333,8 +4345,9 @@ mod tests {
             pen_second_button_does: Some(crate::QuickAction::None),
             ..TouchSettings::default()
         });
-        assert_eq!(s.touch_pen_button(false, 10.0, 10.0), vec![TouchCommand::Redo]);
-        assert!(!s.touch_pen_button_up(false), "not held to erase");
+        assert!(s.touch_pen_button(false, 10.0, 10.0).is_empty());
+        assert!(s.touch_pen_button_up(false));
+        assert_eq!(s.touch_tick(0.0), vec![TouchCommand::Redo]);
         assert_eq!(s.info().tool, ToolKind::Erase);
         assert!(s.touch_pen_button(true, 10.0, 10.0).is_empty());
         s.set_touch_settings(TouchSettings {
@@ -4371,8 +4384,10 @@ mod tests {
         );
         assert!(!s.touch_pen_button_up(true), "not held to erase");
         assert_eq!(s.info().tool, ToolKind::Paint);
-        // the other button as Pen buttons set it
-        assert_eq!(s.touch_pen_button(false, 30.0, 40.0), vec![TouchCommand::Undo]);
+        // the other button as Pen buttons set it (held to erase too: a press does it as it is let go)
+        assert!(s.touch_pen_button(false, 30.0, 40.0).is_empty());
+        assert!(s.touch_pen_button_up(false));
+        assert_eq!(s.touch_tick(0.0), vec![TouchCommand::Undo]);
         // the first set to it, a pen's double-tap runs it too
         s.set_touch_settings(TouchSettings {
             pen_button_does: Some(crate::QuickAction::Undo),

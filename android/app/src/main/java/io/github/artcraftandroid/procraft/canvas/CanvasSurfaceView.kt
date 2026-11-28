@@ -457,9 +457,10 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         vm.penButtonDone()
     }
 
-    /** A side button let go: one held to erase gives the eraser back. */
+    /** A side button let go: one held to erase gives the eraser back (a quick press of one set to an action too does it at the next tick). */
     private fun penLetGo(s: CanvasSession, second: Boolean) = penFault {
         if (s.touchPenButtonUp(second)) vm.penButtonDone()
+        scheduleTouchTick(s)
     }
 
     /** Runs [act], a pen button's: a fault in the core goes in the log, as one in a touch does. */

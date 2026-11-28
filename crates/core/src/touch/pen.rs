@@ -22,7 +22,8 @@
 
 use super::{CanvasSession, GestureAction, Mode, TAP_SLOP, ToolKind, TouchCommand, Touches, dist};
 
-/// A squeeze let go within this long (milliseconds) is a quick one.
+/// A squeeze let go within this long (milliseconds) is a quick one; so is a pen button's press held to
+/// erase and set to an action as well, which is then a press, not a hold.
 const QUICK_SQUEEZE_MS: f64 = 300.0;
 /// Higher than this (a share of the height the pen is sensed at), or with no height, the pen is
 /// too far to pick a colour or a layer where it hovers.
@@ -131,11 +132,32 @@ impl PenState {
 }
 
 /// The pen's button held down to erase: which (its `second`), and the tool it borrowed the eraser
-/// from, given back as it is let go. Borrowed, the eraser doesn't count as a tool chosen.
+/// from, given back as it is let go. Borrowed, the eraser doesn't count as a tool chosen. Set in Pen
+/// buttons to an action as well, what a press of it does, where, since when, and whether a touch
+/// came while it was held: let go quickly with none, it was that press, not a hold.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct HeldEraser {
     second: bool,
     before: ToolKind,
+    press: Option<HeldPress>,
+}
+
+impl HeldEraser {
+    /// A touch came while the button was held: it is a hold, its press not done as it is let go.
+    pub(super) fn touched(&mut self) {
+        if let Some(p) = self.press.as_mut() {
+            p.touched = true;
+        }
+    }
+}
+
+/// A pen button's press, held to erase, that may yet turn out a press (see [`HeldEraser`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct HeldPress {
+    quick: crate::QuickAction,
+    at: (f32, f32),
+    since: std::time::Instant,
+    touched: bool,
 }
 
 /// A squeeze held.
@@ -204,7 +226,9 @@ impl CanvasSession {
     /// action Pen buttons set it to, else what Gesture controls set it to do. Set to nothing in
     /// either, the first switches between the current tool and the eraser, and back, as a pen's
     /// double-tap does by default; the second does nothing. Set to erase in Gesture controls, the
-    /// eraser is borrowed until the button is let go ([`CanvasSession::touch_pen_button_up`]).
+    /// eraser is borrowed until the button is let go ([`CanvasSession::touch_pen_button_up`]);
+    /// set to an action in Pen buttons as well, a quick press with no touch meanwhile does that
+    /// action as it is let go, at the next tick.
     pub fn touch_pen_button(&self, second: bool, x: f32, y: f32) -> Vec<TouchCommand> {
         let (action, does, runs) = {
             let t = self.touches();
@@ -223,12 +247,14 @@ impl CanvasSession {
             out.push(TouchCommand::RunPlugin { key, x, y });
             return out;
         }
-        if let Some(quick) = does {
-            pen_runs(quick, (x, y), &mut out);
+        // held to erase: the eraser at once, while it is held; set to an action in Pen buttons too,
+        // a quick press with no touch meanwhile does that action as it is let go instead
+        if action == Some(GestureAction::Erase) {
+            self.hold_eraser(second, does.map(|quick| (quick, (x, y))));
             return out;
         }
-        if action == Some(GestureAction::Erase) {
-            self.hold_eraser(second);
+        if let Some(quick) = does {
+            pen_runs(quick, (x, y), &mut out);
             return out;
         }
         let preferred = if second { PenPreferred::Ignore } else { PenPreferred::SwitchEraser };
@@ -244,6 +270,14 @@ impl CanvasSession {
         let mut t = self.touches();
         let Some(held) = t.held_eraser.filter(|h| h.second == second) else { return false };
         t.held_eraser = None;
+        // a quick press with no touch while it was held: its action, done at the next tick (the
+        // host asks for it at once, see `touch_deadline`), once the tool is given back
+        if let Some(p) = held.press
+            && !p.touched
+            && p.since.elapsed().as_secs_f64() * 1000.0 < QUICK_SQUEEZE_MS
+        {
+            t.pen_press_due = Some((p.quick, p.at));
+        }
         // a stroke borrowing a tool of its own from the eraser gives back the one chosen
         if t.tool_before == Some(ToolKind::Erase) {
             t.tool_before = Some(held.before);
@@ -370,14 +404,23 @@ impl CanvasSession {
     /// The pen's button (its `second`) pressed to erase while it is held: the eraser is borrowed
     /// from the tool chosen (from a stroke going on, the one it borrowed its own from), until the
     /// button is let go.
-    fn hold_eraser(&self, second: bool) {
+    fn hold_eraser(&self, second: bool, press: Option<(crate::QuickAction, (f32, f32))>) {
         let mut t = self.touches();
         if t.held_eraser.is_some() {
             return;
         }
         let chosen = t.tool_before.take();
         let tool = self.swap_tool(ToolKind::Erase);
-        t.held_eraser = Some(HeldEraser { second, before: chosen.unwrap_or(tool) });
+        let press = press.map(|(quick, at)| HeldPress { quick, at, since: std::time::Instant::now(), touched: false });
+        t.held_eraser = Some(HeldEraser { second, before: chosen.unwrap_or(tool), press });
+    }
+
+    /// A pen button's press due to be done (see [`HeldEraser`]): what it does, for the tick.
+    pub(super) fn pen_press_done(&self, out: &mut Vec<TouchCommand>) {
+        let due = self.touches().pen_press_due.take();
+        if let Some((quick, at)) = due {
+            pen_runs(quick, at, out);
+        }
     }
 
     /// A double-tap, a pen's button or a squeeze set to `action` does it at `at`; set to nothing,
@@ -507,6 +550,52 @@ mod tests {
         // borrowed, the eraser was never a tool chosen: the one before the smudge tool is the brush
         s.touch_pen_double_tap(PenPreferred::SwitchPrevious, 0.0, 0.0);
         assert_eq!(s.info().tool, ToolKind::Paint);
+    }
+
+    /// #432: a pen button held to erase that Pen buttons also sets to an action (the brush, say):
+    /// held, it borrows the eraser at once and gives the tool back as it is let go, the action not
+    /// done; pressed quickly with no touch meanwhile, it is the press, the action done at the next
+    /// tick once the tool is back. A touch while it is held makes it a hold, however short.
+    #[test]
+    fn a_pen_button_held_to_erase_and_pressed_for_an_action_does_each_as_it_is_used() {
+        let s = session();
+        s.set_tool(ToolKind::Smudge);
+        s.set_touch_settings(TouchSettings {
+            pen_second_button: Some(GestureAction::Erase),
+            pen_second_button_does: Some(crate::QuickAction::Paint),
+            ..TouchSettings::default()
+        });
+        let paint = TouchCommand::Run { action: crate::QuickAction::Paint, x: 10.0, y: 10.0 };
+        let tick =
+            |s: &CanvasSession, ms: f64| if s.touch_deadline().is_some() { s.touch_tick(ms) } else { Vec::new() };
+        // held: the eraser while it is held, a stroke erasing, then the smudge tool back and no brush
+        assert!(s.touch_pen_button(true, 10.0, 10.0).is_empty());
+        assert_eq!(s.info().tool, ToolKind::Erase, "holding gave no eraser");
+        s.touch_down(1, PointerKind::Stylus, sample(10.0, 10.0, 0.0));
+        s.touch_up(1, sample(40.0, 10.0, 100.0));
+        assert!(s.touch_pen_button_up(true));
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        assert!(!tick(&s, 200.0).contains(&paint), "a hold did the press's action too");
+        // held long with no touch: still a hold
+        s.touch_pen_button(true, 10.0, 10.0);
+        std::thread::sleep(std::time::Duration::from_millis(QUICK_SQUEEZE_MS as u64 + 50));
+        assert!(s.touch_pen_button_up(true));
+        assert!(!tick(&s, 700.0).contains(&paint));
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        // pressed quickly: the tool back, then the press's action, once
+        s.touch_pen_button(true, 10.0, 10.0);
+        assert!(s.touch_pen_button_up(true));
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        assert_eq!(s.touch_deadline(), Some(0.0), "the press's action asked for at once");
+        assert_eq!(tick(&s, 800.0), vec![paint.clone()]);
+        assert!(tick(&s, 900.0).is_empty());
+        // set to an action alone, a press does it at once, as before
+        s.set_touch_settings(TouchSettings {
+            pen_second_button_does: Some(crate::QuickAction::Paint),
+            ..TouchSettings::default()
+        });
+        assert_eq!(s.touch_pen_button(true, 10.0, 10.0), vec![paint]);
+        assert!(!s.touch_pen_button_up(true));
     }
 
     #[test]
