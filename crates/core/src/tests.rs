@@ -9819,6 +9819,38 @@ fn drawing_assist_is_a_step_and_a_mask_follows_its_layer() {
     assert!(!assisted(layer) && !assisted(mask));
 }
 
+/// #331: Drawing Assist is the layer's own. With symmetry assisting the first layer, a new layer
+/// starts without it (the guide still on and shown), so its strokes aren't mirrored, until it is
+/// turned on for that layer too; the first layer keeps it all along.
+#[test]
+fn a_new_layer_starts_without_drawing_assist_until_it_is_turned_on_for_it() {
+    use crate::guide::{GuideType, SymmetryType};
+    let Some(s) = session(100, 100) else { return };
+    s.set_color(0.0, 0.0, 0.0);
+    s.set_brush_size(0.3);
+    let first = s.layers()[0].id;
+    s.set_guide_on(true);
+    s.set_guide_kind(GuideType::Symmetry);
+    s.set_guide_symmetry(SymmetryType::Vertical, false);
+    s.set_guide_assisted(true);
+    let assisted = |id| s.layers().iter().find(|l| l.id == id).is_some_and(|l| l.assisted);
+    let dot = |x: f32, y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    dot(20.0, 20.0);
+    assert!(pixel(&s, 80, 20)[0] < 128, "mirrored on the first layer");
+    let new = s.add_layer();
+    assert!(!assisted(new) && assisted(first));
+    assert!(s.guide().on && !s.guide().assisted, "the guide stays on, not assisting the new layer");
+    dot(20.0, 50.0);
+    assert!(pixel(&s, 20, 50)[0] < 128 && pixel(&s, 80, 50)[0] > 128, "not mirrored on the new layer");
+    s.set_guide_assisted(true);
+    assert!(assisted(new) && assisted(first));
+    dot(20.0, 80.0);
+    assert!(pixel(&s, 80, 80)[0] < 128, "mirrored once it is turned on for the new layer");
+}
+
 #[test]
 fn a_layer_s_options_follow_what_it_is() {
     use crate::layers::{LayerOption as O, LayerOptionRow, LayerType};
