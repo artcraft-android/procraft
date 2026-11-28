@@ -296,6 +296,11 @@ fn read_halves(gpu: &Gpu, texture: &wgpu::Texture) -> Result<Vec<u8>, GpuError> 
     Ok(out)
 }
 
+/// A texture of half floats, four a texel, read back whole as floats (see [`read_halves`]).
+pub(super) fn read_floats(gpu: &Gpu, texture: &wgpu::Texture) -> Result<Vec<f32>, GpuError> {
+    Ok(read_halves(gpu, texture)?.as_chunks::<2>().0.iter().map(|b| half(*b)).collect())
+}
+
 /// The half float in `bytes` (little-endian), as a float.
 fn half(bytes: [u8; 2]) -> f32 {
     let bits = u16::from_le_bytes(bytes);
