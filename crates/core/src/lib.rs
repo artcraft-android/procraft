@@ -83,6 +83,7 @@ mod limited_gpu_tests;
 mod liquify;
 mod liquify_steps;
 mod list_slider;
+mod log_notes;
 mod lost;
 #[cfg(test)]
 mod low_storage_tests;
@@ -1890,6 +1891,9 @@ pub(crate) struct Shared {
     pub(crate) cursor: cursor_turn::CursorTurns,
     /// Where the artwork is on the screen as last seen, for a dragged colour's rest.
     pub(crate) lands_on: pour::LandsOn,
+    /// What the last frame was drawn with, for a slow frame's line in the log (read without the
+    /// canvas's lock: see `log_notes.rs`).
+    pub(crate) frame_notes: log_notes::FrameNotes,
     /// What the stroke's sound last went by, for its thread to go on with while a frame holds the
     /// canvas (see [`CanvasSession::stroke_sound`]).
     pub(crate) sound_read: parking_lot::Mutex<Option<stroke_sound::SoundRead>>,
@@ -2455,11 +2459,15 @@ fn canvas_of_opened(
             c.let_go_of_spares();
         }
         log::info!(
-            "canvas made in {} ms: {} layers, {} kept compressed, {} KB of copies of the rest",
-            started.elapsed().as_millis(),
-            ids.len(),
-            c.parked_layers(),
-            copies / 1024
+            "{}",
+            log_notes::made_line(
+                started.elapsed().as_millis(),
+                (w, h),
+                doc.dpi,
+                ids.len(),
+                c.parked_layers(),
+                copies / 1024
+            )
         );
         // (a device lost soon after this was lost by its opening: see `device::lost`)
         device::canvas_made();
@@ -2763,6 +2771,7 @@ impl CanvasSession {
                 ),
                 cursor: cursor_turn::CursorTurns::default(),
                 lands_on: pour::LandsOn::default(),
+                frame_notes: log_notes::FrameNotes::default(),
                 sound_read: parking_lot::Mutex::new(None),
                 _alive: activity::Alive::new(),
                 folders: Mutex::new(None),

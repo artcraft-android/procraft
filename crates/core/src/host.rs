@@ -46,6 +46,8 @@ impl CanvasSession {
         self.shared.take_glass(&mut st);
         st.draw_frame(view, format, size, screen, started);
         self.shared.lands_on.note(&st);
+        // (for a slow frame's line: see `CanvasSession::slow_frame_note`)
+        self.shared.frame_notes.note(&st);
         crate::activity::Counts::add(&self.shared.counts.frames);
         // what the frame laid (a stroke committed) may be new to save
         self.shared.nudge.nudge();

@@ -291,14 +291,17 @@ pub(crate) fn draw_loop<S: Screen>(shared: &Shared, screen: &mut S, mut presente
             shared.take_glass(st);
             st.draw_frame(&view, format, size, profile, started);
             shared.lands_on.note(st);
+            shared.frame_notes.note(st);
             let now = Instant::now();
             if let Some(prev) = last_present {
                 st.frame_interval_ms = now.duration_since(prev).as_secs_f32() * 1000.0;
             }
             last_present = Some(now);
-            // everything else waits on the lock meanwhile
-            if held.elapsed() > SLOW_FRAME {
-                log::warn!("a frame held the canvas {} ms", held.elapsed().as_millis());
+            // everything else waits on the lock meanwhile (said with what the frame drew with)
+            let took = held.elapsed();
+            if took > SLOW_FRAME {
+                let note = shared.frame_notes.said(Instant::now());
+                log::warn!("a frame held the canvas {} ms{note}", took.as_millis());
             }
             // a second display showing the canvas draws it again now
             shared.wake.notify_all();

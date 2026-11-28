@@ -219,14 +219,16 @@ const TITLE_CHECK: Duration = Duration::from_secs(1);
 const SLOW_EVENT: Duration = Duration::from_millis(100);
 
 /// Logs, once dropped, a window event that took longer than [`SLOW_EVENT`] (a dialog it waited on
-/// counts too), with the parts of it that took long (see [`frame_parts`]): what holds the window up
-/// shows in the log.
-struct Timed(&'static str, Instant);
+/// counts too), with the parts of it that took long (see [`frame_parts`]) and, for a frame of an
+/// artwork, what it drew with (the brush, the canvas, the zoom: see
+/// [`CanvasSession::slow_frame_note`]): what holds the window up shows in the log.
+struct Timed(&'static str, Instant, Option<std::sync::Weak<CanvasSession>>);
 
 impl Timed {
-    fn new(what: &'static str) -> Timed {
+    /// `what` timed; `frame_of`: the artwork it draws, for a frame (not kept alive by this).
+    fn new(what: &'static str, frame_of: Option<std::sync::Weak<CanvasSession>>) -> Timed {
         frame_parts::begin();
-        Timed(what, Instant::now())
+        Timed(what, Instant::now(), frame_of)
     }
 }
 
@@ -234,7 +236,10 @@ impl Drop for Timed {
     fn drop(&mut self) {
         let took = self.1.elapsed();
         if took > SLOW_EVENT {
-            log::warn!("{} took {} ms{}", self.0, took.as_millis(), frame_parts::said());
+            // (read without the canvas's lock: it never waits)
+            let drew =
+                self.2.as_ref().and_then(std::sync::Weak::upgrade).map(|s| s.slow_frame_note()).unwrap_or_default();
+            log::warn!("{} took {} ms{}{drew}", self.0, took.as_millis(), frame_parts::said());
         }
     }
 }
@@ -629,7 +634,11 @@ impl ApplicationHandler for App {
         if matches!(event, WindowEvent::AxisMotion { .. }) {
             return;
         }
-        let _timed = Timed::new(if event == WindowEvent::RedrawRequested { "a frame" } else { "a window event" });
+        let frame = event == WindowEvent::RedrawRequested;
+        let _timed = Timed::new(
+            if frame { "a frame" } else { "a window event" },
+            self.session.as_ref().filter(|_| frame).map(Arc::downgrade),
+        );
         if self.projection.as_ref().is_some_and(|p| p.window.id() == id) {
             self.projection_event(event);
             return;

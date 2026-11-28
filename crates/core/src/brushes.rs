@@ -706,6 +706,10 @@ impl CanvasSession {
             crate::ToolKind::Smudge => st.smudge_brush = (set, index),
         }
         st.note_choice((set, index));
+        // another brush: the log says which (one line a choice, none as its sliders move)
+        if (set, index) != before {
+            log::info!("{}", crate::log_notes::chosen_line(&crate::log_notes::BrushNote::of(&st, None)));
+        }
         adopt_preview_pictures(&mut st, (set, index));
         warm_pictures([st.brush(st.tool)]);
         st.load_brush_pictures();
