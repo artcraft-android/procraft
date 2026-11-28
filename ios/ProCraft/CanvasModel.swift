@@ -76,10 +76,13 @@ final class CanvasModel {
     var colorMode: ColorMode {
         get {
             let all = ColorMode.allCases
-            return all.indices.contains(AppSettings.shared.colorMode) ? all[AppSettings.shared.colorMode] : .disc
+            let mode = all.indices.contains(AppSettings.shared.colorMode) ? all[AppSettings.shared.colorMode] : .disc
+            return mode == .sphere && !ColourLooks.shared.spherePicker ? .disc : mode
         }
         set { AppSettings.shared.colorMode = ColorMode.allCases.firstIndex(of: newValue) ?? 0 }
     }
+    @ObservationIgnored lazy var colourSphere = ColourSphere(model: .hsb, hue: hue)
+
     /// The second colour (0xRRGGBB), beside the current one in the colour panel: swapped with it,
     /// and mixed in by brushes whose colour dynamics say so. Kept for the next start with the
     /// others (white at first).
@@ -1184,14 +1187,14 @@ final class CanvasModel {
     }
 
     /// A picture the core made (premultiplied RGBA rows).
-    static func image(_ t: ThumbnailImage) -> UIImage? {
+    static func image(_ t: ThumbnailImage, p3: Bool = false) -> UIImage? {
         let width = Int(t.width)
         let height = Int(t.height)
         guard width > 0, height > 0, t.rgba.count >= width * height * 4,
               let provider = CGDataProvider(data: Data(t.rgba) as CFData),
               let image = CGImage(
                   width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
-                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                  space: CGColorSpace(name: p3 ? CGColorSpace.displayP3 : CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
                   bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
                   provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent
               ) else { return nil }

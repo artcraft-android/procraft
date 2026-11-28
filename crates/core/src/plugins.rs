@@ -2825,6 +2825,11 @@ impl Plugins {
         self.hooks().colour_panel(crate::hooks::COLOUR_BEFORE)
     }
 
+    /// Whether the colour panel offers the Sphere picker (interface 23).
+    pub fn colour_sphere(&self) -> bool {
+        self.hooks().colour_panel(crate::hooks::COLOUR_SPHERE)
+    }
+
     /// A hardware keyboard's `press` on the canvas (its key named as [`crate::key_shortcut`] takes
     /// it) as a plugin rebinding keys takes it: itself, another press, or none at all (it does
     /// nothing). With none on, itself.
@@ -5465,6 +5470,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn bundled_sphere_picker_switches_the_tab_on_and_off() {
+        const ID: &str = "io.github.artcraftandroid.sphere-picker";
+        let dir = store("bundled-sphere-picker");
+        let plugins = app_at(&dir);
+        assert!(!card(&plugins, ID).on);
+        assert!(!plugins.colour_sphere());
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert!(plugins.colour_sphere());
+        assert!(!plugins.colour_steps() && !plugins.colour_before());
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert!(!plugins.colour_sphere());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     const COLOUR_EXTRAS: &str = INFINITE;
 
     #[test]
@@ -6306,9 +6326,9 @@ mod tests {
                 assert!(same_value(&got, value), "{id} off: {now}: {got}, not {value}");
             }
         }
-        // fourteen in all, each off as the app comes
+        // Each bundled plugin is off as the app comes.
         let plugins = app_at(&dir);
-        assert_eq!(plugins.plugins().len(), 14);
+        assert_eq!(plugins.plugins().len(), crate::bundled::BUNDLED.len());
         assert!(plugins.plugins().iter().all(|p| !p.on));
         let _ = std::fs::remove_dir_all(&dir);
     }

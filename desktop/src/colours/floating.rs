@@ -89,8 +89,11 @@ impl Colours {
             return None;
         }
         let (k, alone) = (self.floating_scale, self.floating_picker_only);
+        let lighting_height = self.sphere_controls_height();
         let height = if alone {
             PICKER_TOP + PICKER + if self.hue_ringed() { 0.0 } else { HUE_ROW } + 6.0
+        } else if self.mode == Mode::Sphere {
+            351.0 + lighting_height
         } else if self.mode == Mode::Disc {
             351.0
         } else {
@@ -221,9 +224,13 @@ impl Colours {
                 }
             }
             match self.mode {
-                Mode::Disc => {
+                Mode::Disc | Mode::Sphere => {
                     let disc = Rect::from_min_size(pos2(at.x + 10.0, at.y + 53.0), vec2(240.0, 240.0));
-                    self.model_disc(ui, disc);
+                    if self.mode == Mode::Sphere {
+                        self.sphere_picker(ui, disc, lighting_height);
+                    } else {
+                        self.model_disc(ui, disc);
+                    }
                 }
                 Mode::Classic => {
                     let square = Rect::from_min_size(pos2(at.x + 6.0, at.y + 50.0), vec2(248.0, 248.0));
@@ -260,7 +267,7 @@ impl Colours {
                 Mode::Palettes => self.floating_palettes(ui, look, session, rect),
             }
             let tabs = Rect::from_min_size(pos2(at.x, rect.bottom() - TABS), vec2(WIDTH, TABS));
-            if let Some(mode) = tabs_row(ui, look, tabs, self.mode) {
+            if let Some(mode) = tabs_row(ui, look, tabs, self.mode, self.sphere_enabled) {
                 self.mode = mode;
                 self.hex = None;
             }

@@ -13,6 +13,14 @@ private let ringOuter: CGFloat = 182
 private let ringInner: CGFloat = 124
 private let discRadius: CGFloat = 105
 private let harmonyRadius: CGFloat = 149
+private let sphereControlGap: CGFloat = 6
+private let sphereModeHeight: CGFloat = 44
+private let sphereToneHeight: CGFloat = 52
+private let sphereSliderHeight: CGFloat = 48
+
+private func sphereControlsHeight(_ custom: Bool) -> CGFloat {
+    sphereModeHeight + 2 * sphereControlGap + (custom ? sphereToneHeight + sphereControlGap : 0)
+}
 /// A brightness slider runs from black to white whatever the colour.
 private let brightnessTrack: [UInt32] = [0x000000, 0xFFFFFF]
 /// The space the panel's rows and the menus they open are placed in.
@@ -33,7 +41,11 @@ private var modelButtonFill: Color { Look.shared.light ? Color(argb: 0xFFDC_DCDC
 
 /// The colour panel's modes.
 enum ColorMode: CaseIterable {
-    case disc, classic, harmony, value, palettes
+    case disc, classic, harmony, value, palettes, sphere
+
+    static func shown(sphere: Bool) -> [ColorMode] {
+        sphere ? [.disc, .classic, .harmony, .sphere, .value, .palettes] : allCases.filter { $0 != .sphere }
+    }
 
     var label: String {
         switch self {
@@ -42,6 +54,7 @@ enum ColorMode: CaseIterable {
         case .harmony: "Harmony"
         case .value: "Value"
         case .palettes: "Palettes"
+        case .sphere: "Sphere"
         }
     }
 
@@ -52,6 +65,7 @@ enum ColorMode: CaseIterable {
         case .harmony: PcIcons.modeHarmony
         case .value: PcIcons.modeValue
         case .palettes: PcIcons.modePalettes
+        case .sphere: PcIcons.modeSphere
         }
     }
 }
@@ -163,6 +177,8 @@ struct ColorPanel: View {
     @State private var photo: PhotosPickerItem?
     /// Where the background's colour stands in the colour model.
     @State private var backgroundPlace = ColourPlace()
+    @State private var backgroundSphere: ColourSphere?
+    @State private var spherePaletteRevision: UInt32 = 0
     /// The colour as the panel opened, for a plugin's swatch of the colour before.
     @State private var opened: UInt32?
 
@@ -176,7 +192,7 @@ struct ColorPanel: View {
     private var header: some View {
         let short = screenHeight < shortScreen
         // short, the disc reaches up into the header's last 7
-        let height: CGFloat = short && model.colorMode == .disc ? 57 : 64
+        let height: CGFloat = short && (model.colorMode == .disc || model.colorMode == .sphere) ? 57 : 64
         return ZStack(alignment: .topLeading) {
             if background != nil {
                 PanelHeader(title: "Background", start: 20, end: 12, height: height, chevron: false) {
@@ -274,6 +290,51 @@ struct ColorPanel: View {
             }
         case .palettes:
             PalettesList(model: model, c: c, ui: ui, short: short)
+        case .sphere:
+            ModelDiscPicker(
+                m: m, short: short, sphere: background == nil ? model.colourSphere : backgroundSphere,
+                paletteRevision: spherePaletteRevision
+            )
+                .onAppear {
+                    if background != nil && backgroundSphere == nil {
+                        backgroundSphere = ColourSphere(model: .hsb, hue: c.hue)
+                    }
+                }
+        }
+    }
+
+    private func selectSwatch(_ rgb: UInt32, for c: any ColorPick) {
+        c.setRgb(rgb)
+        guard model.colorMode == .sphere else { return }
+        if background != nil && backgroundSphere == nil {
+            backgroundSphere = ColourSphere(model: .hsb, hue: c.hue)
+        }
+        if let sphere = background == nil ? model.colourSphere : backgroundSphere {
+            sphere.setBaseSwatch(model: AppSettings.shared.colourModel, rgb: rgb)
+            spherePaletteRevision = sphere.pictureRevision()
+        }
+    }
+
+    @ViewBuilder private func pickerAndSwatches(_ c: any ColorPick, short: Bool) -> some View {
+        picker(c, short: short)
+        if model.colorMode != .palettes {
+            if short {
+                ShortBottom(model: model, c: c, ui: ui) { selectSwatch($0, for: c) }
+            } else {
+                HistoryBlock(model: model, c: c)
+                if model.palettes.indices.contains(model.defaultPalette) {
+                    let p = model.palettes[model.defaultPalette]
+                    Text(verbatim: p.name)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Pc.panelTitle)
+                        .lineLimit(1)
+                        .padding(.leading, 21)
+                        .padding(.top, 13)
+                        .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .topLeading)
+                    SwatchGrid(model: model, c: c, index: model.defaultPalette, palette: p, onSelect: { selectSwatch($0, for: c) })
+                        .padding(.horizontal, 8)
+                }
+            }
         }
     }
 
@@ -282,25 +343,18 @@ struct ColorPanel: View {
         let c = pick
         Popover(width: panelWidth, arrowX: arrowX) {
             header
-            picker(c, short: short)
-            if model.colorMode != .palettes {
-                if short {
-                    ShortBottom(model: model, c: c, ui: ui)
-                } else {
-                    HistoryBlock(model: model, c: c)
-                    if model.palettes.indices.contains(model.defaultPalette) {
-                        let p = model.palettes[model.defaultPalette]
-                        Text(verbatim: p.name)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(Pc.panelTitle)
-                            .lineLimit(1)
-                            .padding(.leading, 21)
-                            .padding(.top, 13)
-                            .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .topLeading)
-                        SwatchGrid(model: model, c: c, index: model.defaultPalette, palette: p)
-                            .padding(.horizontal, 8)
+            if model.colorMode == .sphere {
+                ViewThatFits(in: .vertical) {
+                    VStack(spacing: 0) { pickerAndSwatches(c, short: short) }
+                        .fixedSize(horizontal: false, vertical: true)
+                    ScrollView {
+                        VStack(spacing: 0) { pickerAndSwatches(c, short: short) }
                     }
                 }
+                // Keep the header, tabs, and the clearance from the top bar outside the scroll.
+                .frame(maxHeight: max(180, screenHeight - 215))
+            } else {
+                pickerAndSwatches(c, short: short)
             }
             ModeTabs(model: model)
         }
@@ -444,6 +498,7 @@ private struct SliderRow: View {
     let value: Float
     let colours: [UInt32]
     var unit: Float = 0.01
+    var height: CGFloat = 36
     let onChange: (Float) -> Void
 
     /// The end a touch began at (-1, 1; 0 between), and whether it has turned into a drag.
@@ -463,7 +518,7 @@ private struct SliderRow: View {
                     .frame(width: 16, height: 10)
                     .offset(x: x - 8)
             }
-            .frame(width: w, height: 36)
+            .frame(width: w, height: height)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
@@ -496,7 +551,7 @@ private struct SliderRow: View {
                     }
             )
         }
-        .frame(height: 36)
+        .frame(height: height)
     }
 }
 
@@ -1326,6 +1381,7 @@ private struct ShortBottom: View {
     let model: CanvasModel
     let c: any ColorPick
     let ui: ColorUi
+    let onSelect: (UInt32) -> Void
 
     var body: some View {
         let palette = model.palettes.indices.contains(model.defaultPalette) ? model.palettes[model.defaultPalette] : nil
@@ -1360,7 +1416,7 @@ private struct ShortBottom: View {
         if history {
             HistoryStrip(model: model, c: c)
         } else if let palette {
-            SwatchGrid(model: model, c: c, index: model.defaultPalette, palette: palette)
+            SwatchGrid(model: model, c: c, index: model.defaultPalette, palette: palette, onSelect: onSelect)
                 .padding(.horizontal, 8)
         }
     }
@@ -1375,6 +1431,11 @@ private struct SwatchGrid: View {
     let palette: PaletteInfo
     /// A colour dragged out onto the canvas fills there.
     var droppable = true
+    var onSelect: ((UInt32) -> Void)?
+
+    private func select(_ rgb: UInt32) {
+        if let onSelect { onSelect(rgb) } else { c.setRgb(rgb) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1384,11 +1445,11 @@ private struct SwatchGrid: View {
                         let slot = row * 10 + col
                         let rgb = palette.colors.indices.contains(slot) ? palette.colors[slot] : nil
                         if let rgb, droppable, c is BrushColor {
-                            DropSwatch(model: model, rgb: rgb, onHold: { model.setSwatch(index, slot, nil) }) { c.setRgb(rgb) }
+                            DropSwatch(model: model, rgb: rgb, onHold: { model.setSwatch(index, slot, nil) }) { select(rgb) }
                         } else {
                             PressCell(onHold: rgb == nil ? nil : { model.setSwatch(index, slot, nil) }) {
                                 if let rgb {
-                                    c.setRgb(rgb)
+                                    select(rgb)
                                 } else {
                                     model.setSwatch(index, slot, c.rgb())
                                 }
@@ -1934,6 +1995,8 @@ private func drawKnob(_ context: inout GraphicsContext, at c: CGPoint, radius r:
 private struct ModelPictureKey: Equatable {
     let model: ColourModel
     let key: UInt32
+    var sphere = false
+    var wideGamut = false
 }
 
 /// The disc picker in another colour model, as the core works it out: the ring's hues as the model
@@ -1944,6 +2007,16 @@ private struct ModelDiscPicker: View {
     let m: ModelColor
     let short: Bool
     var compact = false
+    var sphere: ColourSphere?
+    var paletteRevision: UInt32 = 0
+    var onSphereModeChange: (Bool) -> Void = { _ in }
+    @State private var sphereRevision: UInt32?
+    @State private var sphereRingTurn: Float?
+    @State private var sphereMarker: (model: ColourModel, sample: SphereSample)?
+    @State private var sphereSnap: SphereSnap?
+    @State private var sphereDown: Date?
+    @State private var sphereTap: (at: CGPoint, up: Date)?
+    @State private var toneEdit: (tone: SphereTone, colour: HeldColor)?
     @Environment(\.displayScale) private var displayScale
     /// The disc's picture, and what it was made for.
     @State private var disc: (key: ModelPictureKey, image: UIImage)?
@@ -1968,6 +2041,79 @@ private struct ModelDiscPicker: View {
         return made
     }
 
+    private func glide(_ sphere: ColourSphere, model: ColourModel, snap: SphereSnap) async {
+        let start = ContinuousClock.now
+        while !Task.isCancelled, sphereSnap == snap {
+            guard sphereMarker?.sample.rgb == m.c.rgb() else { break }
+            let elapsed = (ContinuousClock.now - start).components
+            let ms = Float(Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
+            guard let sample = sphere.sampleSnap(model: model, snap: snap, elapsedMs: ms) else { break }
+            sphereMarker = (model, sample)
+            if sample.rgb != m.c.rgb() { m.c.setRgb(sample.rgb) }
+            if ms >= Float(snap.durationMs) { break }
+            try? await Task.sleep(for: .milliseconds(16))
+        }
+        if !Task.isCancelled, sphereSnap == snap { sphereSnap = nil }
+    }
+
+    private func sphereChanged(_ sphere: ColourSphere) {
+        sphereRevision = sphere.pictureRevision()
+        sphereMarker = nil
+        sphereSnap = nil
+    }
+
+    private func lightingControls(_ sphere: ColourSphere, model: ColourModel) -> some View {
+        let custom = sphere.customEnabled()
+        return VStack(spacing: sphereControlGap) {
+            HStack(spacing: sphereControlGap) {
+                ForEach([false, true], id: \.self) { on in
+                    sphereModeButton(on ? "Custom" : "Single hue", selected: on == custom) {
+                        guard on != custom else { return }
+                        sphere.setCustomEnabled(model: model, enabled: on)
+                        toneEdit = nil
+                        sphereChanged(sphere)
+                        onSphereModeChange(on)
+                    }
+                }
+            }
+            if custom {
+                HStack(spacing: sphereControlGap) {
+                    toneButton(sphere, tone: .shadow, title: "Shadow")
+                    toneButton(sphere, tone: .midtone, title: "Midtone")
+                    toneButton(sphere, tone: .highlight, title: "Highlight")
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, sphereControlGap)
+    }
+
+    private func toneButton(_ sphere: ColourSphere, tone: SphereTone, title: String) -> some View {
+        let rgb = sphere.toneRgb(tone: tone) ?? 0
+        let selected = toneEdit?.tone == tone
+        return Button {
+            toneEdit = (tone, HeldColor(rgb: rgb) {
+                sphere.setToneRgb(tone: tone, rgb: $0)
+                sphereChanged(sphere)
+            })
+            sphereTap = nil
+            sphereSnap = nil
+        } label: {
+            VStack(spacing: 4) {
+                RoundedRectangle(cornerRadius: 5).fill(canvasColor(rgb)).frame(height: 21)
+                Text(title).font(.system(size: 12, weight: .semibold)).lineLimit(1).foregroundStyle(Pc.panelTitle)
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity)
+            .frame(height: sphereToneHeight)
+            .background(Pc.hexRow, in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(selected ? Pc.accent : .clear, lineWidth: 2))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+    }
+
     var body: some View {
         let model = m.model
         let coords = m.coords()
@@ -1981,11 +2127,18 @@ private struct ModelDiscPicker: View {
         let inner = ringInner * k
         let outer = ringOuter * k
         let side = Int((radius * 2 * displayScale).rounded())
-        let key = ModelPictureKey(model: model, key: colourModelDiscKey(model: model, h: h, s: s, t: t))
-        let turn = CGFloat(colourModelRingTurn(model: model, hue: h)) * 2 * .pi
-        let pure = colourModelPure(model: model, hue: h)
-        let at = colourModelDiscPoint(model: model, h: h, s: s, t: t)
+        let ringHue = sphere?.hue(model: model) ?? h
+        let useP3 = sphere != nil && CanvasSpace.shared.p3
+        let key = ModelPictureKey(
+            model: model,
+            key: sphere.map { sphereRevision ?? $0.pictureRevision() } ?? colourModelDiscKey(model: model, h: h, s: s, t: t),
+            sphere: sphere != nil, wideGamut: useP3
+        )
+        let turn = CGFloat(colourModelRingTurn(model: model, hue: ringHue)) * 2 * .pi
+        let pure = colourModelPure(model: model, hue: ringHue)
+        let at = sphere == nil ? colourModelDiscPoint(model: model, h: h, s: s, t: t) : []
         let current = m.c.rgb()
+        let marker = sphereMarker.flatMap { $0.model == model ? $0.sample : nil } ?? sphere?.marker(model: model)
         let luma = model == .hsy && !compact
         let left: CGFloat = compact ? 10 : 6
         let top: CGFloat = compact ? 4 : short ? 0 : 8
@@ -1993,6 +2146,15 @@ private struct ModelDiscPicker: View {
         let bottom: CGFloat = compact ? 6 : luma ? 4 : short ? 3 : 17
         let ring = Self.ring(model)
         VStack(spacing: 0) {
+            if let sphere { lightingControls(sphere, model: model) }
+            if let sphere, sphere.customEnabled(), let edit = toneEdit {
+                SphereToneEditor(colour: edit.colour, image: disc?.image, across: across) { toneEdit = nil }
+                    .id(edit.tone)
+                    .padding(.leading, left)
+                    .padding(.top, top)
+                    .padding(.bottom, bottom)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
             Canvas { context, size in
                 let o = CGPoint(x: size.width / 2, y: size.height / 2)
                 let mid = (inner + outer) / 2
@@ -2007,7 +2169,10 @@ private struct ModelDiscPicker: View {
                 // the ring's knob sits on the middle of the ring, where the hue is
                 drawKnob(&context, at: CGPoint(x: o.x + cos(turn) * mid, y: o.y - sin(turn) * mid), radius: 26.2 * k,
                          fill: CanvasSpace.shared.color(pure))
-                if at.count >= 2 {
+                if let marker, marker.rgb == current {
+                    drawKnob(&context, at: CGPoint(x: o.x + CGFloat(marker.x) * radius, y: o.y + CGFloat(marker.y) * radius),
+                             radius: 10.75, fill: CanvasSpace.shared.color(current))
+                } else if at.count >= 2 {
                     drawKnob(&context, at: CGPoint(x: o.x + CGFloat(at[0]) * radius, y: o.y + CGFloat(at[1]) * radius), radius: 10.75,
                              fill: CanvasSpace.shared.color(current))
                 }
@@ -2027,23 +2192,96 @@ private struct ModelDiscPicker: View {
                         if onRing == nil {
                             let start = CGPoint(x: drag.startLocation.x - centre.x, y: drag.startLocation.y - centre.y)
                             onRing = hypot(start.x, start.y) > (radius + inner) / 2
+                            sphereSnap = nil
+                            sphereRingTurn = nil
+                            sphereDown = sphere != nil && hypot(start.x, start.y) <= radius ? drag.time : nil
+                        }
+                        if sphereDown != nil, hypot(drag.translation.width, drag.translation.height) > 8 {
+                            sphereDown = nil
                         }
                         let was = m.coords()
                         if onRing == true {
                             var turnAt = Float(atan2(-d.y, d.x) / (2 * .pi))
                             turnAt = (turnAt + 1).truncatingRemainder(dividingBy: 1)
-                            m.set([colourModelRingHue(model: model, turn: turnAt), was[1], was[2]])
+                            let nextHue = colourModelRingHue(model: model, turn: turnAt)
+                            if let sphere {
+                                if sphere.customEnabled() {
+                                    if let previous = sphereRingTurn { sphere.rotateHues(turns: turnAt - previous) }
+                                    sphereRingTurn = turnAt
+                                } else {
+                                    sphere.setHue(model: model, hue: nextHue)
+                                }
+                                sphereChanged(sphere)
+                            } else {
+                                m.set([nextHue, was[1], was[2]])
+                            }
+                        } else if let sphere {
+                            if let sample = sphere.sample(model: model, x: Float(d.x / radius), y: Float(d.y / radius)) {
+                                m.c.setRgb(sample.rgb)
+                                sphereMarker = (model, sample)
+                            }
                         } else {
                             m.set(colourModelDiscPick(
                                 model: model, h: was[0], s: was[1], t: was[2], u: Float(d.x / radius), v: Float(d.y / radius)
                             ))
                         }
                     }
-                    .onEnded { _ in onRing = nil }
+                    .onEnded { drag in
+                        defer {
+                            onRing = nil
+                            sphereDown = nil
+                        }
+                        guard let sphere, let down = sphereDown, drag.time.timeIntervalSince(down) < 0.5,
+                              hypot(drag.translation.width, drag.translation.height) <= 8 else {
+                            sphereTap = nil
+                            return
+                        }
+                        let pos = drag.location
+                        let x = Float((pos.x - left - across / 2) / radius)
+                        let y = Float((pos.y - top - across / 2) / radius)
+                        if let tap = sphereTap, (0...0.3).contains(down.timeIntervalSince(tap.up)),
+                           hypot(pos.x - tap.at.x, pos.y - tap.at.y) <= radius * 0.18,
+                           let snap = sphere.snap(model: model, x: x, y: y),
+                           let sample = sphere.sample(model: model, x: x, y: y) {
+                            m.c.setRgb(sample.rgb)
+                            sphereMarker = (model, sample)
+                            sphereSnap = snap
+                            sphereTap = nil
+                        } else {
+                            sphereTap = (pos, drag.time)
+                        }
+                    }
             )
+            }
             if luma {
                 LumaSliders(m: m, coords: coords)
                 Color.clear.frame(height: short ? 3 : 17)
+            }
+        }
+        .onChange(of: model) { _, _ in
+            sphereSnap = nil
+            sphereTap = nil
+            sphereDown = nil
+        }
+        .onChange(of: sphere.map(ObjectIdentifier.init)) { _, _ in
+            sphereRevision = nil
+            sphereMarker = nil
+            sphereRingTurn = nil
+            sphereTap = nil
+            sphereDown = nil
+            sphereSnap = nil
+            toneEdit = nil
+        }
+        .onChange(of: paletteRevision) { _, _ in
+            if let sphere {
+                sphereChanged(sphere)
+                toneEdit = nil
+                sphereTap = nil
+            }
+        }
+        .task(id: sphereSnap) {
+            if let sphere, let snap = sphereSnap {
+                await glide(sphere, model: model, snap: snap)
             }
         }
         .task(id: key) {
@@ -2052,6 +2290,10 @@ private struct ModelDiscPicker: View {
                 return
             }
             let made = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+                if let sphere {
+                    let n = sphere.imageSide()
+                    return CanvasModel.image(ThumbnailImage(width: n, height: n, rgba: sphere.picture(model: model)), p3: useP3)
+                }
                 let rgba = colourModelDiscPicture(model: model, h: h, s: s, t: t, side: UInt32(side))
                 return CanvasModel.image(ThumbnailImage(width: UInt32(side), height: UInt32(side), rgba: rgba))
             }.value
@@ -2059,6 +2301,63 @@ private struct ModelDiscPicker: View {
                 disc = (key, made)
             }
         }
+    }
+}
+
+private func sphereModeButton(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+        Text(title)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(selected ? .white : Pc.panelTitle)
+            .frame(maxWidth: .infinity)
+            .frame(height: sphereModeHeight)
+            .background(selected ? Pc.accent : Pc.hexRow, in: RoundedRectangle(cornerRadius: 9))
+            .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .accessibilityAddTraits(selected ? [.isSelected] : [])
+}
+
+private struct SphereToneEditor: View {
+    let colour: HeldColor
+    let image: UIImage?
+    let across: CGFloat
+    let done: () -> Void
+
+    private func row(_ title: String, value: Float, colours: [UInt32], onChange: @escaping (Float) -> Void) -> some View {
+        HStack(spacing: 0) {
+            Text(title).font(.system(size: 13)).foregroundStyle(Pc.panelTitle).frame(width: 74, alignment: .leading)
+            SliderRow(value: value, colours: colours, height: sphereSliderHeight, onChange: onChange)
+        }
+        .padding(.horizontal, 12)
+    }
+
+    var body: some View {
+        let previewBand = across - 3 * sphereSliderHeight - 6
+        let side = min(across * 0.46, previewBand - 18)
+        let h = colour.hue, s = colour.saturation, v = colour.brightness
+        VStack(spacing: 0) {
+            ZStack {
+                if let image {
+                    Image(uiImage: image).resizable().frame(width: side, height: side)
+                }
+            }
+            .frame(width: across, height: previewBand)
+            .overlay(alignment: .topTrailing) {
+                sphereModeButton("Done", selected: true, action: done).frame(width: 62).padding(6)
+            }
+            row("Hue", value: huePosition(control: .slider, hue: h), colours: sliderHues) {
+                colour.setHsv(hueAt(control: .slider, position: $0), colour.saturation, colour.brightness)
+            }
+            row("Saturation", value: s, colours: [CanvasModel.rgb(hue: h, saturation: 0, brightness: v), CanvasModel.rgb(hue: h, saturation: 1, brightness: v)]) {
+                colour.setHsv(colour.hue, $0, colour.brightness)
+            }
+            row("Brightness", value: v, colours: [0, CanvasModel.rgb(hue: h, saturation: s, brightness: 1)]) {
+                colour.setHsv(colour.hue, colour.saturation, $0)
+            }
+            Color.clear.frame(height: 6)
+        }
+        .frame(width: across, height: across)
     }
 }
 
@@ -2188,7 +2487,7 @@ private struct ModeTabs: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(ColorMode.allCases, id: \.self) { mode in
+            ForEach(ColorMode.shown(sphere: ColourLooks.shared.spherePicker), id: \.self) { mode in
                 Button { model.colorMode = mode } label: { EmptyView() }
                     .buttonStyle(ModeTabStyle(mode: mode, selected: model.colorMode == mode))
             }
@@ -2219,7 +2518,7 @@ struct CompactColors: View {
 
     @ViewBuilder private var picker: some View {
         switch mode {
-        case .disc:
+        case .disc, .sphere:
             DiscPicker(c: c, short: false, compact: true)
         case .classic:
             ClassicPicker(c: c, square: 248, compact: true)
@@ -2284,7 +2583,7 @@ struct CompactPicker: View {
         VStack(spacing: 0) {
             Group {
                 switch mode {
-                case .disc: DiscPicker(c: c, short: false, compact: true)
+                case .disc, .sphere: DiscPicker(c: c, short: false, compact: true)
                 case .classic: ClassicPicker(c: c, square: 248, compact: true)
                 case .harmony: HarmonyPicker(kind: .complementary, c: c, short: false, compact: true)
                 case .value: CompactValue(c: c, ui: ui)
@@ -2310,11 +2609,12 @@ struct CompactPicker: View {
 /// The compact pickers' modes as a row of icons, the chosen one blue.
 private struct CompactTabs: View {
     let mode: ColorMode
+    var sphere = false
     let onMode: (ColorMode) -> Void
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(ColorMode.allCases, id: \.self) { m in
+            ForEach(ColorMode.shown(sphere: sphere), id: \.self) { m in
                 // the tabs' 36-unit glyphs, a little smaller here
                 PcIconView(m.icon, size: 33, color: m == mode ? Pc.accent : Pc.panelTitle)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2493,6 +2793,7 @@ struct FloatingColors: View {
     let screen: CGSize
 
     @State private var ui = ColorUi()
+    @State private var sphereCustom: Bool?
     /// Where the window was as the drag on its grabber began.
     @State private var dragFrom: CGPoint?
 
@@ -2562,11 +2863,25 @@ struct FloatingColors: View {
                 .padding(.top, 4)
         case .palettes:
             FloatingPalettes(model: model, c: c, ui: ui)
+        case .sphere:
+            ModelDiscPicker(
+                m: modelColor(c), short: false, compact: true, sphere: model.colourSphere,
+                onSphereModeChange: { sphereCustom = $0 }
+            )
+                .onAppear { sphereCustom = model.colourSphere.customEnabled() }
+                .padding(.top, 5)
         }
     }
 
     var body: some View {
-        let height: CGFloat = model.colorMode == .disc ? 351 : 390
+        let requestedHeight: CGFloat = switch model.colorMode {
+        case .disc: 351
+        case .sphere: 351 + sphereControlsHeight(sphereCustom ?? model.colourSphere.customEnabled())
+        default: 390
+        }
+        let k = Look.shared.scale(.floating)
+        let sphereScroll = model.colorMode == .sphere && requestedHeight * k > screen.height
+        let height = sphereScroll ? screen.height / k : requestedHeight
         // while a plugin lays the panels out, where the layout has it (folded, its tab)
         let laid = model.layoutLook.on ? model.shownColours(width: compactWidth, height: height) : nil
         // hidden from its menu: unseen until its button or Show Hidden brings it back
@@ -2586,14 +2901,17 @@ struct FloatingColors: View {
             let at = laid.map { CGPoint(x: CGFloat($0.x), y: CGFloat($0.y)) } ?? kept
             // kept on the screen
             // at the floating windows' size, as the other floating windows are
-            let k = Look.shared.scale(.floating)
             let x = min(max(at.x, 0), max(screen.width - compactWidth * k, 0))
             let y = min(max(at.y, 0), max(screen.height - height * k, 0))
             Popover(width: compactWidth, arrowX: 0, side: .none) {
                 ZStack(alignment: .topLeading) {
                     VStack(spacing: 0) {
                         Color.clear.frame(height: 44)
-                        picker(BrushColor(model: model))
+                        if sphereScroll {
+                            ScrollView { picker(BrushColor(model: model)) }
+                        } else {
+                            picker(BrushColor(model: model))
+                        }
                     }
                     title
                     grabber
@@ -2615,7 +2933,7 @@ struct FloatingColors: View {
                     }
                 }
                 .frame(height: height - 52, alignment: .top)
-                CompactTabs(mode: model.colorMode) { model.colorMode = $0 }
+                CompactTabs(mode: model.colorMode, sphere: ColourLooks.shared.spherePicker) { model.colorMode = $0 }
             }
             .frame(height: height, alignment: .top)
             .coordinateSpace(.named(colorsSpace))

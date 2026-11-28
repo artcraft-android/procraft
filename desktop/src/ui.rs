@@ -1007,6 +1007,7 @@ impl Interface {
         if self.open != Some(Popover::Adjustments) {
             self.adjustments.showing_filters = false;
         }
+        self.colours.follow_sphere_plugin(&self.prefs.plugins);
         if let Some(open) = self.open {
             self.popover(&ctx, session, open, anchor(open), &mut backdrops);
         }

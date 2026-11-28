@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.sphere-picker",
+  "name": "Sphere picker",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Adds a Sphere tab with single-hue and custom lighting. Edit the shadow, midtone and highlight, rotate their hues together, and double-tap to snap to the nearest tone.",
+  "compat": { "procraft": { "interface": 23 } },
+  "permissions": [],
+  "hooks": ["colour_panel"]
+}

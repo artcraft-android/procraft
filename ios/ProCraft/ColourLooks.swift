@@ -14,6 +14,7 @@ final class ColourLooks {
     private(set) var steps = false
     /// A plugin has the colour swatch show the colour as the panel opened beside the colour now.
     private(set) var before = false
+    private(set) var spherePicker = false
     /// A picker plugin draws Classic's square its own way: its picture, where touches land.
     private(set) var pickerOn = false
     /// A plugin has the floating colour window show Classic's picker alone.
@@ -34,6 +35,7 @@ final class ColourLooks {
         triangle = store.colourTriangle()
         steps = store.colourSteps()
         before = store.colourBefore()
+        spherePicker = store.colourSphere()
         pickerOn = store.pickerOn()
         floatingPickerOnly = store.floatingPickerOnly()
         classicChoices = store.menuChoices(place: .classic)

@@ -140,7 +140,7 @@ const val LOUPE_LIFT_DP = 40f
 fun loupeLift(pen: Boolean) = if (pen) 0f else LOUPE_LIFT_DP
 
 /** The colour panel's ways of choosing a colour. */
-enum class ColorMode { DISC, CLASSIC, HARMONY, VALUE, PALETTES }
+enum class ColorMode { DISC, CLASSIC, HARMONY, VALUE, PALETTES, SPHERE }
 
 /** Companion colours in the harmony mode, as hue turns (degrees) from the chosen colour. */
 enum class HarmonyKind(val label: String, val turns: List<Float>) {
@@ -383,11 +383,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The colour panel's mode, kept from one session to the next. */
     private var colorModeState by mutableStateOf(ColorMode.entries.getOrElse(interfacePrefs.getInt(COLOR_MODE, ColorMode.DISC.ordinal)) { ColorMode.DISC })
     var colorMode: ColorMode
-        get() = colorModeState
+        get() = if (colorModeState == ColorMode.SPHERE && !io.github.artcraftandroid.procraft.ui.Pc.spherePicker) ColorMode.DISC else colorModeState
         set(mode) {
             colorModeState = mode
             interfacePrefs.edit().putInt(COLOR_MODE, mode.ordinal).apply()
         }
+
+    internal val colourSphere by lazy { io.github.artcraftandroid.procraft.core.ColourSphere(io.github.artcraftandroid.procraft.core.ColourModel.HSB, hue) }
 
     /**
      * The colour model the colour panel's disc, Classic and Value work in (HSB, the panel's own,
@@ -655,6 +657,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         io.github.artcraftandroid.procraft.ui.Pc.colourTriangle = plugins.colourTriangle()
         io.github.artcraftandroid.procraft.ui.Pc.colourSteps = plugins.colourSteps()
         io.github.artcraftandroid.procraft.ui.Pc.colourBefore = plugins.colourBefore()
+        io.github.artcraftandroid.procraft.ui.Pc.spherePicker = plugins.colourSphere()
         io.github.artcraftandroid.procraft.ui.Pc.picker = if (plugins.pickerOn()) {
             io.github.artcraftandroid.procraft.ui.ClassicPicker(
                 pick = { x, y -> plugins.pickerPick(x, y) },

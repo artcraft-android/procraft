@@ -34,6 +34,7 @@ mod colour_blob;
 mod colour_drag;
 mod colour_models;
 mod colour_press;
+mod colour_sphere;
 mod crop;
 mod crop_edit;
 mod cursor_turn;
@@ -217,6 +218,7 @@ pub use colour_models::{
     oklab_tracks, oklab_value_slid, oklab_value_tracks,
 };
 pub use colour_press::{ColourPress, PressTurn};
+pub use colour_sphere::{ColourSphere, SphereSample, SphereSnap, SphereTone};
 pub use crop_edit::{CropReadout, CropShown};
 pub use cursor_turn::CursorPen;
 pub use device::keep_device;
