@@ -9,6 +9,10 @@
 //!
 //! Both are read without waiting on the canvas (a frame laying a stroke's paint holds it): the
 //! newest stamp's are noted as the stamps are laid, the hover's turn as the pointer moves.
+//!
+//! Hovering, the cursor fades: its outline and its fill show only once the pen has hovered a
+//! moment, fading in over the next, so a pen lifted between strokes leaves nothing in the way of
+//! the next one; they fade back out while it moves fast, and near the top of its reach.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -26,6 +30,36 @@ const HEADING_MOST: f32 = 0.3;
 const HEADING_AGREEING: f32 = 0.1;
 /// How fast that falls off as the move turns from the way (per unit of their difference).
 const HEADING_DISAGREEING: f32 = 0.75;
+
+/// A hover settles from 0 as it begins to 1 a second on (a 120th at each of 120 hover events a
+/// second); the cursor shows once it has settled this far, and fully this much further on.
+const HOVER_SHOWS_S: f32 = 0.1;
+const HOVER_FADES_IN_S: f32 = 0.125;
+/// Hovering faster than this (points a second: 30 points between two of 120 hover events a
+/// second), it settles back, the faster the quicker.
+const HOVER_RACING: f32 = 3600.0;
+/// The cursor fades out over the top third of the height the pen is sensed at.
+const HOVER_HEIGHT_FADE: f32 = 3.0;
+/// A step between hover events counts this long at most (seconds): the pen out of sight meanwhile.
+const HOVER_STEP_MOST_S: f32 = 1.0 / 30.0;
+
+/// How far a hover has settled (0..1) from `settled` after a step of `seconds` moving at `speed`
+/// points a second: on with the time, back while it races, the faster the quicker. Every app's hover
+/// cursor fades by it.
+pub(crate) fn hover_settled(settled: f32, seconds: f32, speed: f32) -> f32 {
+    let step = if seconds.is_finite() { seconds.clamp(0.0, HOVER_STEP_MOST_S) } else { 0.0 };
+    let gained = if speed > HOVER_RACING { -step * speed / HOVER_RACING } else { step };
+    (settled + gained).clamp(0.0, 1.0)
+}
+
+/// How strongly the hover cursor shows (0..1), settled `settled`, the pen `height` up (a share of
+/// the height it is sensed at; 0 where the platform doesn't say): none until it has hovered a
+/// moment, then fading in; fainter over the top third of the height.
+pub(crate) fn hover_shown(settled: f32, height: f32) -> f32 {
+    let shown = ((settled - HOVER_SHOWS_S) / HOVER_FADES_IN_S).clamp(0.0, 1.0);
+    let low = if height > 0.0 { ((1.0 - height) * HOVER_HEIGHT_FADE).clamp(0.0, 1.0) } else { 1.0 };
+    shown * low
+}
 
 /// A pen held over the canvas: how it is turned (radians), its lean's way as its samples' azimuth
 /// (orientation) and its barrel (0 for a pen that doesn't say).
@@ -72,6 +106,49 @@ impl Heading {
     }
 }
 
+/// How far a hover has settled (see [`hover_settled`]), for a pointer told of read without
+/// waiting on the canvas ([`CanvasSession::cursor_hover_at`]).
+#[derive(Debug, Default)]
+struct HoverFade {
+    /// 0 as the hover begins, 1 once it has gone on long enough.
+    settled: f32,
+    /// Where (points) and when (seconds) the pointer last was; none since the hover began.
+    last: Option<((f32, f32), f64)>,
+}
+
+impl HoverFade {
+    /// The pointer hovers at `at` (points) at `now` (seconds): how far it has settled now.
+    fn moved(&mut self, at: (f32, f32), now: f64) -> f32 {
+        if !(at.0.is_finite() && at.1.is_finite() && now.is_finite()) {
+            return self.settled;
+        }
+        if let Some((from, then)) = self.last {
+            // (a clock gone back counts as no time)
+            let seconds = ((now - then) as f32).max(0.0);
+            let far = (at.0 - from.0).hypot(at.1 - from.1);
+            let speed = if seconds > 0.0 && far.is_finite() { far / seconds } else { 0.0 };
+            self.settled = hover_settled(self.settled, seconds, speed);
+        }
+        self.last = Some((at, now));
+        self.settled
+    }
+
+    /// How strongly the cursor shows (0..1), the pen `height` up.
+    fn shown(&self, height: f32) -> f32 {
+        hover_shown(self.settled, height)
+    }
+}
+
+/// How the brush cursor shows where the pointer hovers ([`CanvasSession::cursor_hover_at`]): how
+/// far its outline turns (see [`CanvasSession::cursor_turn`]), and how strongly its outline and its
+/// fill show (0..1) as the hover fades in.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct CursorHover {
+    pub turn: f32,
+    pub outline: f32,
+    pub fill: f32,
+}
+
 /// The brush cursor's turns, kept beside the canvas's lock.
 pub(crate) struct CursorTurns {
     /// The newest stamp's while a stroke is painted (an f32's bits; NaN before it has one), and
@@ -81,6 +158,8 @@ pub(crate) struct CursorTurns {
     /// As last worked out where the pointer hovers.
     hovered: AtomicU32,
     heading: parking_lot::Mutex<Heading>,
+    /// How far the hover's fade has come.
+    fade: parking_lot::Mutex<HoverFade>,
     /// Window pixels a point, as last seen.
     points: AtomicU32,
     /// The plugins strokes go through, for where the cursor shows (see
@@ -95,6 +174,7 @@ impl Default for CursorTurns {
             painted_radius: AtomicU32::new(f32::NAN.to_bits()),
             hovered: AtomicU32::new(0f32.to_bits()),
             heading: parking_lot::Mutex::new(Heading::default()),
+            fade: parking_lot::Mutex::new(HoverFade::default()),
             points: AtomicU32::new(1f32.to_bits()),
             hooks: parking_lot::Mutex::new(None),
         }
@@ -183,10 +263,34 @@ impl CanvasSession {
         load(&turns.hovered)
     }
 
-    /// The hovering pointer left the canvas: its next move begins afresh from where it comes back
-    /// (the way it was going is kept).
+    /// The pen, or a mouse, hovers over the canvas at (`x`, `y`), window pixels, at `seconds` (any
+    /// steady clock), held as `pen` says, `height` up (a share of the height it is sensed at, 0 on
+    /// the glass; none for a pointer that doesn't tell): how its brush cursor shows there. It turns
+    /// as [`CanvasSession::cursor_hovers`] says; its outline and fill show once the hover has gone
+    /// on a moment (none as it begins), fading in, back out while the pointer races, and fainter
+    /// high above the glass, as [`CanvasSession::pen_hover_cursor`] fades. Read without waiting on
+    /// the canvas.
+    pub fn cursor_hover_at(
+        &self,
+        x: f32,
+        y: f32,
+        pen: Option<CursorPen>,
+        seconds: f64,
+        height: Option<f32>,
+    ) -> CursorHover {
+        let turn = self.cursor_hovers(x, y, pen);
+        let points = load(&self.shared.cursor.points).max(1e-3);
+        let mut fade = self.shared.cursor.fade.lock();
+        fade.moved((x / points, y / points), seconds);
+        let shown = fade.shown(height.unwrap_or(0.0));
+        CursorHover { turn, outline: shown, fill: shown }
+    }
+
+    /// The hovering pointer left the canvas, or touched it: its next move begins afresh from
+    /// where it comes back (the way it was going is kept), its cursor faded in again from none.
     pub fn cursor_hover_gone(&self) {
         self.shared.cursor.heading.lock().last = None;
+        *self.shared.cursor.fade.lock() = HoverFade::default();
     }
 
     /// How far the brush cursor's outline turns on the screen past the brush's own rotation (radians,
@@ -251,5 +355,82 @@ mod tests {
         h.last = None;
         h.moved((900.0, 0.0));
         assert_eq!(h.angle(), Some(held));
+    }
+
+    /// A hover at 120 events a second, `n` of them, each `step` points on from the last: how much
+    /// the cursor shows after each.
+    fn hovered(fade: &mut HoverFade, from: f64, n: usize, step: f32) -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                fade.moved((step * i as f32, 0.0), from + i as f64 / 120.0);
+                fade.shown(0.0)
+            })
+            .collect()
+    }
+
+    /// Where `fade` stands after a move to `at` at `now`.
+    fn shown_after(fade: &mut HoverFade, at: (f32, f32), now: f64) -> f32 {
+        fade.moved(at, now);
+        fade.shown(0.0)
+    }
+
+    #[test]
+    fn a_hover_shows_its_cursor_only_after_a_moment_fading_in() {
+        let mut fade = HoverFade::default();
+        let shown = hovered(&mut fade, 10.0, 40, 2.0);
+        // as it begins and for a tenth of a second on: nothing in the way of the next stroke
+        assert!(shown[..=12].iter().all(|&s| s < 1e-3), "{shown:?}");
+        // then fading in over an eighth of a second, steadily
+        assert!(shown[13] > 0.03 && shown[13] < 0.2, "{shown:?}");
+        assert!(shown[13..=27].windows(2).all(|w| w[1] >= w[0]), "{shown:?}");
+        assert!(shown[26] < 1.0 && shown[27] >= 0.999, "{shown:?}");
+        assert!(shown[27..].iter().all(|&s| s >= 0.999), "{shown:?}");
+        eprintln!("hover fade at 120 Hz: {shown:?}");
+    }
+
+    #[test]
+    fn a_hover_fades_back_out_while_it_moves_fast_and_in_again_when_it_slows() {
+        let mut fade = HoverFade::default();
+        // hovered slowly over a second: whole, and all the way along
+        hovered(&mut fade, 0.0, 150, 1.0);
+        assert_eq!(fade.shown(0.0), 1.0);
+        // 60 points between events at 120 a second (7200 a second, twice as fast as it takes):
+        // it goes back two 120ths each event, so it shows whole a while yet, then fades out
+        let (x, t) = (149.0, 149.0 / 120.0);
+        let fast: Vec<f32> =
+            (1..=80).map(|i| shown_after(&mut fade, (x + 60.0 * i as f32, 0.0), t + f64::from(i) / 120.0)).collect();
+        assert!(fast[..40].iter().all(|&s| s == 1.0), "{fast:?}");
+        assert!(fast[40..].windows(2).all(|w| w[1] <= w[0]) && fast[50] < 1.0, "{fast:?}");
+        assert_eq!(fast[79], 0.0, "{fast:?}");
+        // slower than 30 points an event: back on its way in
+        let (x, t) = (x + 4800.0, t + 80.0 / 120.0);
+        let slow: Vec<f32> =
+            (1..60).map(|i| shown_after(&mut fade, (x + i as f32, 0.0), t + f64::from(i) / 120.0)).collect();
+        assert!(slow[10] < 1e-3 && slow[58] >= 0.999, "{slow:?}");
+        eprintln!("fast: {fast:?}");
+    }
+
+    #[test]
+    fn a_hover_counts_time_not_events_and_a_pen_high_up_shows_fainter() {
+        // at 240 events a second it fades in as at 120: by the time, not the count
+        let mut fade = HoverFade::default();
+        let shown: Vec<f32> = (0..60).map(|i| shown_after(&mut fade, (i as f32, 0.0), i as f64 / 240.0)).collect();
+        assert!(shown[23] < 1e-3 && shown[24] < 1e-2, "{shown:?}");
+        assert!(shown[54] >= 0.999 && shown[52] < 1.0, "{shown:?}");
+        // a step counts a 30th of a second at most (the pen out of sight meanwhile)
+        let mut fade = HoverFade::default();
+        fade.moved((0.0, 0.0), 0.0);
+        assert!((fade.moved((1.0, 0.0), 2.0) - 1.0 / 30.0).abs() < 1e-6);
+        // a clock gone back, or not a number, changes nothing
+        let settled = fade.settled;
+        assert_eq!(fade.moved((2.0, 0.0), 1.0), settled);
+        assert_eq!(fade.moved((f32::NAN, 0.0), 3.0), settled);
+        // up to two thirds of the height it is sensed at whole, then fainter to none at the top;
+        // none said, whole
+        assert_eq!(hover_shown(1.0, 0.0), 1.0);
+        assert_eq!(hover_shown(1.0, 0.5), 1.0);
+        assert!((hover_shown(1.0, 0.9) - 0.3).abs() < 1e-5);
+        assert_eq!(hover_shown(1.0, 1.0), 0.0);
+        assert_eq!(hover_shown(1.0, f32::NAN), 1.0);
     }
 }

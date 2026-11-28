@@ -27,15 +27,6 @@ const QUICK_SQUEEZE_MS: f64 = 300.0;
 /// Higher than this (a share of the height the pen is sensed at), or with no height, the pen is
 /// too far to pick a colour or a layer where it hovers.
 const NEAR: f32 = 0.99;
-/// The hover cursor shows once the pen has hovered this long (seconds), and fully this long after.
-const HOVER_SHOWS_S: f32 = 0.1;
-const HOVER_FADES_IN_S: f32 = 0.125;
-/// Hovering faster than this (points a second), the cursor fades back, the faster the quicker.
-const HOVER_RACING: f32 = 3600.0;
-/// The cursor fades out over the top third of the height the pen is sensed at.
-const HOVER_HEIGHT_FADE: f32 = 3.0;
-/// A step between hover events counts this long at most (seconds): the pen out of sight meanwhile.
-const HOVER_STEP_MOST_S: f32 = 1.0 / 30.0;
 /// Layer Select under a squeeze chooses again once the pen has moved this far (points).
 const SELECT_STEP: f32 = TAP_SLOP;
 
@@ -175,10 +166,8 @@ impl CanvasSession {
         match (hover, t.pen.hover) {
             (Some(h), Some(last)) => {
                 let seconds = ((h.time_ms - last.time_ms) / 1000.0).max(0.0) as f32;
-                let step = seconds.min(HOVER_STEP_MOST_S);
                 let speed = if seconds > 0.0 { dist(h.at(), last.at()) / points / seconds } else { 0.0 };
-                let gained = if speed > HOVER_RACING { -step * speed / HOVER_RACING } else { step };
-                t.pen.settled = (t.pen.settled + gained).clamp(0.0, 1.0);
+                t.pen.settled = crate::cursor_turn::hover_settled(t.pen.settled, seconds, speed);
             }
             _ => t.pen.settled = 0.0,
         }
@@ -207,9 +196,8 @@ impl CanvasSession {
             let brush = st.brush(st.tool);
             brush.pressure_factors(brush.setting("hover_pressure")).0
         };
-        let shown = ((settled - HOVER_SHOWS_S) / HOVER_FADES_IN_S).clamp(0.0, 1.0);
-        let low = if h.height > 0.0 { ((1.0 - h.height) * HOVER_HEIGHT_FADE).clamp(0.0, 1.0) } else { 1.0 };
-        Some(HoverCursor { x: h.x, y: h.y, alpha: shown * low, scale })
+        let alpha = crate::cursor_turn::hover_shown(settled, h.height);
+        Some(HoverCursor { x: h.x, y: h.y, alpha, scale })
     }
 
     /// The pen's button pressed (its `second`), hovering or touching at (`x`, `y`): the QuickMenu

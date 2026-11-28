@@ -47,6 +47,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** How the pen hovering was last held (its lean's way; Android tells no barrel), for its cursor. */
     private var hoverPen: io.github.artcraftandroid.procraft.core.CursorPen? = null
 
+    /** How high it was (a share of its reach; none for a pen that doesn't say), for its cursor's fade. */
+    private var hoverHeight: Float? = null
+
     /** The pen's side buttons as its events last said. */
     private val penButtons = PenButtons()
 
@@ -277,7 +280,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             }
             // a pen touching at no pressure before it presses (some begin their touches above the glass; one
             // not known to give a pressure waits a moment for one, then paints at full pressure): as it hovering there
-            is TouchCommand.PenHovers -> hovered(Offset(c.x, c.y))
+            is TouchCommand.PenHovers -> hovered(Offset(c.x, c.y), height = 0f)
             TouchCommand.TextLayer -> vm.askRasterize = true
             TouchCommand.BrushChanged -> vm.brushTouched()
             // Recolor's reticle dragged or tapped elsewhere (its fills on the view model's fill thread)
@@ -524,7 +527,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 // (told each time: a session opened meanwhile knows it too); a hand already down is set aside
                 session?.setTouchPenHovering(true)?.let(::obey)
                 hoverPen = io.github.artcraftandroid.procraft.core.CursorPen(e.getOrientation(0), 0f)
-                hovered(Offset(e.x, e.y))
+                hoverHeight = penHeight(e)
+                hovered(Offset(e.x, e.y), hoverHeight)
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
                 session?.setTouchPenHovering(false)?.let(::obey)
@@ -549,15 +553,18 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         return true
     }
 
-    /** The pen is held over the canvas at [at]: hovering, or touching at no pressure before it presses. */
-    private fun hovered(at: Offset) {
+    /**
+     * The pen is held over the canvas at [at], [height] up (a share of its reach): hovering, or
+     * touching at no pressure before it presses (on the glass).
+     */
+    private fun hovered(at: Offset, height: Float?) {
         // a spray can's sound (a plugin's) rattles shaken above the canvas
         if (vm.strokeSoundOn) session?.soundHover(at.x, at.y)
         penHovering = true
         // not over the bars or an open panel, where the gaps between their buttons and rows come
         // here and the buttons don't: it came and went as the pen crossed them, drawn under them
         val over = vm.overInterface(at)
-        if (over) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true, pen = hoverPen)
+        if (over) vm.showCursor(null) else if (painting()) vm.showCursor(at, hovering = true, pen = hoverPen, height = height)
         // and Liquify's ring where the pen hovers
         if (vm.adjustment == Adjustment.LIQUIFY) vm.showLiquifyRing(at.takeUnless { over })
     }

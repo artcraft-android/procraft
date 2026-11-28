@@ -201,7 +201,7 @@ pub use brush_hold::{
 };
 pub use brush_libraries::BrushLibraryInfo;
 pub use brush_library::{BrushDrop, BrushDropOver, brush_drop_copies, brush_drop_place, prepare_brushes};
-pub use brushes::{BrushInfo, BrushSetInfo, HoverFill, LibraryScroll, RecentBrush, brush_previews_kept};
+pub use brushes::{BrushInfo, BrushSetInfo, CursorLook, HoverFill, LibraryScroll, RecentBrush, brush_previews_kept};
 pub use clipboard::{COPY_PIXELS_A_METRE, copy_straight, picture_png, write_copy_png};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
@@ -218,7 +218,7 @@ pub use colour_models::{
 };
 pub use colour_press::{ColourPress, PressTurn};
 pub use crop_edit::{CropReadout, CropShown};
-pub use cursor_turn::CursorPen;
+pub use cursor_turn::{CursorHover, CursorPen};
 pub use device::keep_device;
 pub use filter_layers::PluginLayerFilter;
 pub use floating::{
@@ -367,6 +367,15 @@ pub(crate) const GRID_LINE: [f32; 3] = [46.0 / 255.0, 46.0 / 255.0, 46.0 / 255.0
 pub(crate) const GRID_LINE_LIGHT: [f32; 3] = [202.0 / 255.0, 205.0 / 255.0, 206.0 / 255.0];
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const GRID_SPACING_PT: f32 = 16.0;
+/// The line round the canvas while its background is hidden (where the canvas's edge would
+/// otherwise not show against the surround), sRGB: near black round the dark interface's, white
+/// round the light one's; a point wide, just outside the edge.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) const CANVAS_BORDER: [f32; 3] = [0.1, 0.1, 0.1];
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) const CANVAS_BORDER_LIGHT: [f32; 3] = [1.0, 1.0, 1.0];
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) const CANVAS_BORDER_PT: f32 = 1.0;
 /// The longest a read beside the frames waits for them to lay what they lay a share at a time
 /// (see [`Shared::await_frames_laid`]): past it, it lays the rest itself.
 pub(crate) const FRAMES_LAY_MOST: std::time::Duration = std::time::Duration::from_secs(3);
@@ -1070,7 +1079,18 @@ impl State {
             color: if self.light { GRID_LINE_LIGHT } else { GRID_LINE },
             // a plugin's picture covering the window in place of the lines
             picture: self.surround_picture.as_ref().map(|p| surround::cover(self.window_size, (p.width, p.height), by)),
+            border: self.canvas_border(),
         }
+    }
+
+    /// The line round the canvas, while its background is hidden: its edge shows against the
+    /// surround seen through it.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn canvas_border(&self) -> Option<procraft_gpu::CanvasBorder> {
+        (!self.doc.background_visible).then_some(procraft_gpu::CanvasBorder {
+            color: if self.light { CANVAS_BORDER_LIGHT } else { CANVAS_BORDER },
+            width: CANVAS_BORDER_PT * self.display_scale,
+        })
     }
 
     /// The colour around the canvas: a plugin's (the colour hook's surround), else the

@@ -8,8 +8,8 @@ use procraft_engine::preview;
 use procraft_engine::stroke::{InputSettings, LEAST_ROUNDNESS, MOST_ROUNDNESS, Stamp, StrokeBuilder};
 use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
 
-use crate::CanvasSession;
 use crate::layers::ThumbnailImage;
+use crate::{CanvasSession, State, ToolKind};
 
 /// The brush cursor's fill while the pen hovers ([`CanvasSession::hover_fill`]): how big, a share
 /// of the cursor's diameter, and how strong, a share of the opacity painted with.
@@ -22,17 +22,193 @@ pub struct HoverFill {
 /// Where a shape's outline is traced: where its paint is a quarter strong.
 const OUTLINE_LEVEL: f32 = 0.25;
 
-/// The last brush stamp pictured, by what it was made from (shape image, own image, hardness,
-/// roundness, rotation, size): the size preview asks each frame.
-#[allow(clippy::type_complexity)]
-static STAMPS: std::sync::Mutex<Option<((Option<u32>, Option<u64>, [u32; 3], usize), Vec<u8>)>> =
-    std::sync::Mutex::new(None);
+/// What a brush stamp is pictured from: its shape image, its own image, its hardness, roundness and
+/// rotation (their bits), and the picture's side.
+type StampKey = (Option<u32>, Option<u64>, [u32; 3], usize);
 
-/// The last brush outline traced, by what it was traced from (shape image, own image, roundness,
-/// rotation): a cursor asks each frame.
-#[allow(clippy::type_complexity)]
-static OUTLINES: std::sync::Mutex<Option<((Option<u32>, Option<u64>, u32, u32), Vec<Vec<f32>>)>> =
-    std::sync::Mutex::new(None);
+/// What a brush's outline is traced from: its shape image, its own image, its roundness and
+/// rotation (their bits).
+type OutlineKey = (Option<u32>, Option<u64>, u32, u32);
+
+/// The last brush stamp pictured, by what it was made from: the size preview asks each frame.
+static STAMPS: std::sync::Mutex<Option<(StampKey, Vec<u8>)>> = std::sync::Mutex::new(None);
+
+/// The last brush outline traced, by what it was traced from: a cursor asks each frame.
+static OUTLINES: std::sync::Mutex<Option<(OutlineKey, Vec<Vec<f32>>)>> = std::sync::Mutex::new(None);
+
+/// What the brush cursor shows for the current tool's brush ([`CanvasSession::cursor_look`]).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct CursorLook {
+    /// The brush's diameter on the screen (window pixels) as it paints now: its size, the brush
+    /// scaling and the zoom.
+    pub diameter: f32,
+    /// The brush's own outline (Cursor outline): 0 none, 1 contrasting lines, 2 the colour.
+    pub outline: i32,
+    /// Names its shape's loops, to be asked for again only when they change.
+    pub shape_key: u64,
+    /// Its shape's loops (see [`CanvasSession::brush_outline`]); none when they are the ones the
+    /// caller named it has.
+    pub shape: Option<Vec<Vec<f32>>>,
+    /// The fill while the pen hovers, if its Hover fill fills it (see
+    /// [`CanvasSession::hover_fill`]).
+    pub fill: Option<HoverFill>,
+    /// The stamp the fill shows: its side (pixels), what names it (0 without a fill), and its
+    /// coverage (see [`CanvasSession::brush_stamp`]); none without a fill, or when it is the one
+    /// the caller named it has.
+    pub side: u32,
+    pub stamp_key: u64,
+    pub stamp: Option<Vec<u8>>,
+}
+
+/// A name for `key`, never 0 (0 names nothing).
+fn named(key: &impl std::hash::Hash) -> u64 {
+    use std::hash::{BuildHasher, BuildHasherDefault};
+    BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default().hash_one(key).max(1)
+}
+
+impl State {
+    /// What the current tool's brush's outline is traced from, and its own image if it has one.
+    fn outline_source(&self) -> (OutlineKey, Option<procraft_engine::brush::Pixels>) {
+        let shape = &self.brush(self.tool).shape;
+        let key =
+            (shape.image, shape.source.as_ref().map(|s| s.id), shape.roundness.to_bits(), shape.rotation.to_bits());
+        (key, shape.source.as_ref().map(|s| s.pixels.clone()))
+    }
+
+    /// What the current tool's brush's stamp is pictured from at `side` pixels, and its own image
+    /// if it has one.
+    fn stamp_source(&self, side: usize) -> (StampKey, Option<procraft_engine::brush::Pixels>) {
+        let brush = self.brush(self.tool);
+        let shape = &brush.shape;
+        let key = (
+            shape.image,
+            shape.source.as_ref().map(|s| s.id),
+            [brush.hardness, shape.roundness, shape.rotation].map(f32::to_bits),
+            side,
+        );
+        (key, shape.source.as_ref().map(|s| s.pixels.clone()))
+    }
+
+    /// The brush cursor's fill while the pen hovers (see [`CanvasSession::hover_fill`]).
+    fn hover_fill_now(&self) -> Option<HoverFill> {
+        // the eraser and the smudge lay no colour: their stamp filled in the colour painted with
+        // stood in the way, nothing like what they do
+        if self.tool != ToolKind::Paint {
+            return None;
+        }
+        let brush = self.brush(self.tool);
+        if brush.setting("hover_fill").round() < 1.0 {
+            return None;
+        }
+        let pressure = brush.setting("hover_pressure");
+        let pressure = if pressure.is_finite() { pressure.clamp(0.01, 1.0) } else { 0.44 };
+        let [size, opacity, ..] = brush.pressures(pressure);
+        let (size, opacity) = brush.factors(size, opacity);
+        // the size goes down to the brush's least, not to nothing (as a stroke's stamps do)
+        let diameter = brush.diameter(self.shown_sliders().size);
+        let least = (brush.min_size.min(brush.biggest()) / diameter.max(0.5)).clamp(0.0, 1.0);
+        let size = least + (1.0 - least) * size.clamp(0.0, 1.0);
+        let fill = HoverFill { size, opacity: opacity.clamp(0.0, 1.0) };
+        (fill.size.is_finite() && fill.opacity.is_finite()).then_some(fill)
+    }
+}
+
+/// A brush's outline traced from `key` and its own image `own` (see
+/// [`CanvasSession::brush_outline`]), the last one kept.
+fn traced_outline(key: OutlineKey, own: Option<procraft_engine::brush::Pixels>) -> Vec<Vec<f32>> {
+    let (image, source, roundness, rotation) = key;
+    if image.is_none() && source.is_none() {
+        return Vec::new();
+    }
+    let mut kept = OUTLINES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((k, loops)) = kept.as_ref()
+        && *k == key
+    {
+        return loops.clone();
+    }
+    let side = procraft_engine::textures::TEXTURE_SIZE;
+    let traced = match (own, image) {
+        (Some(own), _) => procraft_engine::outline::shape_outline(&own, side, OUTLINE_LEVEL),
+        (None, Some(i)) => procraft_engine::textures::shape_image(i)
+            .map(|shape| procraft_engine::outline::shape_outline(&shape.pixels, side, OUTLINE_LEVEL))
+            .unwrap_or_default(),
+        (None, None) => Vec::new(),
+    };
+    // as a stamp is drawn: across its full size, squashed across, turned on the screen
+    let (roundness, turn) = (f32::from_bits(roundness), f32::from_bits(rotation));
+    let roundness = if roundness.is_finite() { roundness.clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS) } else { 1.0 };
+    let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
+    let loops: Vec<Vec<f32>> = traced
+        .iter()
+        .map(|ring| {
+            ring.iter()
+                .flat_map(|p| {
+                    let (x, y) = (p.x - 0.5, (p.y - 0.5) * roundness);
+                    [x * cos - y * sin, x * sin + y * cos]
+                })
+                .collect()
+        })
+        .collect();
+    *kept = Some((key, loops.clone()));
+    loops
+}
+
+/// A brush's stamp pictured from `key` and its own image `own` (see
+/// [`CanvasSession::brush_stamp`]), the last one kept.
+fn pictured_stamp(key: StampKey, own: Option<procraft_engine::brush::Pixels>) -> Vec<u8> {
+    let mut kept = STAMPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((k, stamp)) = kept.as_ref()
+        && *k == key
+    {
+        return stamp.clone();
+    }
+    let (image, _, [hardness, roundness, turn], side) = key;
+    let (hardness, roundness, turn) = (f32::from_bits(hardness), f32::from_bits(roundness), f32::from_bits(turn));
+    let pixels = match (own, image) {
+        (Some(own), _) => Some(own.to_vec()),
+        (None, Some(i)) => procraft_engine::textures::shape_image(i).map(|s| s.pixels),
+        (None, None) => None,
+    };
+    let roundness = if roundness.is_finite() { roundness.clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS) } else { 1.0 };
+    let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
+    let size = procraft_engine::textures::TEXTURE_SIZE;
+    // averaged down to about the picture's size first, so a small picture keeps fine detail's
+    // weight rather than catching a few of its pixels
+    let (picture, n) = match &pixels {
+        Some(p) if p.len() >= size * size => {
+            let mut at = (p.clone(), size);
+            while at.1 / 2 >= side.max(1) && at.1 > 1 {
+                at = (halved(&at.0, at.1), at.1 / 2);
+            }
+            (Some(at.0), at.1)
+        }
+        _ => (None, 0),
+    };
+    let r = side as f32 / 2.0;
+    let mut out = vec![0u8; side * side];
+    for (i, o) in out.iter_mut().enumerate() {
+        let (px, py) = ((i % side) as f32 + 0.5 - r, (i / side) as f32 + 0.5 - r);
+        // back into the stamp's own frame: turned back, then unsquashed across
+        let (x, y) = (px * cos + py * sin, (-px * sin + py * cos) / roundness);
+        let cover = match &picture {
+            Some(pic) => {
+                let (u, v) = ((x / side as f32 + 0.5) * n as f32 - 0.5, (y / side as f32 + 0.5) * n as f32 - 0.5);
+                bilinear(pic, n, u, v)
+            }
+            None => {
+                // the round tip as the stamp shader draws it: a one-pixel rim, softened from
+                // its hardness outwards
+                let d = x.hypot(y);
+                let rim = (r - d + 0.5).clamp(0.0, 1.0);
+                let t = ((d - hardness.min(0.999) * r) / (r + 0.5 - hardness.min(0.999) * r)).clamp(0.0, 1.0);
+                rim.min(1.0 - t * t * (3.0 - 2.0 * t))
+            }
+        };
+        *o = (cover.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    *kept = Some((key, out.clone()));
+    out
+}
 
 /// Held while a brush's sample stroke is drawn (see [`CanvasSession::brush_preview`]).
 static PREVIEWS: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -411,49 +587,8 @@ impl CanvasSession {
     /// pairs in brush diameters about its middle (y down, as on the screen), squashed across by
     /// its roundness and turned by its fixed rotation; none for the round tip (a circle).
     pub fn brush_outline(&self) -> Vec<Vec<f32>> {
-        let (key, pixels) = {
-            let st = self.shared.lock();
-            let shape = &st.brush(st.tool).shape;
-            let key =
-                (shape.image, shape.source.as_ref().map(|s| s.id), shape.roundness.to_bits(), shape.rotation.to_bits());
-            let pixels = shape.source.as_ref().map(|s| s.pixels.clone());
-            (key, pixels)
-        };
-        let (image, source, roundness, rotation) = key;
-        if image.is_none() && source.is_none() {
-            return Vec::new();
-        }
-        let mut kept = OUTLINES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((k, loops)) = kept.as_ref()
-            && *k == key
-        {
-            return loops.clone();
-        }
-        let side = procraft_engine::textures::TEXTURE_SIZE;
-        let traced = match (pixels, image) {
-            (Some(own), _) => procraft_engine::outline::shape_outline(&own, side, OUTLINE_LEVEL),
-            (None, Some(i)) => procraft_engine::textures::shape_image(i)
-                .map(|shape| procraft_engine::outline::shape_outline(&shape.pixels, side, OUTLINE_LEVEL))
-                .unwrap_or_default(),
-            (None, None) => Vec::new(),
-        };
-        // as a stamp is drawn: across its full size, squashed across, turned on the screen
-        let (roundness, turn) = (f32::from_bits(roundness), f32::from_bits(rotation));
-        let roundness = if roundness.is_finite() { roundness.clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS) } else { 1.0 };
-        let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
-        let loops: Vec<Vec<f32>> = traced
-            .iter()
-            .map(|ring| {
-                ring.iter()
-                    .flat_map(|p| {
-                        let (x, y) = (p.x - 0.5, (p.y - 0.5) * roundness);
-                        [x * cos - y * sin, x * sin + y * cos]
-                    })
-                    .collect()
-            })
-            .collect();
-        *kept = Some((key, loops.clone()));
-        loops
+        let (key, own) = self.shared.lock().outline_source();
+        traced_outline(key, own)
     }
 
     /// What the brush cursor's fill shows while the pen hovers, if the current tool's brush's
@@ -462,21 +597,7 @@ impl CanvasSession {
     /// the opacity slider's). A brush whose size or opacity follows the pressure fills smaller or
     /// fainter there; one that follows neither, all of the cursor at the opacity painted with.
     pub fn hover_fill(&self) -> Option<HoverFill> {
-        let st = self.shared.lock();
-        let brush = st.brush(st.tool);
-        if brush.setting("hover_fill").round() < 1.0 {
-            return None;
-        }
-        let pressure = brush.setting("hover_pressure");
-        let pressure = if pressure.is_finite() { pressure.clamp(0.01, 1.0) } else { 0.44 };
-        let [size, opacity, ..] = brush.pressures(pressure);
-        let (size, opacity) = brush.factors(size, opacity);
-        // the size goes down to the brush's least, not to nothing (as a stroke's stamps do)
-        let diameter = brush.diameter(st.shown_sliders().size);
-        let least = (brush.min_size.min(brush.biggest()) / diameter.max(0.5)).clamp(0.0, 1.0);
-        let size = least + (1.0 - least) * size.clamp(0.0, 1.0);
-        let fill = HoverFill { size, opacity: opacity.clamp(0.0, 1.0) };
-        (fill.size.is_finite() && fill.opacity.is_finite()).then_some(fill)
+        self.shared.lock().hover_fill_now()
     }
 
     /// The current tool's brush's stamp as it paints, `side` x `side` pixels of coverage (0..255):
@@ -485,70 +606,33 @@ impl CanvasSession {
     /// size slider's preview.
     pub fn brush_stamp(&self, side: u32) -> Vec<u8> {
         let side = side.clamp(1, 1024) as usize;
-        let (key, source) = {
-            let st = self.shared.lock();
-            let brush = st.brush(st.tool);
-            let shape = &brush.shape;
-            let key = (
-                shape.image,
-                shape.source.as_ref().map(|s| s.id),
-                [brush.hardness, shape.roundness, shape.rotation].map(f32::to_bits),
-                side,
-            );
-            (key, shape.source.as_ref().map(|s| s.pixels.clone()))
+        let (key, own) = self.shared.lock().stamp_source(side);
+        pictured_stamp(key, own)
+    }
+
+    /// What the brush cursor shows for the current tool's brush, read without waiting on the
+    /// canvas (a frame laying a stroke holds it, and a pen's moves then stalled behind it): none
+    /// while a frame holds it, to be asked again at the next move. Its fill's stamp is pictured
+    /// across the brush's diameter on the screen, up to `most` pixels. The shape's loops and the
+    /// stamp come back only when they aren't the ones `have_shape` and `have_stamp` name.
+    pub fn cursor_look(&self, most: u32, have_shape: u64, have_stamp: u64) -> Option<CursorLook> {
+        let (diameter, outline, fill, (shape_key, shape_own), (stamp_key, stamp_own)) = {
+            let st = self.shared.try_lock()?;
+            let zoom = st.view.map_or(1.0, |v| v.zoom());
+            let diameter = st.brush(st.tool).diameter(st.shown_sliders().size) * st.brush_scale() * zoom;
+            let diameter = if diameter.is_finite() { diameter.max(0.0) } else { 0.0 };
+            let outline = st.brush(st.tool).setting("cursor_outline").round();
+            let fill = st.hover_fill_now();
+            let side = (diameter.round() as usize).clamp(2, (most as usize).clamp(2, 1024));
+            (diameter, outline, fill, st.outline_source(), st.stamp_source(side))
         };
-        let mut kept = STAMPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((k, stamp)) = kept.as_ref()
-            && *k == key
-        {
-            return stamp.clone();
-        }
-        let (image, _, [hardness, roundness, turn], _) = key;
-        let (hardness, roundness, turn) = (f32::from_bits(hardness), f32::from_bits(roundness), f32::from_bits(turn));
-        let pixels = match (source, image) {
-            (Some(own), _) => Some(own.to_vec()),
-            (None, Some(i)) => procraft_engine::textures::shape_image(i).map(|s| s.pixels),
-            (None, None) => None,
-        };
-        let roundness = if roundness.is_finite() { roundness.clamp(LEAST_ROUNDNESS, MOST_ROUNDNESS) } else { 1.0 };
-        let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
-        let size = procraft_engine::textures::TEXTURE_SIZE;
-        // averaged down to about the picture's size first, so a small picture keeps fine detail's
-        // weight rather than catching a few of its pixels
-        let (picture, n) = match &pixels {
-            Some(p) if p.len() >= size * size => {
-                let mut at = (p.clone(), size);
-                while at.1 / 2 >= side.max(1) && at.1 > 1 {
-                    at = (halved(&at.0, at.1), at.1 / 2);
-                }
-                (Some(at.0), at.1)
-            }
-            _ => (None, 0),
-        };
-        let r = side as f32 / 2.0;
-        let mut out = vec![0u8; side * side];
-        for (i, o) in out.iter_mut().enumerate() {
-            let (px, py) = ((i % side) as f32 + 0.5 - r, (i / side) as f32 + 0.5 - r);
-            // back into the stamp's own frame: turned back, then unsquashed across
-            let (x, y) = (px * cos + py * sin, (-px * sin + py * cos) / roundness);
-            let cover = match &picture {
-                Some(pic) => {
-                    let (u, v) = ((x / side as f32 + 0.5) * n as f32 - 0.5, (y / side as f32 + 0.5) * n as f32 - 0.5);
-                    bilinear(pic, n, u, v)
-                }
-                None => {
-                    // the round tip as the stamp shader draws it: a one-pixel rim, softened from
-                    // its hardness outwards
-                    let d = x.hypot(y);
-                    let rim = (r - d + 0.5).clamp(0.0, 1.0);
-                    let t = ((d - hardness.min(0.999) * r) / (r + 0.5 - hardness.min(0.999) * r)).clamp(0.0, 1.0);
-                    rim.min(1.0 - t * t * (3.0 - 2.0 * t))
-                }
-            };
-            *o = (cover.clamp(0.0, 1.0) * 255.0).round() as u8;
-        }
-        *kept = Some((key, out.clone()));
-        out
+        let outline = if outline.is_finite() { outline.clamp(0.0, 2.0) as i32 } else { 1 };
+        let named_shape = named(&shape_key);
+        let shape = (named_shape != have_shape).then(|| traced_outline(shape_key, shape_own));
+        let side = stamp_key.3 as u32;
+        let named_stamp = if fill.is_some() { named(&stamp_key) } else { 0 };
+        let stamp = (fill.is_some() && named_stamp != have_stamp).then(|| pictured_stamp(stamp_key, stamp_own));
+        Some(CursorLook { diameter, outline, shape_key: named_shape, shape, fill, side, stamp_key: named_stamp, stamp })
     }
 
     /// The current tool's brush's control `key`, as the studio shows it.
@@ -1285,6 +1369,95 @@ mod tests {
             .unwrap_or(super::HoverFill { size: 1.0, opacity: 0.0 });
         assert!(thinning.size < 0.7 && thinning.opacity == 1.0, "{thinning:?}");
         eprintln!("hover fill: plain {plain:?}, by opacity {fading:?} (at 90% {harder:?}), by size {thinning:?}");
+    }
+
+    /// The eraser and the smudge lay no colour: their hovering cursor isn't filled with the colour
+    /// painted with (a black disc stood over the picture as the eraser hovered, #424), though their
+    /// brush's Hover fill says All; the brush painting with it is.
+    #[test]
+    fn the_eraser_and_the_smudge_hover_with_no_fill_of_the_colour() {
+        let s = CanvasSession::new(64, 64);
+        for tool in [crate::ToolKind::Paint, crate::ToolKind::Erase, crate::ToolKind::Smudge] {
+            s.set_tool(tool);
+            s.studio_begin();
+            s.set_studio_setting("hover_fill".into(), 2.0);
+            s.studio_end(true);
+            let painting = tool == crate::ToolKind::Paint;
+            assert_eq!(s.hover_fill().is_some(), painting, "{tool:?}");
+            let look = s.cursor_look(64, 0, 0).expect("the canvas is free");
+            assert_eq!(look.fill.is_some(), painting, "{tool:?}");
+            assert_eq!(look.stamp.is_some(), painting, "{tool:?}");
+            assert_eq!(look.stamp_key != 0, painting, "{tool:?}");
+        }
+    }
+
+    /// The brush cursor's look is read without waiting on the canvas: while a frame holds it (a
+    /// stroke being laid), the read gives way at once and the pen's moves go on (they stalled
+    /// behind each frame, five reads every tenth of a second, and the cursor and the strokes
+    /// stuttered, #424); free, it is what the reads that wait give, its shape and stamp sent again
+    /// only when they change.
+    #[test]
+    fn the_cursor_look_never_waits_on_a_frame_holding_the_canvas() {
+        use std::time::{Duration, Instant};
+        let s = CanvasSession::new(64, 64);
+        s.set_tool(crate::ToolKind::Paint);
+        s.studio_begin();
+        s.set_studio_setting("hover_fill".into(), 2.0);
+        s.studio_end(true);
+        let look = s.cursor_look(256, 0, 0).expect("the canvas is free");
+        let info = s.info();
+        assert!((look.diameter - info.brush_diameter * info.zoom).abs() < 1e-3, "{} {info:?}", look.diameter);
+        assert_eq!(look.outline, s.current_brush_setting("cursor_outline".into()).round() as i32);
+        assert_eq!(look.shape.clone().unwrap_or_default(), s.brush_outline());
+        assert_eq!(look.fill, s.hover_fill());
+        assert!(look.side >= 2 && look.side <= 256, "{}", look.side);
+        assert_eq!(look.stamp.as_deref(), Some(&s.brush_stamp(look.side)[..]));
+        // named as had: nothing sent again
+        let again = s.cursor_look(256, look.shape_key, look.stamp_key).expect("the canvas is free");
+        assert_eq!((again.shape, again.stamp), (None, None));
+        assert_eq!((again.shape_key, again.stamp_key), (look.shape_key, look.stamp_key));
+        // what it costs each move, at the cursor's every move as it rereads
+        let t = Instant::now();
+        for _ in 0..200 {
+            let _ = s.cursor_look(256, look.shape_key, look.stamp_key);
+        }
+        let each = t.elapsed() / 200;
+        assert!(each < Duration::from_millis(2), "{each:?} a read");
+        // a frame holding the canvas
+        let (held, go) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let holder = {
+            let (s, held) = (Arc::clone(&s), held.0);
+            std::thread::spawn(move || {
+                let _st = s.shared.lock();
+                let _ = held.send(());
+                let _ = go.1.recv_timeout(Duration::from_secs(5));
+            })
+        };
+        held.1.recv_timeout(Duration::from_secs(5)).expect("the frame holds the canvas");
+        let t = Instant::now();
+        let busy = s.cursor_look(256, 0, 0);
+        let quick = t.elapsed();
+        assert!(busy.is_none());
+        assert!(quick < Duration::from_millis(20), "{quick:?}");
+        // the reads it stands for each waited out the frame
+        let waiter = {
+            let s = Arc::clone(&s);
+            std::thread::spawn(move || {
+                let t = Instant::now();
+                let _ = s.info();
+                t.elapsed()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = go.0.send(());
+        holder.join().expect("the frame ends");
+        let waited = waiter.join().expect("the read ends");
+        assert!(waited >= Duration::from_millis(90), "{waited:?}");
+        // and free again, read again
+        assert!(s.cursor_look(256, look.shape_key, look.stamp_key).is_some());
+        eprintln!(
+            "cursor look: {each:?} a read free; {quick:?} while a frame held the canvas, where a read that waits took {waited:?}"
+        );
     }
 
     /// A brush file whose own preview is blank (a brush imported from another app can bring one):

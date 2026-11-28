@@ -72,6 +72,31 @@ fn fs_display(i: Out) -> @location(0) vec4<f32> {
     return shown(textureSample(composite, smp, i.uv)) * cover;
 }
 
+// ---- a line round the canvas, just outside its edge ------------------------------------------
+// The quad reaches past each side as far as the line goes (du.edge); the line's colour (sRGB) and
+// width in target pixels are in du.l0.
+
+@fragment
+fn fs_border(i: Out) -> @location(0) vec4<f32> {
+    // how far in from each side this pixel's middle is, in target pixels (negative outside)
+    let across = length(vec2<f32>(dpdx(i.uv.x), dpdy(i.uv.x)));
+    let down = length(vec2<f32>(dpdx(i.uv.y), dpdy(i.uv.y)));
+    let inside = min(i.uv, vec2<f32>(1.0) - i.uv) / max(vec2<f32>(across, down), vec2<f32>(1e-9));
+    // how far out of the canvas it is (its corners square, as two lines crossing)
+    let out = max(-inside.x, -inside.y);
+    // the share of the pixel in the band from the edge out to the line's width
+    let w = du.l0.w;
+    let cover = clamp(out + 0.5, 0.0, 1.0) - clamp(out - w + 0.5, 0.0, 1.0);
+    if (cover <= 0.0) {
+        discard;
+    }
+    var rgb = du.l0.rgb;
+    if (du.m1.z > 0.5) {
+        rgb = srgb_to_linear(rgb);
+    }
+    return vec4<f32>(rgb * cover, cover);
+}
+
 // a canvas colour (premultiplied) as the target shows it
 fn shown(c: vec4<f32>) -> vec4<f32> {
     // see-through parts (a hidden background) show what is drawn behind the canvas, the surround

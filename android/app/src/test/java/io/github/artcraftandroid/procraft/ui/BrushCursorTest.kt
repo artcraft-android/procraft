@@ -27,6 +27,15 @@ class BrushCursorTest {
     }
 
     @Test
+    fun theEraserAndTheSmudgeShowNoFillAndAHoverFadesItsFillIn() {
+        // (the core gives the eraser and the smudge no fill: #424's black disc under the eraser)
+        // a hover only just begun shows no fill, however strongly the brush paints
+        assertEquals(0f, hoverFillStrength(1f, 1f, shown = 0f), 1e-6f)
+        assertEquals(0.4f, hoverFillStrength(0.8f, 1f, shown = 0.5f), 1e-6f)
+        assertEquals(0.8f, hoverFillStrength(0.8f, 1f, shown = 2f), 1e-6f)
+    }
+
+    @Test
     fun theStyleChosenForEveryBrushGoesOverTheBrushsOwn() {
         for (outline in 0..2) for (filled in listOf(false, true)) {
             assertEquals(CursorLines.CONTRAST, cursorLines(CursorStyle.CONTRAST, outline, filled))

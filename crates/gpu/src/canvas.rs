@@ -823,6 +823,17 @@ pub struct SurroundGrid {
     pub width: f32,
     pub color: [f32; 3],
     pub picture: Option<[f32; 4]>,
+    /// A line round the canvas, just outside its edge, if one shows (where the canvas would
+    /// otherwise not be told from its surround: a hidden background).
+    pub border: Option<CanvasBorder>,
+}
+
+/// A line round the canvas ([`SurroundGrid::border`]): its colour (sRGB) and how wide it is
+/// (target pixels), drawn just outside the canvas's edge, turned and zoomed with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CanvasBorder {
+    pub color: [f32; 3],
+    pub width: f32,
 }
 
 /// A small premultiplied RGBA8 image (rows top to bottom).
@@ -1605,6 +1616,24 @@ impl DisplayUniform {
                 look: [[0.0; 4]; 3],
             },
         }
+    }
+
+    /// A line `width` target pixels wide in `color` (sRGB) just outside the canvas's edge, for the
+    /// map `m` (the unit square to clip space) onto a target `size` pixels: the quad reaches past
+    /// each side as far as the line goes and a pixel more, and each pixel along it shows as much of
+    /// the line as covers it. Its colour and width go where a look's first row would (a line has
+    /// no look). None for a canvas not on the target.
+    fn border(mut self, m: &Affine, size: (f32, f32), color: [f32; 3], width: f32) -> Option<DisplayUniform> {
+        let across = (m.a * size.0 / 2.0).hypot(m.b * size.1 / 2.0);
+        let down = (m.c * size.0 / 2.0).hypot(m.d * size.1 / 2.0);
+        let ok = across.is_finite() && down.is_finite() && across > 0.0 && down > 0.0;
+        if !ok || !width.is_finite() || width <= 0.0 {
+            return None;
+        }
+        self.edge = [(width + 1.0) / across, (width + 1.0) / down, 0.0, 0.0];
+        self.look = [[color[0], color[1], color[2], width], [0.0; 4], [0.0; 4]];
+        self.m1[3] = 0.0;
+        Some(self)
     }
 
     /// With the canvas's edge smoothed, for the map `m` (the unit square to clip space) onto a
@@ -3432,6 +3461,8 @@ struct ScreenPipelines {
     blur: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     frost: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     veil: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    /// The line round the canvas.
+    border: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
 }
 
 pub struct Canvas {
@@ -12465,6 +12496,7 @@ impl Canvas {
             selection: selection_pipelines,
             frost,
             veil: veil_pipelines,
+            border: border_pipelines,
             ..
         } = &mut self.screen;
         let pipeline = display.entry(target.format).or_insert_with(|| {
@@ -12575,6 +12607,31 @@ impl Canvas {
                 .looking(target.look),
             );
             pass.set_bind_group(0, &sharp.bind, &[]);
+            pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+            pass.draw(0..6, 0..1);
+        }
+
+        // a line round it, just outside its edge, where one shows (after the sharper part, which
+        // draws with the canvas's pipeline still set)
+        let line = target.grid.and_then(|g| g.border).and_then(|b| {
+            DisplayUniform::new([m.a, m.b, m.c, m.d], [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0], None, false)
+                .border(&m, (w, h), b.color, b.width)
+        });
+        if let Some(line) = line {
+            let pipeline = border_pipelines.entry(target.format).or_insert_with(|| {
+                blended_pipeline(
+                    device,
+                    kept,
+                    display_lut_layout,
+                    display_module,
+                    "canvas border",
+                    ("vs_display", "fs_border"),
+                    target.format,
+                    Some(PREMULTIPLIED_OVER),
+                )
+            });
+            let offset = uniforms.push(&line);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.draw(0..6, 0..1);
         }

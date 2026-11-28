@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.foundation.layout.wrapContentHeight
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
@@ -63,7 +64,9 @@ import io.github.artcraftandroid.procraft.core.SideSliderTap
 import io.github.artcraftandroid.procraft.core.ToolKind
 import io.github.artcraftandroid.procraft.core.sideSliderDragShare
 import io.github.artcraftandroid.procraft.core.sideSliderShownPercent
-import io.github.artcraftandroid.procraft.core.sideSliderTap
+import io.github.artcraftandroid.procraft.core.sideSliderDrags
+import io.github.artcraftandroid.procraft.core.sideSliderLand
+import io.github.artcraftandroid.procraft.core.sideSliderLift
 import io.github.artcraftandroid.procraft.core.sideThumbShadow
 
 private val SliderLeft = 5.dp
@@ -550,12 +553,14 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
 }
 
 /**
- * An upright slider moved by dragging anywhere on it: the thumb follows the finger (relative,
- * not jump-to-touch), finer the farther out to the side the finger goes, 1 at the top. Moved or
- * held still, its [panel] comes up, and stays up when the finger lifts; its thumb tapped brings
- * the panel up, or takes it away; a tap elsewhere on the track takes the thumb there (and the
- * panel away). Its [notches] (saved values) show as marks on the track; a value dragged near one
- * is pulled onto it, and a tap on one goes there. On a notch, the thumb shows a blue bar.
+ * An upright slider, 1 at the top, as the core's side slider rules say: a touch landing well off
+ * the thumb takes it there at once (and its [panel] away), the pen's from closer by than a
+ * finger's; one gone a few points along drags it from there, finer the farther out to the side the
+ * finger goes, and so does one that lands on or near the thumb, from where the thumb is. Dragged
+ * or held still, its panel comes up, and stays up when the finger lifts; its thumb tapped quickly
+ * brings the panel up, or takes it away. Its [notches] (saved values) show as marks on the track;
+ * a value dragged near one is pulled onto it, and a touch landing on one goes there. On a notch,
+ * the thumb shows a blue bar.
  */
 @Composable
 fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Modifier, panel: SliderPanelHooks? = null, notches: List<Float> = emptyList(), height: Dp = Pc.SliderHeight) {
@@ -572,27 +577,58 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                 awaitEachGesture {
                     val down = awaitFirstDown()
                     down.consume()
+                    val inset = Pc.ThumbInset.toPx()
+                    val half = Pc.ThumbHeight.toPx() / 2f
+                    // the thumb's reach either side of its middle, in the slider's values
+                    val reach = half / travel
+                    // where a point on the track stands for (the thumb's middle there)
+                    fun valueAt(y: Float) = 1f - (y - inset - half) / travel
+                    // as it was when the touch landed
+                    val from = current
+                    val panelWasUp = hooks?.up?.invoke() == true
+                    // where the finger has taken it, before a notch pulls it in
+                    var raw = current
+                    // landing well off the thumb (points from its middle; the pen's reach is
+                    // shorter, landing where it points), the thumb goes there at once, onto a
+                    // notch it lands on, and a panel up goes
+                    val thumbY = inset + half + travel * (1f - from)
+                    val off = kotlin.math.hypot(down.position.x - size.width / 2f, down.position.y - thumbY).toDp().value
+                    val pen = down.type == PointerType.Stylus || down.type == PointerType.Eraser
+                    val landed = sideSliderLand(valueAt(down.position.y), off, pen, reach, marks)
+                    if (landed != null) {
+                        raw = landed
+                        change(landed)
+                        hooks?.hide()
+                    }
+                    val jumped = landed != null
                     var last = down.position.y
-                    var moved = false
+                    var lastAt = down.position
+                    var liftedAt = down.uptimeMillis
+                    var dragged = false
+                    var held = false
                     var lifted = false
                     // the system took the touch back (the pen coming near takes the screen from a
                     // finger): it wasn't lifted, so the panel stays up for the pen to tap its +
                     var taken = false
-                    // where the finger has taken it, before a notch pulls it in
-                    var raw = current
                     // follows the finger; false once it is lifted. Another pointer's event (the
                     // pen hovering in) isn't this touch's.
                     suspend fun AwaitPointerEventScope.follow(): Boolean {
                         val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: return true
+                        lastAt = c.position
                         if (!c.pressed) {
+                            liftedAt = c.uptimeMillis
                             // a cancelled touch ends already consumed; a lift doesn't
                             taken = c.isConsumed
                             return false
                         }
+                        // gone a few points along, it drags the thumb: the whole way from where
+                        // it landed (a finger's wobble as it taps moves nothing)
+                        if (!dragged && sideSliderDrags((c.position.y - down.position.y).toDp().value)) {
+                            dragged = true
+                            hooks?.show()
+                        }
                         val dy = c.position.y - last
-                        if (dy != 0f) {
-                            if (!moved) hooks?.show()
-                            moved = true
+                        if (dragged && dy != 0f) {
                             last = c.position.y
                             // the farther out to the side the finger is, the finer the thumb follows
                             val across = (c.position.x - size.width / 2f).toDp().value
@@ -603,27 +639,27 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                         return true
                     }
                     withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
-                        while (!lifted && !moved) lifted = !follow()
+                        while (!lifted && !dragged) lifted = !follow()
                     }
-                    if (!lifted && !moved) hooks?.show()
-                    // a tap on the thumb brings up the panel (or takes it away); elsewhere the
-                    // thumb goes there (or onto a notch's mark there) and the panel goes
-                    if (lifted && !moved && !taken) {
-                        val inset = Pc.ThumbInset.toPx()
-                        val at = 1f - (down.position.y - inset - Pc.ThumbHeight.toPx() / 2f) / travel
-                        val up = hooks?.up?.invoke() == true
-                        when (val tap = sideSliderTap(at, current, Pc.ThumbHeight.toPx() / 2f / travel, marks, up)) {
-                            is SideSliderTap.Panel -> hooks?.show()
-                            is SideSliderTap.ClosePanel -> hooks?.hide()
-                            is SideSliderTap.Jump -> {
-                                change(tap.value)
-                                hooks?.hide()
-                            }
-                        }
+                    // held still: the panel comes up
+                    if (!lifted && !dragged) {
+                        held = true
+                        hooks?.show()
                     }
                     while (!lifted) lifted = !follow()
                     // let go, the panel stays up for its + (and so does it for a touch the pen took)
-                    if (taken) hooks?.show()
+                    if (taken) {
+                        hooks?.show()
+                    } else if (!held) {
+                        // a quick tap on the thumb brings the panel up or takes it away (a jump
+                        // was done as it landed)
+                        val seconds = (liftedAt - down.uptimeMillis) / 1000.0
+                        when (sideSliderLift(valueAt(lastAt.y), from, reach, jumped, dragged, seconds, panelWasUp)) {
+                            is SideSliderTap.Panel -> hooks?.show()
+                            is SideSliderTap.ClosePanel -> hooks?.hide()
+                            else -> Unit
+                        }
+                    }
                 }
             }
             .drawBehind {
@@ -697,7 +733,8 @@ private val ThumbShadow: List<ShadowStep> by lazy { sideThumbShadow() }
 /**
  * The brush's outline where the pen paints or hovers, in the brush's own shape (the round tip's a
  * circle): a thin dark line with a light edge, or in the colour painted with. Hovering, the brush's
- * stamp fills it in the colour, as strong as the brush paints, if its Hover fill says so.
+ * stamp fills it in the colour, as strong as the brush paints, if its Hover fill says so; and both
+ * fade in once the pen has hovered a moment (none as it comes back from a stroke).
  */
 @Composable
 fun BrushCursor(vm: CanvasViewModel) {
@@ -710,13 +747,17 @@ fun BrushCursor(vm: CanvasViewModel) {
     val shape = vm.cursorShape
     val turn = vm.cursorTurn
     val fill = vm.cursorFill.takeIf { vm.cursorHovering }
-    // as the brush would paint at its estimated pressure: as strong, and as big
+    // as the brush would paint at its estimated pressure: as strong, and as big; and as far as
+    // the hover has faded in
     val look = vm.cursorFillLook
-    val strength = hoverFillStrength(vm.opacity, look.opacity)
+    val painted = hoverFillStrength(vm.opacity, look.opacity)
+    val strength = hoverFillStrength(vm.opacity, look.opacity, vm.cursorFillShown)
+    val lines = vm.cursorShown.coerceIn(0f, 1f)
+    if (lines <= 0f && (fill == null || strength <= 0f)) return
     val fillR = r * look.size.coerceIn(0f, 1f)
     androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
         // the stamp under the outline, turned as the stamps are
-        if (fill != null && fillR >= 1f) {
+        if (fill != null && fillR >= 1f && strength > 0f) {
             rotate(Math.toDegrees(turn.toDouble()).toFloat(), pivot = at) {
                 drawImage(
                     fill,
@@ -741,11 +782,14 @@ fun BrushCursor(vm: CanvasViewModel) {
             }
         }
         fun outline(color: Color, width: Float) {
-            if (paths.isEmpty()) drawCircle(color, r, at, style = Stroke(width))
-            for (p in paths) drawPath(p, color, style = Stroke(width))
+            val shown = color.copy(alpha = color.alpha * lines)
+            if (paths.isEmpty()) drawCircle(shown, r, at, style = Stroke(width))
+            for (p in paths) drawPath(p, shown, style = Stroke(width))
         }
-        // (a fill at the faintest opacities is as good as none: the lines show with it)
-        when (cursorLines(style, vm.cursorOutline, filled = fill != null && strength >= CURSOR_FILL_SEEN)) {
+        // (a fill at the faintest opacities is as good as none: the lines show with it; whether
+        // it fills is what the brush paints, not how far it has faded in, so the lines don't
+        // come and go as it does)
+        if (lines > 0f) when (cursorLines(style, vm.cursorOutline, filled = fill != null && painted >= CURSOR_FILL_SEEN)) {
             CursorLines.NONE -> Unit
             CursorLines.CONTRAST -> { outline(Color.White, 3.dp.toPx()); outline(Color.Black, 1.dp.toPx()) }
             CursorLines.COLOUR -> { outline(Color(0x99FFFFFF), 3.dp.toPx()); outline(paint, 1.5.dp.toPx()) }
@@ -756,8 +800,13 @@ fun BrushCursor(vm: CanvasViewModel) {
 /** A hover fill drawn at least this strong (the brush's opacity) shows by itself. */
 private const val CURSOR_FILL_SEEN = 0.1f
 
-/** How strongly the hover fill shows: the opacity painted with ([opacity]), times what the brush's estimated hover pressure leaves of it ([atPressure]). */
-internal fun hoverFillStrength(opacity: Float, atPressure: Float): Float = opacity.coerceIn(0f, 1f) * atPressure.coerceIn(0f, 1f)
+/**
+ * How strongly the hover fill shows: the opacity painted with ([opacity]), times what the brush's
+ * estimated hover pressure leaves of it ([atPressure]), times how far the hover has faded it in
+ * ([shown]).
+ */
+internal fun hoverFillStrength(opacity: Float, atPressure: Float, shown: Float = 1f): Float =
+    opacity.coerceIn(0f, 1f) * atPressure.coerceIn(0f, 1f) * shown.coerceIn(0f, 1f)
 
 /** How the brush cursor's outline is drawn: not at all, a thin dark line with a light edge, or in the colour. */
 internal enum class CursorLines { NONE, CONTRAST, COLOUR }

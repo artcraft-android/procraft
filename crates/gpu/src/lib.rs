@@ -27,11 +27,11 @@ pub use canvas::plugin_filter::{
 };
 pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture, read_picture_given};
 pub use canvas::{
-    Backdrop, Canvas, DisplayLut, FillPreview, Filter, FineThumbnail, LayerStore, LayerThumbnailStep, LiquifyMode,
-    LiquifyStamp, MOST_TIPS, PendingAlphas, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, STORE_LIT,
-    SecondStroke, SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target,
-    Thumbnail, TipKind, VEIL_GRID, VeilCell, VeilCells, grey_levels, most_resident, read_texture, start_reading,
-    textures_bytes,
+    Backdrop, Canvas, CanvasBorder, DisplayLut, FillPreview, Filter, FineThumbnail, LayerStore, LayerThumbnailStep,
+    LiquifyMode, LiquifyStamp, MOST_TIPS, PendingAlphas, PendingThumbnail, Readback, ReadyToPark, RemakeStats,
+    Resample, STORE_LIT, SecondStroke, SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool,
+    SurroundGrid, Target, Thumbnail, TipKind, VEIL_GRID, VeilCell, VeilCells, grey_levels, most_resident, read_texture,
+    start_reading, textures_bytes,
 };
 pub use canvas::{CanvasPaper, CarryFault, GREY_LOOK, PYRAMID_LEVELS, ViewLook, pyramid_levels};
 pub use choice::{

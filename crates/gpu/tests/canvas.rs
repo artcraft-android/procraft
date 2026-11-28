@@ -473,6 +473,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
         width: 2.0,
         color: [1.0, 0.0, 0.0],
         picture: None,
+        border: None,
     };
     canvas.render(
         &gpu,
@@ -507,6 +508,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
         width: 8.0 / 3.0,
         color: [1.0, 0.0, 0.0],
         picture: None,
+        border: None,
     };
     canvas.render(
         &gpu,
@@ -536,6 +538,88 @@ fn the_surround_grid_is_fixed_to_the_target() {
         assert!((side[0] as i32 - 119).abs() <= 2 && (side[1] as i32 - 34).abs() <= 2, "{x}: {side:?}");
     }
     assert_eq!(pixel(&px, 100, 43, 50), [51, 51, 51, 255]);
+}
+
+/// A canvas whose background is hidden shows the surround through it: a line round it, just
+/// outside its edge, shows where it ends (#421), as wide as asked, its corners square, smoothed
+/// where the edge falls between pixels; the canvas itself isn't touched, and without the line
+/// nothing is drawn there.
+#[test]
+fn a_line_round_the_canvas_shows_just_outside_its_edge() {
+    use procraft_engine::geom::Affine;
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(10, 10);
+    doc.background_visible = false;
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: 100, height: 100, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    // the canvas 40 pixels square from (30, 30) (from `left` across), no grid lines anywhere
+    let mut draw = |left: f32, border: Option<procraft_gpu::CanvasBorder>| {
+        let to_screen = Affine { a: 4.0, b: 0.0, c: 0.0, d: 4.0, e: left, f: 30.0 };
+        let grid =
+            SurroundGrid { spacing: 1000.0, origin: [500.0, 500.0], width: 0.0, border, ..SurroundGrid::default() };
+        canvas.render(
+            &gpu,
+            &mut doc,
+            Some(Target {
+                view: &view,
+                format,
+                size: (100, 100),
+                to_screen,
+                surround: [0.2, 0.2, 0.2],
+                grid: Some(grid),
+                selection: None,
+                backdrop: None,
+                convert: None,
+                lut: None,
+                crisp_from: f32::INFINITY,
+                look: None,
+                traced: false,
+            }),
+        );
+        read(&gpu, &target, 100, 100)
+    };
+    let red = Some(procraft_gpu::CanvasBorder { color: [1.0, 0.0, 0.0], width: 2.0 });
+    let px = draw(30.0, red);
+    let surround = [51, 51, 51, 255];
+    // two pixels wide outside each side, the canvas inside showing the surround through it
+    assert_eq!(pixel(&px, 100, 27, 50), surround);
+    assert_eq!(pixel(&px, 100, 28, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&px, 100, 29, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&px, 100, 30, 50), surround, "the canvas's own edge");
+    assert_eq!(pixel(&px, 100, 50, 50), surround);
+    assert_eq!(pixel(&px, 100, 69, 50), surround);
+    assert_eq!(pixel(&px, 100, 70, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&px, 100, 71, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&px, 100, 72, 50), surround);
+    assert_eq!(pixel(&px, 100, 50, 28), [255, 0, 0, 255]);
+    assert_eq!(pixel(&px, 100, 50, 71), [255, 0, 0, 255]);
+    // square corners
+    assert_eq!(pixel(&px, 100, 28, 28), [255, 0, 0, 255]);
+    assert_eq!(pixel(&px, 100, 71, 71), [255, 0, 0, 255]);
+    // half a pixel along: the edge between pixels, the line smoothed over three of them, as much
+    // line in all
+    let px = draw(30.5, red);
+    let row: Vec<f32> = (26..32).map(|x| (f32::from(pixel(&px, 100, x, 50)[0]) - 51.0) / 204.0).collect();
+    let line: f32 = row.iter().sum();
+    assert!((line - 2.0).abs() < 0.05, "{row:?}");
+    assert!((row[2] - 0.5).abs() < 0.05 && (row[3] - 1.0).abs() < 0.02 && (row[4] - 0.5).abs() < 0.05, "{row:?}");
+    // none asked: nothing there
+    let px = draw(30.0, None);
+    for x in [28, 29, 70, 71] {
+        assert_eq!(pixel(&px, 100, x, 50), surround, "{x}");
+    }
 }
 
 #[test]

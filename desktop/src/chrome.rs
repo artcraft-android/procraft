@@ -9,7 +9,8 @@ use egui::layers::{PaintList, ShapeIdx};
 use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use procraft_core::{
     CanvasInfo, CanvasSession, InterfacePart, SideBarDrag, SideBarDragState, SideBarShown, SideSliderTap, ToolKind,
-    side_slider_drag_share, side_slider_shown_percent, side_slider_tap, side_thumb_shadow,
+    side_slider_drag_share, side_slider_drags, side_slider_land, side_slider_lift, side_slider_shown_percent,
+    side_thumb_shadow,
 };
 use resvg::tiny_skia;
 
@@ -489,7 +490,17 @@ struct Press {
     which: Slider,
     raw: f32,
     since: std::time::Instant,
-    moved: bool,
+    /// Where it landed (the window's points), when (the interface's time, seconds), the slider's
+    /// value then, and whether its panel was up.
+    origin: Pos2,
+    at: f64,
+    from: f32,
+    panel_was_up: bool,
+    /// Whether the thumb jumped under it as it landed, whether it has gone far enough along to
+    /// drag the thumb, and where it was last (the window's points).
+    jumped: bool,
+    dragged: bool,
+    last: Pos2,
     /// Held still long enough to bring up the panel: let go, it is no tap.
     held: bool,
 }
@@ -624,7 +635,7 @@ impl SideBar {
                 self.slider(ui, look, session, which, rect, value);
             }
             // a slider held still brings up its panel too
-            if let Some(press) = self.pressed.as_mut().filter(|p| !p.moved && !p.held) {
+            if let Some(press) = self.pressed.as_mut().filter(|p| !p.dragged && !p.held) {
                 if press.since.elapsed() >= HOLD {
                     press.held = true;
                     self.panel = Some(press.which);
@@ -772,12 +783,14 @@ impl SideBar {
         self.modify.as_ref().is_some_and(|m| m.shown.state == SideBarDragState::Moving)
     }
 
-    /// An upright slider moved by dragging anywhere on it: the thumb follows the pointer (not
-    /// jumping to it), finer the farther out to the side the pointer goes, 1 at the top. Moved or
-    /// held still, its panel comes up and stays up when it is let go; its thumb tapped brings the
-    /// panel up or takes it away; a tap elsewhere on the track takes the thumb there (and the
-    /// panel away). Its notches (saved values) show as marks on the track; a value dragged near
-    /// one is pulled onto it, and a tap on one goes there. On a notch, the thumb shows a blue bar.
+    /// An upright slider, 1 at the top, as the core's side slider rules say: a press landing well
+    /// off the thumb takes it there at once (and a panel up away), a tablet pen's from closer by
+    /// than a finger's or the mouse's; one gone a few points along drags it from there, finer the
+    /// farther out to the side the pointer goes, and so does one that lands on or near the thumb,
+    /// from where the thumb is. Dragged or held still, its panel comes up and stays up when it is
+    /// let go; its thumb tapped quickly brings the panel up or takes it away. Its notches (saved
+    /// values) show as marks on the track; a value dragged near one is pulled onto it, and a press
+    /// landing on one goes there. On a notch, the thumb shows a blue bar.
     fn slider(&mut self, ui: &Ui, look: &mut Look, session: &CanvasSession, which: Slider, rect: Rect, value: f32) {
         let size = which == Slider::Size;
         let travel = rect.height() - pc::THUMB_HEIGHT - pc::THUMB_INSET * 2.0;
@@ -786,44 +799,85 @@ impl SideBar {
             Slider::Size => session.set_brush_size(v),
             Slider::Opacity => session.set_brush_opacity(v),
         };
+        // the thumb's reach either side of its middle, in the slider's values, and what a point on
+        // the track stands for (the thumb's middle there)
+        let reach = pc::THUMB_HEIGHT / 2.0 / travel;
+        let value_at = |y: f32| 1.0 - (y - rect.top() - pc::THUMB_INSET - pc::THUMB_HEIGHT / 2.0) / travel;
+        let now = ui.input(|i| i.time);
+        let pointer = ui.input(|i| i.pointer.latest_pos());
         if response.is_pointer_button_down_on() && self.pressed.is_none_or(|p| p.which != which) {
-            self.pressed =
-                Some(Press { which, raw: value, since: std::time::Instant::now(), moved: false, held: false });
+            let origin = ui.input(|i| i.pointer.press_origin()).or(pointer).unwrap_or(rect.center());
+            let mut press = Press {
+                which,
+                raw: value,
+                since: std::time::Instant::now(),
+                origin,
+                at: now,
+                from: value,
+                panel_was_up: self.panel == Some(which),
+                jumped: false,
+                dragged: false,
+                last: origin,
+                held: false,
+            };
+            // landing well off the thumb (points from its middle; a tablet pen's reach is shorter,
+            // landing where it points), the thumb goes there at once, onto a notch it lands on, and
+            // a panel up goes
+            let thumb_y = rect.top() + pc::THUMB_INSET + pc::THUMB_HEIGHT / 2.0 + travel * (1.0 - value);
+            let off = (origin.x - rect.center().x).hypot(origin.y - thumb_y);
+            let pen = crate::pen::mouse_pen().is_some();
+            if let Some(to) = side_slider_land(value_at(origin.y), off, pen, reach, session.slider_notches(size)) {
+                set(to);
+                press.raw = to;
+                press.jumped = true;
+                self.panel = None;
+            }
+            self.pressed = Some(press);
         }
-        if let Some(press) = self.pressed.as_mut().filter(|p| p.which == which) {
-            let dy = response.drag_delta().y;
-            if dy != 0.0 {
-                if !press.moved {
-                    self.panel = Some(which);
-                }
-                press.moved = true;
+        if let Some(press) = self.pressed.as_mut().filter(|p| p.which == which)
+            && let Some(at) = pointer
+        {
+            // gone a few points along, it drags the thumb: the whole way from where it landed (a
+            // wobble as it taps moves nothing)
+            if !press.dragged && side_slider_drags(at.y - press.origin.y) {
+                press.dragged = true;
+                self.panel = Some(which);
+            }
+            let dy = at.y - press.last.y;
+            if press.dragged && dy != 0.0 {
                 // the farther out to the side the pointer is, the finer the thumb follows it
-                let across = response.interact_pointer_pos().map_or(0.0, |p| p.x - rect.center().x);
+                let across = at.x - rect.center().x;
                 press.raw = (press.raw - dy / travel * side_slider_drag_share(across)).clamp(0.0, 1.0);
                 set(session.slider_notch_at(size, press.raw).unwrap_or(press.raw));
+                press.last = at;
+            } else if !press.dragged {
+                press.last.x = at.x;
             }
         }
-        // a tap on the thumb brings up the panel (or takes it away); elsewhere the thumb goes
-        // there (or onto a notch's mark there)
-        if response.clicked()
-            && !self.pressed.is_some_and(|p| p.held)
-            && let Some(p) = response.interact_pointer_pos()
+        // let go, the panel stays up; a quick tap on the thumb brings it up or takes it away (a jump
+        // was done as it landed)
+        if !response.is_pointer_button_down_on()
+            && let Some(press) = self.pressed.filter(|p| p.which == which)
         {
-            let at = 1.0 - (p.y - rect.top() - pc::THUMB_INSET - pc::THUMB_HEIGHT / 2.0) / travel;
-            let reach = pc::THUMB_HEIGHT / 2.0 / travel;
-            match side_slider_tap(at, value, reach, session.slider_notches(size), self.panel.is_some()) {
-                SideSliderTap::Panel => self.panel = Some(which),
-                SideSliderTap::ClosePanel => self.panel = None,
-                SideSliderTap::Jump { value } => {
-                    set(value);
-                    self.panel = None;
-                }
-            }
-        }
-        // let go, the panel stays up
-        if !response.is_pointer_button_down_on() && self.pressed.is_some_and(|p| p.which == which) {
             self.pressed = None;
             self.changed = true;
+            if !press.held {
+                let at = pointer.map_or(press.origin.y, |p| p.y);
+                let seconds = now - press.at;
+                match side_slider_lift(
+                    value_at(at),
+                    press.from,
+                    reach,
+                    press.jumped,
+                    press.dragged,
+                    seconds,
+                    press.panel_was_up,
+                ) {
+                    Some(SideSliderTap::Panel) => self.panel = Some(which),
+                    Some(SideSliderTap::ClosePanel) => self.panel = None,
+                    _ => {}
+                }
+            }
         }
         let notches = session.slider_notches(size);
         let on_notch = notches.iter().any(|n| (n - value).abs() < 1e-4);
@@ -1158,6 +1212,60 @@ mod tests {
             assert!(c.abs_diff(c0) <= 3, "{c} {c0}");
         }
         assert_eq!(super::track_colour(Some(f32::NAN)), crate::look::argb(pc::SLIDER_TRACK));
+    }
+
+    /// The side sliders go by the core's rules, as the tablet apps do: a press landing well off the
+    /// thumb takes it there as it lands (not as it lifts), and brings no panel; a wobble under five
+    /// points moves nothing, and lifted quickly on the thumb brings the panel up, a second quick tap
+    /// taking it away; a slow tap does neither; a press beside the thumb within its reach stays
+    /// where it is, and dragged from there moves the thumb the whole way from where it landed.
+    #[test]
+    fn a_slider_jumps_to_a_press_landing_off_its_thumb_and_drags_only_past_five_points() {
+        let mut h = Hand::new();
+        h.session.set_brush_size(0.7);
+        h.frame(Vec::new());
+        // 60 points below the thumb, on the track
+        let far = h.on_size(0.7) + vec2(0.0, 60.0);
+        h.down(far);
+        let jumped = h.size();
+        assert!(jumped < 0.4 && jumped > 0.1, "{jumped}");
+        assert_eq!(h.side.panel, None);
+        h.up(far);
+        assert!((h.size() - jumped).abs() < 1e-6);
+        assert_eq!(h.side.panel, None, "a jump brings no panel");
+        // on the thumb, a 4 point wobble: nothing moves, and lifted quickly the panel comes up
+        let on = h.on_size(jumped);
+        h.down(on);
+        h.frame(vec![Event::PointerMoved(on + vec2(0.0, 4.0))]);
+        assert!((h.size() - jumped).abs() < 1e-6, "a wobble moved it to {}", h.size());
+        h.up(on + vec2(0.0, 4.0));
+        assert_eq!(h.side.panel, Some(Slider::Size));
+        h.tap(on);
+        assert_eq!(h.side.panel, None);
+        // a slow tap on the thumb (a fifth of a second): nothing
+        h.down(on);
+        for _ in 0..12 {
+            h.frame(Vec::new());
+        }
+        h.up(on);
+        assert_eq!(h.side.panel, None);
+        // beside the thumb within a finger's reach (20 points): it stays, then dragged 30 up from
+        // there, it moves as far as the press went
+        let beside = on + vec2(0.0, 20.0);
+        h.down(beside);
+        assert!((h.size() - jumped).abs() < 1e-6, "jumped to {}", h.size());
+        for k in 1..=6 {
+            h.frame(vec![Event::PointerMoved(beside - vec2(0.0, 5.0 * k as f32))]);
+        }
+        h.up(beside - vec2(0.0, 30.0));
+        let fit = fit_side_bar(Rect::from_min_size(Pos2::ZERO, WINDOW), false, 1.0, pc::BAR_HEIGHT, h.centre);
+        let travel = fit.track - pc::THUMB_HEIGHT - pc::THUMB_INSET * 2.0;
+        let moved = h.size() - jumped;
+        assert!(
+            moved > 0.0 && (moved * travel - 30.0 * procraft_core::side_slider_drag_share(0.0)).abs() < 1.0,
+            "{moved}"
+        );
+        assert_eq!(h.side.panel, Some(Slider::Size));
     }
 
     #[test]

@@ -11579,6 +11579,52 @@ fn set_current_brush(s: &CanvasSession, key: &str, value: f32) {
     st.library[set].brushes[index].set_setting(key, value);
 }
 
+/// While the canvas's background is hidden (the surround showing through it, its edge lost), a line
+/// a point wide goes round it (#421): near black round the dark interface's canvas, white round the
+/// light one's; none while the background shows.
+#[test]
+fn the_canvas_has_a_line_round_it_while_its_background_is_hidden() {
+    use procraft_engine::geom::Vec2;
+    let s = CanvasSession::new(64, 64);
+    let border = |s: &CanvasSession| {
+        let st = s.shared.lock();
+        let grid = st.surround_grid(Vec2::ZERO);
+        assert_eq!(grid.border, st.canvas_border());
+        grid.border.map(|b| (b.color, b.width / st.display_scale))
+    };
+    assert_eq!(border(&s), None);
+    assert!(s.set_background_visible(false));
+    assert_eq!(border(&s), Some(([0.1, 0.1, 0.1], 1.0)));
+    s.set_light_interface(true);
+    assert_eq!(border(&s), Some(([1.0, 1.0, 1.0], 1.0)));
+    assert!(s.set_background_visible(true));
+    assert_eq!(border(&s), None);
+}
+
+/// Hovering, the brush cursor and its fill show only once the pen has hovered a moment, fading in;
+/// each time it comes back (lifted from a stroke, or into reach again) from none, so a pen lifted
+/// between strokes leaves nothing over the picture (#424); and fainter high above the glass. It
+/// turns as it did.
+#[test]
+fn the_hovering_cursor_fades_in_after_a_moment_each_time_the_pen_comes_back() {
+    let s = CanvasSession::new(64, 64);
+    let hover = |i: i32, from: f64, height: Option<f32>| {
+        s.cursor_hover_at(100.0 + i as f32, 100.0, None, from + f64::from(i) / 120.0, height)
+    };
+    let shown: Vec<_> = (0..40).map(|i| hover(i, 5.0, None)).collect();
+    assert!(shown[..=12].iter().all(|h| h.outline < 1e-3 && h.fill < 1e-3), "{shown:?}");
+    assert!(shown[39].outline >= 0.999 && shown[39].fill >= 0.999, "{shown:?}");
+    // turned as the hover alone turns it
+    assert_eq!(shown[39].turn, s.cursor_turn());
+    // lifted to paint, or out of reach: none again as it comes back
+    s.cursor_hover_gone();
+    let back = hover(0, 6.0, None);
+    assert_eq!((back.outline, back.fill), (0.0, 0.0));
+    // high up (nine tenths of the reach): fainter
+    let high = (1..40).fold(0.0, |_, i| hover(i, 6.0, Some(0.9)).outline);
+    assert!((high - 0.3).abs() < 1e-3, "{high}");
+}
+
 /// Hovering, the brush cursor's outline turns as a stamp laid there would: a brush that follows the
 /// stroke with the way the pointer goes (as a still dab lies before it has gone anywhere), one that
 /// holds still not at all, one turned by the pen as the pen leans.

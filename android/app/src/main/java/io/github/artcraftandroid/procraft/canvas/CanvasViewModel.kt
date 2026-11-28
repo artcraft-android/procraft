@@ -458,8 +458,29 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var cursorFillLook by mutableStateOf(io.github.artcraftandroid.procraft.core.HoverFill(1f, 1f))
         private set
 
-    /** The stamp [cursorFill] was made from, and its side, to make it again only when it changes. */
-    private var cursorFillMade: Pair<Int, ByteArray>? = null
+    /**
+     * How strongly the cursor's outline and its fill show (0..1): painting, the outline whole;
+     * hovering, each fading in once the pen has hovered a moment (the core's), none as it comes
+     * back from a stroke, so nothing stands over the picture between strokes.
+     */
+    var cursorShown by mutableFloatStateOf(1f)
+        private set
+    var cursorFillShown by mutableFloatStateOf(0f)
+        private set
+
+    /** What names the brush's shape loops and its stamp the cursor has (the core's), to be sent again only when they change. */
+    private var cursorShapeKey = 0UL
+    private var cursorStampKey = 0UL
+
+    /** The brush's stamp as last sent, whether or not it fills the cursor now. */
+    private var cursorStamp: androidx.compose.ui.graphics.ImageBitmap? = null
+
+    /** When the hover began (uptime ms). */
+    private var hoverBegan = 0L
+
+    /** The last hover, to show the cursor fading in while the pen holds still (no moves come). */
+    private var lastHover: Triple<Offset, io.github.artcraftandroid.procraft.core.CursorPen?, Float?>? = null
+    private var hoverFading: kotlinx.coroutines.Job? = null
 
     /** When the brush cursor shows: while the pen hovers, while painting, or both. */
     enum class CursorShows { HOVERING, PAINTING, BOTH }
@@ -542,52 +563,104 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * zoom, as long as it shows when [hovering] (or painting); a hovering pen held as [pen] says
      * (none: a mouse, or a pen that doesn't tell).
      */
-    fun showCursor(p: Offset?, hovering: Boolean = false, pen: io.github.artcraftandroid.procraft.core.CursorPen? = null) {
+    fun showCursor(
+        p: Offset?,
+        hovering: Boolean = false,
+        pen: io.github.artcraftandroid.procraft.core.CursorPen? = null,
+        height: Float? = null,
+    ) {
         val wanted = if (hovering) cursorShows != CursorShows.PAINTING else cursorShows != CursorShows.HOVERING
+        if (!hovering || p == null) stopHoverFading()
         if (!brushCursorOn || p == null || !wanted) {
-            // (hovering again, it goes on from where it comes back)
-            if (p == null) session?.cursorHoverGone()
+            // (hovering again, it goes on from where it comes back, fading in afresh)
+            if (p == null || cursorHovering) session?.cursorHoverGone()
             cursorAt = null
+            cursorHovering = false
             return
         }
         // where a stroke's sample there lands, as a plugin may move it: the cursor stands where the stroke goes
         val at = session?.cursorPoint(p.x, p.y)?.takeIf { it.size == 2 }?.let { Offset(it[0], it[1]) } ?: p
-        // sized as it shows, and while hovering again now and then: the size may have changed
-        // meanwhile (painting, it takes its newest stamp's below)
+        // sized and styled as the brush is, read again now and then while it shows (the size may
+        // have changed meanwhile), without waiting on the canvas: a frame holding it leaves the look
+        // as it was, read again at the next move (painting, it is as big as its newest stamp, below)
         val now = android.os.SystemClock.uptimeMillis()
-        if (cursorAt == null || (hovering && now - cursorReadAt >= CURSOR_REREAD_MS)) session?.let { s ->
-            cursorRadius = s.info().let { it.brushDiameter * it.zoom / 2f }
-            cursorOutline = s.currentBrushSetting("cursor_outline").roundToInt()
-            // a shape or a fill that can't be read leaves the round tip's circle, in lines: the
-            // cursor still shows
-            cursorShape = runCatching { s.brushOutline() }.getOrDefault(emptyList())
-            val look = if (hovering) runCatching { s.hoverFill() }.getOrNull() else null
-            cursorFill = look?.let { runCatching { fillStamp(s) }.getOrNull() }
-            look?.let { cursorFillLook = it }
-            cursorReadAt = now
-        }
-        // turned as its stamps are: the newest one painting, one laid where it hovers else; and
-        // painting, as big as the newest stamp is laid (read without waiting on the canvas)
+        if (cursorAt == null || now - cursorReadAt >= CURSOR_REREAD_MS) session?.let { s -> readCursorLook(s, now) }
         session?.let { s ->
-            cursorTurn = if (hovering) s.cursorHovers(at.x, at.y, pen) else s.cursorTurn()
-            if (!hovering) s.cursorRadius()?.let { cursorRadius = it }
+            if (hovering) {
+                // turned as a stamp laid where it hovers; fading in as the hover goes on
+                val shown = s.cursorHoverAt(at.x, at.y, pen, now / 1000.0, height)
+                cursorTurn = shown.turn
+                cursorShown = shown.outline
+                cursorFillShown = shown.fill
+                // the size is the brush's while it hovers, its newest stamp's while it paints
+                cursorRadius = cursorBrushRadius
+                lastHover = Triple(p, pen, height)
+                if (!cursorHovering) hoverBegan = now
+                // (still fading in: shown again as it goes, though the pen holds still)
+                if ((shown.outline < 1f || shown.fill < 1f) && now - hoverBegan < CURSOR_FADE_MS) fadeOnWhileStill()
+            } else {
+                // a stroke ends the hover: the next one fades in afresh
+                if (cursorHovering) s.cursorHoverGone()
+                cursorTurn = s.cursorTurn()
+                cursorShown = 1f
+                cursorFillShown = 0f
+                cursorRadius = s.cursorRadius() ?: cursorBrushRadius
+            }
         }
         cursorHovering = hovering
         cursorAt = at
     }
 
+    /** The brush's own radius on the screen (window pixels), as the look last read said. */
+    private var cursorBrushRadius = 0f
+
     /**
-     * The brush's stamp at the cursor's size on the screen, white with its coverage as alpha; made
-     * again only when it changes. None for a stamp too faint to see there: the outline shows instead.
+     * Reads the brush cursor's look (the core's, read without waiting on the canvas): its size,
+     * outline, shape and hover fill, the shape and the stamp sent only when they change. A look
+     * that can't be read now keeps the one before.
      */
-    private fun fillStamp(s: CanvasSession): androidx.compose.ui.graphics.ImageBitmap? {
-        val n = (cursorRadius * 2f).roundToInt().coerceIn(2, CURSOR_FILL_MOST)
-        val alpha = s.brushStamp(n.toUInt())
-        if (alpha.size < n * n || alpha.none { (it.toInt() and 0xFF) >= CURSOR_FILL_FAINTEST }) return null
-        cursorFillMade?.let { (side, made) -> if (side == n && made.contentEquals(alpha)) return cursorFill }
-        cursorFillMade = n to alpha
-        val colors = IntArray(n * n) { i -> (alpha[i].toInt() and 0xFF shl 24) or 0xFFFFFF }
-        return android.graphics.Bitmap.createBitmap(colors, n, n, android.graphics.Bitmap.Config.ARGB_8888).asImageBitmap()
+    private fun readCursorLook(s: CanvasSession, now: Long) {
+        val look = runCatching { s.cursorLook(CURSOR_FILL_MOST.toUInt(), cursorShapeKey, cursorStampKey) }.getOrNull() ?: return
+        cursorReadAt = now
+        cursorBrushRadius = look.diameter / 2f
+        cursorOutline = look.outline
+        look.shape?.let {
+            cursorShape = it
+            cursorShapeKey = look.shapeKey
+        }
+        look.stamp?.let {
+            cursorStamp = fillPicture(it, look.side.toInt())
+            cursorStampKey = look.stampKey
+        }
+        cursorFill = if (look.fill != null) cursorStamp else null
+        look.fill?.let { cursorFillLook = it }
+    }
+
+    /**
+     * A stamp [side] x [side] of coverage as a picture, white with its coverage as alpha; none for
+     * one too faint to see (the outline shows instead).
+     */
+    private fun fillPicture(alpha: ByteArray, side: Int): androidx.compose.ui.graphics.ImageBitmap? {
+        if (side < 1 || alpha.size < side * side || alpha.none { (it.toInt() and 0xFF) >= CURSOR_FILL_FAINTEST }) return null
+        val colors = IntArray(side * side) { i -> (alpha[i].toInt() and 0xFF shl 24) or 0xFFFFFF }
+        return android.graphics.Bitmap.createBitmap(colors, side, side, android.graphics.Bitmap.Config.ARGB_8888).asImageBitmap()
+    }
+
+    /** While the cursor fades in and the pen holds still (no moves come), it goes on fading in. */
+    private fun fadeOnWhileStill() {
+        if (hoverFading?.isActive == true) return
+        hoverFading = viewModelScope.launch {
+            kotlinx.coroutines.delay(CURSOR_FADE_STEP_MS)
+            hoverFading = null
+            val (p, pen, height) = lastHover ?: return@launch
+            if (cursorHovering && cursorAt != null) showCursor(p, hovering = true, pen = pen, height = height)
+        }
+    }
+
+    private fun stopHoverFading() {
+        hoverFading?.cancel()
+        hoverFading = null
+        lastHover = null
     }
 
     /** When the cursor's size was last read (uptime ms). */
@@ -10393,8 +10466,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val COLOR_MODE = "color_mode"
         const val COLOUR_MODEL = "colour_model"
 
-        /** How often a hovering brush cursor reads its size again, ms. */
+        /** How often a brush cursor reads its size again, ms. */
         const val CURSOR_REREAD_MS = 100L
+
+        /** While a hovering cursor fades in, it is shown again this often though no moves come, ms. */
+        const val CURSOR_FADE_STEP_MS = 16L
+
+        /** A hover's cursor has faded in by this long after it began (the core's fade, a little over), ms. */
+        const val CURSOR_FADE_MS = 300L
 
         /** The hover fill's stamp is made at most this many pixels across (larger, it is drawn bigger). */
         const val CURSOR_FILL_MOST = 256
