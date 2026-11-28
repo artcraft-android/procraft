@@ -25729,10 +25729,12 @@ fn a_wet_dual_brushs_stroke_gone_back_to_a_mark_ends_as_with_its_second_put_toge
         {
             let mut st = s.shared.lock();
             let canvas = st.canvas.as_mut()?;
-            // a piece of a stroke's end a frame and paint laid in place all at once: the same
-            // frames each time, whatever the time
+            // a piece of a stroke's end a frame, paint laid in place all at once, and no render cut
+            // for taking long to record: the same frames each time, whatever the time. (A render
+            // cut so, the PC busy, left its paint a level apart on a few pixels, on any backend)
             canvas.set_relay_at_once(std::time::Duration::ZERO);
             canvas.set_in_place_paced(false);
+            canvas.set_record_most(std::time::Duration::MAX);
             canvas.join_synthesis(joined);
         }
         // paint to pick up: four bands of colour across, airbrushed
