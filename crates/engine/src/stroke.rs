@@ -524,6 +524,11 @@ struct Extras {
     /// The gap per unit of stamp size: the older spacing (version 0) puts stamps 1/√2 as far
     /// apart as the newer.
     spacing_stride: f32,
+    /// Its stamps build up gradually, each pixel by its own share of the stamp: a gradual brush's
+    /// not mixed wet nor laid in place. Read once: looked up by name for every stamp among the
+    /// controls a brush holds (a stock brush some 170), the settings that say so took about a
+    /// tenth of what making one did.
+    gradual: bool,
 }
 
 /// Each tilt switch's angle (its dial's share of a quarter turn), none where the switch is off.
@@ -636,6 +641,7 @@ impl Extras {
             motion_filtering: unit("motion_filtering"),
             motion_expression: unit("motion_expression"),
             spacing_stride: if b.setting("spacing_version") < 0.5 { std::f32::consts::FRAC_1_SQRT_2 } else { 1.0 },
+            gradual: b.rendering == Rendering::Gradual && !b.mixes_wet() && !b.laid_in_place(),
         }
     }
 }
@@ -3361,9 +3367,7 @@ impl StrokeBuilder {
         // a gradual stroke's pixels each build up by their own share of the stamp (wet paint is
         // laid stamp by stamp as it is mixed, and a stroke laid in place takes the rule pixel by
         // pixel itself)
-        let gradual =
-            self.brush.rendering == Rendering::Gradual && !self.brush.mixes_wet() && !self.brush.laid_in_place();
-        let overlap = if gradual { diameter / self.step(p) } else { 0.0 };
+        let overlap = if x.gradual { diameter / self.step(p) } else { 0.0 };
         let shape = self.brush.shape.clone();
         let [count_by, count_jitter_by, lateral_by, linear_by, size_jitter_by, opacity_jitter_by, scatter_by] = [
             PC::Count,

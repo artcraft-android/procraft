@@ -21,6 +21,8 @@ mod app_log;
 mod bars;
 mod big_pictures;
 mod blend_wheel;
+#[cfg(test)]
+mod brush_cost_tests;
 mod brush_files;
 mod brush_hold;
 mod brush_libraries;

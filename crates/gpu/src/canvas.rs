@@ -52,6 +52,9 @@ const SLOT: u64 = 256;
 const MULTIPLY_MODE: u32 = 1;
 /// Set in a layer uniform's `stroke_blend` (over the blend mode's number): luminance blending.
 const STROKE_LUMINANCE: u32 = 0x100;
+/// Set in a layer uniform's `stroke_blend`: the stroke is cut as its paint mixes into the layer
+/// (see [`StrokeStyle::cut_as_mixed`]).
+const STROKE_MIXES: u32 = 0x200;
 
 /// The largest uniform block a shader reads.
 const UNIFORM_SIZE: u64 = 176;
@@ -341,6 +344,9 @@ pub struct StrokeStyle {
     /// Luminance blending: the stroke mixed into its layer by its coverage in squared colour
     /// (nearer to light), not as the colour's numbers are.
     pub luminance: bool,
+    /// The stroke's paint mixes into what the layer holds as it goes (Uniform and Intense
+    /// Blending): its alpha threshold cuts it as mixed in (see [`StrokeStyle::cut_as_mixed`]).
+    pub mixes: bool,
     /// Dry paint laid in place, each pixel taking paint only as far as it has room left (see
     /// `Brush::laid_in_place`).
     pub laid_in_place: bool,
@@ -399,6 +405,14 @@ impl StrokeStyle {
         }
     }
 
+    /// Whether the stroke's alpha threshold cuts its paint as mixed into what the layer holds:
+    /// paint that mixes as it goes, cut at a threshold, drawn apart from the layer. Over the
+    /// layer's own paint its edge then blends in and a dual brush's second doesn't show, so its
+    /// rim rings only what it lays on a clear layer. Committed reading the layer.
+    pub fn cut_as_mixed(&self) -> bool {
+        self.mixes && self.alpha_threshold >= 0.0 && self.tool == StrokeTool::Paint && !self.in_place()
+    }
+
     /// Whether the stroke paints its layer as it goes: wet paint, or dry paint laid in place.
     pub fn paints_in_place(&self) -> bool {
         self.tool == StrokeTool::Paint && (self.wet_pull.is_some() || self.laid_in_place)
@@ -452,6 +466,7 @@ impl StrokeStyle {
             preview: false,
             sample: false,
             luminance: false,
+            mixes: false,
             laid_in_place: false,
             store: 0,
         }
@@ -527,6 +542,7 @@ impl StrokeStyle {
             preview: false,
             sample: false,
             luminance: brush.setting("luminance_blending") >= 0.5,
+            mixes: brush.blends(),
             laid_in_place: tool == StrokeTool::Paint && brush.laid_in_place(),
             store: 0,
         }
@@ -1546,7 +1562,9 @@ impl LayerUniform {
             threshold: s.alpha_threshold,
             grain_brightness: s.grain_brightness,
             grain_contrast: s.grain_contrast,
-            stroke_blend: s.blend | if s.luminance { STROKE_LUMINANCE } else { 0 },
+            stroke_blend: s.blend
+                | if s.luminance { STROKE_LUMINANCE } else { 0 }
+                | if s.cut_as_mixed() { STROKE_MIXES } else { 0 },
             grain_rotation: s.grain_rotation,
             grain_blend: s.grain_blend,
             burnt_blend: s.burnt_blend,
@@ -3094,6 +3112,39 @@ struct LayerGpu {
     view: wgpu::TextureView,
 }
 
+/// Whether `op` makes an undo step once it is laid.
+fn makes_step(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Commit(_)
+            | Op::Clear(..)
+            | Op::Invert(..)
+            | Op::Fill(..)
+            | Op::Record(_)
+            | Op::OutsideChange(_)
+            | Op::Duplicate { .. }
+            | Op::MergeDown { .. }
+            | Op::MergeMany { .. }
+            | Op::ApplyMask { .. }
+            | Op::Flatten { .. }
+            | Op::TransformEnd { commit: true, .. }
+            | Op::Write { .. }
+            | Op::Flip { .. }
+            | Op::Release { keep: true, .. }
+    )
+}
+
+/// The history as it will be once the queued work is laid (see [`Canvas::history_ahead`]).
+struct HistoryAhead<'a> {
+    undo: usize,
+    redo: usize,
+    undo_name: Option<&'a str>,
+    redo_name: Option<&'a str>,
+    /// Whether the step undo (redo) would take next is a stroke's still queued.
+    undo_queued_stroke: bool,
+    redo_queued_stroke: bool,
+}
+
 /// Steps (oldest first) as one: its pixels latest first, so undoing them puts back the oldest
 /// last, and the document and selection from before the first that changed them.
 fn collapsed(steps: Vec<Step>) -> Step {
@@ -3590,6 +3641,10 @@ pub struct Canvas {
     bound_full_grain: Option<u64>,
     shape_sources: SourceSlots,
     grain_sources: SourceSlots,
+    /// Pictures of the user's own given for the arrays' spare layers since the last render, to put
+    /// there before its work (see [`Canvas::use_sources`]): whether the shape array's (else the
+    /// grain's), the layer, the picture.
+    sources_due: Vec<(bool, u32, procraft_engine::brush::Pixels)>,
     /// Full coverage, stood in for the selection when there is none.
     everything: wgpu::TextureView,
     /// Where an adjustment is painted on (Pencil), instead of everywhere the selection takes.
@@ -3678,8 +3733,9 @@ pub struct Canvas {
     brush_across: Option<f32>,
     smudge_tiles: Option<u32>,
     use_wet_textures: bool,
-    /// Stamps queued to be laid so far, for tests.
+    /// Stamps queued to be laid so far, for tests and the log, and of them a dual brush's second's.
     stamps_queued: u64,
+    second_stamps_queued: u64,
     /// Where a dual brush's second was laid before its paint laid in place began (nothing to put
     /// together with yet), or reached before it was laid from scratch: put together there as the
     /// stroke ends.
@@ -3810,6 +3866,8 @@ pub struct Canvas {
     dirty: IRect,
     /// Whether the composite is made around pictures of what isn't being worked on, and them.
     cache_composites: bool,
+    /// A layer whose settings are being dragged (see [`Canvas::settings_dragged`]).
+    dragged: Option<LayerId>,
     caches: Option<Caches>,
     /// Caches being remade a little each render (more layers than fit), and the composite left
     /// as it was until they are ready.
@@ -4184,6 +4242,7 @@ impl Canvas {
             smudge_tiles: None,
             use_wet_textures: true,
             stamps_queued: 0,
+            second_stamps_queued: 0,
             second_unsynthesized: IRect::EMPTY,
             synthesis_due: IRect::EMPTY,
             joins_synthesis: true,
@@ -4248,6 +4307,7 @@ impl Canvas {
             stroke_step: None,
             ops: Vec::new(),
             cache_composites: false,
+            dragged: None,
             caches: None,
             remake: None,
             spare_caches: None,
@@ -4285,6 +4345,7 @@ impl Canvas {
             bound_full_grain: None,
             shape_sources: SourceSlots::after(shape_images.len()),
             grain_sources: SourceSlots::after(grain_images.len()),
+            sources_due: Vec::new(),
         };
         Ok(canvas)
     }
@@ -4299,17 +4360,57 @@ impl Canvas {
         self.id
     }
 
-    /// Points `style` at `brush`'s own shape and grain images, if it has them, putting them in
-    /// the arrays' spare layers first if they aren't there.
-    pub fn use_sources(&mut self, gpu: &Gpu, style: &mut StrokeStyle, brush: &Brush) {
-        if brush.shape.source.is_some() || brush.grain.source.is_some() {
-            self.prepare_brush_images(gpu);
+    /// Points `style` at `brush`'s own shape and grain images, if it has them, the arrays' spare
+    /// layers they go in taken for them if they aren't there. Nothing is sent to the GPU here: a
+    /// stroke begins on the app's own thread, which is to send it nothing (see `sent.rs`). The next
+    /// render puts them there (making the arrays first, if the canvas goes without them yet),
+    /// before any work that reads them.
+    pub fn use_sources(&mut self, _gpu: &Gpu, style: &mut StrokeStyle, brush: &Brush) {
+        if brush.shape.source.is_none() && brush.grain.source.is_none() {
+            return;
+        }
+        // without the arrays yet, their spare layers counted from after the shipped images, as the
+        // render that makes them has them
+        if !self.brush_images {
+            let (shapes, grains) = (textures::SHAPE_COUNT as usize, textures::GRAIN_COUNT as usize);
+            if self.shape_sources.first as usize != shapes {
+                self.shape_sources = SourceSlots::after(shapes);
+            }
+            if self.grain_sources.first as usize != grains {
+                self.grain_sources = SourceSlots::after(grains);
+            }
         }
         if let Some(source) = brush.shape.source.as_ref() {
-            style.shape = Some(self.shape_sources.layer(gpu, &self.shapes, source));
+            let (layer, new) = self.shape_sources.layer(source);
+            if new {
+                self.sources_due.push((true, layer, source.pixels.clone()));
+            }
+            style.shape = Some(layer);
         }
         if let Some(source) = brush.grain.source.as_ref() {
-            style.grain = Some(self.grain_sources.layer(gpu, &self.grains, source));
+            let (layer, new) = self.grain_sources.layer(source);
+            if new {
+                self.sources_due.push((false, layer, source.pixels.clone()));
+            }
+            style.grain = Some(layer);
+        }
+    }
+
+    /// Puts the brush images given since the last render on the GPU (see [`Canvas::use_sources`],
+    /// [`Canvas::use_full_grain`]): the arrays made first for pictures of the user's own if the
+    /// canvas goes without them yet.
+    fn put_images_due(&mut self, gpu: &Gpu) {
+        if !self.sources_due.is_empty() {
+            self.prepare_brush_images(gpu);
+            for (shapes, layer, pixels) in std::mem::take(&mut self.sources_due) {
+                write_brush_image(gpu, if shapes { &self.shapes } else { &self.grains }, layer, &pixels);
+            }
+        }
+        let grains = self.full_grains.put_due(gpu);
+        let shapes = self.full_shapes.put_due(gpu);
+        // the stroke's bind made again with them
+        if grains || shapes {
+            self.bound_full_grain = None;
         }
     }
 
@@ -4322,8 +4423,14 @@ impl Canvas {
         let (shape_images, grain_images) = (textures::shapes(), textures::grains());
         self.shapes = brush_images(gpu, "shapes", &shape_images);
         self.grains = brush_images(gpu, "grains", &grain_images);
-        self.shape_sources = SourceSlots::after(shape_images.len());
-        self.grain_sources = SourceSlots::after(grain_images.len());
+        // (spare layers taken for pictures given before, whose writes are due, are kept: see
+        // `use_sources`)
+        if self.shape_sources.first as usize != shape_images.len() {
+            self.shape_sources = SourceSlots::after(shape_images.len());
+        }
+        if self.grain_sources.first as usize != grain_images.len() {
+            self.grain_sources = SourceSlots::after(grain_images.len());
+        }
         self.brush_images = true;
         self.bind_brush_images(&gpu.device);
     }
@@ -4435,13 +4542,15 @@ impl Canvas {
         self.grains = stand_in_images(gpu, "grains");
         self.shape_sources = SourceSlots::after(0);
         self.grain_sources = SourceSlots::after(0);
+        self.sources_due.clear();
         self.brush_images = false;
         self.prediction.clear();
         self.bind_brush_images(&gpu.device);
     }
 
     /// `style` reads the brush file's grain `id` (`pixels`, `side` square) in place of the brush
-    /// images: each stroke its own, kept on the GPU while it is among the last few used.
+    /// images: each stroke its own, kept on the GPU while it is among the last few used (put there
+    /// by the next render, as [`Canvas::use_sources`] says).
     pub fn use_full_grain(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, pixels: &[u8]) {
         if self.full_grains.hold(gpu, id, side, pixels) {
             style.grain = Some(0);
@@ -4451,7 +4560,8 @@ impl Canvas {
     }
 
     /// `style` reads the brush file's shape `id` (`pixels`, `side` square) in place of the brush
-    /// images: each stroke its own, kept on the GPU while it is among the last few used.
+    /// images: each stroke its own, kept on the GPU while it is among the last few used (put there
+    /// by the next render, as [`Canvas::use_sources`] says).
     pub fn use_full_shape(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, pixels: &[u8]) {
         if self.full_shapes.hold(gpu, id, side, pixels) {
             style.shape = Some(0);
@@ -4480,22 +4590,22 @@ impl Canvas {
         if self.active.is_some() || self.smudge.is_some() || !self.ops.is_empty() {
             return;
         }
-        self.full_shapes.held.clear();
-        self.full_grains.held.clear();
+        self.full_shapes.let_go();
+        self.full_grains.let_go();
     }
 
     /// [`Canvas::use_full_shape`] for an image given with its smaller levels (see [`grey_levels`]),
-    /// so that only copying them is left to do here.
-    pub fn use_full_shape_levels(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, levels: &[u8]) {
-        if self.full_shapes.hold_levels(gpu, id, side, levels) {
+    /// so that only copying them is left to do (by the next render).
+    pub fn use_full_shape_levels(&mut self, _gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, levels: &[u8]) {
+        if self.full_shapes.hold_levels(id, side, levels) {
             style.shape = Some(0);
             style.full_shape = Some(id);
         }
     }
 
     /// [`Canvas::use_full_grain`] for an image given with its smaller levels (see [`grey_levels`]).
-    pub fn use_full_grain_levels(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, levels: &[u8]) {
-        if self.full_grains.hold_levels(gpu, id, side, levels) {
+    pub fn use_full_grain_levels(&mut self, _gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, levels: &[u8]) {
+        if self.full_grains.hold_levels(id, side, levels) {
             style.grain = Some(0);
             style.full_grain = Some(id);
             style.grain_side = side as f32;
@@ -4504,7 +4614,8 @@ impl Canvas {
 
     /// `style` reads its shapes from the set `id` (`tips`, each `side` square, in order) in place of
     /// the brush images, each stamp the one its `tip` says: kept on the GPU while it is among the
-    /// last few used. A grey byte a pixel for masks, else four (RGBA, straight; see [`TipKind`]).
+    /// last few used (put there by the next render). A grey byte a pixel for masks, else four (RGBA,
+    /// straight; see [`TipKind`]).
     /// Nothing if they don't fit (see [`MOST_TIPS`]).
     pub fn use_tip_set(
         &mut self,
@@ -4651,33 +4762,81 @@ impl Canvas {
         self.active.map(|a| a.style.tool)
     }
 
-    /// Whether an undo is possible, counting queued work.
+    /// Whether an undo is possible, counting queued work (an undo or redo queued among it too).
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
-            || self.ops.iter().any(|op| {
-                matches!(
-                    op,
-                    Op::Commit(_)
-                        | Op::Clear(..)
-                        | Op::Invert(..)
-                        | Op::Fill(..)
-                        | Op::Record(_)
-                        | Op::OutsideChange(_)
-                        | Op::Duplicate { .. }
-                        | Op::MergeDown { .. }
-                        | Op::MergeMany { .. }
-                        | Op::ApplyMask { .. }
-                        | Op::Flatten { .. }
-                        | Op::TransformEnd { commit: true, .. }
-                        | Op::Write { .. }
-                        | Op::Flip { .. }
-                        | Op::Release { keep: true, .. }
-                )
-            })
+        self.history_ahead().undo > 0
     }
 
+    /// Whether a redo is possible, counting queued work.
     pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
+        self.history_ahead().redo > 0
+    }
+
+    /// The name of the step undo would undo next, and of the step redo would redo, as the history
+    /// will be once the queued work is laid (an undo queued while the frames still lay the stroke
+    /// it takes back, say).
+    pub fn undo_name_ahead(&self) -> Option<String> {
+        self.history_ahead().undo_name.map(str::to_owned)
+    }
+
+    pub fn redo_name_ahead(&self) -> Option<String> {
+        self.history_ahead().redo_name.map(str::to_owned)
+    }
+
+    /// Whether the step an undo queued now would take back (`undo`), or a redo bring back, is a
+    /// stroke's still queued (its end not yet laid): it changes no document, and can wait in the
+    /// queue for the frames to lay the stroke first, a share at a time.
+    pub fn steps_a_queued_stroke(&self, undo: bool) -> bool {
+        let ahead = self.history_ahead();
+        if undo { ahead.undo_queued_stroke } else { ahead.redo_queued_stroke }
+    }
+
+    /// The history as it will be once the queued work is laid: how many steps undo and redo have,
+    /// and the names of those they would take next. Steps queued, undone and redone in order
+    /// (the steps a collapse makes one counted as the canvas counts them).
+    fn history_ahead(&self) -> HistoryAhead<'_> {
+        // each step's name, and whether it is a stroke's still queued
+        let mut undo: Vec<(Option<&str>, bool)> = self.undo.iter().map(|s| (s.name.as_deref(), false)).collect();
+        let mut redo: Vec<(Option<&str>, bool)> = self.redo.iter().map(|s| (s.name.as_deref(), false)).collect();
+        let mut name = None;
+        // (a mark made by a render before: the steps since it)
+        let mut mark = self.mark.map(|since| self.undo.iter().position(|s| s.made > since).unwrap_or(self.undo.len()));
+        for op in &self.ops {
+            match op {
+                Op::Name(n) => name = Some(n.as_str()),
+                Op::Undo => {
+                    if let Some(step) = undo.pop() {
+                        redo.push(step);
+                    }
+                }
+                Op::Redo => {
+                    if let Some(step) = redo.pop() {
+                        undo.push(step);
+                    }
+                }
+                Op::Mark => mark = Some(undo.len()),
+                Op::Collapse => {
+                    let first = mark.take().unwrap_or(undo.len()).min(undo.len());
+                    if undo.len() - first >= 2 {
+                        let named = undo.split_off(first).into_iter().rev().find_map(|(n, _)| n);
+                        undo.push((named, false));
+                    }
+                }
+                op if makes_step(op) => {
+                    undo.push((name.take(), matches!(op, Op::Commit(_))));
+                    redo.clear();
+                }
+                _ => {}
+            }
+        }
+        HistoryAhead {
+            undo: undo.len(),
+            redo: redo.len(),
+            undo_name: undo.last().and_then(|s| s.0),
+            redo_name: redo.last().and_then(|s| s.0),
+            undo_queued_stroke: undo.last().is_some_and(|s| s.1),
+            redo_queued_stroke: redo.last().is_some_and(|s| s.1),
+        }
     }
 
     /// Drops what could be redone, as a new step would: the canvas is set aside for something new
@@ -5281,6 +5440,9 @@ impl Canvas {
             .collect();
         self.dirty = self.dirty.union(bounds);
         self.stamps_queued += instances.len() as u64;
+        if second {
+            self.second_stamps_queued += instances.len() as u64;
+        }
         if !instances.is_empty() || clear {
             let pencil = active.pencil;
             // drawn from scratch: what is still queued of it would be laid only to be cleared (a
@@ -5615,10 +5777,33 @@ impl Canvas {
     }
 
     /// How many stamps have been queued to be laid so far (each lot of a stroke's, and its
-    /// second's): for tests counting what an end lays.
-    #[doc(hidden)]
+    /// second's): for the log's slow frames, and for tests counting what an end lays.
     pub fn stamps_queued(&self) -> u64 {
         self.stamps_queued
+    }
+
+    /// Of [`Canvas::stamps_queued`], how many went into a dual brush's second: for benches telling
+    /// a dual brush's two parts' work apart.
+    #[doc(hidden)]
+    pub fn second_stamps_queued(&self) -> u64 {
+        self.second_stamps_queued
+    }
+
+    /// The open stroke's textures read back as floats, four a pixel: the stroke's, then its
+    /// second's while it has one. For tests looking for paint that isn't a number (none where
+    /// strokes build up in 8 bits a channel).
+    #[doc(hidden)]
+    pub fn stroke_floats(&self, gpu: &Gpu) -> Result<Vec<Vec<f32>>, GpuError> {
+        if self.pipelines.stroke_format != STROKE_FORMAT {
+            return Ok(Vec::new());
+        }
+        let mut out = vec![carry_check::read_floats(gpu, &self.stroke)?];
+        if self.active.is_some_and(|a| a.second.is_some())
+            && let Some(second) = self.second_stroke.made()
+        {
+            out.push(carry_check::read_floats(gpu, second)?);
+        }
+        Ok(out)
     }
 
     /// The open stroke's brush is `diameter` canvas pixels across at its widest: painting in place, the
@@ -6501,6 +6686,7 @@ impl Canvas {
     /// The document was changed (layers added, removed, reordered, their settings...): `before`
     /// is how it was, for undo.
     pub fn record_document(&mut self, before: Document) {
+        self.dragged = None;
         self.end_stroke();
         self.ops.push(Op::Record(Box::new(before)));
         self.invalidate();
@@ -6864,6 +7050,20 @@ impl Canvas {
 
     pub fn invalidate(&mut self) {
         self.let_go_caches(true);
+        self.dirty = self.full();
+    }
+
+    /// The document's layers' settings changed as something is dragged (a layer's opacity, its
+    /// blend mode as the picker passes), `layer`'s among them: everything composites again next
+    /// frame, around the caches as they are, `layer` composited live in place of the current one
+    /// until the change is recorded (see [`Canvas::record_document`]), so the caches are made
+    /// around it once and stay as they are for the rest of the drag. (A cache is made again only
+    /// once what it was made from changes: its key holds every setting of every layer in it.)
+    /// Letting them go at each change made each frame of a drag composite every layer again, and
+    /// over layers kept off the GPU start a remake of them that never finished, bringing layers
+    /// back at each change and showing nothing of the drag till it was let go.
+    pub fn settings_dragged(&mut self, layer: Option<LayerId>) {
+        self.dragged = layer;
         self.dirty = self.full();
     }
 
@@ -7633,7 +7833,21 @@ impl Canvas {
     /// Records and submits everything queued, recomposites what changed and draws to `target`.
     /// Undoing a structural step puts the earlier document into `doc`.
     pub fn render(&mut self, gpu: &Gpu, doc: &mut Document, target: Option<Target<'_>>) {
+        // the work held back from a render goes on in renders of its own after it, one after
+        // another: each in the one before, hundreds of a stroke's pieces laid at once (by a read,
+        // say) overflowed the thread's stack
+        let mut more = self.render_piece(gpu, doc, target);
+        while more {
+            more = self.render_piece(gpu, doc, None);
+        }
+    }
+
+    /// [`Canvas::render`] once: whether work it held back is to be laid by a render after it at
+    /// once (not a stroke laid again, or catching up, which the renders that show the canvas lay).
+    fn render_piece(&mut self, gpu: &Gpu, doc: &mut Document, target: Option<Target<'_>>) -> bool {
         let started = std::time::Instant::now();
+        // the brush images given as strokes began, before anything reads them
+        self.put_images_due(gpu);
         self.sync_layers(gpu, doc);
         // the stroke's bind goes with the open stroke's grain
         let full_grain = self.active.as_ref().and_then(|a| a.style.full_grain);
@@ -9184,9 +9398,7 @@ impl Canvas {
         // the work held back, in a submission after this one's (a stroke being laid again goes on in
         // the next render that shows the canvas, as do the renders after one that shows the canvas:
         // see above)
-        if deferred && !self.relaying && !self.catching_up {
-            self.render(gpu, doc, None);
-        }
+        deferred && !self.relaying && !self.catching_up
     }
 
     /// Begins the stroke painting in place into `target` in `style`: what it carries and keeps,
@@ -10080,10 +10292,11 @@ impl Canvas {
                 quad_bind(device, &self.pipelines.quad_layout, views, grain, &self.grain_sampler, &self.paper_view)
             };
             let laid = stroke.style.tool == StrokeTool::Laid;
-            match (stroke.style.tool, laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
+            let reads = laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance;
+            match (stroke.style.tool, reads || stroke.style.cut_as_mixed()) {
                 (StrokeTool::Paint | StrokeTool::Laid, true) => {
-                    // recolour where the layer has alpha, or blend by a mode or burn edges (which
-                    // read the layer): into scratch, then back
+                    // recolour where the layer has alpha, or blend by a mode, burn edges or cut as
+                    // mixed into the layer (which read the layer): into scratch, then back
                     let offset = uniforms.push(
                         &LayerUniform {
                             opacity: 1.0,
@@ -11202,15 +11415,18 @@ impl Canvas {
     }
 
     /// The top level's items composited live while caches are used (from the one holding the
-    /// current layer up to a run of plain items at the top: normal, the first not clipped to what
-    /// is below the run), with every layer in them; none while something else is under way
-    /// (Animation Assist's frames, an adjustment, liquify, a transform, a stroke elsewhere).
+    /// current layer, or while one's settings are dragged that layer, up to a run of plain items at
+    /// the top: normal, the first not clipped to what is below the run), with every layer in them;
+    /// none while something else is under way (Animation Assist's frames, an adjustment, liquify, a
+    /// transform, a stroke elsewhere).
     fn live_items(&self, doc: &Document) -> Option<(Vec<LayerId>, std::ops::Range<usize>)> {
         if doc.animation.is_some() {
             return None;
         }
         let tops = doc.members(None);
-        let mut top = doc.current();
+        // (a layer whose settings are being dragged in place of the current one: so the caches are
+        // made around it once, and kept while it changes, see `Canvas::settings_dragged`)
+        let mut top = self.dragged.filter(|id| doc.layer(*id).is_some()).unwrap_or_else(|| doc.current());
         if doc.layer(top).is_some_and(|l| l.kind == LayerKind::Mask) {
             top = doc.layer(top)?.parent?;
         }
@@ -15433,6 +15649,11 @@ impl Parked {
     /// The whole layer (`width` x `height`, clear outside the rectangle); none if damaged.
     fn pixels(&self, width: u32, height: u32) -> Option<Vec<u8>> {
         let rows = self.rows()?;
+        // painted edge to edge: its rows are the whole layer already (not laid out again: a big
+        // canvas's layer is many megabytes)
+        if self.rect == Some(IRect::from_size(width, height)) {
+            return Some(rows);
+        }
         let mut full = vec![0u8; width as usize * height as usize * 4];
         if let Some(r) = self.rect {
             let row = r.width() as usize * 4;
@@ -15967,12 +16188,25 @@ impl TipKind {
 }
 
 /// Brush files' grains or shapes at their own size, each an array with its mip levels, the image in its first
-/// layer: only the last few used, so that their memory doesn't grow with the brushes.
+/// layer: only the last few used, so that their memory doesn't grow with the brushes. Those given
+/// since the last render wait for it to put them on the GPU (see [`Canvas::use_sources`]).
 #[derive(Default)]
 struct FullGrains {
     /// Each image's id, its view, when it was last used and what it takes on the GPU (bytes).
     held: Vec<(u64, wgpu::TextureView, u64, u64)>,
+    /// Those given and not put on the GPU yet, and when each was last used.
+    due: Vec<(FullDue, u64)>,
     clock: u64,
+}
+
+/// An image given to [`FullGrains`], for the next render to put on the GPU: `side` square, its own
+/// set of `images` (`channels` bytes a pixel), or one grey image with its smaller `levels` after it.
+struct FullDue {
+    id: u64,
+    side: u32,
+    images: Vec<Vec<u8>>,
+    channels: u32,
+    levels: Option<Vec<u8>>,
 }
 
 impl FullGrains {
@@ -15981,19 +16215,37 @@ impl FullGrains {
         self.held.iter().map(|slot| slot.3).sum()
     }
 
-    /// Has the image `id` ready; false if `pixels` aren't `side` square.
-    fn hold(&mut self, gpu: &Gpu, id: u64, side: u32, pixels: &[u8]) -> bool {
-        self.hold_set(gpu, id, side, &[pixels], 1)
+    /// Lets go of them all, and of those due.
+    fn let_go(&mut self) {
+        self.held.clear();
+        self.due.clear();
     }
 
-    /// Has the images `id` ready, one to a layer in their order, `channels` bytes a pixel (1 grey,
-    /// 4 RGBA straight, held premultiplied); false if any isn't `side` square, there are none or
-    /// more than [`MOST_TIPS`].
-    fn hold_set(&mut self, gpu: &Gpu, id: u64, side: u32, images: &[&[u8]], channels: u32) -> bool {
+    /// Whether the image `id` is held or due, marked used now if it is.
+    fn used(&mut self, id: u64) -> bool {
         self.clock += 1;
         let clock = self.clock;
         if let Some(slot) = self.held.iter_mut().find(|slot| slot.0 == id) {
             slot.2 = clock;
+            return true;
+        }
+        if let Some(due) = self.due.iter_mut().find(|due| due.0.id == id) {
+            due.1 = clock;
+            return true;
+        }
+        false
+    }
+
+    /// Has the image `id` ready by the next render; false if `pixels` aren't `side` square.
+    fn hold(&mut self, gpu: &Gpu, id: u64, side: u32, pixels: &[u8]) -> bool {
+        self.hold_set(gpu, id, side, &[pixels], 1)
+    }
+
+    /// Has the images `id` ready by the next render, one to a layer in their order, `channels`
+    /// bytes a pixel (1 grey, 4 RGBA straight, held premultiplied); false if any isn't `side`
+    /// square, there are none or more than [`MOST_TIPS`].
+    fn hold_set(&mut self, gpu: &Gpu, id: u64, side: u32, images: &[&[u8]], channels: u32) -> bool {
+        if self.used(id) {
             return true;
         }
         let square = (side as usize).pow(2) * channels as usize;
@@ -16006,97 +16258,119 @@ impl FullGrains {
         {
             return false;
         }
-        let layers = gpu.array_layers(images.len() as u32).max(gpu.array_layers_least());
-        let texture = gpu.texture(&wgpu::TextureDescriptor {
-            label: Some("full grain"),
-            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: layers },
-            mip_level_count: side.ilog2() + 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: if channels == 4 { wgpu::TextureFormat::Rgba8Unorm } else { wgpu::TextureFormat::R8Unorm },
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        for (layer, pixels) in images.iter().enumerate() {
-            if channels == 4 {
-                // premultiplied, so that its smaller levels don't darken its edges
-                let premultiplied: Vec<u8> = pixels
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .flat_map(|&[r, g, b, a]| {
-                        let by = |c: u8| ((u32::from(c) * u32::from(a) + 127) / 255) as u8;
-                        [by(r), by(g), by(b), a]
-                    })
-                    .collect();
-                write_image_levels_of(gpu, &texture, layer as u32, side, &premultiplied, 4);
-            } else {
-                write_image_levels(gpu, &texture, layer as u32, side, pixels);
-            }
-        }
-        if self.held.len() >= FULL_GRAINS_HELD
-            && let Some(oldest) = self.held.iter().enumerate().min_by_key(|(_, slot)| slot.2).map(|(i, _)| i)
-        {
-            self.held.swap_remove(oldest);
-        }
-        let bytes = levels_bytes(side) as u64 * u64::from(channels) * u64::from(layers);
-        self.held.push((id, array_view(&texture), clock, bytes));
+        let images = images.iter().map(|i| i.to_vec()).collect();
+        self.due.push((FullDue { id, side, images, channels, levels: None }, self.clock));
         true
     }
 
-    /// Has the grey image `id` ready from `levels` (`side` square and its smaller levels after it,
-    /// as [`grey_levels`] gives them); false if they aren't that.
-    fn hold_levels(&mut self, gpu: &Gpu, id: u64, side: u32, levels: &[u8]) -> bool {
-        self.clock += 1;
-        let clock = self.clock;
-        if let Some(slot) = self.held.iter_mut().find(|slot| slot.0 == id) {
-            slot.2 = clock;
+    /// Has the grey image `id` ready by the next render from `levels` (`side` square and its
+    /// smaller levels after it, as [`grey_levels`] gives them); false if they aren't that.
+    fn hold_levels(&mut self, id: u64, side: u32, levels: &[u8]) -> bool {
+        if self.used(id) {
             return true;
         }
         if !side.is_power_of_two() || levels.len() != levels_bytes(side) {
             return false;
         }
-        let texture = gpu.texture(&wgpu::TextureDescriptor {
-            label: Some("full grain"),
-            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: gpu.array_layers_least() },
-            mip_level_count: side.ilog2() + 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let (mut at, mut size) = (0, side);
-        for mip in 0..side.ilog2() + 1 {
-            let bytes = (size * size) as usize;
-            let Some(level) = levels.get(at..at + bytes) else { return false };
-            gpu.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: mip,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                level,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size), rows_per_image: Some(size) },
-                wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
-            );
-            at += bytes;
-            size = (size / 2).max(1);
-        }
-        if self.held.len() >= FULL_GRAINS_HELD
-            && let Some(oldest) = self.held.iter().enumerate().min_by_key(|(_, slot)| slot.2).map(|(i, _)| i)
-        {
-            self.held.swap_remove(oldest);
-        }
-        let bytes = levels_bytes(side) as u64 * u64::from(gpu.array_layers_least());
-        self.held.push((id, array_view(&texture), clock, bytes));
+        let due = FullDue { id, side, images: Vec::new(), channels: 1, levels: Some(levels.to_vec()) };
+        self.due.push((due, self.clock));
         true
+    }
+
+    /// Puts the images due on the GPU, the longest unused let go past [`FULL_GRAINS_HELD`];
+    /// whether there were any.
+    fn put_due(&mut self, gpu: &Gpu) -> bool {
+        let due = std::mem::take(&mut self.due);
+        let any = !due.is_empty();
+        for (due, clock) in due {
+            let made = match &due.levels {
+                Some(levels) => put_levels(gpu, due.side, levels),
+                None => put_set(gpu, due.side, &due.images, due.channels),
+            };
+            let Some((view, bytes)) = made else { continue };
+            if self.held.len() >= FULL_GRAINS_HELD
+                && let Some(oldest) = self.held.iter().enumerate().min_by_key(|(_, slot)| slot.2).map(|(i, _)| i)
+            {
+                self.held.swap_remove(oldest);
+            }
+            self.held.push((due.id, view, clock, bytes));
+        }
+        any
     }
 
     fn view(&self, id: u64) -> Option<&wgpu::TextureView> {
         self.held.iter().find(|slot| slot.0 == id).map(|slot| &slot.1)
     }
+}
+
+/// `images` (each `side` square, `channels` bytes a pixel) on the GPU as an array with its mip
+/// levels, one to a layer (see [`FullGrains::hold_set`]): its view, and what it takes (bytes).
+fn put_set(gpu: &Gpu, side: u32, images: &[Vec<u8>], channels: u32) -> Option<(wgpu::TextureView, u64)> {
+    let layers = gpu.array_layers(u32::try_from(images.len()).ok()?).max(gpu.array_layers_least());
+    let texture = gpu.texture(&wgpu::TextureDescriptor {
+        label: Some("full grain"),
+        size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: layers },
+        mip_level_count: side.ilog2() + 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: if channels == 4 { wgpu::TextureFormat::Rgba8Unorm } else { wgpu::TextureFormat::R8Unorm },
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (layer, pixels) in images.iter().enumerate() {
+        if channels == 4 {
+            // premultiplied, so that its smaller levels don't darken its edges
+            let premultiplied: Vec<u8> = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|&[r, g, b, a]| {
+                    let by = |c: u8| ((u32::from(c) * u32::from(a) + 127) / 255) as u8;
+                    [by(r), by(g), by(b), a]
+                })
+                .collect();
+            write_image_levels_of(gpu, &texture, layer as u32, side, &premultiplied, 4);
+        } else {
+            write_image_levels(gpu, &texture, layer as u32, side, pixels);
+        }
+    }
+    let bytes = levels_bytes(side) as u64 * u64::from(channels) * u64::from(layers);
+    Some((array_view(&texture), bytes))
+}
+
+/// A grey image `side` square from its `levels` (see [`FullGrains::hold_levels`]) on the GPU: its
+/// view, and what it takes (bytes).
+fn put_levels(gpu: &Gpu, side: u32, levels: &[u8]) -> Option<(wgpu::TextureView, u64)> {
+    let texture = gpu.texture(&wgpu::TextureDescriptor {
+        label: Some("full grain"),
+        size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: gpu.array_layers_least() },
+        mip_level_count: side.ilog2() + 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let (mut at, mut size) = (0, side);
+    for mip in 0..side.ilog2() + 1 {
+        let bytes = (size * size) as usize;
+        let level = levels.get(at..at + bytes)?;
+        gpu.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: mip,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            level,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size), rows_per_image: Some(size) },
+            wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        );
+        at += bytes;
+        size = (size / 2).max(1);
+    }
+    let bytes = levels_bytes(side) as u64 * u64::from(gpu.array_layers_least());
+    Some((array_view(&texture), bytes))
 }
 
 /// A grey image `side` (a power of two) square with its smaller levels after it, each the 2×2
@@ -16137,15 +16411,16 @@ impl SourceSlots {
         SourceSlots { first: shipped as u32, held: Vec::new(), clock: 0 }
     }
 
-    /// The layer of `texture` holding `source`, put there if it isn't.
-    fn layer(&mut self, gpu: &Gpu, texture: &wgpu::Texture, source: &Source) -> u32 {
+    /// The layer holding `source`, and whether it was taken for it just now (for it to be put
+    /// there: see [`Canvas::use_sources`]).
+    fn layer(&mut self, source: &Source) -> (u32, bool) {
         self.clock += 1;
         let clock = self.clock;
         if let Some(i) = self.held.iter().position(|&(id, _)| id == source.id) {
             if let Some(slot) = self.held.get_mut(i) {
                 slot.1 = clock;
             }
-            return self.first + i as u32;
+            return (self.first + i as u32, false);
         }
         let i = if self.held.len() < SOURCE_SLOTS {
             self.held.push((source.id, clock));
@@ -16157,9 +16432,7 @@ impl SourceSlots {
             }
             oldest
         };
-        let layer = self.first + i as u32;
-        write_brush_image(gpu, texture, layer, &source.pixels);
-        layer
+        (self.first + i as u32, true)
     }
 }
 
@@ -17047,6 +17320,40 @@ mod tests {
                 assert!(fast.rgba == slow.rgba && fast.width == slow.width, "{w}x{h} part");
             }
         }
+    }
+
+    /// A parked layer's pixels come back as they were: painted edge to edge (its rows the whole
+    /// layer), in a part of it, or nowhere.
+    #[test]
+    fn a_parked_layers_pixels_come_back_as_they_were() {
+        let (w, h) = (300u32, 200u32);
+        let mut seed = 777u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 16) as u8
+        };
+        let painted = |rect: IRect, next: &mut dyn FnMut() -> u8| {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            for y in rect.y0..rect.y1 {
+                for x in rect.x0..rect.x1 {
+                    let i = ((y as u32 * w + x as u32) * 4) as usize;
+                    rgba[i + 3] = next() | 1;
+                    rgba[i] = next().min(rgba[i + 3]);
+                }
+            }
+            rgba
+        };
+        for rect in [
+            IRect::from_size(w, h),
+            IRect { x0: 0, y0: 30, x1: 300, y1: 120 },
+            IRect { x0: 17, y0: 5, x1: 211, y1: 199 },
+        ] {
+            let rgba = painted(rect, &mut next);
+            let parked = Parked::of(&rgba, w, Some(rect));
+            assert!(parked.pixels(w, h) == Some(rgba), "{rect:?}");
+        }
+        let clear = vec![0u8; (w * h * 4) as usize];
+        assert!(Parked::of(&clear, w, None).pixels(w, h) == Some(clear));
     }
 
     std::thread_local! {

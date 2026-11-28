@@ -31,6 +31,29 @@ pub fn within_threads<R>(threads: usize, f: impl FnOnce() -> R) -> R {
     out
 }
 
+std::thread_local! {
+    /// Whether this thread is doing a share of work shared out here (see [`in_worker`]).
+    // (already const: clippy 1.99 asks for it again when built for Android)
+    #[allow(clippy::missing_const_for_thread_local)]
+    static WORKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this thread is doing a share of [`side_by_side`]'s or [`each_part`]'s work (or is the
+/// thread that asked, doing all of it where no thread could be made): work it would share out
+/// again is better done on it, the cores being busy already (a tile packed side by side with the
+/// others is packed on its thread).
+pub fn in_worker() -> bool {
+    WORKING.with(std::cell::Cell::get)
+}
+
+/// `f`, done on this thread as a share of work shared out (see [`in_worker`]).
+fn working<R>(f: impl FnOnce() -> R) -> R {
+    let before = WORKING.with(|w| w.replace(true));
+    let out = f();
+    WORKING.with(|w| w.set(before));
+    out
+}
+
 /// The most threads work is spread over, whatever the cores (see [`hold_threads_to`]).
 static HELD_TO: AtomicUsize = AtomicUsize::new(usize::MAX);
 
@@ -104,12 +127,15 @@ pub fn side_by_side_within<T: Sync, R: Send>(items: &[T], each: usize, f: impl F
     let done: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::new());
     // a worker takes the next item there is until none are left, then puts what it did in `done`
     let work = || {
-        let mut mine = Vec::new();
-        loop {
-            let i = next.fetch_add(1, Ordering::Relaxed);
-            let Some(item) = items.get(i) else { break };
-            mine.push((i, f(item)));
-        }
+        let mine = working(|| {
+            let mut mine = Vec::new();
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { break };
+                mine.push((i, f(item)));
+            }
+            mine
+        });
         done.lock().unwrap_or_else(PoisonError::into_inner).extend(mine);
     };
     std::thread::scope(|scope| {
@@ -144,9 +170,11 @@ pub fn each_part<T: Send>(items: &mut [T], part: usize, f: impl Fn(&mut [T]) + S
     let workers = cores().min(items.len().div_ceil(part));
     let parts = Mutex::new(items.chunks_mut(part));
     let work = || {
-        while let Some(piece) = parts.lock().ok().and_then(|mut p| p.next()) {
-            f(piece);
-        }
+        working(|| {
+            while let Some(piece) = parts.lock().ok().and_then(|mut p| p.next()) {
+                f(piece);
+            }
+        });
     };
     std::thread::scope(|scope| {
         let work = &work;
@@ -183,6 +211,23 @@ mod tests {
         // work too big for two at once still comes back whole, in order
         let out = side_by_side_within(&items, BUDGET / 2 + 1, |v| v + 1);
         assert!(out.iter().enumerate().all(|(i, r)| *r == Some(i as u32 + 1)));
+    }
+
+    /// Work shared out knows it is (so it isn't shared out again), and the thread that asked knows
+    /// it isn't once it is done, even where it did all the work itself.
+    #[test]
+    fn shared_out_work_knows_it_is() {
+        assert!(!in_worker());
+        let items: Vec<u32> = (0..50).collect();
+        assert!(side_by_side(&items, |_| in_worker()).iter().all(|w| *w == Some(true)));
+        let mut parts = vec![false; 50];
+        each_part(&mut parts, 3, |piece| piece.iter_mut().for_each(|w| *w = in_worker()));
+        assert!(parts.iter().all(|w| *w));
+        threads_fail(true);
+        let alone = side_by_side(&items, |_| in_worker());
+        threads_fail(false);
+        assert!(alone.iter().all(|w| *w == Some(true)));
+        assert!(!in_worker());
     }
 
     #[test]

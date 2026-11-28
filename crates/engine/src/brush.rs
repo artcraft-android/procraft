@@ -392,42 +392,104 @@ pub enum PressureCurve {
     SpacingJitter,
 }
 
-/// A brush's own [`PressureCurve`]s, those it has.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PressureCurves(BTreeMap<PressureCurve, Curve>);
+/// Every [`PressureCurve`], in their order (as brush files list them too:
+/// [`crate::brushfile::PRESSURE_CURVES`]).
+const KINDS: [PressureCurve; 36] = {
+    use PressureCurve::*;
+    [
+        LateralJitter,
+        LinearJitter,
+        Count,
+        CountJitter,
+        SizeJitter,
+        OpacityJitter,
+        Scatter,
+        RoundnessJitterY,
+        RoundnessJitterX,
+        GrainMovement,
+        GrainScale,
+        GrainZoom,
+        GrainDepth,
+        GrainDepthJitter,
+        WetGrade,
+        WetBlur,
+        WetBlurJitter,
+        WetnessJitter,
+        Hue,
+        Saturation,
+        Brightness,
+        Secondary,
+        HueJitter,
+        SaturationJitter,
+        LightnessJitter,
+        DarknessJitter,
+        SecondaryJitter,
+        Flow,
+        Bleed,
+        Roundness,
+        Dilution,
+        Charge,
+        Attack,
+        WetPull,
+        SmudgePull,
+        SpacingJitter,
+    ]
+};
+
+/// A brush's own [`PressureCurve`]s, those it has: a place for each kind, so that the thirty or
+/// so each stamp reads are found at once (kept by kind in a tree, a brush with every curve took
+/// half as long again to make a stamp as one with none: see `tests/stamp_cost.rs`). The places
+/// are on the heap: held in the brush they took 1.4 KB of it, which every brush kept by value
+/// carried (the session's state holds two, and is moved whole as a session is made).
+#[derive(Clone, PartialEq)]
+pub struct PressureCurves(Box<[Option<Curve>; KINDS.len()]>);
+
+impl Default for PressureCurves {
+    fn default() -> PressureCurves {
+        PressureCurves(Box::new(std::array::from_fn(|_| None)))
+    }
+}
+
+impl std::fmt::Debug for PressureCurves {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
 
 impl PressureCurves {
     pub fn get(&self, kind: PressureCurve) -> Option<&Curve> {
-        self.0.get(&kind)
+        self.0.get(kind as usize).and_then(Option::as_ref)
     }
 
     /// Gives `kind` a curve, or takes its curve away.
     pub fn set(&mut self, kind: PressureCurve, curve: Option<Curve>) {
-        match curve {
-            Some(c) => self.0.insert(kind, c),
-            None => self.0.remove(&kind),
-        };
+        if let Some(place) = self.0.get_mut(kind as usize) {
+            *place = curve;
+        }
     }
 
     /// The curves a new brush has: the colour's following the pressure, straight.
     pub fn new_brush() -> PressureCurves {
-        let colour =
-            [PressureCurve::Hue, PressureCurve::Saturation, PressureCurve::Brightness, PressureCurve::Secondary];
-        PressureCurves(colour.into_iter().map(|k| (k, Curve::linear())).collect())
+        let mut curves = PressureCurves::default();
+        for k in [PressureCurve::Hue, PressureCurve::Saturation, PressureCurve::Brightness, PressureCurve::Secondary] {
+            curves.set(k, Some(Curve::linear()));
+        }
+        curves
     }
 
     /// What `kind` is scaled by at `pressure`: 1 without a curve.
     pub fn at(&self, kind: PressureCurve, pressure: f32) -> f32 {
-        self.0.get(&kind).map_or(1.0, |c| c.eval(pressure))
+        self.get(kind).map_or(1.0, |c| c.eval(pressure))
     }
 
     /// `pressure` through `kind`'s curve: as it is without one.
     pub fn through(&self, kind: PressureCurve, pressure: f32) -> f32 {
-        self.0.get(&kind).map_or(pressure, |c| c.eval(pressure))
+        self.get(kind).map_or(pressure, |c| c.eval(pressure))
     }
 
+    /// The curves it has, by kind in their order.
     pub fn iter(&self) -> impl Iterator<Item = (PressureCurve, &Curve)> {
-        self.0.iter().map(|(k, c)| (*k, c))
+        KINDS.iter().zip(self.0.iter()).filter_map(|(k, c)| c.as_ref().map(|c| (*k, c)))
     }
 }
 
@@ -1081,6 +1143,69 @@ impl Brush {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::Vec2;
+
+    /// Every kind of pressure curve is listed once, in its order, so each has a place of its own
+    /// and they are gone through as their order goes: the kinds brush files keep, all of them.
+    #[test]
+    fn every_pressure_curve_kind_is_listed_in_its_order() {
+        for (i, kind) in KINDS.iter().enumerate() {
+            assert_eq!(*kind as usize, i, "{kind:?}");
+        }
+        assert!(KINDS.windows(2).all(|w| w[0] < w[1]));
+        let in_files: Vec<PressureCurve> = crate::brushfile::PRESSURE_CURVES.iter().map(|(k, _)| *k).collect();
+        assert_eq!(in_files, KINDS);
+    }
+
+    /// A brush's pressure curves, kept a place for each kind, answer as a map of them by kind
+    /// would (as they were kept before): what each kind has, what it scales by and lets through
+    /// at any pressure, those it has in their order, how they compare and print, as curves are
+    /// given and taken away in any order.
+    #[test]
+    fn a_brush_s_pressure_curves_answer_as_a_map_of_them_by_kind() {
+        let curve = |k: usize| Curve::new(&[Vec2::new(0.0, 0.1 * (k % 7) as f32), Vec2::new(1.0, 1.0)]);
+        let mut curves = PressureCurves::default();
+        let mut model: BTreeMap<PressureCurve, Curve> = BTreeMap::new();
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for step in 0..400 {
+            let kind = KINDS[next() as usize % KINDS.len()];
+            if next() % 3 == 0 {
+                curves.set(kind, None);
+                model.remove(&kind);
+            } else {
+                curves.set(kind, Some(curve(step)));
+                model.insert(kind, curve(step));
+            }
+            for k in KINDS {
+                assert_eq!(curves.get(k), model.get(&k), "{k:?}");
+                for p in [0.0, 0.13, 0.5, 0.77, 1.0, -1.0, 2.0, f32::NAN] {
+                    let at = model.get(&k).map_or(1.0, |c| c.eval(p));
+                    let through = model.get(&k).map_or(p, |c| c.eval(p));
+                    assert_eq!(curves.at(k, p).to_bits(), at.to_bits(), "{k:?} at {p}");
+                    assert_eq!(curves.through(k, p).to_bits(), through.to_bits(), "{k:?} through {p}");
+                }
+            }
+            let listed: Vec<(PressureCurve, &Curve)> = curves.iter().collect();
+            let modelled: Vec<(PressureCurve, &Curve)> = model.iter().map(|(k, c)| (*k, c)).collect();
+            assert_eq!(listed, modelled);
+            assert_eq!(format!("{curves:?}"), format!("{model:?}"));
+        }
+        let copy = curves.clone();
+        assert_eq!(copy, curves);
+        curves.set(PressureCurve::Flow, Some(curve(3)));
+        curves.set(PressureCurve::Flow, None);
+        assert_eq!(copy == curves, copy.iter().eq(curves.iter()));
+        assert_eq!(PressureCurves::default(), PressureCurves::default());
+        let new: Vec<PressureCurve> = PressureCurves::new_brush().iter().map(|(k, _)| k).collect();
+        use PressureCurve::*;
+        assert_eq!(new, [Hue, Saturation, Brightness, Secondary]);
+    }
 
     /// A stand-in's twin draws the same picture, held apart: drawing it leaves the stand-in
     /// undrawn, and its pixels go once the twin does; a picture of the user's own has none

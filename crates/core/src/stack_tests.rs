@@ -57,7 +57,12 @@ fn picture(w: u32, h: u32) -> ThumbnailImage {
 fn the_sessions_state_is_small_enough_to_move() {
     let state = std::mem::size_of::<State>();
     let shared = std::mem::size_of::<crate::Shared>();
-    println!("the session's state: {state} bytes ({:.1} KB); all it shares: {shared} bytes", state as f64 / 1024.0);
+    // (it holds two brushes by value, the studio's and the one for an empty library)
+    let brush = std::mem::size_of::<procraft_engine::brush::Brush>();
+    println!(
+        "the session's state: {state} bytes ({:.1} KB), a brush {brush} of them twice; all it shares: {shared} bytes",
+        state as f64 / 1024.0
+    );
     assert!(state <= STATE_MOST, "the state takes {state} bytes, more than {STATE_MOST}");
     assert!(shared <= STATE_MOST + 4096, "the shared part takes {shared} bytes");
 }
