@@ -1075,7 +1075,7 @@ impl CanvasSession {
         // a plugin moving picked layers together: each of them, if this is one
         let hooks = self.shared.lock().hooks.clone();
         let together = hooks.is_some_and(|hooks| hooks.opacity_together());
-        self.change_live("layer opacity", done, |d| {
+        self.change_live_of("layer opacity", done, Some(LayerId(id)), |d| {
             let chosen = d.chosen();
             if !(together && chosen.len() > 1 && chosen.contains(&LayerId(id))) {
                 return d.set_opacity(LayerId(id), opacity);
@@ -1098,7 +1098,7 @@ impl CanvasSession {
     /// Apply a centered mode immediately, keeping the picker movement as one undo step.
     pub fn preview_layer_blend(&self, id: u64, blend: u32) -> bool {
         let Some(mode) = BlendMode::from_id(blend) else { return false };
-        self.change_live(BLEND_MODE_STEP, false, |d| {
+        self.change_live_of(BLEND_MODE_STEP, false, Some(LayerId(id)), |d| {
             changed(d, id, |l| l.blend != mode) && d.set_blend(LayerId(id), mode)
         })
     }
@@ -1550,6 +1550,19 @@ impl CanvasSession {
     /// A change made continuously, called `name` by undo and redo: shown at once, recorded as one
     /// step when `done`.
     pub(crate) fn change_live(&self, name: &str, done: bool, f: impl FnOnce(&mut Document) -> bool) -> bool {
+        self.change_live_of(name, done, None, f)
+    }
+
+    /// [`CanvasSession::change_live`] of the settings of layer `dragged`, if one: it composites
+    /// live with the layers worked on until the change is done, the composite's caches kept as
+    /// they are meanwhile (see `Canvas::settings_dragged`).
+    pub(crate) fn change_live_of(
+        &self,
+        name: &str,
+        done: bool,
+        dragged: Option<LayerId>,
+        f: impl FnOnce(&mut Document) -> bool,
+    ) -> bool {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.finish_stroke();
@@ -1563,7 +1576,7 @@ impl CanvasSession {
         st.pending_doc.get_or_insert(before);
         st.pending_name = Some(name.to_owned());
         if let Some(canvas) = st.canvas.as_mut() {
-            canvas.invalidate();
+            canvas.settings_dragged(dragged);
         }
         if done {
             st.settle();
@@ -1709,8 +1722,10 @@ impl crate::State {
     /// Takes the time-lapse frame asked for (see [`CanvasSession::record_time_lapse`]), if there
     /// is one: in a frame (`at_once` false) once the frames have laid what they lay a share at a
     /// time, an open shape's stroke among it (not the stroke the pen is drawing), and the caches are
-    /// whole (else a frame after this one does, more asked for until then); otherwise now, laying
-    /// that at once. Its picture
+    /// whole (else a frame after this one does, more asked for until then), and once a change made
+    /// continuously (a slider dragged) is done, as it is one step (the frame after it takes it: the
+    /// apps ask for one at each of its moves, and each frame of the drag took one); otherwise now,
+    /// laying that at once. Its picture
     /// (private layers left out, so a private insert never shows in the replay or its video) is
     /// only started on the GPU here and handed to the keeper, never waited for. (Taken while a big
     /// shape's stroke was still being laid a share a frame, the render it is read with laid all
@@ -1729,6 +1744,10 @@ impl crate::State {
         // (and an open shape's stroke still being laid: not the pen's own stroke, whose work comes as
         // it moves)
         let laying_shape = self.shape.is_some() && (canvas.catching_up() || canvas.relaying());
+        // (a change still being made: its end asks for a frame, which takes it)
+        if !at_once && self.pending_doc.is_some() {
+            return;
+        }
         if !at_once && (canvas.busy() || canvas.lays_over_frames() || laying_shape) {
             self.needs_frame = true;
             return;

@@ -32,6 +32,9 @@ pub const TIME_LAPSE_FPS: u32 = 30;
 pub(crate) const FRAME_SIDE: u32 = 1280;
 /// The longest a save (or a frame taken with none drawn) waits for the frames taken to be kept.
 pub(crate) const KEEP_MOST: std::time::Duration = std::time::Duration::from_secs(5);
+/// The most frames taken that wait to be kept (see [`FrameKeeper::keep`]): far more than strokes
+/// one after another leave waiting, each at most a picture of [`FRAME_SIDE`] square on its way back.
+pub(crate) const WAITING_MOST: usize = 16;
 const JPEG_QUALITY: u8 = 85;
 /// A package's videos are made again as one rather than be more than this (while every frame is
 /// still a picture to make them of).
@@ -87,9 +90,16 @@ struct KeepQueue {
 }
 
 impl FrameKeeper {
-    /// `picture` to be kept as `lapse`'s next frame, after those handed over before it.
+    /// `picture` to be kept as `lapse`'s next frame, after those handed over before it. With
+    /// [`WAITING_MOST`] waiting already, the oldest of them is let go for it: each holds a copy
+    /// coming back from the GPU in a buffer of its own, and taken faster than they were kept (a
+    /// frame each while a layer's opacity was dragged) hundreds piled up, more than a tablet's GPU
+    /// had memory for, and its device was lost.
     pub(crate) fn keep(&self, lapse: Arc<TimeLapse>, picture: procraft_gpu::PendingThumbnail) {
         let mut queue = self.inner.queue.lock();
+        while queue.pictures.len() >= WAITING_MOST {
+            queue.pictures.pop_front();
+        }
         queue.pictures.push_back((lapse, picture));
         if queue.running {
             return;
@@ -105,6 +115,12 @@ impl FrameKeeper {
             queue.running = false;
             self.inner.kept.notify_all();
         }
+    }
+
+    /// How many pictures handed over wait to be kept (not the one being kept).
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        self.inner.queue.lock().pictures.len()
     }
 
     /// Waits until every picture handed over is kept, for at most `most`: whether they are.

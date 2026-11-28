@@ -851,6 +851,72 @@ fn with_little_memory_the_caches_borrow_their_second_textures_and_composite_the_
     assert!(t.canvases[0].composites_cached());
 }
 
+/// #442: a layer's opacity dragged (and its blend mode, as the picker passes the modes), over
+/// layers most of which are parked, composites around the caches as they are: the dragged layer
+/// composited live in place of the current one, the caches made around it once and kept for the
+/// rest of the drag (no remake under way after the first change), every frame alike the full
+/// composite; recorded, the caches are made around the current layer again. Let go at each change,
+/// their remake began again each frame and never finished.
+#[test]
+fn a_layer_s_settings_dragged_composite_around_caches_kept_for_the_drag() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // room for three layers' textures only: the rest are parked
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    let modes = [BlendMode::Normal, BlendMode::Multiply, BlendMode::Normal, BlendMode::Screen, BlendMode::Normal];
+    t.each(|doc, canvas| {
+        let base = doc.current();
+        fill(canvas, doc, base, [180, 180, 180]);
+        for i in 0..7u8 {
+            let id = doc.add_layer();
+            doc.set_blend(id, modes[usize::from(i) % modes.len()]);
+            let at = Vec2::new(f32::from(i % 4) * 4.0 + 2.0, f32::from(i / 4) * 6.0 + 3.0);
+            paint(canvas, doc, id, [i * 30, 200 - i * 20, 90], at, 4.0, StrokeTool::Paint);
+        }
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "made");
+    t.same(&gpu, 2, "made, parked");
+    assert!(t.canvases[0].composites_cached(), "made around caches");
+    let ids: Vec<LayerId> = t.docs[0].layers().iter().map(|l| l.id).collect();
+    let current = t.docs[0].current();
+    // the current (top) layer's opacity, a layer's far below it, and a multiplied one's blend mode
+    let drags: [(&str, LayerId, Option<BlendMode>); 3] = [
+        ("the current layer's opacity", current, None),
+        ("a lower layer's opacity", ids[2], None),
+        ("a layer's blend mode", ids[2], Some(BlendMode::Darken)),
+    ];
+    for (what, dragged, blend) in drags {
+        let before: Vec<Document> = t.docs.to_vec();
+        for k in 0..=6 {
+            let v = 1.0 - k as f32 / 8.0;
+            t.each(|doc, canvas| {
+                match blend {
+                    Some(mode) if k % 2 == 0 => doc.set_blend(dragged, mode),
+                    Some(_) => doc.set_blend(dragged, BlendMode::Multiply),
+                    None => doc.set_opacity(dragged, v),
+                };
+                canvas.settings_dragged(Some(dragged));
+            });
+            if k > 1 {
+                // the caches as they were: nothing to remake
+                let (doc, canvas) = (&mut t.docs[0], &mut t.canvases[0]);
+                canvas.render(&gpu, doc, None);
+                assert!(!canvas.busy(), "{what}, change {k}: the caches remade");
+                assert!(canvas.composites_cached(), "{what}, change {k}: the caches let go");
+            }
+            t.same(&gpu, 2, &format!("{what}, change {k}"));
+        }
+        for (canvas, before) in t.canvases.iter_mut().zip(before) {
+            canvas.record_document(before);
+        }
+        t.same(&gpu, 2, &format!("{what}, recorded"));
+        assert!(t.canvases[0].composites_cached(), "{what}: made around caches again");
+    }
+}
+
 #[test]
 fn parked_layers_come_back_as_they_were() {
     let Some((gpu, _, _)) = setup() else { return };

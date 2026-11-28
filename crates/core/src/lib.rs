@@ -1211,6 +1211,7 @@ impl State {
         let name = self.pending_name.take();
         if let (Some(before), Some(canvas)) = (self.pending_doc.take(), self.canvas.as_mut()) {
             if name.as_deref() == Some(layers::BLEND_MODE_STEP) && before == self.doc {
+                canvas.settings_dragged(None);
                 return;
             }
             if let Some(name) = name {
