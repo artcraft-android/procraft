@@ -6,7 +6,10 @@
 //! [`MOST_PER_PIXEL`] bytes a pixel of the biggest picture's side, beside the pictures held for
 //! the brushes chosen. Drawing a 2048 picture held 77 MB at most while each of its blurs and what
 //! it is ranked by took a picture's worth of its own; 61 MB with them added in place (106 and 90 MB
-//! in all, beside those held). (A test of its own, as it counts every allocation the program makes.)
+//! in all, beside those held). Blurred on several threads into strips of their own and ranked by a
+//! radix sort holding its keys and two pairs for each, 89 MB; 57 MB with the columns blurred straight
+//! into the sums and the values let go of as the sort reads them (118 and 86 MB in all). (A test of
+//! its own, as it counts every allocation the program makes.)
 
 use std::time::{Duration, Instant};
 
@@ -61,8 +64,10 @@ fn a_big_picture_is_drawn_within_a_bound_and_let_go_of_before_the_next() {
     let mut peak_over = 0u64;
     for (set, index, name, sides) in &chosen {
         let (before, before_most) = held();
+        let asked = Instant::now();
         assert!(s.select_brush(*set, *index));
         settle();
+        let took = asked.elapsed();
         let (after, after_most) = held();
         // the most held while its pictures were drawn, over what was held as it was chosen (shown
         // only where that passes the most so far: the count keeps the program's most)
@@ -70,11 +75,12 @@ fn a_big_picture_is_drawn_within_a_bound_and_let_go_of_before_the_next() {
         let new_most = after_most > before_most;
         peak_over = peak_over.max(after_most.saturating_sub(start));
         println!(
-            "{name:<22} pictures {sides:?}: {} held at most while drawn, over {} before{}; {} held after",
+            "{name:<22} pictures {sides:?}: {} held at most while drawn, over {} before{}; {} held after; made in {} ms",
             mb(over),
             mb(before.saturating_sub(start)),
             if new_most { "" } else { " (no new most)" },
-            mb(after.saturating_sub(start))
+            mb(after.saturating_sub(start)),
+            took.as_millis()
         );
     }
     let (end, _) = held();

@@ -243,13 +243,13 @@ pub fn shape_sharpens(index: u32) -> bool {
 }
 
 /// Whether our grain `index` shows more drawn bigger than [`TEXTURE_SIZE`] (see
-/// [`shape_sharpens`]). Those made of noise a texel across (each texel its own speck, as a fine
-/// paper's grain is a pixel or two, and as a stock grain's is where they stand in for one) have
-/// nothing finer to show: drawn bigger they would be other noise, as fine in texels, so finer than
-/// the grain they stand in for.
+/// [`shape_sharpens`]): all of them. Even those made of noise a texel across (each texel its own
+/// speck, as a fine paper's grain is a pixel or two) do: magnified over a big tile their texels
+/// show as soft squares several pixels across, where a stock image a thousand or two pixels
+/// across shows its own grain within them; drawn bigger they keep their noise where it was, with
+/// finer noise on it (see [`finer_noise`]).
 pub fn grain_sharpens(index: u32) -> bool {
-    let noise = [grain::NOISE, grain::SHEET, grain::FINE_NOISE, grain::SPECKLED, grain::MOTTLED, grain::SPRAYED];
-    index < GRAIN_COUNT && !noise.contains(&index)
+    index < GRAIN_COUNT
 }
 
 /// How many times finer than [`TEXTURE_SIZE`] an image `side` pixels across is. Drawn at it, an
@@ -444,12 +444,18 @@ fn marks_at(half: u32, side: usize) -> Vec<f32> {
 fn marks_drawn(half: u32, n: usize) -> Vec<f32> {
     let sigma = (half as f32 / 4.0) / 1.665;
     let raw: Vec<f32> = (0..n * n).map(|k| hash((k % n) as i32, (k / n) as i32, 6101)).collect();
-    let soft = if sigma < 0.35 { raw } else { gaussian_wrapped(&raw, n, sigma) };
+    let soft = if sigma < 0.35 {
+        raw
+    } else {
+        // (the noise let go of once softened)
+        let soft = gaussian_wrapped(&raw, n, sigma);
+        drop(raw);
+        soft
+    };
     // in order of value, equal ones in order of place (as a stable sort by value)
-    let mut order: Vec<(u32, u32)> = soft.iter().map(|&v| total_order(v)).zip(0..).collect();
-    order.sort_unstable();
+    let order = in_order(soft);
     let mut even = vec![0.0; n * n];
-    for (rank, &(_, k)) in order.iter().enumerate() {
+    for (rank, &k) in order.iter().enumerate() {
         if let Some(v) = even.get_mut(k as usize) {
             *v = rank as f32 / (n * n - 1) as f32;
         }
@@ -738,6 +744,77 @@ pub fn hard_round_at(side: usize) -> Vec<u8> {
     field(side, |x, y| ((radius - (x - 0.5).hypot(y - 0.5)) * side as f32 + 0.5).clamp(0.0, 1.0))
 }
 
+/// A round tip as a picture `side` pixels square, drawn from a stock round tip's `tones` (its values
+/// at [`SHAPE_TONE_SHARES`]): a disc falling off from its middle as the stock tip does, each texel
+/// the tone at the share of the square lying further out than it. A stock tip that is round all
+/// through comes out as big as it is and as soft at its rim, to be read through its smaller levels
+/// as it is: the round tip drawn by its hardness falls to nothing faster at its rim, so that a
+/// stroke's many stamps build its edge up harder than the stock tip's.
+pub fn round_from_tones(tones: &[u8; 17], side: usize) -> Vec<u8> {
+    let spread: Vec<(f32, f32)> =
+        tones.iter().zip(SHAPE_TONE_SHARES).map(|(&t, s)| (f32::from(t) / 255.0, s)).collect();
+    field(side, |x, y| tone_at(&spread, 1.0 - disc_cover((x - 0.5).hypot(y - 0.5))))
+}
+
+/// Whether the stock tip under `key` (inverted, for a brush that inverts it) is round all through, as
+/// [`round_from_tones`] draws it: its rows and columns hold the ink, band by band, that a disc
+/// drawn from its tones does, each within [`ROUND_BANDS_APART`] of the fullest (a ring, a dab or a
+/// tip off its middle doesn't). None measured, it isn't known to be.
+pub fn stock_shape_is_round(key: u64, inverted: bool) -> bool {
+    round_bands_apart(key, inverted).is_some_and(|apart| apart <= ROUND_BANDS_APART)
+}
+
+/// How far (out of 255) the stock tip under `key`'s rows and columns lie from a disc's drawn from
+/// its tones, band by band, at the most (see [`stock_shape_is_round`]); none if it isn't measured.
+fn round_bands_apart(key: u64, inverted: bool) -> Option<u32> {
+    let (tones, rows, cols) = (
+        stock_shape_tones_of(key, inverted)?,
+        stock_shape_rows_of(key, inverted)?,
+        stock_shape_cols_of(key, inverted)?,
+    );
+    let n = TEXTURE_SIZE;
+    let disc = round_from_tones(&tones, n);
+    // its rows' means in 64 bands, as shares of the fullest (a disc's columns are its rows)
+    let per = n / 64;
+    let means: Vec<u32> = disc.chunks(per * n).map(|band| band.iter().map(|&v| u32::from(v)).sum::<u32>()).collect();
+    let top = means.iter().copied().max().unwrap_or(0).max(1);
+    let ours = means.iter().map(|&m| (m * 255 + top / 2) / top);
+    let apart = |theirs: &[u8; 64]| ours.clone().zip(theirs).map(|(a, &b)| a.abs_diff(u32::from(b))).max().unwrap_or(0);
+    Some(apart(&rows).max(apart(&cols)))
+}
+
+/// How far (out of 255) a band of a round stock tip's rows or columns may lie from a disc's (see
+/// [`stock_shape_is_round`]): the medium and medium-hard stock tips lie within 3 and 7, the hard
+/// one whose ink lies in a ring 53 out.
+const ROUND_BANDS_APART: u32 = 12;
+
+/// How much of a square a disc about its middle covers, its radius `r` a share of the side.
+fn disc_cover(r: f32) -> f32 {
+    if r <= 0.5 {
+        PI * r * r
+    } else if r >= std::f32::consts::FRAC_1_SQRT_2 {
+        1.0
+    } else {
+        // less the four caps past the sides
+        PI * r * r - 4.0 * (r * r * (0.5 / r).acos() - 0.5 * (r * r - 0.25).sqrt())
+    }
+}
+
+/// The value `spread` ((value, share at or below it), the shares rising) puts at `share`.
+fn tone_at(spread: &[(f32, f32)], share: f32) -> f32 {
+    let mut before: Option<(f32, f32)> = None;
+    for &(v, s) in spread {
+        if share <= s {
+            return match before {
+                Some((bv, bs)) if s > bs => bv + (v - bv) * (share - bs) / (s - bs),
+                _ => v,
+            };
+        }
+        before = Some((v, s));
+    }
+    before.map_or(0.0, |(v, _)| v)
+}
+
 /// How far out the small point's dot paints half (a share of its square's side): where the stock
 /// small point's ink, as its rows measure it (64 bands, averaged down to 256 square), puts it.
 pub const POINT_RADIUS: f32 = 0.135;
@@ -900,27 +977,37 @@ pub fn drawn_by_octaves(index: u32) -> bool {
 /// values then moved onto `tones` (a stock grain's, at [`TONE_SHARES`]) keeping their order. A
 /// stand-in that varies as much at each size as the stock image it was measured from.
 pub fn octave_grain(amplitudes: &[f32; OCTAVES], tones: &[u8; 9]) -> Vec<u8> {
-    let n = TEXTURE_SIZE;
-    let raw: Vec<f32> = (0..n * n)
-        .map(|k| {
-            let (i, j) = ((k % n) as f32 + 0.5, (k / n) as f32 + 0.5);
-            amplitudes
-                .iter()
-                .enumerate()
-                .filter(|&(_, &amplitude)| amplitude > 0.0)
-                .map(|(octave, &amplitude)| {
-                    // (each cell's corner on a texel's middle: the finest octave is the texels'
-                    // own values)
-                    let cell = (1u32 << octave) as f32;
-                    let period = (n >> octave).max(1) as i32;
-                    let seed = 9001 + octave as u32 * 7919;
-                    amplitude * (value_noise(i / cell - 0.5, j / cell - 0.5, period, seed) - 0.5)
-                })
-                .sum()
-        })
+    octave_grain_at(amplitudes, tones, TEXTURE_SIZE)
+}
+
+/// [`octave_grain`] drawn `side` pixels across (a power of two from [`TEXTURE_SIZE`] up to
+/// [`SHARPEST`]), the same tile sharper: its octaves where they were, and finer ones on them down
+/// to its texels (see [`octaves_more`]), each half as strong as the one above (as [`fbm_finer`]'s),
+/// from its finest: a big picture for a tile whose stock image has more pixels than ours texels.
+pub fn octave_grain_at(amplitudes: &[f32; OCTAVES], tones: &[u8; 9], side: usize) -> Vec<u8> {
+    let finest = amplitudes.first().copied().unwrap_or(0.0);
+    // each octave's cells across the tile, its seed and its strength
+    let finer =
+        (1..=octaves_more(side)).map(|k| (TEXTURE_SIZE << k, OCTAVES as u32 + k, finest * 0.5f32.powi(k as i32)));
+    let octaves: Vec<(usize, u32, f32)> = (0..)
+        .zip(amplitudes)
+        .map(|(octave, &amplitude)| ((TEXTURE_SIZE >> octave).max(1), octave, amplitude))
+        .chain(finer)
+        .filter(|&(_, _, amplitude)| amplitude > 0.0)
         .collect();
+    let raw = values_field(side, |x, y| {
+        octaves
+            .iter()
+            .map(|&(cells, octave, amplitude)| {
+                // (each cell's corner on a texel's middle at the side its cells are texels: the
+                // finest octave is the texels' own values)
+                let (u, v) = (x * cells as f32 - 0.5, y * cells as f32 - 0.5);
+                amplitude * (value_noise(u, v, cells as i32, 9001 + octave * 7919) - 0.5)
+            })
+            .sum()
+    });
     let spread: Vec<(f32, f32)> = tones.iter().zip(TONE_SHARES).map(|(&t, s)| (f32::from(t) / 255.0, s)).collect();
-    ranked(&raw, &spread)
+    ranked(raw, &spread)
 }
 
 /// The key the stock tables keep an image's measurements under: FNV-1a of its file's name in lower
@@ -953,7 +1040,7 @@ pub fn retoned_shape(pixels: &[u8], tones: &[u8], shares: &[f32]) -> Vec<u8> {
     let mut raw = deep;
     raw.iter_mut().zip(pixels).for_each(|(sum, &v)| *sum = f32::from(v) + (*sum / 3.0).clamp(0.0, 1.0) * 0.999);
     let spread: Vec<(f32, f32)> = tones.iter().zip(shares).map(|(&t, &s)| (f32::from(t) / 255.0, s)).collect();
-    ranked(&raw, &spread)
+    ranked(raw, &spread)
 }
 
 /// `pixels`, a grain or shape, with its values moved onto `tones` (its values at `shares`)
@@ -969,7 +1056,7 @@ pub fn retoned(pixels: &[u8], tones: &[u8], shares: &[f32]) -> Vec<u8> {
         })
         .collect();
     let spread: Vec<(f32, f32)> = tones.iter().zip(shares).map(|(&t, &s)| (f32::from(t) / 255.0, s)).collect();
-    ranked(&raw, &spread)
+    ranked(raw, &spread)
 }
 
 /// Makes the shapes and grains now, so the first canvas doesn't wait for them (slow: off the main
@@ -1971,7 +2058,7 @@ fn grain_from(index: u32) -> Option<(u32, DrawnFrom)> {
 
 /// `pixels`, a grain, its values spread onto `spread` keeping their order (see [`ranked`]).
 fn respread(pixels: &[u8], spread: &[(f32, f32)]) -> Vec<u8> {
-    ranked(&pixels.iter().map(|&v| f32::from(v)).collect::<Vec<f32>>(), spread)
+    ranked(pixels.iter().map(|&v| f32::from(v)).collect(), spread)
 }
 
 /// Our grain `index` drawn `side` pixels across, tiling; none past the last. Bigger than
@@ -1979,6 +2066,10 @@ fn respread(pixels: &[u8], spread: &[(f32, f32)]) -> Vec<u8> {
 fn draw_grain(index: u32, side: usize) -> Option<Vec<u8>> {
     if let Some((from, make)) = grain_from(index) {
         return Some(make(&draw_grain(from, side)?));
+    }
+    if let Some((raw, finish)) = noise_of(index) {
+        let small = finish(&raw);
+        return Some(if side > TEXTURE_SIZE { finer_noise(&raw, &small, side, 7001 + index * 31) } else { small });
     }
     let zoom = zoom_of(side);
     let more = octaves_more(side);
@@ -2040,20 +2131,6 @@ fn draw_grain(index: u32, side: usize) -> Option<Vec<u8>> {
             let one = 0.5 + 0.5 * ((x + y + w) * std::f32::consts::TAU * 16.0).cos();
             let two = 0.5 + 0.5 * ((x - y + w) * std::f32::consts::TAU * 16.0).cos();
             edge((one.max(two) - 0.7) * 6.0, zoom)
-        }),
-        grain::NOISE => field(side, |x, y| {
-            // near white, darkened here and there by fine flecks about two texels across: each
-            // texel the average of sparse specks over it and its neighbours to the right and
-            // below (wrapping, so it tiles), as a speckled image shrunk to half
-            let n = TEXTURE_SIZE as i32;
-            let (i, j) = ((x * n as f32) as i32, (y * n as f32) as i32);
-            let specks: f32 = (0..4)
-                .map(|k| {
-                    let u = hash((i + k % 2).rem_euclid(n), (j + k / 2).rem_euclid(n), 1471);
-                    ((u - 0.5) * 2.0).max(0.0).powi(2)
-                })
-                .sum();
-            1.0 - specks / 4.0
         }),
         grain::CRUMPLED => field(side, |x, y| {
             // ridges where folds were
@@ -2204,12 +2281,8 @@ fn draw_grain(index: u32, side: usize) -> Option<Vec<u8>> {
             contrast(0.35 + 0.65 * patches * (1.0 - 0.6 * pits), 1.3)
         }),
         grain::RECYCLED => recycled(side),
-        grain::SHEET => sheet(side),
         grain::WORN => worn(side),
-        grain::SPECKLED => ranked(&soft_noise(side, 1601, 0.4), &SPECKLED_SPREAD),
-        grain::MOTTLED => ranked(&soft_noise(side, 4001, 0.4), &MOTTLED_SPREAD),
         grain::ROUGH_CANVAS => rough_canvas(side),
-        grain::SPRAYED => ranked(&soft_noise(side, 4201, 0.4), &SPRAYED_SPREAD),
         grain::DRY_PATCHES => dry_patches(side),
         grain::GRAPH_PAPER => graph_paper(side),
         grain::DOT_GRID => dot_grid(side),
@@ -2529,7 +2602,7 @@ fn dry_patches(side: usize) -> Vec<u8> {
                 + 0.1 * value_noise(x * 128.0, y * 128.0, 128, 4219)
         })
         .collect();
-    ranked(&raw, &DRY_PATCHES_SPREAD)
+    ranked(raw, &DRY_PATCHES_SPREAD)
 }
 
 /// The rough canvas's values: a quarter dark, under 0.14, the rest spread up to the weave's light
@@ -2563,7 +2636,7 @@ fn rough_canvas(side: usize) -> Vec<u8> {
             crossings * (0.4 + 0.6 * threads) + 1.2 * coat + 0.3 * dragged
         })
         .collect();
-    ranked(&raw, &ROUGH_CANVAS_SPREAD)
+    ranked(raw, &ROUGH_CANVAS_SPREAD)
 }
 
 /// The charcoal grain's values: most of it from 0.19 to 0.41, a fifth the bright tops of the tooth
@@ -2629,10 +2702,107 @@ const SHEET_SPREAD: [(f32, f32); 11] = [
     (0.9, 1.0),
 ];
 
-/// A paper sheet: fine tooth, each texel its own (as the stock paper's, whose grain is a pixel or
-/// two across), its values ranked onto [`SHEET_SPREAD`].
-fn sheet(side: usize) -> Vec<u8> {
-    ranked(&soft_noise(side, 3001, 0.0), &SHEET_SPREAD)
+/// How a grain of noise has its values put on its tones (see [`noise_of`]).
+type NoiseFinish = fn(&[f32]) -> Vec<u8>;
+
+/// Our grains of noise a texel across: the values each is drawn from at [`TEXTURE_SIZE`] and how
+/// they are put on its tones (none for any other grain). Bigger, each is that noise sharper (see
+/// [`finer_noise`]).
+/// - the noise: near white, darkened here and there by fine flecks about two texels across, each
+///   texel the average of sparse specks over it and its neighbours to the right and below
+///   (wrapping, so it tiles), as a speckled image shrunk to half;
+/// - a paper sheet: fine tooth, each texel its own (as the stock paper's, whose grain is a pixel
+///   or two across), its values ranked onto [`SHEET_SPREAD`];
+/// - the speckled, mottled and sprayed grains: noise softened over each texel's neighbours, ranked
+///   onto their spreads.
+fn noise_of(index: u32) -> Option<(Vec<f32>, NoiseFinish)> {
+    let n = TEXTURE_SIZE;
+    Some(match index {
+        grain::NOISE => {
+            let m = n as i32;
+            let flecks = (0..m * m)
+                .map(|k| {
+                    let (i, j) = (k % m, k / m);
+                    let specks: f32 = (0..4)
+                        .map(|d| {
+                            let u = hash((i + d % 2).rem_euclid(m), (j + d / 2).rem_euclid(m), 1471);
+                            ((u - 0.5) * 2.0).max(0.0).powi(2)
+                        })
+                        .sum();
+                    1.0 - specks / 4.0
+                })
+                .collect();
+            (flecks, |raw| raw.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect())
+        }
+        grain::SHEET => (soft_noise(n, 3001, 0.0), |raw| ranked(raw.to_vec(), &SHEET_SPREAD)),
+        grain::SPECKLED => (soft_noise(n, 1601, 0.4), |raw| ranked(raw.to_vec(), &SPECKLED_SPREAD)),
+        grain::MOTTLED => (soft_noise(n, 4001, 0.4), |raw| ranked(raw.to_vec(), &MOTTLED_SPREAD)),
+        grain::SPRAYED => (soft_noise(n, 4201, 0.4), |raw| ranked(raw.to_vec(), &SPRAYED_SPREAD)),
+        _ => return None,
+    })
+}
+
+/// How much the finer noise a grain of noise drawn bigger takes on varies against the noise itself
+/// (see [`finer_noise`]): the stock grains our noise stands in for vary 0.7 as much (the median of
+/// 158, root mean squares) at sizes under a texel of ours, with the stock image as big as our tile.
+const FINER_NOISE_SHARE: f32 = 0.7;
+
+/// `small`, a grain of noise a texel across ([`TEXTURE_SIZE`] square; `raw` the values it was
+/// drawn from, see [`noise_of`]), drawn `side` across: the same noise sharper. `raw` eased between
+/// its texels as value noise is between its lattice (so that magnified it shows no squares), with
+/// finer noise on it down to the texels at `side`, each octave half as strong as the one above as
+/// [`fbm_finer`]'s and all of them [`FINER_NOISE_SHARE`] as strong as `raw`, its values then put on
+/// `small`'s own (the darkest share of them taking the darkest of `small`'s, and so on): its tones
+/// and its noise where they were, each texel at `side` with its own grain, as a stock image a
+/// thousand or two pixels across has, rather than a soft square several pixels across.
+fn finer_noise(raw: &[f32], small: &[u8], side: usize, seed: u32) -> Vec<u8> {
+    let n = TEXTURE_SIZE;
+    let count = raw.len().max(1) as f32;
+    let mean = raw.iter().sum::<f32>() / count;
+    let spread = (raw.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / count).sqrt();
+    let at = |i: i32, j: i32| {
+        let (i, j) = (i.rem_euclid(n as i32) as usize, j.rem_euclid(n as i32) as usize);
+        raw.get(j * n + i).copied().unwrap_or(mean)
+    };
+    let more = octaves_more(side);
+    // the octaves' strengths, halving, together FINER_NOISE_SHARE of `raw`'s spread (value noise's
+    // lattice values are even over 0..1, so spread 1 / sqrt(12))
+    let halvings: f32 = (1..=more).map(|k| 0.25f32.powi(k as i32 - 1)).sum::<f32>().sqrt();
+    let first = FINER_NOISE_SHARE * spread * 12f32.sqrt() / halvings.max(1e-6);
+    let values = values_field(side, |x, y| {
+        // between the texels' middles at the side `raw` is
+        let (u, v) = (x * n as f32 - 0.5, y * n as f32 - 0.5);
+        let (i, j) = (u.floor() as i32, v.floor() as i32);
+        let (fx, fy) = (smooth(u - i as f32), smooth(v - j as f32));
+        let top = at(i, j) + (at(i + 1, j) - at(i, j)) * fx;
+        let bottom = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * fx;
+        let finer: f32 = (1..=more)
+            .map(|k| {
+                let cells = (n << k) as f32;
+                let noise = value_noise(x * cells - 0.5, y * cells - 0.5, cells as i32, seed.wrapping_add(k * 7919));
+                first * 0.5f32.powi(k as i32 - 1) * (noise - 0.5)
+            })
+            .sum();
+        top + (bottom - top) * fy + finer
+    });
+    let mut tones = small.to_vec();
+    tones.sort_unstable();
+    on_values(values, &tones)
+}
+
+/// `raw` values put on `sorted` (rising): the darkest share of them taking the darkest of those,
+/// and so on, equal ones in order of place.
+fn on_values(raw: Vec<f32>, sorted: &[u8]) -> Vec<u8> {
+    let order = in_order(raw);
+    let mut pixels = vec![0u8; order.len()];
+    let (count, kept) = (order.len().max(1), sorted.len());
+    for (rank, &k) in order.iter().enumerate() {
+        let value = sorted.get(rank * kept / count).copied().unwrap_or(0);
+        if let Some(p) = pixels.get_mut(k as usize) {
+            *p = value;
+        }
+    }
+    pixels
 }
 
 /// The worn paper's values, as [`RECYCLED_SPREAD`]: light, most of it full and hardly any under
@@ -2651,7 +2821,7 @@ fn worn(side: usize) -> Vec<u8> {
             0.6 * mottle + 0.25 * scuffs + 0.15 * value_noise(u * 256.0, v * 256.0, 256, 3119)
         })
         .collect();
-    ranked(&raw, &WORN_SPREAD)
+    ranked(raw, &WORN_SPREAD)
 }
 
 /// `raw` values ranked onto `spread` ((value, share at or below it), rising): the darkest share
@@ -2662,18 +2832,93 @@ fn total_order(v: f32) -> u32 {
     if bits >> 31 == 1 { !bits } else { bits | 1 << 31 }
 }
 
-fn ranked(raw: &[f32], spread: &[(f32, f32)]) -> Vec<u8> {
-    // in order of value, equal ones in order of place (as a stable sort by value)
-    // (places as u32: half the memory of an image's worth, and none has 2^32 pixels)
-    let mut order: Vec<(u32, u32)> = raw.iter().map(|&v| total_order(v)).zip(0..).collect();
-    order.sort_unstable();
-    let mut pixels = vec![0u8; raw.len()];
+/// The places of `values` in rising order of value (as [`total_order`] orders them), equal ones in
+/// order of place: as sorting (value, place) pairs puts them, by a radix sort of the values' bits
+/// (three passes, of 11, 11 and 10 bits, each keeping the order the last left), several times as
+/// fast as that for a big picture's millions. It holds no more at once than the values and a pair
+/// for each, as that sort did: the values are let go of once the first pass has read them, and the
+/// second keeps only the last pass's bits of each key beside its place, in a word.
+fn in_order(values: Vec<f32>) -> Vec<u32> {
+    const BITS: u32 = 11;
+    // the bits the last pass sorts by
+    const TOP: u32 = u32::BITS - 2 * BITS;
+    let count = values.len();
+    // the bits a place takes
+    let place_bits = usize::BITS - count.saturating_sub(1).leading_zeros();
+    if place_bits + TOP > u32::BITS {
+        // more places than fit beside those bits (none of our pictures has): as pairs, sorted
+        let mut pairs: Vec<(u32, u32)> = values.iter().map(|&v| total_order(v)).zip(0..).collect();
+        drop(values);
+        pairs.sort_unstable();
+        return pairs.into_iter().map(|(_, place)| place).collect();
+    }
+    let digit = |key: u32, pass: u32| ((key >> (pass * BITS)) & ((1 << BITS) - 1)) as usize;
+    // where each digit's run begins in each pass, counted in one read of the values
+    let mut starts = [vec![0usize; 1 << BITS], vec![0usize; 1 << BITS], vec![0usize; 1 << TOP]];
+    for &v in &values {
+        let key = total_order(v);
+        for (pass, runs) in (0..).zip(&mut starts) {
+            if let Some(n) = runs.get_mut(digit(key, pass)) {
+                *n += 1;
+            }
+        }
+    }
+    for runs in &mut starts {
+        let mut at = 0;
+        for n in runs.iter_mut() {
+            (*n, at) = (at, at + *n);
+        }
+    }
+    let [first, second, last] = &mut starts;
+    // by the lowest bits: each key with its place
+    let mut pairs = vec![0u64; count];
+    for (place, &v) in (0u32..).zip(&values) {
+        let key = total_order(v);
+        if let Some(n) = first.get_mut(digit(key, 0)) {
+            if let Some(slot) = pairs.get_mut(*n) {
+                *slot = u64::from(key) << u32::BITS | u64::from(place);
+            }
+            *n += 1;
+        }
+    }
+    drop(values);
+    // by the next: the key's top bits over its place
+    let mut tops = vec![0u32; count];
+    for &pair in &pairs {
+        let (key, place) = ((pair >> u32::BITS) as u32, pair as u32);
+        if let Some(n) = second.get_mut(digit(key, 1)) {
+            if let Some(slot) = tops.get_mut(*n) {
+                *slot = (key >> (2 * BITS)) << place_bits | place;
+            }
+            *n += 1;
+        }
+    }
+    drop(pairs);
+    // by the top bits: the places
+    let mask = ((1u64 << place_bits) - 1) as u32;
+    let mut order = vec![0u32; count];
+    for &top in &tops {
+        if let Some(n) = last.get_mut((u64::from(top) >> place_bits) as usize) {
+            if let Some(slot) = order.get_mut(*n) {
+                *slot = top & mask;
+            }
+            *n += 1;
+        }
+    }
+    order
+}
+
+fn ranked(raw: Vec<f32>, spread: &[(f32, f32)]) -> Vec<u8> {
+    // in order of value, equal ones in order of place (as a stable sort by value), `raw` let go of
+    // as it is read
+    let order = in_order(raw);
+    let mut pixels = vec![0u8; order.len()];
     let count = order.len().max(1) as f32;
     let last = spread.last().map_or(1.0, |s| s.0);
     // the stretch of `spread` the share falls in: the first whose end it doesn't pass (the shares
     // only grow, so it only moves on)
     let mut at = 0;
-    for (rank, &(_, k)) in order.iter().enumerate() {
+    for (rank, &k) in order.iter().enumerate() {
         let share = (rank as f32 + 0.5) / count;
         while spread.get(at + 1).is_some_and(|b| share > b.1) {
             at += 1;
@@ -2745,7 +2990,7 @@ fn recycled(side: usize) -> Vec<u8> {
             sheet - 1.5 * edge(1.0 - fibre(x, y) / rough, zoom)
         })
         .collect();
-    ranked(&raw, &RECYCLED_SPREAD)
+    ranked(raw, &RECYCLED_SPREAD)
 }
 
 /// An image `n` pixels square from `f(x, y)` with x, y in 0..1 at pixel centres and values clamped
@@ -2761,6 +3006,24 @@ fn field(n: usize, f: impl Fn(f32, f32) -> f32 + Sync) -> Vec<u8> {
                     let (i, j) = (k % n, band * rows + k / n);
                     let v = f((i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32);
                     *px = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            });
+        }
+    });
+    out
+}
+
+/// [`field`]'s values as they are, unclamped.
+fn values_field(n: usize, f: impl Fn(f32, f32) -> f32 + Sync) -> Vec<f32> {
+    let mut out = vec![0.0f32; n * n];
+    let rows = n.div_ceil(crate::par::cores());
+    std::thread::scope(|s| {
+        for (band, values) in out.chunks_mut(rows * n).enumerate() {
+            let f = &f;
+            crate::par::beside(s, move || {
+                for (k, value) in values.iter_mut().enumerate() {
+                    let (i, j) = (k % n, band * rows + k / n);
+                    *value = f((i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32);
                 }
             });
         }
@@ -3142,28 +3405,66 @@ fn wrapped_blur_adding(img: &[f32], n: usize, r: usize, sums: &mut [f32]) {
     wrapped_blur_into(img, n, r, sums, |px, v| *px += v);
 }
 
-/// [`wrapped_blur`] of `img`, each pixel of it handed to `put` with its place in `out`.
-fn wrapped_blur_into(img: &[f32], n: usize, r: usize, out: &mut [f32], put: impl Fn(&mut f32, f32)) {
+/// [`wrapped_blur`] of `img`, each pixel of it handed to `put` with its place in `out`: across each
+/// row, then down each column, each line's sums carried along it in the same order whichever way
+/// it is worked through. The rows are blurred side by side on a few threads, and the columns too,
+/// a band of them each, carried down the rows together (an image's rows lie in order in memory, so
+/// a band reads each row's stretch at once) and put straight into `out`, each band its own stretch
+/// of each row: the same sums, bit for bit, as one line at a time, with no more than one picture's
+/// worth of its own (the rows' blur) however many threads share it.
+fn wrapped_blur_into(img: &[f32], n: usize, r: usize, out: &mut [f32], put: impl Fn(&mut f32, f32) + Sync) {
     let span = (2 * r + 1) as f64;
-    let pass = |src: &[f32], across: bool, out: &mut [f32], put: &dyn Fn(&mut f32, f32)| {
-        let at = |a: usize, b: usize| {
-            let (x, y) = if across { (a % n, b) } else { (b, a % n) };
-            f64::from(src.get(y * n + x).copied().unwrap_or(0.0))
-        };
-        for b in 0..n {
-            let mut sum: f64 = (0..=2 * r).map(|k| at(n - r + k, b)).sum();
-            for a in 0..n {
-                let (x, y) = if across { (a, b) } else { (b, a) };
-                if let Some(px) = out.get_mut(y * n + x) {
-                    put(px, (sum / span) as f32);
+    // (what a sum of none is, which the sums start from)
+    let none: f64 = std::iter::empty::<f64>().sum();
+    let threads = crate::par::cores();
+    // across each row
+    let mut across = vec![0.0f32; n * n];
+    let rows = n.div_ceil(threads).max(1);
+    std::thread::scope(|s| {
+        for (band, lines) in across.chunks_mut(rows * n).enumerate() {
+            crate::par::beside(s, move || {
+                for (i, line) in lines.chunks_mut(n).enumerate() {
+                    let y = band * rows + i;
+                    let at = |a: usize| f64::from(img.get(y * n + a % n).copied().unwrap_or(0.0));
+                    let mut sum = (0..=2 * r).map(|k| at(n - r + k)).fold(none, |s, v| s + v);
+                    for (a, px) in line.iter_mut().enumerate() {
+                        *px = (sum / span) as f32;
+                        sum += at(a + n + r + 1) - at(a + n - r);
+                    }
                 }
-                sum += at(a + n + r + 1, b) - at(a + n - r, b);
-            }
+            });
         }
-    };
-    let mut across = vec![0.0; n * n];
-    pass(img, true, &mut across, &|px, v| *px = v);
-    pass(&across, false, out, &put);
+    });
+    // down each column: a band of columns a thread, its stretch of each row of `out` (in order)
+    let width = n.div_ceil(threads).max(1);
+    let mut bands: Vec<Vec<&mut [f32]>> = (0..n.div_ceil(width)).map(|_| Vec::with_capacity(n)).collect();
+    for row in out.chunks_mut(n).take(n) {
+        for (stretch, band) in row.chunks_mut(width).zip(bands.iter_mut()) {
+            band.push(stretch);
+        }
+    }
+    let (across, put) = (&across, &put);
+    std::thread::scope(|s| {
+        for (stretches, x0) in bands.into_iter().zip((0..n).step_by(width)) {
+            let w = width.min(n - x0);
+            crate::par::beside(s, move || {
+                let row = |y: usize| across.get((y % n) * n + x0..(y % n) * n + x0 + w).unwrap_or(&[]);
+                let mut sums = vec![none; w];
+                for k in 0..=2 * r {
+                    for (sum, &v) in sums.iter_mut().zip(row(n - r + k)) {
+                        *sum += f64::from(v);
+                    }
+                }
+                for (a, line) in stretches.into_iter().enumerate() {
+                    let (next, last) = (row(a + n + r + 1), row(a + n - r));
+                    for (((px, sum), &v1), &v0) in line.iter_mut().zip(sums.iter_mut()).zip(next).zip(last) {
+                        put(px, (*sum / span) as f32);
+                        *sum += f64::from(v1) - f64::from(v0);
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// The image at (`u`, `v`) (pixel corners at whole numbers), bilinear, wrapping round.
@@ -3251,6 +3552,67 @@ mod tests {
         assert_eq!(grains().len(), GRAIN_COUNT as usize);
     }
 
+    /// The wrapped box blur as first written, a line at a time on one thread: what
+    /// [`wrapped_blur`] must match bit for bit.
+    fn wrapped_blur_slowly(img: &[f32], n: usize, r: usize) -> Vec<f32> {
+        let span = (2 * r + 1) as f64;
+        let pass = |src: &[f32], across: bool| {
+            let at = |a: usize, b: usize| {
+                let (x, y) = if across { (a % n, b) } else { (b, a % n) };
+                f64::from(src[y * n + x])
+            };
+            let mut out = vec![0.0f32; n * n];
+            for b in 0..n {
+                let mut sum: f64 = (0..=2 * r).map(|k| at(n - r + k, b)).sum();
+                for a in 0..n {
+                    let (x, y) = if across { (a, b) } else { (b, a) };
+                    out[y * n + x] = (sum / span) as f32;
+                    sum += at(a + n + r + 1, b) - at(a + n - r, b);
+                }
+            }
+            out
+        };
+        pass(&pass(img, true), false)
+    }
+
+    /// The wrapped blur worked side by side and down a band of columns together is the same, bit
+    /// for bit, as a line at a time, on one thread or several, added into sums or not.
+    #[test]
+    fn the_wrapped_blur_side_by_side_is_the_same() {
+        let n = 2 * TEXTURE_SIZE;
+        let img: Vec<f32> =
+            (0..n * n).map(|k| (hash((k % n) as i32 / 3, (k / n) as i32, 79) * 8.0).floor() / 8.0).collect();
+        for r in [0, 1, 7, 48, 192, n / 2 - 1] {
+            let slow = wrapped_blur_slowly(&img, n, r);
+            for threads in [1, 3, 8] {
+                let fast = crate::par::within_threads(threads, || wrapped_blur(&img, n, r));
+                assert!(fast.iter().zip(&slow).all(|(a, b)| a.to_bits() == b.to_bits()), "radius {r} on {threads}");
+            }
+            let mut sums = vec![0.5f32; n * n];
+            wrapped_blur_adding(&img, n, r, &mut sums);
+            assert!(sums.iter().zip(&slow).all(|(a, b)| a.to_bits() == (0.5 + b).to_bits()), "radius {r} added");
+        }
+    }
+
+    /// The radix order is the sort's, bit for bit: by value, equal values in order of place; past
+    /// the places that fit beside a key's top bits (a picture over 2048 a side) too.
+    #[test]
+    fn in_order_puts_values_as_sorting_them_does() {
+        // the value whose bits order as `key`
+        let value = |key: u32| f32::from_bits(if key >> 31 == 1 { key & !(1 << 31) } else { !key });
+        for n in [0usize, 1, 2, 7, 65_536, 300_001, (1 << 22) + 1] {
+            // keys of every size, many equal, below and above naught
+            let keys: Vec<u32> =
+                (0..n).map(|k| (hash(k as i32, 3, 5).to_bits() >> (k % 23)) ^ (((k as u32 / 5) & 1) << 31)).collect();
+            let values: Vec<f32> = keys.iter().map(|&key| value(key)).collect();
+            assert!(values.iter().zip(&keys).all(|(&v, &key)| total_order(v) == key));
+            let mut sorted: Vec<(u32, u32)> = keys.into_iter().zip(0..).collect();
+            sorted.sort_unstable();
+            let places: Vec<u32> = sorted.into_iter().map(|(_, place)| place).collect();
+            assert!(in_order(values) == places, "{n}");
+        }
+    }
+
     #[test]
     fn the_blur_and_ranking_give_what_they_gave_a_pixel_at_a_time() {
         let n = TEXTURE_SIZE;
@@ -3274,14 +3636,14 @@ mod tests {
         }
         let spreads: [&[(f32, f32)]; 4] = [&SHEET_SPREAD, &RECYCLED_SPREAD, &[(0.2, 0.0)], &[]];
         for spread in spreads {
-            assert_eq!(ranked(&img, spread), ranked_slowly(&img, spread));
+            assert_eq!(ranked(img.clone(), spread), ranked_slowly(&img, spread));
         }
         let shape = shapes().into_iter().nth(shape::LEAF as usize).unwrap().pixels;
         let tones: Vec<u8> = (0..17).map(|k| (k * 15) as u8).collect();
         let raw: Vec<f32> = shape.iter().map(|&v| f32::from(v) + 0.5).collect();
         let spread: Vec<(f32, f32)> =
             tones.iter().zip(SHAPE_TONE_SHARES).map(|(&t, s)| (f32::from(t) / 255.0, s)).collect();
-        assert_eq!(ranked(&raw, &spread), ranked_slowly(&raw, &spread));
+        assert_eq!(ranked(raw.clone(), &spread), ranked_slowly(&raw, &spread));
     }
 
     #[test]
@@ -3757,12 +4119,14 @@ mod tests {
     /// Drawn twice as big, each shape and grain that shows more so is the same picture (averaged
     /// back down, alike with the one brushes hold, each edge's place as it was, and as bright) and
     /// sharper than that one magnified (steeper from texel to texel). One soft all through drawn
-    /// bigger is next to the same as it magnified, which is why it isn't; a grain of noise a texel
-    /// across would be other noise, as fine in texels, so isn't either.
+    /// bigger is next to the same as it magnified, which is why it isn't. A grain of noise a texel
+    /// across is its texels with finer grain on them, which averaged down leaves a little of
+    /// itself: alike a little less.
     #[test]
     fn drawn_bigger_each_is_the_same_picture_sharper() {
         let side = 2 * TEXTURE_SIZE;
         let noise = [grain::NOISE, grain::SHEET, grain::FINE_NOISE, grain::SPECKLED, grain::MOTTLED, grain::SPRAYED];
+        let mut least_alike_noise = (f32::MAX, "");
         let mut least_alike = (f32::MAX, "");
         let mut brightest = (0.0f32, "");
         let mut least_sharper = (f64::MAX, "");
@@ -3785,7 +4149,11 @@ mod tests {
                 let sharper = steepness(&big_f, side) / steepness(&magnified, side).max(1e-6);
                 let apart = big_f.iter().zip(&magnified).map(|(a, b)| (a - b).abs()).sum::<f32>() / big_f.len() as f32;
                 if sharpens {
-                    if same < least_alike.0 {
+                    if kind == "grain" && noise.contains(&i) {
+                        if same < least_alike_noise.0 {
+                            least_alike_noise = (same, name);
+                        }
+                    } else if same < least_alike.0 {
                         least_alike = (same, name);
                     }
                     if brighter > brightest.0 {
@@ -3794,14 +4162,17 @@ mod tests {
                     if sharper < least_sharper.0 {
                         least_sharper = (sharper, name);
                     }
-                } else if !(kind == "grain" && noise.contains(&i)) && apart > soft_most.0 {
+                } else if apart > soft_most.0 {
                     soft_most = (apart, name);
                 }
             }
         }
-        eprintln!("drawn at {side}: averaged down, the least alike {least_alike:?}, the most brightened {brightest:?}");
+        eprintln!(
+            "drawn at {side}: averaged down, the least alike {least_alike:?} ({least_alike_noise:?} of noise), the most brightened {brightest:?}"
+        );
         eprintln!("the least sharper {least_sharper:?} times as steep; the soft at most {soft_most:?} levels off");
         assert!(least_alike.0 > 0.95, "{least_alike:?}");
+        assert!(least_alike_noise.0 > 0.88, "{least_alike_noise:?}");
         assert!(brightest.0 < 4.0, "{brightest:?}");
         assert!(least_sharper.0 > 1.0, "{least_sharper:?}");
         assert!(soft_most.0 < 1.0, "{soft_most:?}");
@@ -3884,7 +4255,7 @@ mod tests {
         let raw: Vec<f32> =
             pixels.iter().zip(&deep).map(|(&v, &sum)| f32::from(v) + (sum / 3.0).clamp(0.0, 1.0) * 0.999).collect();
         let spread: Vec<(f32, f32)> = tones.iter().zip(shares).map(|(&t, &s)| (f32::from(t) / 255.0, s)).collect();
-        ranked(&raw, &spread)
+        ranked(raw, &spread)
     }
 
     /// A shape retoned with its blurs added in place is the one retoned as first written, pixel for
@@ -3948,5 +4319,184 @@ mod tests {
         let (texels_small, texels_big) = (edge(&small), edge(&big));
         eprintln!("hard round edge texels (a tenth to nine tenths): {texels_small} at 256, {texels_big} at 1024");
         assert!(texels_big <= texels_small * 5 && texels_big >= texels_small * 3, "{texels_small} {texels_big}");
+    }
+
+    /// The tones of `pixels` at [`SHAPE_TONE_SHARES`], as the stock tables measure a stock tip's.
+    fn tones_of(pixels: &[u8]) -> Vec<i32> {
+        let mut sorted = pixels.to_vec();
+        sorted.sort_unstable();
+        SHAPE_TONE_SHARES.iter().map(|s| i32::from(sorted[(s * (sorted.len() - 1) as f32).round() as usize])).collect()
+    }
+
+    /// A softer stock round tip drawn from its tones holds them, and is as wide and round as the
+    /// stock tip down its rows: its falloff and its size are the stock tip's (where the round tip
+    /// drawn by its hardness stood in with its own). Drawn bigger, it is the same picture.
+    #[test]
+    fn a_round_tip_drawn_from_its_tones_holds_them() {
+        // the medium-hard tip and the medium one
+        for key in [0xe073_f930_1590_16ea_u64, 0x4ef3_7111_5bbb_a93a] {
+            let tones = stock_shape_tones_of(key, false).unwrap();
+            let pixels = round_from_tones(&tones, TEXTURE_SIZE);
+            let ours = tones_of(&pixels);
+            let apart = ours.iter().zip(tones).map(|(a, b)| (a - i32::from(b)).abs()).max().unwrap();
+            let rows: Vec<i32> =
+                stock_tones(crate::stock_tones::STOCK_SHAPE_ROWS, key).unwrap().map(i32::from).to_vec();
+            let our_rows = row_bands(&pixels, TEXTURE_SIZE);
+            let rows_apart = our_rows.iter().zip(&rows).map(|(a, b)| (a - b).abs()).max().unwrap();
+            let big = averaged_down(&round_from_tones(&tones, 1024), 1024);
+            let big_apart = big.iter().zip(&pixels).map(|(&a, &b)| (a - f32::from(b)).abs()).fold(0.0f32, f32::max);
+            eprintln!(
+                "{key:016x}: tones at most {apart} levels apart, rows {rows_apart}, drawn at 1024 {big_apart:.1}"
+            );
+            assert!(apart <= 3, "{key:016x}: {ours:?} against {tones:?}");
+            assert!(rows_apart <= 6, "{key:016x}: {our_rows:?} against {rows:?}");
+            assert!(big_apart <= 3.0, "{key:016x}");
+        }
+    }
+
+    /// Only a stock tip round all through is taken for one: the medium-hard and medium tips are, a
+    /// hard tip whose ink lies in a ring and lumps isn't, nor one that isn't measured.
+    #[test]
+    fn only_a_round_stock_tip_is_drawn_round_from_its_tones() {
+        for key in [0xe073_f930_1590_16ea_u64, 0x4ef3_7111_5bbb_a93a, 0xf586_c4f7_8be8_727f] {
+            eprintln!("{key:016x}: its bands at most {:?} from a disc's", round_bands_apart(key, false));
+        }
+        assert!(
+            stock_shape_is_round(0xe073_f930_1590_16ea, false) && stock_shape_is_round(0x4ef3_7111_5bbb_a93a, false)
+        );
+        assert!(!stock_shape_is_round(0xf586_c4f7_8be8_727f, false));
+        assert!(!stock_shape_is_round(0x1234_5678_9abc_def0, false));
+    }
+
+    /// `pixels` (`side` square) read over a canvas patch `n` square as the GPU reads a grain over a
+    /// tile `tile` canvas pixels across: between its texels at the level that fits (magnified past
+    /// its side), between its two nearest levels (box means) when shrunk, wrapping round.
+    fn read_over_tile(pixels: &[u8], side: usize, tile: f32, n: usize) -> Vec<f32> {
+        let mut levels = vec![pixels.iter().map(|&v| f32::from(v)).collect::<Vec<f32>>()];
+        while levels.last().unwrap().len() > 1 {
+            let (up, s) = (levels.last().unwrap(), levels.last().unwrap().len().isqrt());
+            let h = s / 2;
+            let down = (0..h * h)
+                .map(|k| {
+                    let (x, y) = (k % h * 2, k / h * 2);
+                    (up[y * s + x] + up[y * s + x + 1] + up[(y + 1) * s + x] + up[(y + 1) * s + x + 1]) / 4.0
+                })
+                .collect();
+            levels.push(down);
+        }
+        let bilinear = |level: &[f32], u: f32, v: f32| {
+            let s = level.len().isqrt() as i64;
+            let at = |x: i64, y: i64| level[(y.rem_euclid(s) * s + x.rem_euclid(s)) as usize];
+            let (x, y) = (u * s as f32 - 0.5, v * s as f32 - 0.5);
+            let (x0, y0) = (x.floor() as i64, y.floor() as i64);
+            let (fx, fy) = (x - x.floor(), y - y.floor());
+            let top = at(x0, y0) * (1.0 - fx) + at(x0 + 1, y0) * fx;
+            let bottom = at(x0, y0 + 1) * (1.0 - fx) + at(x0 + 1, y0 + 1) * fx;
+            top * (1.0 - fy) + bottom * fy
+        };
+        let lod = (side as f32 / tile).log2().max(0.0);
+        let (low, f) = (lod.floor() as usize, lod.fract());
+        (0..n * n)
+            .map(|k| {
+                let (u, v) = (((k % n) as f32 + 0.5) / tile, ((k / n) as f32 + 0.5) / tile);
+                let a = bilinear(&levels[low.min(levels.len() - 1)], u, v);
+                let b = bilinear(&levels[(low + 1).min(levels.len() - 1)], u, v);
+                a * (1.0 - f) + b * f
+            })
+            .collect()
+    }
+
+    /// How sharp a patch `n` square is from pixel to pixel: the mean squared step to the next pixel
+    /// across and down over its values' variance (4 for each pixel its own speck; for soft
+    /// squares `z` pixels across about 4 / z^2, for crisp ones 4 / z).
+    fn pixel_steps(values: &[f32], n: usize) -> f32 {
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32;
+        let mut sum = 0.0f32;
+        for y in 0..n - 1 {
+            for x in 0..n - 1 {
+                let v = values[y * n + x];
+                sum += (values[y * n + x + 1] - v).powi(2) + (values[(y + 1) * n + x] - v).powi(2);
+            }
+        }
+        sum / ((n - 1) * (n - 1)) as f32 / variance.max(1e-6)
+    }
+
+    /// Over a big tile, a grain of noise a texel across read from its big picture shows grain from
+    /// pixel to pixel, where read from the one brushes hold its texels showed as soft squares
+    /// several pixels across; its values as they were. At the biggest stock brushes' tile (1682
+    /// pixels, so a held texel spans 6.6), each drawn at 2048 (from 0.04-0.13 to 0.21-0.34); and a
+    /// paper drawn by a 2048 image's octaves at a tile of 1000 (its texels then 3.9 pixels), drawn
+    /// at 512 (0.12 to 0.18).
+    #[test]
+    fn a_noise_grain_over_a_big_tile_shows_specks_not_soft_squares() {
+        let n = 256;
+        let mean = |v: &[u8]| v.iter().map(|&x| f64::from(x)).sum::<f64>() / v.len() as f64;
+        // each: its name, the picture brushes hold, the big one, its side and the tile it is read over
+        type Case = (String, Vec<u8>, Vec<u8>, usize, f32);
+        let mut cases: Vec<Case> =
+            [grain::SHEET, grain::FINE_NOISE, grain::SPECKLED, grain::MOTTLED, grain::SPRAYED, grain::NOISE]
+                .into_iter()
+                .map(|i| {
+                    let small = grain_image(i).unwrap();
+                    (small.name.to_owned(), small.pixels, grain_at(i, SHARPEST).unwrap(), SHARPEST, 1682.0)
+                })
+                .collect();
+        let (_, octaves) = stock_grain_octaves("Wax-Crayon-Paper.jpg").unwrap();
+        let tones = stock_grain_tones("Wax-Crayon-Paper.jpg").unwrap();
+        let (small, big) = (octave_grain(&octaves, &tones), octave_grain_at(&octaves, &tones, 512));
+        cases.push(("paper by octaves".to_owned(), small, big, 512, 1000.0));
+        let mut short = Vec::new();
+        for (name, small, big, side, tile) in cases {
+            // (a paper drawn by octaves is eased between its texels at every side, an octave finer)
+            let most = if side == 512 { 1.4 } else { 2.0 };
+            let before = pixel_steps(&read_over_tile(&small, TEXTURE_SIZE, tile, n), n);
+            let after = pixel_steps(&read_over_tile(&big, side, tile, n), n);
+            let brighter = (mean(&big) - mean(&small)).abs();
+            eprintln!(
+                "{name}: steps from pixel to pixel over the spread {before:.3} held, {after:.3} big; mean {brighter:.2} apart"
+            );
+            if after <= most * before || brighter >= 1.0 {
+                short.push(name);
+            }
+        }
+        assert!(short.is_empty(), "{short:?}");
+    }
+
+    /// Where the time to draw a big picture goes, 2048 a side, on one thread and on two (a weak
+    /// phone's, drawing them ahead): our shapes and grains drawn, a stand-in's ranking onto its
+    /// tones and the blurs that order it, and packing it as kept (run with `--ignored`).
+    #[test]
+    #[ignore]
+    fn where_a_big_picture_s_time_goes() {
+        let side = SHARPEST;
+        let time = |what: &str, f: &dyn Fn()| {
+            for threads in [1, 2] {
+                let t = std::time::Instant::now();
+                crate::par::within_threads(threads, f);
+                eprintln!("{what} on {threads}: {} ms", t.elapsed().as_millis());
+            }
+        };
+        let shape = shape_at(shape::SPLATTER, side).unwrap();
+        let img: Vec<f32> = shape.iter().map(|&v| f32::from(v) / 255.0).collect();
+        let tones: Vec<u8> = (0..17).map(|k| (k * 15) as u8).collect();
+        time("a shape drawn (splatter)", &|| drop(shape_at(shape::SPLATTER, side)));
+        time("a shape drawn (bristles)", &|| drop(shape_at(shape::BRISTLES, side)));
+        time("a stand-in retoned", &|| drop(retoned_shape(&shape, &tones, &SHAPE_TONE_SHARES)));
+        for r in [48, 192, 512] {
+            time(&format!("its blur of {r}"), &|| {
+                let mut sums = vec![0.0f32; side * side];
+                wrapped_blur_adding(&img, side, r, &mut sums);
+            });
+        }
+        time("its ranking", &|| drop(ranked(img.clone(), &[(0.0, 0.0), (1.0, 1.0)])));
+        time("a grain drawn (grunge)", &|| drop(grain_at(grain::GRUNGE, side)));
+        time("a grain drawn (mottled)", &|| drop(grain_at(grain::MOTTLED, side)));
+        let (_, octaves) = stock_grain_octaves("Wax-Crayon-Paper.jpg").unwrap();
+        let paper = stock_grain_tones("Wax-Crayon-Paper.jpg").unwrap();
+        time("a paper by octaves at 512", &|| drop(octave_grain_at(&octaves, &paper, 512)));
+        time("packed (LZ4)", &|| drop(crate::applz4::encode(&shape)));
+        let packed = crate::applz4::encode(&shape);
+        time("unpacked", &|| drop(crate::applz4::decode(&packed, side * side)));
     }
 }

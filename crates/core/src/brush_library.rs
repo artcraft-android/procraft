@@ -2935,7 +2935,7 @@ mod keeping {
     #[test]
     fn an_imported_round_tip_is_as_soft_once_the_library_is_read_back() {
         // a brush whose file names the stock medium tips (as the airbrushes and blending brushes
-        // made from them do): drawn as our round tip at their softness
+        // made from them do): drawn as a picture of the stock tip's own falloff, at their softness
         let s = CanvasSession::new(32, 32);
         let mut wanted = Vec::new();
         for (tip, hardness) in [("Brush-Preset-Medium.png", 0.5), ("Brush-Preset-Medium-Hard.png", 0.75)] {
@@ -2943,8 +2943,8 @@ mod keeping {
             let set = s.import_any_brushes(file, Some("Blend.brush".into()), 0).unwrap() as usize;
             let st = s.shared.lock();
             let b = st.library[set].brushes.iter().find(|b| b.name == format!("Blend {tip}")).unwrap();
-            assert!(b.round_tip() && (b.hardness - hardness).abs() < 1e-6, "{tip}: {}", b.hardness);
-            wanted.push((b.name.clone(), hardness));
+            assert!(b.shape.source.is_some() && (b.hardness - hardness).abs() < 1e-6, "{tip}: {}", b.hardness);
+            wanted.push((b.name.clone(), hardness, true));
         }
         // another app's soft round brush (no stock tip named, as from a Krita or Photoshop file):
         // its own softness
@@ -2954,13 +2954,13 @@ mod keeping {
             let b = st.library[set as usize].brushes.iter_mut().find(|b| b.name == "Soft round").unwrap();
             assert!(b.round_tip() && b.stock.shape.is_none());
             b.hardness = 0.2;
-            wanted.push((b.name.clone(), 0.2));
+            wanted.push((b.name.clone(), 0.2, false));
         }
         // kept, and read back as the app does when it starts again
         let t = CanvasSession::new(32, 32);
         assert!(t.load_brush_library(s.saved_brush_library()));
         let st = t.shared.lock();
-        for (name, hardness) in wanted {
+        for (name, hardness, pictured) in wanted {
             let b = st.library.iter().flat_map(|set| &set.brushes).find(|b| b.name == name).unwrap();
             println!(
                 "{name}: hardness {:.2} (imported {hardness:.2}); a stamp's ink {:.3} of a hard disc's (imported {:.3})",
@@ -2969,7 +2969,7 @@ mod keeping {
                 round_tip_ink(hardness)
             );
             assert!(
-                b.round_tip() && (b.hardness - hardness).abs() < 1e-6,
+                b.round_tip() != pictured && (b.hardness - hardness).abs() < 1e-6,
                 "{name}: {} after, {hardness} before",
                 b.hardness
             );

@@ -2778,6 +2778,9 @@ fn named_grain(n: &str) -> Option<u32> {
         (&["scale"], grain::SCALES),
         (&["hex", "honeycomb"], grain::HEXAGONS),
         (&["leather", "skin"], grain::LEATHER),
+        // bark chips heaped every way, of every size (not a trunk's furrows): stood in as the
+        // noise of the stock image's own octaves
+        (&["brush-preset-bark"], grain::WASH),
         (&["bark"], grain::BARK),
         (&["rust"], grain::RUST),
         (&["scratch"], grain::SCRATCHES),

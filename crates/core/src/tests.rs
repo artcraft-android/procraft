@@ -22063,7 +22063,9 @@ fn panel_pictures_and_strokes_come_out_alike_where_copies_start_at_multiples_of_
         let above = s.add_layer();
         assert!(s.select_layer(above));
         assert!(s.select_brush(dry.0, dry.1));
-        s.set_brush_size(1.0);
+        // a line some 130 pixels across, leaving most of the layer bare (at full size its stamps
+        // are three times the canvas's width and cover all of it)
+        s.set_brush_size(0.3);
         s.set_color(0.1, 0.7, 0.3);
         swing(1.0);
         assert!(s.select_layer(base));
@@ -22082,6 +22084,7 @@ fn panel_pictures_and_strokes_come_out_alike_where_copies_start_at_multiples_of_
         let painted = s.copy_layer_contents(above).unwrap().rgba;
         let (on, off): (Vec<usize>, Vec<usize>) = (0..n * n).partition(|i| painted[i * 4 + 3] > 200);
         assert!(!on.is_empty(), "the stroke above painted");
+        assert!(!off.is_empty(), "the stroke above left none of its layer bare, for a touch where it hasn't paint");
         let under: Vec<Vec<u64>> = on
             .iter()
             .step_by(on.len().div_ceil(12))

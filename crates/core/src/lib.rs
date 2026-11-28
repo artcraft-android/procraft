@@ -26,6 +26,8 @@ mod brush_hold;
 mod brush_libraries;
 mod brush_library;
 mod brush_pictures;
+#[cfg(test)]
+mod brush_quality_tests;
 mod brushes;
 mod bundled;
 mod clipboard;

@@ -19,7 +19,17 @@ pub(crate) fn drawn_shape(s: &StandIn) -> (Option<u32>, Option<Source>, Option<f
             let disc = drawn(SHAPE, s, most, |side| Some(textures::hard_round_at(side)));
             return (None, Some(disc), Some(hardness));
         }
-        Pick::Round(hardness) => return (None, None, Some(hardness)),
+        // a softer round tip, measured round: its own falloff as a picture, read through its levels
+        // as the stock tip is (soft all through, so no big picture)
+        Pick::Round(hardness) => {
+            let tones =
+                textures::stock_shape_tones_of(key, inverted).filter(|_| textures::stock_shape_is_round(key, inverted));
+            let Some(tones) = tones else { return (None, None, Some(hardness)) };
+            let round = drawn(SHAPE, s, TEXTURE_SIZE, move |side| {
+                Some(emptied_border(textures::round_from_tones(&tones, side), side))
+            });
+            return (None, Some(round), Some(hardness));
+        }
         // the small point: our soft dot, as big and as soft as the stock one measures (soft all
         // through, so no big picture)
         Pick::Point => {
@@ -230,11 +240,13 @@ pub(crate) fn drawn_grain(s: &StandIn) -> (Option<u32>, Option<Source>) {
     };
     let tones = textures::stock_grain_tones_of(key);
     let source = if textures::drawn_by_octaves(i)
-        && let (Some((_, octaves)), Some(tones)) = (textures::stock_grain_octaves_of(key), tones)
+        && let (Some((width, octaves)), Some(tones)) = (textures::stock_grain_octaves_of(key), tones)
     {
         // a paper or a wash: noise as strong at each size as the stock image is, with its tones
-        // (tiled as a share of that image is; its finest octave is its texels, nothing finer known)
-        Some(drawn(GRAIN, s, TEXTURE_SIZE, move |_| Some(invert(textures::octave_grain(&octaves, &tones)))))
+        // (tiled as a share of that image is, its texels that image's pixels at a thousand a side;
+        // a big picture too, its texels the image's own pixels, for one that has more)
+        let most = sharpest(Some((width * textures::OCTAVE_SHARE).round() as usize));
+        Some(drawn(GRAIN, s, most, move |side| Some(invert(textures::octave_grain_at(&octaves, &tones, side)))))
     } else if i < textures::GRAIN_COUNT && (textures::drawn_to_stock_size(i) || tones.is_some()) {
         // a big picture too, the size of the stock image's own, where ours shows more so
         let most = if textures::grain_sharpens(i) { sharpest(textures::stock_grain_side(key)) } else { TEXTURE_SIZE };

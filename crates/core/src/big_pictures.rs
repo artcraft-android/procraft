@@ -343,7 +343,7 @@ pub(crate) fn load(bigs: Vec<Big>, make: bool) {
             }
         }
         if make {
-            ask(&reader, &unmade, true);
+            choose(&reader, &unmade);
         }
     };
     let thread = std::thread::Builder::new().name("procraft-big-pictures-read".to_owned());
@@ -362,6 +362,25 @@ pub(crate) fn make_ahead(bigs: Vec<Big>) {
     ask(&shared, &bigs, false);
 }
 
+/// A brush chosen: its pictures (`bigs`, those not made yet) made before any other and held once
+/// made, and those an earlier choice still waits for made after them as pictures made ahead are
+/// (on a few threads, kept but not held), unless a stroke wants one of them again.
+fn choose(shared: &Arc<Shared>, bigs: &[Big]) {
+    put_first(&mut shared.lock(), bigs);
+    ask(shared, bigs, true);
+}
+
+/// The waiting pictures wanted before, but not among `bigs` (a brush chosen since), no longer
+/// wanted first: behind `bigs` once those are put in front, and made ahead.
+fn put_first(store: &mut Store, bigs: &[Big]) {
+    let Store { waiting, wanted, .. } = store;
+    for big in waiting.iter() {
+        if !bigs.iter().any(|b| b.id == big.id) {
+            wanted.remove(&big.id);
+        }
+    }
+}
+
 /// Puts `bigs` among those to make (`first`: before the others, and held once made), starting
 /// the thread that makes them if it isn't going.
 fn ask(shared: &Arc<Shared>, bigs: &[Big], first: bool) {
@@ -369,6 +388,19 @@ fn ask(shared: &Arc<Shared>, bigs: &[Big], first: bool) {
         return;
     }
     let mut store = shared.lock();
+    queue(&mut store, bigs, first);
+    let start = !store.working && !store.waiting.is_empty();
+    if start {
+        store.working = true;
+    }
+    drop(store);
+    if start {
+        work(shared);
+    }
+}
+
+/// `bigs` put among those waiting in `store` (`first`: in front, in their order, and wanted).
+fn queue(store: &mut Store, bigs: &[Big], first: bool) {
     for big in bigs.iter().rev() {
         if store.held.iter().any(|(id, _)| *id == big.id) {
             continue;
@@ -390,14 +422,6 @@ fn ask(shared: &Arc<Shared>, bigs: &[Big], first: bool) {
             (None, true) => store.waiting.push_front(big.clone()),
             (None, false) => store.waiting.push_back(big.clone()),
         }
-    }
-    let start = !store.working && !store.waiting.is_empty();
-    if start {
-        store.working = true;
-    }
-    drop(store);
-    if start {
-        work(shared);
     }
 }
 
@@ -616,6 +640,90 @@ mod tests {
             wait_for_big_pictures(Duration::from_secs(120));
             *shared.lock() = Store::default();
         }
+    }
+
+    /// A brush chosen has its pictures made first, and those a brush chosen before it still waits
+    /// for come after them, made ahead (on a few threads, not held), unless a stroke wants one of
+    /// them again; an imported brush's last.
+    #[test]
+    fn the_brush_chosen_last_has_its_pictures_made_first() {
+        let big = |id: u64| Big { id, side: 1024, draw: Draw::Grain(grain::GRUNGE) };
+        let mut store = Store::default();
+        let wanted = |store: &Store| {
+            let mut ids: Vec<u64> = store.wanted.iter().copied().collect();
+            ids.sort_unstable();
+            ids
+        };
+        let order = |store: &Store| store.waiting.iter().map(|b| b.id).collect::<Vec<u64>>();
+        // a brush chosen, then another, then an import's made ahead
+        for (bigs, first) in [(vec![big(1), big(2)], true), (vec![big(3), big(4)], true), (vec![big(5)], false)] {
+            if first {
+                put_first(&mut store, &bigs);
+            }
+            queue(&mut store, &bigs, first);
+        }
+        assert_eq!(order(&store), [3, 4, 1, 2, 5]);
+        assert_eq!(wanted(&store), [3, 4]);
+        // a stroke of the first brush wants its grain: first, and held once made
+        queue(&mut store, &[big(2)], true);
+        assert_eq!(order(&store), [2, 3, 4, 1, 5]);
+        assert_eq!(wanted(&store), [2, 3, 4]);
+    }
+
+    /// Every stock brush whose grain's tile at its most size passes what brushes hold has a big
+    /// picture to read, but a paper or wash drawn by its stock image's octaves where that image has
+    /// no more pixels than its texels (a 1024 one: a bigger picture would be finer than the image),
+    /// and every one whose stamp does, but our round tip and shapes soft all through (as sharp
+    /// magnified). Our grains of noise and the papers and washes of 2048 images had none.
+    #[test]
+    fn every_grain_and_shape_that_shows_more_big_has_a_big_picture() {
+        let sets = crate::stock_library::shipped();
+        let noise = [grain::NOISE, grain::SHEET, grain::FINE_NOISE, grain::SPECKLED, grain::MOTTLED, grain::SPRAYED];
+        let (mut grains, mut had, mut have, mut by_octaves) = (0, 0, 0, 0);
+        let (mut shapes, mut shapes_have, mut soft) = (0, 0, 0);
+        for brush in sets.iter().flat_map(|s| &s.brushes) {
+            let second = brush.secondary.as_deref().map(|b| b.clone().as_second());
+            for b in std::iter::once(brush).chain(second.as_ref()) {
+                let most = b.diameter(1.0);
+                if b.grain.depth > 0.0
+                    && (b.grain.image.is_some() || b.grain.source.is_some())
+                    && past_held(grain_tile(b, most))
+                {
+                    grains += 1;
+                    let big = grain_of(b);
+                    let index = b.grain.image.unwrap_or(u32::MAX);
+                    let octaves = procraft_engine::textures::drawn_by_octaves(index)
+                        && b.grain.source.as_ref().is_some_and(|s| s.pixels.most_side() <= 512);
+                    have += usize::from(big.is_some());
+                    // (by the rules before: none for noise or for a paper or wash by octaves)
+                    had += usize::from(
+                        big.is_some() && !noise.contains(&index) && !procraft_engine::textures::drawn_by_octaves(index),
+                    );
+                    if big.is_none() {
+                        assert!(octaves, "{}: grain {index} on a tile of {}", b.name, grain_tile(b, most));
+                        by_octaves += 1;
+                    }
+                }
+                if past_held(most) {
+                    shapes += 1;
+                    match shape_of(b) {
+                        Some(_) => shapes_have += 1,
+                        None => {
+                            // our round tip, a shape of ours soft all through, or a stand-in drawn so
+                            let ours = b.shape.image.is_some_and(|i| !procraft_engine::textures::shape_sharpens(i));
+                            let drawn = b.shape.source.as_ref().is_some_and(|s| s.pixels.most_side() <= TEXTURE_SIZE);
+                            assert!(b.round_tip() || ours || drawn, "{}", b.name);
+                            soft += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "grains past what brushes hold: {grains}, {have} with a big picture (by the rules before, {had});              {by_octaves} a paper or wash whose image has no more pixels; shapes: {shapes}, {shapes_have} with one,              {soft} soft all through or our round tip"
+        );
+        assert_eq!(have + by_octaves, grains);
+        assert!(have > had);
     }
 
     #[test]
@@ -1305,6 +1413,25 @@ mod tests {
         let started = Instant::now();
         let (mut made, mut raw, mut packed, mut slowest) = (0, 0, 0, Duration::ZERO);
         let (mut kept, mut packing, mut unpacking) = (0, Duration::ZERO, Duration::ZERO);
+        // as PNGs would pack them shipped with the app, each at most 512 or 1024 a side (averaged
+        // down to that)
+        let png = |pixels: &[u8], side: usize| {
+            let rows: Vec<u8> = (0..pixels.len())
+                .map(|i| pixels[i].wrapping_sub(if i >= side { pixels[i - side] } else { 0 }))
+                .collect();
+            miniz_oxide::deflate::compress_to_vec(&rows, 6).len()
+        };
+        let down = |pixels: &[u8], side: usize, to: usize| -> Vec<u8> {
+            let k = side / to;
+            (0..to * to)
+                .map(|i| {
+                    let (x, y) = (i % to * k, i / to * k);
+                    let sum: u32 = (0..k * k).map(|j| u32::from(pixels[(y + j / k) * side + x + j % k])).sum();
+                    ((sum as f32 / (k * k) as f32).round()) as u8
+                })
+                .collect()
+        };
+        let mut capped = [0usize; 2];
         for big in reached.iter().take(most) {
             let one = Instant::now();
             let Some((side, pixels)) = big.drawn() else { continue };
@@ -1317,6 +1444,9 @@ mod tests {
                 .map(|i| pixels[i].wrapping_sub(if i >= side { pixels[i - side] } else { 0 }))
                 .collect();
             packed += miniz_oxide::deflate::compress_to_vec(&rows, 6).len();
+            for (n, cap) in capped.iter_mut().zip([512, 1024]) {
+                *n += if side > cap { png(&down(&pixels, side, cap), cap) } else { png(&pixels, side) };
+            }
             // as kept on disk
             let t = Instant::now();
             let lz4 = procraft_engine::applz4::encode(&pixels);
@@ -1336,6 +1466,7 @@ mod tests {
             raw >> 20,
             packed >> 20
         );
+        eprintln!("shipped as PNGs at most 512 a side: {} MB; at most 1024: {} MB", capped[0] >> 20, capped[1] >> 20);
         eprintln!(
             "kept as LZ4: {} MB ({} ms packing each, {} ms unpacking each on average)",
             kept >> 20,
