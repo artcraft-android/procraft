@@ -23,8 +23,6 @@ const LICENCES: &str = concat!(
     include_str!("../../android/app/src/main/assets/fonts/Inter-OFL.txt"),
     "\n\nThe app keeps Lucide icons (lucide.dev), by Lucide Icons and Contributors.\n\n",
     include_str!("../../android/app/src/main/assets/icons/LICENSE-lucide.txt"),
-    "\n\nThe undo and redo icons are Google's Material Symbols (fonts.google.com/icons), under the ",
-    "Apache License 2.0 (its text at the end).",
 );
 /// What the Windows packages hold besides the app: Microsoft's DirectX Shader Compiler, beside the
 /// .exe, which Direct3D 12 makes the shaders with (packaging/windows).

@@ -1,10 +1,9 @@
 """Draws ProCraft's own interface icons from plain geometry (docs/icons/STYLE_GUIDE.md), takes in the
-ones contributors drew (assets/icons/contributed/) and the few taken whole from an open icon set
-(TAKEN_ICONS: Undo and Redo, from Material Symbols, in assets/icons/material-symbols/), and puts
-them in place: an SVG master per icon (assets/icons/procraft/<name>.svg, a 24-unit grid), and its
-path data, scaled into its slot (assets/icons/slots.tsv), in Icons.kt. The plugins' own icons
-(PLUGIN_ICONS) go the same way into their folders: a master in plugins/<plugin>/icons/<key>.svg, and
-its path data, on the grid, into the manifest's menu choice of that key.
+ones contributors drew (assets/icons/contributed/), and puts them in place: an SVG master per icon
+(assets/icons/procraft/<name>.svg, a 24-unit grid), and its path data, scaled into its slot
+(assets/icons/slots.tsv), in Icons.kt. The plugins' own icons (PLUGIN_ICONS) go the same way into
+their folders: a master in plugins/<plugin>/icons/<key>.svg, and its path data, on the grid, into the
+manifest's menu choice of that key.
 Needs shapely. Run from anywhere:
 
     python tools/icons/draw_icons.py
@@ -229,20 +228,6 @@ ADJUSTED = {'transform': (lork_arrow, 'its head shortened and its tail drawn out
             'erase': (lork_eraser_whole, 'its lower end drawn whole'),
             'layers': (lork_layers, 'its back sheet set further back')}
 
-# Icons taken whole from an open icon set: its files as its makers give them, on their own grid
-# (assets/icons/<set>/<file>.svg, the set's licence and SOURCE.md beside them), put on the 24 grid
-# and placed in their slots as drawn, nothing widened or rounded. Each set: how its masters' notes
-# credit it, and its licence.
-ICON_SETS = {'material-symbols': ("Google's Material Symbols (Outlined, fill 0, weight 400, grade 0, optical size 24)",
-                                  'Apache-2.0')}
-TAKEN_ICONS = {'undo': ('material-symbols', 'undo'), 'redo': ('material-symbols', 'redo'),
-               'pieundo': ('material-symbols', 'undo')}
-
-
-def taken(icon_set, name):
-    """An icon from an open set (assets/icons/<icon_set>/<name>.svg), as given, on the 24 grid."""
-    return unary_union(svg_parts(os.path.join(ROOT, 'assets', 'icons', icon_set, f'{name}.svg')))
-
 
 def wrench():
     """Actions: an open-end wrench with a hole in its handle."""
@@ -288,6 +273,19 @@ def turning_arrow():
     tip = (sx + back[0] * 3.6, sy + back[1] * 3.6)
     head = soft(Polygon([tip, (sx + normal[0] * 3.6, sy + normal[1] * 3.6), (sx - normal[0] * 3.6, sy - normal[1] * 3.6)]), 0.45)
     return unary_union([arc, head])
+
+
+def u_turn_arrow(mirror):
+    """Undo (or, mirrored, Redo): Josh's arrow, as he drew it on a 216-unit grid and put here on the
+    24 grid. A line 20 thick with round ends runs right along the bottom, turns up round a half circle
+    and runs back left to a triangular head pointing back, its corners rounded as if stroked 20 wide."""
+    k = 24 / 216
+    cx, cy, r = 139.0, 124.5, 50.5
+    turn = [(cx + r * math.cos(a), cy + r * math.sin(a)) for a in (math.radians(90 - 180 * i / 64) for i in range(65))]
+    line = LineString([(42.0, 175.0), *turn, (82.0, 74.0)]).buffer(10.0, quad_segs=16)
+    head = Polygon([(28.0, 74.0), (80.0, 43.0), (80.0, 105.0)]).buffer(10.0, quad_segs=16)
+    shape = scale(unary_union([line, head]), k, k, origin=(0, 0))
+    return scale(shape, -1, 1, origin=(12, 12)) if mirror else shape
 
 
 def ring(cx, cy, r, w):
@@ -1764,6 +1762,7 @@ BLENDS = {'multiply': overlap_dark, 'darken': darken, 'shade': sunset, 'color-bu
 SHRINK = {'blend-subtract': 0.75, 'blend-divide': 0.85}
 DRAWINGS = {
     'actions': wrench,
+    'undo': lambda: u_turn_arrow(False), 'redo': lambda: u_turn_arrow(True),
     'tabadd': plus, 'tabcanvas': canvas_tab, 'tabshare': share_tab, 'tabimport': import_tab, 'tabvideo': video_tab,
     'tabprefs': prefs_tab, 'tabhelp': help_tab,
     'automatic': wand, 'freehand': lasso, 'rectangleshape': rectangle_tool, 'ellipseshape': ellipse_tool,
@@ -1779,7 +1778,7 @@ DRAWINGS = {
     'adjustchromatic': fringed_lens, 'adjustliquify': spiral, 'adjustclone': stamp,
     'modedisc': colour_disc, 'modeclassic': classic_picker, 'modeharmony': harmony, 'modevalue': value_sliders,
     'modepalettes': palette, 'modelayer': one_sheet, 'modepencil': pencil, 'apply': check_in_disc, 'preview': eye,
-    'canceladjust': cross_in_disc, 'piereset': reset_transform,
+    'canceladjust': cross_in_disc, 'pieundo': lambda: u_turn_arrow(False), 'piereset': reset_transform,
     'adjustknob': knob,
     'studiostroke': dotted_path, 'studiostabilize': smoothed, 'studiotaper': spindle, 'studioshape': three_shapes,
     'studiograin': grain_tile, 'studiorendering': roller, 'studiowet': two_drops, 'studiocolor': colour_circles,
@@ -1813,8 +1812,6 @@ DRAWINGS = {
 }
 DRAWINGS.update({name: ADJUSTED[name][0] if name in ADJUSTED else (lambda who=who, name=name: contributed(who, name))
                  for name, who in CONTRIBUTED_ICONS.items()})
-DRAWINGS.update({name: lambda icon_set=icon_set, file=file: taken(icon_set, file)
-                 for name, (icon_set, file) in TAKEN_ICONS.items()})
 DRAWINGS.update({f'set-{k}': draw for k, draw in enumerate(SET_ICONS)})
 DRAWINGS.update({f'blend-{k}': draw for k, draw in BLENDS.items()})
 
@@ -1859,13 +1856,7 @@ def main():
     src = open(ICONS, encoding='utf-8', newline='').read()
     for name, draw in DRAWINGS.items():
         shape = draw().simplify(0.02)
-        licence = 'MIT OR Apache-2.0'
-        if name in TAKEN_ICONS:
-            icon_set, file = TAKEN_ICONS[name]
-            title, licence = ICON_SETS[icon_set]
-            origin = (f'{title} "{file}", put on the 24 grid from assets/icons/{icon_set}/{file}.svg '
-                      'by tools/icons/draw_icons.py')
-        elif name in CONTRIBUTED_ICONS:
+        if name in CONTRIBUTED_ICONS:
             who = CONTRIBUTED_ICONS[name]
             how = f'{ADJUSTED[name][1]}, ' if name in ADJUSTED else ''
             origin = (f'drawn by {CONTRIBUTORS[who]}, {how}placed from assets/icons/contributed/{who}/{name}.svg '
@@ -1874,7 +1865,7 @@ def main():
             origin = 'original, drawn by tools/icons/draw_icons.py'
         with open(os.path.join(MASTERS, f'{name}.svg'), 'w', encoding='utf-8', newline='\n') as f:
             f.write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">\n'
-                    f'  <!-- ProCraft {name} icon: {origin}. {licence}. -->\n'
+                    f'  <!-- ProCraft {name} icon: {origin}. MIT OR Apache-2.0. -->\n'
                     f'  <path fill="currentColor" fill-rule="evenodd" d="{path_data(shape)}"/>\n</svg>\n')
         w, h, (x0, y0, x1, y1) = places[name]
         bx0, by0, bx1, by1 = shape.bounds

@@ -280,9 +280,7 @@ private fun Licences(onBack: () -> Unit) {
         val text = "The interface font is Inter, by The Inter Project Authors, under the SIL Open Font License 1.1." + gap +
             asset("fonts/Inter-OFL.txt").trim() + gap +
             "The app keeps Lucide icons (lucide.dev), by Lucide Icons and Contributors, under the ISC License." + gap +
-            asset("icons/LICENSE-lucide.txt").trim() + gap +
-            "The undo and redo icons are Google's Material Symbols (fonts.google.com/icons), under the Apache License 2.0 (its text at the end)." + gap +
-            asset("licenses.txt")
+            asset("icons/LICENSE-lucide.txt").trim() + gap + asset("licenses.txt")
         text.split(gap).map { it.trimEnd() }.filter { it.isNotBlank() }
     }
     androidx.activity.compose.BackHandler(onBack = onBack)
