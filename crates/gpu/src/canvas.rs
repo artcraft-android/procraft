@@ -3620,6 +3620,9 @@ pub struct Canvas {
     /// down in runs on this GPU (see [`Gpu::lays_wet_runs`]).
     stamp_by_stamp: bool,
     wet_runs: bool,
+    /// Each smudge window's passes end with a dispatch over no pixels before the window is copied
+    /// back, so that the copy has all its last dispatch wrote: on OpenGL (see `smudge.rs`).
+    wet_settle: bool,
     /// Strokes painting in place keep marks to go back to as they are laid again (see `rewind.rs`),
     /// within this many bytes (none: as the device's memory gives them); and the marks made and
     /// gone back to so far.
@@ -4134,6 +4137,7 @@ impl Canvas {
             dispatched: AtomicU64::new(0),
             stamp_by_stamp: false,
             wet_runs: gpu.lays_wet_runs(),
+            wet_settle: gpu.is_gl(),
             rewinds: true,
             rewind_most: None,
             marks_made: 0,
@@ -5904,6 +5908,13 @@ impl Canvas {
     #[doc(hidden)]
     pub fn lay_stamp_by_stamp(&mut self, on: bool) {
         self.stamp_by_stamp = on;
+    }
+
+    /// Whether each smudge window's passes end with a dispatch over no pixels before the window is
+    /// copied back (on OpenGL unless set; see `smudge.rs`): for tests, which time the two.
+    #[doc(hidden)]
+    pub fn set_wet_settle(&mut self, on: bool) {
+        self.wet_settle = on;
     }
 
     /// How many windows smudges and paint laid in place have been laid in (see `smudge.rs`): for

@@ -750,7 +750,7 @@ impl Canvas {
         let writes = each.iter().fold(IRect::EMPTY, |r, w| r.union(*w));
         let (work, kept) = pieces.iter().fold((false, false), |(w, k), p| (w || p.work, k || p.kept));
         let count: usize = pieces.iter().map(|p| p.uniforms.len()).sum();
-        self.smudge_uniform_room(gpu, params, count);
+        self.smudge_uniform_room(gpu, params, count + 1);
         // the layer as it was is read by a glaze, paint laid apart and paint put together, else
         // not filled in
         let before = pieces.iter().any(|p| {
@@ -876,6 +876,25 @@ impl Canvas {
                 pass.dispatch_workgroups(x, y, 1);
                 self.dispatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+        }
+        // On OpenGL the window's passes end with a dispatch over no pixels, so that the copy back
+        // below has all the last one wrote. Behind the barrier wgpu puts before a copy from a buffer
+        // a shader wrote (`GL_PIXEL_BUFFER_BARRIER_BIT`), an Adreno 750's OpenGL ES copied the
+        // window back without some of the last dispatch's writes: a few columns at a stamp's edge,
+        // at times a workgroup's pixels, not the same from one time to the next (a Legion, 2026-11;
+        // seen with a brush image that isn't clear at the quad's edges). A stamp's dispatch with
+        // another after it, behind the storage barrier between them, always came out whole, and so
+        // does the last one with this after it (its box empty: it lays nothing). It costs a
+        // dispatch of one workgroup a window.
+        if self.wet_settle
+            && !resident_textures
+            && let Some((piece, head)) = pieces.last().and_then(|p| p.uniforms.first().map(|u| (p, u)))
+        {
+            let none =
+                params.push(&SmudgeUniform { origin, stride, rows: reach.height(), paper, bbox: [0; 4], ..*head });
+            pass.set_bind_group(0, &bind, &[none, piece.listed]);
+            pass.set_pipeline(pipelines.map_or(&compute.smudge_deposit, |p| &p.deposit));
+            pass.dispatch_workgroups(1, 1, 1);
         }
         drop(pass);
         if let Some(smudge) = self.smudge.as_mut() {
