@@ -205,6 +205,13 @@ impl Canvas {
     /// The open stroke's second laid again from its start in `ops` (the work queued for a render)
     /// goes back to its newest mark before what changed instead, and lays only what follows: its
     /// stamps from scratch become [`Op::RewindSecond`] to the mark and the stamps after it.
+    ///
+    /// Nothing between the two may let that mark go. Its stamps queued before it are dropped (laid
+    /// from the mark with the rest): laid first, they made marks of their own and let older ones go,
+    /// past how far back marks reach or for room, the one to go back to among them, and the second
+    /// was then laid again from the mark over what it had laid already. And where it still goes back
+    /// to a mark (that work left to a later render), it goes back no later than that mark: what it
+    /// kept past it is gone by then.
     pub(super) fn second_rewound(&self, ops: Vec<Op>) -> Vec<Op> {
         let Some(marks) = self.second_marks.as_ref().filter(|m| m.on && !m.marks.is_empty()) else { return ops };
         if self.ends_whole {
@@ -218,26 +225,29 @@ impl Canvas {
         if ops.iter().take(from).any(other) {
             return ops;
         }
-        let paced = |op: &Op| -> Vec<PacedStamp> {
-            match op {
-                // (not a dual brush's tip: taken off again, it lays nothing for good)
-                Op::Stamps { second: true, tip: false, instances, wet, times, .. } => {
-                    instances.iter().zip(wet).zip(times).map(|((s, w), t)| (*s, *w, *t)).collect()
-                }
-                _ => Vec::new(),
-            }
+        // (where an earlier going back still waits, the second as that leaves it)
+        let waiting =
+            ops.iter().take(from).filter_map(|op| if let Op::RewindSecond(at) = op { Some(*at) } else { None });
+        let given = match waiting.min() {
+            Some(at) => marks.given.get(..at).unwrap_or(&marks.given),
+            None => &marks.given,
         };
-        // those queued before it are laid first (and kept for the newest mark as they are)
-        let queued: Vec<PacedStamp> = ops.iter().take(from).flat_map(&paced).collect();
         let Some(op) = ops.get(from).filter(|op| matches!(op, Op::Stamps { carry: false, .. })) else { return ops };
-        let stamps = paced(op);
-        let unchanged = stamps.iter().zip(marks.given.iter().chain(&queued)).take_while(|(a, b)| same(a, b)).count();
+        let stamps: Vec<PacedStamp> = match op {
+            Op::Stamps { instances, wet, times, .. } => {
+                instances.iter().zip(wet).zip(times).map(|((s, w), t)| (*s, *w, *t)).collect()
+            }
+            _ => return ops,
+        };
+        let unchanged = stamps.iter().zip(given).take_while(|(a, b)| same(a, b)).count();
         let Some(at) = marks.marks.iter().rev().map(|m| m.at).find(|&at| at > 0 && at <= unchanged) else {
             return ops;
         };
         let mut out = Vec::with_capacity(ops.len() + 1);
         for (k, op) in ops.into_iter().enumerate() {
             match op {
+                // (its stamps queued before it: laid again from the mark; not a tip, taken off again)
+                Op::Stamps { second: true, tip: false, .. } if k < from => {}
                 Op::Stamps { second, instances, wet, picks, times, style, layer, pencil, carry, .. } if k == from => {
                     out.push(Op::RewindSecond(at));
                     out.push(Op::Stamps {

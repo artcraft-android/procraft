@@ -4390,6 +4390,228 @@ fn a_stroke_redrawn_twice_before_a_render_lays_only_the_last() {
     }
 }
 
+#[test]
+fn a_wet_dual_shape_drops_obsolete_redraws_and_preserves_the_final_paint() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let paint = StrokeStyle::new(StrokeTool::Paint, [0.2, 0.4, 0.8], 1.0);
+    let wet = StrokeStyle { wet_pull: Some(0.85), wet_from_before: true, dilution: 0.5, load: 0.1, ..paint };
+    let second = procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0, classic: false };
+    let line = |y: f32, radius: f32| -> Vec<Stamp> {
+        (0..40)
+            .map(|i| Stamp {
+                time_ms: f64::from(i) * 4.0,
+                distance: i as f32,
+                ..Stamp::round(Vec2::new(12.0 + i as f32, y), radius, 0.5)
+            })
+            .collect()
+    };
+    let coverage: Vec<u8> = (0..64 * 64).map(|i| if i % 64 < 24 { 0 } else { 190 }).collect();
+    for selection in [None, Some(coverage.as_slice())] {
+        let draw = |moves: &[(f32, bool)], redraw: bool| {
+            let mut doc = Document::new(64, 64);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            canvas.fill_layer(doc.current(), [164, 92, 72]);
+            canvas.render_finished(&gpu, &mut doc);
+            canvas.set_selection(&gpu, selection);
+            canvas.set_work_at_once(1);
+            canvas.set_rewinds(false, None);
+            canvas.begin_dual_stroke(doc.current(), wet, second);
+            for &(y, show) in moves {
+                let first = line(y, 8.0);
+                let second = line(y + 2.0, 5.0);
+                if redraw {
+                    canvas.replace_shape_stamps(&first, Some(&second));
+                } else {
+                    canvas.add_second_stamps(&second);
+                    canvas.add_stamps(&first);
+                }
+                if show {
+                    canvas.render_finished(&gpu, &mut doc);
+                }
+            }
+            let sent = canvas.pieces_sent();
+            canvas.render_finished(&gpu, &mut doc);
+            let pieces = canvas.pieces_sent() - sent;
+            canvas.end_stroke();
+            canvas.render_finished(&gpu, &mut doc);
+            (canvas.read_layer(&gpu, doc.current()).unwrap(), pieces)
+        };
+        let (pixels, pieces) = draw(&[(44.0, false)], true);
+        let (ordinary, _) = draw(&[(44.0, false)], false);
+        assert!(ordinary == pixels, "batching layer synthesis during a redraw should produce the same pixels");
+        let (queued, queued_pieces) = draw(&[(14.0, false), (39.0, false), (44.0, false)], true);
+        assert!(queued == pixels);
+        assert_eq!(queued_pieces, pieces, "only the final outline should reach the GPU");
+        let (restored, _) = draw(&[(39.0, true), (14.0, false), (44.0, false)], true);
+        assert!(restored == pixels, "redrawing over reused tiles should produce the same pixels");
+    }
+}
+
+#[test]
+fn a_wet_dual_tip_crossing_a_tile_edge_leaves_the_original_stroke_intact() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let paint = StrokeStyle::new(StrokeTool::Paint, [0.2, 0.4, 0.8], 1.0);
+    let wet = StrokeStyle { wet_pull: Some(0.75), dilution: 0.5, ..paint };
+    let second = procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0, classic: false };
+    let draw = |preview: bool| {
+        let mut doc = Document::new(536, 100);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.fill_layer(doc.current(), [176, 92, 57]);
+        canvas.render_finished(&gpu, &mut doc);
+        canvas.set_smudge_tiles(Some(256));
+        canvas.begin_dual_stroke(doc.current(), wet, second);
+        let stamp = |x, time_ms| Stamp { time_ms, ..Stamp::round(Vec2::new(x, 50.0), 18.0, 0.7) };
+        let start = [stamp(215.0, 0.0), stamp(229.0, 20.0), stamp(248.0, 40.0)];
+        canvas.add_second_stamps(&start);
+        canvas.add_stamps(&start);
+        canvas.render_finished(&gpu, &mut doc);
+        if preview && canvas.shows_in_place_tip() {
+            let before = canvas.read_layer(&gpu, doc.current()).unwrap();
+            canvas.set_in_place_tip(&[stamp(260.0, 45.0)], &[stamp(292.0, 47.0)]);
+            canvas.render_finished(&gpu, &mut doc);
+            assert!(canvas.read_layer(&gpu, doc.current()).unwrap() != before, "the live tip should be visible");
+        }
+        let last = [stamp(247.0, 60.0), stamp(255.0, 80.0)];
+        canvas.add_second_stamps(&last);
+        canvas.add_stamps(&last);
+        canvas.end_stroke();
+        canvas.render_finished(&gpu, &mut doc);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    assert!(draw(true) == draw(false), "removing the live tip changed the committed stroke");
+}
+
+#[test]
+fn resident_wet_paint_matches_windows_through_a_tip_redraw_and_undo() {
+    let Some(gpu) = gpu() else { return };
+    if !gpu.device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        || gpu.device.limits().max_storage_textures_per_shader_stage < 4
+    {
+        return;
+    }
+    let _check = NoErrors(&gpu);
+    let size = (536, 160);
+    let paint = StrokeStyle::new(StrokeTool::Paint, [0.15, 0.36, 0.8], 0.85);
+    let wet = StrokeStyle { wet_pull: Some(0.72), dilution: 0.54, load: 0.13, ..paint };
+    let second = procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0, classic: false };
+    let stamps = |x: f32, y: f32, start: f64| -> Vec<Stamp> {
+        (0..21)
+            .map(|i| Stamp {
+                time_ms: start + f64::from(i) * 4.0,
+                distance: i as f32 * 4.0,
+                ..Stamp::round(Vec2::new(x + i as f32 * 4.0, y), 29.0, 0.57)
+            })
+            .collect()
+    };
+    let selection: Vec<_> = (0..size.0 * size.1)
+        .map(|i| {
+            if i % size.0 > 264 {
+                172
+            } else if i / size.0 > 86 {
+                0
+            } else {
+                255
+            }
+        })
+        .collect();
+    let draw = |textures: bool, masked: bool| {
+        let mut doc = Document::new(size.0, size.1);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let layer = doc.current();
+        canvas.set_wet_textures(textures);
+        canvas.set_smudge_tiles(Some(256));
+        canvas.set_work_at_once(1 << 19);
+        canvas.fill_layer(layer, [156, 92, 54]);
+        canvas.render_finished(&gpu, &mut doc);
+        canvas.begin_stroke(layer, style(StrokeTool::Paint, 0.7));
+        canvas.add_stamps(&[dot(Vec2::new(262.0, 56.0), 30.0)]);
+        canvas.end_stroke();
+        canvas.render_finished(&gpu, &mut doc);
+        canvas.set_selection(&gpu, masked.then_some(selection.as_slice()));
+
+        canvas.begin_dual_stroke(layer, wet, second);
+        let first = stamps(197.0, 50.0, 0.0);
+        canvas.add_second_stamps(&first);
+        canvas.add_stamps(&first);
+        canvas.render_finished(&gpu, &mut doc);
+        assert_eq!(canvas.uses_wet_textures(), textures);
+        let mut captures = vec![canvas.read_layer(&gpu, layer).unwrap()];
+
+        let tip = stamps(265.0, 77.0, 84.0);
+        canvas.set_in_place_tip(&tip, &tip);
+        canvas.render_finished(&gpu, &mut doc);
+        captures.push(canvas.read_layer(&gpu, layer).unwrap());
+
+        for y in [75.0, 41.0] {
+            canvas.replace_shape_stamps(&stamps(218.0, y, 0.0), Some(&stamps(225.0, y + 5.0, 0.0)));
+            canvas.render_finished(&gpu, &mut doc);
+            captures.push(canvas.read_layer(&gpu, layer).unwrap());
+        }
+        canvas.end_stroke();
+        canvas.render_finished(&gpu, &mut doc);
+        captures.push(canvas.read_layer(&gpu, layer).unwrap());
+        canvas.undo();
+        canvas.render_finished(&gpu, &mut doc);
+        captures.push(canvas.read_layer(&gpu, layer).unwrap());
+        canvas.redo();
+        canvas.render_finished(&gpu, &mut doc);
+        captures.push(canvas.read_layer(&gpu, layer).unwrap());
+        captures
+    };
+    for masked in [false, true] {
+        for (frame, (resident, window)) in draw(true, masked).into_iter().zip(draw(false, masked)).enumerate() {
+            assert!(resident == window, "paint differed at frame {frame}, selection {masked}");
+        }
+    }
+}
+
+#[test]
+fn wet_paint_region_grows_on_a_large_canvas_and_can_return_to_windows() {
+    let Some(gpu) = gpu() else { return };
+    if !gpu.device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        || gpu.device.limits().max_storage_textures_per_shader_stage < 4
+    {
+        return;
+    }
+    let _check = NoErrors(&gpu);
+    let draw = |resident| {
+        let mut doc = Document::new(4704, 1264);
+        let layer = doc.current();
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.set_wet_textures(resident);
+        canvas.set_smudge_tiles(Some(256));
+        canvas.fill_layer(layer, [126, 91, 56]);
+        canvas.render_finished(&gpu, &mut doc);
+        let paint = StrokeStyle::new(StrokeTool::Paint, [0.12, 0.4, 0.8], 0.7);
+        let wet = StrokeStyle { wet_pull: Some(0.72), dilution: 0.54, load: 0.13, ..paint };
+        let tip = procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0, classic: false };
+        canvas.begin_dual_stroke(layer, wet, tip);
+        for (phase, (x, y)) in [(4590.0, 1150.0), (2550.0, 860.0), (60.0, 70.0)].into_iter().enumerate() {
+            let stamps: Vec<_> = (0..9)
+                .map(|i| Stamp {
+                    time_ms: phase as f64 * 64.0 + f64::from(i) * 5.0,
+                    distance: i as f32 * 4.0,
+                    ..Stamp::round(Vec2::new(x + i as f32 * 4.0, y), 21.0, 0.68)
+                })
+                .collect();
+            canvas.add_second_stamps(&stamps);
+            canvas.add_stamps(&stamps);
+            canvas.render_finished(&gpu, &mut doc);
+            assert_eq!(canvas.uses_wet_textures(), resident && phase < 2, "phase {phase}");
+        }
+        canvas.end_stroke();
+        canvas.render_finished(&gpu, &mut doc);
+        let image = canvas.read_layer(&gpu, layer).unwrap();
+        canvas.undo();
+        canvas.render_finished(&gpu, &mut doc);
+        assert!(canvas.read_layer(&gpu, layer).unwrap().as_chunks::<4>().0.iter().all(|p| *p == [126, 91, 56, 255]));
+        image
+    };
+    assert!(draw(true) == draw(false), "moving into and out of the resident region changed the painted layer");
+}
+
 /// A stroke redrawn whole as it ends, its stamps laid so far still at its start, lays only those
 /// after them (a long stroke of wet paint took a tenth of a second at the lift), and comes out as
 /// laid whole; with one of them changed (an end taper reaching back), it is laid whole again.
@@ -6943,4 +7165,215 @@ fn a_dual_stroke_laid_again_holds_its_picture_until_both_parts_are_laid() {
     }
     assert!(renders < 100);
     assert_ne!(canvas.read_composite(&gpu).unwrap(), before, "never shown laid again");
+}
+
+/// A dual brush's second laid again from scratch twice, the second time before the first's going
+/// back to a mark was laid (left to a later render, its stroke's own stamps before it taking that
+/// render's share), comes out as laid whole. The second going back was worked out from the marks
+/// and stamps as they were before the first was gone back to: it chose a later mark, which the first
+/// had let go by then, so it went back to none ("a second's mark at 90 went before it was gone back
+/// to") and laid its stamps from that mark over the second as the first left it, ten of them never
+/// laid.
+#[test]
+fn a_seconds_second_relay_queued_behind_the_first_ends_as_laid_whole() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let paint = StrokeStyle::new(StrokeTool::Paint, [0.2, 0.3, 0.7], 1.0);
+    let second = procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0, classic: false };
+    let stamp = |k: usize, radius: f32| Stamp {
+        time_ms: k as f64 * 4.0,
+        distance: k as f32 * 3.0,
+        ..Stamp::round(Vec2::new(20.0 + k as f32 * 3.0, 64.0), radius, 0.4)
+    };
+    // the second's 110 stamps, those from `from` on smaller (an end taper reaching back)
+    let tapered =
+        |from: usize| -> Vec<Stamp> { (0..110).map(|k| stamp(k, if k < from { 10.0 } else { 7.0 })).collect() };
+    let draw = |marks: bool| {
+        let mut doc = Document::new(512, 128);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.set_rewinds(marks, None);
+        canvas.begin_dual_stroke(doc.current(), paint, second);
+        // laid a display frame at a time, ten stamps (40 ms) each: a mark before each
+        let whole = tapered(110);
+        for chunk in whole.chunks(10) {
+            canvas.add_stamps(chunk);
+            canvas.add_second_stamps(chunk);
+            canvas.render_finished(&gpu, &mut doc);
+        }
+        // more of its own stamps and its second laid again from the 85th, four stamps a render
+        // shown: the going back to the mark at 80 waits behind the stamps for the next
+        canvas.set_stamps_at_once(4);
+        canvas.add_stamps(&(110..118).map(|k| stamp(k, 10.0)).collect::<Vec<_>>());
+        canvas.replace_second_stamps(&tapered(85));
+        let (_window, view) = window_target(&gpu, (512, 128), wgpu::TextureFormat::Rgba8Unorm);
+        let identity = procraft_engine::geom::Affine::IDENTITY;
+        canvas.render(
+            &gpu,
+            &mut doc,
+            Some(shown_on(&view, wgpu::TextureFormat::Rgba8Unorm, (512, 128), identity, None)),
+        );
+        // and again from the 95th before that is laid
+        canvas.replace_second_stamps(&tapered(95));
+        canvas.set_stamps_at_once(1 << 20);
+        canvas.end_stroke();
+        canvas.render_finished(&gpu, &mut doc);
+        (canvas.read_layer(&gpu, doc.current()).unwrap(), canvas.second_rewinds())
+    };
+    let (marked, (made, rewound, _)) = draw(true);
+    let (whole, _) = draw(false);
+    let differ = marked.chunks(4).zip(whole.chunks(4)).filter(|(a, b)| a != b).count();
+    println!("{made} marks, gone back to {rewound} times; {differ} pixels unlike the second laid whole");
+    assert_eq!(differ, 0, "{differ} pixels unlike the second laid whole");
+    // (both times: once to the mark at 80, then to it again, the later one let go by then)
+    assert_eq!(rewound, 2, "went back {rewound} times");
+}
+
+/// What [`wet_dual_frames`] measured: each freehand frame's and each shape move's time (ms, its
+/// GPU work waited for), and the layer as the stroke left it.
+struct WetDualFrames {
+    freehand: Vec<f64>,
+    moves: Vec<f64>,
+    layer: Vec<u8>,
+}
+
+/// The middle and the ninth tenth of `ms`.
+fn median_and_p90(ms: &[f64]) -> (f64, f64) {
+    let mut sorted = ms.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let at = |share: f64| sorted.get(((sorted.len() as f64 - 1.0) * share).round() as usize).copied().unwrap_or(0.0);
+    (at(0.5), at(0.9))
+}
+
+/// A big wet dual brush on a 4096 square canvas, its wet paint kept on the GPU between passes
+/// (`resident`) or copied in and out of window buffers for each: a freehand stroke drawn a display
+/// frame's stamps at a time (eight at 240 Hz), then the same stroke redrawn as an ellipse moved
+/// about 24 times, as a QuickShape drag lays it, each frame drawn and its GPU work waited for.
+fn wet_dual_frames(gpu: &Gpu, resident: bool) -> WetDualFrames {
+    use std::time::Instant;
+    const SIDE: u32 = 4096;
+    let mut doc = Document::new(SIDE, SIDE);
+    let mut canvas = Canvas::new(gpu, &doc).unwrap();
+    let layer = doc.current();
+    canvas.set_wet_textures(resident);
+    canvas.fill_layer(layer, [164, 92, 72]);
+    canvas.render_finished(gpu, &mut doc);
+    gpu.wait().unwrap();
+    let paint = StrokeStyle::new(StrokeTool::Paint, [0.2, 0.4, 0.8], 1.0);
+    let wet = StrokeStyle { wet_pull: Some(0.85), wet_from_before: true, dilution: 0.5, load: 0.1, ..paint };
+    let second = procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0, classic: false };
+    let stamp = |at: Vec2, radius: f32, k: usize| Stamp {
+        time_ms: k as f64 * 1000.0 / 240.0,
+        distance: k as f32 * 12.0,
+        ..Stamp::round(at, radius, 0.5)
+    };
+    let timed = |canvas: &mut Canvas, doc: &mut Document| {
+        let started = Instant::now();
+        canvas.render_finished(gpu, doc);
+        gpu.wait().unwrap();
+        started.elapsed().as_secs_f64() * 1e3
+    };
+    // freehand: 480 stamps 120 pixels round along a wave 2000 pixels long (within what the wet
+    // paint kept on the GPU may take: a longer stroke goes on in windows)
+    canvas.begin_dual_stroke(layer, wet, second);
+    let path = |k: usize| {
+        let t = k as f32 / 480.0;
+        Vec2::new(800.0 + 2000.0 * t, 2048.0 + 500.0 * (t * std::f32::consts::TAU).sin())
+    };
+    let firsts: Vec<Stamp> = (0..480).map(|k| stamp(path(k), 120.0, k)).collect();
+    let seconds: Vec<Stamp> = (0..480).map(|k| stamp(path(k) + Vec2::new(4.0, 6.0), 90.0, k)).collect();
+    let mut freehand = Vec::new();
+    for (first, second) in firsts.chunks(8).zip(seconds.chunks(8)) {
+        canvas.add_second_stamps(second);
+        canvas.add_stamps(first);
+        freehand.push(timed(&mut canvas, &mut doc));
+    }
+    assert_eq!(canvas.uses_wet_textures(), resident, "freehand");
+    canvas.end_stroke();
+    canvas.render_finished(gpu, &mut doc);
+    // the same brush made a shape and dragged: 360 stamps round an ellipse, moved 24 times (a
+    // bigger one, past what the wet paint kept on the GPU may take, goes on in windows)
+    canvas.begin_dual_stroke(layer, wet, second);
+    let ellipse = |dx: f32, k: usize, radius: f32| {
+        let a = k as f32 / 360.0 * std::f32::consts::TAU;
+        stamp(Vec2::new(1800.0 + dx + 700.0 * a.cos(), 2048.0 + 450.0 * a.sin()), radius, k)
+    };
+    let mut moves = Vec::new();
+    for m in 0..=24 {
+        let dx = m as f32 * 12.0;
+        let first: Vec<Stamp> = (0..360).map(|k| ellipse(dx, k, 120.0)).collect();
+        let second: Vec<Stamp> = (0..360).map(|k| ellipse(dx + 4.0, k, 90.0)).collect();
+        canvas.replace_shape_stamps(&first, Some(&second));
+        let ms = timed(&mut canvas, &mut doc);
+        // (the first lays it whole: the moves after are what a drag costs)
+        if m > 0 {
+            moves.push(ms);
+        }
+    }
+    assert_eq!(canvas.uses_wet_textures(), resident, "dragged");
+    canvas.end_stroke();
+    canvas.render_finished(gpu, &mut doc);
+    let layer = canvas.read_layer(gpu, layer).unwrap();
+    WetDualFrames { freehand, moves, layer }
+}
+
+/// A big wet dual brush on a 4096 square canvas (a stroke within what the wet paint kept on the GPU
+/// may take) costs the GPU less a frame with its wet paint kept
+/// on the GPU than copied in and out of window buffers, freehand and as a QuickShape is dragged, and
+/// comes out the same bit for bit. Prints each way's frames (median and ninth tenth), and with
+/// `WET_BENCH_DUMP` set leaves the layer in the temporary folder to compare with another build.
+/// Bounds, each round's medians against the windows' of that round, the middle round of six: the
+/// freehand frame no slower, the shape move at most nine tenths of the windows'.
+/// `cargo test -p procraft-gpu --release --test canvas wet_dual_brush_frames -- --ignored --nocapture`
+#[test]
+#[ignore = "a bench: run alone, in release"]
+fn wet_dual_brush_frames() {
+    let Some(gpu) = gpu() else { return };
+    if !gpu.device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        || gpu.device.limits().max_storage_textures_per_shader_stage < 4
+    {
+        eprintln!("skipped: no resident wet paint on this GPU");
+        return;
+    }
+    let _check = NoErrors(&gpu);
+    // (each way once to warm up its pipelines, then six rounds of each in turn: the PC's GPU is
+    // shared, and a run's medians moved by half from one to the next, so each round's resident
+    // medians are taken against the windows' of the same round)
+    let _ = (wet_dual_frames(&gpu, false), wet_dual_frames(&gpu, true));
+    let (mut windows, mut resident) = (wet_dual_frames(&gpu, false), wet_dual_frames(&gpu, true));
+    let ratio = |w: &WetDualFrames, r: &WetDualFrames, part: fn(&WetDualFrames) -> &Vec<f64>| {
+        median_and_p90(part(r)).0 / median_and_p90(part(w)).0.max(1e-9)
+    };
+    let mut ratios = vec![(ratio(&windows, &resident, |f| &f.freehand), ratio(&windows, &resident, |f| &f.moves))];
+    for _ in 1..6 {
+        let (w, r) = (wet_dual_frames(&gpu, false), wet_dual_frames(&gpu, true));
+        assert!(w.layer == windows.layer && r.layer == resident.layer, "laid otherwise the next time");
+        ratios.push((ratio(&w, &r, |f| &f.freehand), ratio(&w, &r, |f| &f.moves)));
+        windows.freehand.extend(w.freehand);
+        windows.moves.extend(w.moves);
+        resident.freehand.extend(r.freehand);
+        resident.moves.extend(r.moves);
+    }
+    println!("on {:?}", gpu.backend());
+    for (name, f) in [("windows", &windows), ("resident", &resident)] {
+        let (free, free90) = median_and_p90(&f.freehand);
+        let (moved, moved90) = median_and_p90(&f.moves);
+        println!(
+            "{name}: freehand frame {free:.2} ms (p90 {free90:.2}), {} frames; shape move {moved:.2} ms (p90 {moved90:.2}), {} moves",
+            f.freehand.len(),
+            f.moves.len()
+        );
+        if std::env::var_os("WET_BENCH_DUMP").is_some() {
+            let path = std::env::temp_dir().join(format!("procraft-wet-bench-{name}.rgba"));
+            std::fs::write(&path, &f.layer).unwrap();
+            println!("{name}: layer left in {}", path.display());
+        }
+    }
+    let free: Vec<f64> = ratios.iter().map(|r| r.0).collect();
+    let moved: Vec<f64> = ratios.iter().map(|r| r.1).collect();
+    let (free, moved) = (median_and_p90(&free).0, median_and_p90(&moved).0);
+    println!("resident against windows, the middle round: freehand {free:.2}, shape moves {moved:.2} ({ratios:.2?})");
+    let differ = windows.layer.iter().zip(&resident.layer).filter(|(a, b)| a != b).count();
+    assert_eq!(differ, 0, "resident wet paint came out otherwise than windowed");
+    assert!(free <= 1.0, "freehand frames resident took {free:.2} of the windows' time");
+    assert!(moved <= 0.9, "shape moves resident took {moved:.2} of the windows' time");
 }

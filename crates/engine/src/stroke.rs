@@ -1369,6 +1369,11 @@ impl StrokeBuilder {
         (self.given_pressure, self.pressure_tapers)
     }
 
+    /// How much a turn of the path contributes to the stamp's angle.
+    pub fn path_angle_share(&self) -> f32 {
+        self.follow()
+    }
+
     pub fn exact_path(mut self) -> StrokeBuilder {
         self.exact = true;
         self
@@ -2554,7 +2559,8 @@ impl StrokeBuilder {
 
     /// How many samples each way stabilisation averages: the stronger of the app's and the
     /// brush's (see [`StrokeBuilder::with_input`]), the app's alone where the brush's own smoothing
-    /// doesn't count.
+    /// doesn't count. As many samples for a pen as for a finger: at their tuned rates, a finger's
+    /// stand for twice the time.
     fn stabilised(&self) -> usize {
         if self.exact || self.steady {
             return 0;
@@ -6750,6 +6756,45 @@ mod tests {
         assert!(stamps.iter().all(|s| s.center.is_finite()));
         assert!(stamps[0].center.distance(few[0].pos) < 1.0);
         assert!(stamps[stamps.len() - 1].center.distance(few[3].pos) < 2.0);
+    }
+
+    /// Stabilisation averages as many samples each way for a pen as for a finger, at their tuned
+    /// rates (240 and 120 a second): a finger's settled stamps trail twice as far behind, by the
+    /// app's setting or the brush's. (Half a second of a pen's at full strength, a second of a
+    /// finger's.)
+    #[test]
+    fn stabilisation_averages_as_many_samples_for_a_pen_as_for_a_finger() {
+        let trail = |pointer: Pointer, rate: f64, amount: f32, global: bool| -> f32 {
+            let samples: Vec<Sample> = (0..=(rate * 1.6) as usize)
+                .map(|i| {
+                    let ms = i as f64 * 1000.0 / rate;
+                    Sample::at(Vec2::new(ms as f32, 50.0), 1.0, ms)
+                })
+                .collect();
+            let end = samples.last().unwrap().pos.x;
+            let mut brush = plain();
+            let mut input = InputSettings::default();
+            if global {
+                input.stabilization = amount;
+            } else {
+                brush.set_setting("stabilization", amount);
+            }
+            let mut stroke = StrokeBuilder::new(brush, 4.0, pointer).with_input(input);
+            stroke.add(&samples);
+            // (the line goes a pixel a millisecond)
+            end - stroke.newest_stamp().unwrap().center.x
+        };
+        for amount in [0.5, 1.0] {
+            for global in [false, true] {
+                let pen = trail(Pointer::Stylus, PEN_RATE, amount, global);
+                let finger = trail(Pointer::Finger, FINGER_RATE, amount, global);
+                let samples = (amount.powf(STABILIZATION_POWER) * MOST_AVERAGED).floor();
+                println!("amount {amount}, global {global}: pen {pen} ms, finger {finger} ms ({samples} samples)");
+                let pen_ms = samples * (1000.0 / PEN_RATE as f32);
+                assert!((pen - pen_ms).abs() <= 10.0, "pen trails {pen} ms, not {pen_ms}");
+                assert!((finger - 2.0 * pen).abs() <= 12.0, "finger trails {finger} ms, pen {pen}");
+            }
+        }
     }
 
     #[test]

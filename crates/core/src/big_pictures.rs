@@ -81,6 +81,19 @@ pub(crate) struct Picture {
     pub(crate) levels: Arc<Vec<u8>>,
 }
 
+/// A wet tip keeps its first choice of image resolution while the brush is selected.
+#[derive(Default)]
+pub(crate) struct PictureChoice(Option<(u64, Option<Picture>)>);
+
+impl PictureChoice {
+    pub(crate) fn get(&mut self, big: &Big) -> Option<Picture> {
+        if self.0.as_ref().is_none_or(|(id, _)| *id != big.id) {
+            self.0 = Some((big.id, ready(big)));
+        }
+        self.0.as_ref().and_then(|(_, picture)| picture.clone())
+    }
+}
+
 impl Picture {
     /// `pixels`, `side` square, ready; none if they aren't that.
     fn of(side: u32, pixels: &[u8]) -> Option<Picture> {
@@ -561,6 +574,20 @@ mod tests {
 
     use super::*;
     use crate::{CanvasSession, PenSample, PointerKind};
+
+    #[test]
+    fn a_wet_tip_keeps_its_choice_when_a_sharper_picture_arrives() {
+        let big = Big { id: 42, side: 2, draw: Draw::Shape(0) };
+        let mut first = PictureChoice::default();
+        OFF.with(|off| off.set(true));
+        assert!(first.get(&big).is_none());
+        OFF.with(|off| off.set(false));
+
+        let shared = shared();
+        hold(&mut shared.lock(), big.id, Picture::of(2, &[0, 63, 127, 255]).unwrap());
+        assert!(first.get(&big).is_none());
+        assert_eq!(PictureChoice::default().get(&big).unwrap().side, 2);
+    }
 
     /// A folder of its own for a test's pictures, empty.
     fn folder(name: &str) -> PathBuf {

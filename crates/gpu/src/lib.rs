@@ -646,10 +646,22 @@ impl Gpu {
         if drawn {
             log::info!("texture copies drawn on this GPU (PowerVR GL)");
         }
+        let wet_storage = !old
+            && !software
+            && info.backend != wgpu::Backend::Gl
+            && adapter
+                .get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm)
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::STORAGE_READ_WRITE);
+        let optional = wgpu::Features::PIPELINE_CACHE
+            | if wet_storage {
+                wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+            } else {
+                wgpu::Features::empty()
+            };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("procraft"),
-            // where the GPU has it: the pipelines' compiled form to keep between runs
-            required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
+            required_features: adapter.features() & optional,
             // the adapter's own limits, so large canvases fit where the GPU allows them
             required_limits:
                 within.clone().map_or_else(|| adapter.limits(), |l| l.or_worse_values_from(&adapter.limits())),
@@ -940,6 +952,16 @@ impl Gpu {
     /// Whether the device is OpenGL (ES)'s.
     pub fn is_gl(&self) -> bool {
         self.adapter.get_info().backend == wgpu::Backend::Gl
+    }
+
+    /// Whether wet paint's stamps can go down a run at a time, a dispatch for each run (see
+    /// `Canvas::lay_wet`): not on an Adreno's OpenGL ES, where the run pass laid paint a few levels
+    /// off, the same each time, and in other places as the run's box moved (a Legion, 2026-11: four
+    /// wet tests failed so, two others with a tighter box; all six passed a stamp a dispatch). There
+    /// each stamp is a dispatch of its own.
+    pub fn lays_wet_runs(&self) -> bool {
+        let info = self.adapter.get_info();
+        !(info.backend == wgpu::Backend::Gl && info.name.to_ascii_lowercase().contains("adreno"))
     }
 
     /// Whether the GPU draws into half floats, blended and filtered: strokes build up in them, and

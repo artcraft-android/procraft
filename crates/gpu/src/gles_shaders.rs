@@ -25,6 +25,7 @@ const SHADERS: &[(&str, &str)] = &[
     ("selection", include_str!("shaders/selection.wgsl")),
     ("bounds", include_str!("shaders/bounds.wgsl")),
     ("flip", include_str!("shaders/flip.wgsl")),
+    ("provisional", include_str!("shaders/provisional.wgsl")),
     ("crop", include_str!("shaders/crop.wgsl")),
     ("filter", include_str!("shaders/filter.wgsl")),
     ("liquify", include_str!("shaders/liquify.wgsl")),
@@ -34,6 +35,14 @@ const SHADERS: &[(&str, &str)] = &[
             include_str!("shaders/blend.wgsl"),
             include_str!("shaders/smudge.wgsl"),
             include_str!("shaders/smudge_compute.wgsl")
+        ),
+    ),
+    (
+        "resident wet paint",
+        concat!(
+            include_str!("shaders/blend.wgsl"),
+            include_str!("shaders/smudge.wgsl"),
+            include_str!("shaders/smudge_resident.wgsl")
         ),
     ),
     (
