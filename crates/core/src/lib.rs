@@ -196,11 +196,14 @@ pub use brush_files::{
     ReadBrushes, is_brush_zip, read_any_brushes, read_brushes, read_brushes_file, read_brushes_from,
 };
 pub use brush_hold::{
-    BRUSH_DRAG_WINDOW, BRUSH_MENU_HOLD, BRUSH_TOUCH_CLOCK_TRUST, BrushHoldMove, brush_hold_move,
+    BRUSH_HOLD_SLOP, BRUSH_MENU_HOLD, BRUSH_TOUCH_CLOCK_TRUST, BrushHoldMove, brush_hold_move, brush_hold_slop,
     brush_menu_hold_seconds, brush_menu_wait, brush_row_slides,
 };
 pub use brush_libraries::BrushLibraryInfo;
-pub use brush_library::{BrushDrop, BrushDropOver, brush_drop_copies, brush_drop_place, prepare_brushes};
+pub use brush_library::{
+    BrushDrop, BrushDropOver, BrushPlace, BrushPlaceChange, brush_drop_copies, brush_drop_place, drag_edge_scrolled,
+    drag_edge_way, prepare_brushes,
+};
 pub use brushes::{BrushInfo, BrushSetInfo, CursorLook, HoverFill, LibraryScroll, RecentBrush, brush_previews_kept};
 pub use clipboard::{COPY_PIXELS_A_METRE, copy_straight, picture_png, write_copy_png};
 pub use colour::{

@@ -23,9 +23,10 @@ private let resultFill = Color(argb: 0x14FF_FFFF)
 private let searchBlock: CGFloat = 60
 /// Menus stay below the top bar.
 private let menuTop: CGFloat = 57
-/// A brush held goes on to follow the finger once it has moved this far, while it still may (the
-/// core's brush_hold_move says until when).
-private let heldSlop: CGFloat = 8
+/// A brush held lets the finger wander this far (points: the core's), its menu still coming; once
+/// the menu shows, moved further, however long it was held, it lifts and follows the finger (the
+/// core's brush_hold_move).
+private let heldSlop = CGFloat(brushHoldSlop())
 /// A brush's cell as the touch comes down: it shrinks to this (deepest about 0.09 s in) and is back
 /// to its size about 0.2 s in, the finger still down, as measured (0.876 to 0.88).
 private let pressShrink: CGFloat = 0.88
@@ -747,9 +748,8 @@ private struct HeldBrush: ViewModifier {
     let ended: () -> Void
     @GestureState private var touching = false
     @GestureState private var pressed = false
-    /// When the hold was made (its menu showing), and whether a move has had its say since: the
-    /// brush lifted, or the list given the touch.
-    @State private var heldAt = Date.distantPast
+    /// Whether a move has had its say since the hold was made (its menu showing): the brush lifted,
+    /// or (a Recent brush's) the list given the touch.
     @State private var decided = false
     @State private var shrink: CGFloat = 1
 
@@ -765,7 +765,7 @@ private struct HeldBrush: ViewModifier {
             .scaleEffect(shrink * (lifted ? heldLift : 1))
             .animation(.easeOut(duration: heldLiftTime), value: lifted)
             .simultaneousGesture(
-                LongPressGesture(minimumDuration: brushMenuHoldSeconds())
+                LongPressGesture(minimumDuration: brushMenuHoldSeconds(), maximumDistance: heldSlop)
                     .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(librarySpace)))
                     .updating($touching) { _, state, _ in
                         state = true
@@ -779,14 +779,13 @@ private struct HeldBrush: ViewModifier {
                         guard case let .second(true, drag) = value else { return }
                         if !ui.holding, !ui.dragging {
                             ui.holding = true
-                            heldAt = Date()
                             decided = false
                             held()
                         }
                         guard let drag else { return }
                         if !decided, !ui.dragging {
                             let moved = Float(hypot(drag.translation.width, drag.translation.height))
-                            switch brushHoldMove(moved: moved, slop: Float(heldSlop), sinceMenu: Date().timeIntervalSince(heldAt), movable: movable) {
+                            switch brushHoldMove(moved: moved, slop: Float(heldSlop), movable: movable) {
                             case .stays:
                                 break
                             case .drags:
@@ -796,7 +795,7 @@ private struct HeldBrush: ViewModifier {
                                     ui.touches?.take(near: drag.location)
                                 }
                             case .leaves:
-                                // too late to lift it: the list has the touch, the menu staying
+                                // a Recent brush stays: the list has the touch, the menu staying
                                 decided = true
                             }
                         }

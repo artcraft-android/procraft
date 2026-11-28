@@ -11505,6 +11505,263 @@ fn brushes_let_go_on_a_brush_move_along_their_set_and_are_copied_into_another() 
     assert_eq!(s.brush_library(), kept);
 }
 
+/// Every brush of the library named apart (its set's place and its own, as the library first
+/// was), so that where each went shows by its name.
+fn name_every_brush_apart(s: &CanvasSession) {
+    for (set, l) in s.brush_library().iter().enumerate() {
+        assert!(s.rename_brush_set(set as u32, format!("set {set}")));
+        for i in 0..l.brushes.len() {
+            assert!(s.rename_brush(set as u32, i as u32, format!("{set}.{i}")));
+        }
+    }
+}
+
+/// The names of the library's sets and of each one's brushes.
+fn library_names(s: &CanvasSession) -> Vec<(String, Vec<String>)> {
+    s.brush_library().iter().map(|l| (l.name.clone(), l.brushes.iter().map(|b| b.name.clone()).collect())).collect()
+}
+
+/// The device test's run (a report: the brush in use jumped to a set's first brush after a move
+/// along a set, a new set and a copy): the brush in use stays the brush it was, and so does each
+/// set's last choice, through all three; a set opened under a dragged brush (as a tap on it) makes
+/// its own choice the brush in use, and a set never chosen in its first brush, as the original's
+/// sets do.
+#[test]
+fn the_brush_in_use_stays_through_a_move_a_new_set_and_a_copy() {
+    use crate::BrushDropOver as Over;
+    let s = CanvasSession::new(64, 64);
+    name_every_brush_apart(&s);
+    let library = s.brush_library();
+    let stock = library.iter().position(|l| l.brushes.len() >= 6).unwrap() as u32;
+    let other = library.iter().enumerate().position(|(i, l)| i as u32 != stock && l.brushes.len() >= 3).unwrap() as u32;
+    let name = |set: u32, index: u32| s.brush_library()[set as usize].brushes[index as usize].name.clone();
+    let set_of = |set_name: &str| s.brush_library().iter().position(|l| l.name == set_name).unwrap() as u32;
+    let current = || s.current_brush().name;
+    let choice = |set_name: &str| s.brush_set_choice(set_of(set_name)).map(|b| b.name);
+    // a brush chosen in the other set, then the brush in use (the "Nori" of the run) in the stock set
+    let (stock_name, other_name) = (format!("set {stock}"), format!("set {other}"));
+    assert!(s.select_brush(other, 1));
+    assert!(s.select_brush(stock, 2));
+    let nori = name(stock, 2);
+    let other_choice = name(other, 1);
+    assert_eq!(current(), nori);
+    // a move along its set: the brush above it put below it, then it to the top
+    assert!(s.drop_brushes_over(stock, vec![1], Over::OnBrush { set: stock, index: 4, lower: true }));
+    assert_eq!(current(), nori);
+    assert!(s.drop_brushes_over(stock, vec![1], Over::OnBrush { set: stock, index: 0, lower: false }));
+    assert_eq!(name(stock, 0), nori);
+    assert_eq!(current(), nori);
+    // a new set, at the top: every set a place down
+    assert_eq!(s.new_brush_set(), 0);
+    assert!(s.rename_brush_set(0, "new".into()));
+    assert_eq!(current(), nori);
+    assert_eq!(choice(&stock_name), Some(nori.clone()));
+    assert_eq!(choice(&other_name), Some(other_choice.clone()));
+    // copies: the brush in use onto the new set's row, another onto the other set's row, the brush
+    // in use onto a brush of the other set
+    let (stock, other) = (set_of(&stock_name), set_of(&other_name));
+    assert!(s.drop_brushes_over(stock, vec![0], Over::OnSet { set: 0 }));
+    assert_eq!(name(0, 0), nori);
+    assert!(s.drop_brushes_over(stock, vec![3], Over::OnSet { set: other }));
+    assert!(s.drop_brushes_over(stock, vec![0], Over::OnBrush { set: other, index: 1, lower: false }));
+    let c = s.current_brush();
+    assert_eq!((c.set, c.index, c.name.as_str()), (stock, 0, nori.as_str()), "on the brush it was, not a copy");
+    assert_eq!(choice(&stock_name), Some(nori.clone()));
+    assert_eq!(choice(&other_name), Some(other_choice.clone()));
+    // the new set, never chosen in, would give its first brush (the copy) if opened
+    assert_eq!(s.brush_set_choice(0).map(|b| (b.index, b.name)), Some((0, nori.clone())));
+    // a set opened under the drag: its choice becomes the brush in use, the set left keeping its own
+    let b = s.brush_set_choice(other).unwrap();
+    assert!(s.select_brush(b.set, b.index));
+    assert_eq!(current(), other_choice);
+    assert_eq!(choice(&stock_name), Some(nori));
+}
+
+/// Drops of every kind (along a set, onto another set's row or among its brushes, several at
+/// once) with new sets between them, 1500 at random: the library ends as the drops say, the brush
+/// in use and each set's choice stay on the brushes they named, and the places a drop reports for
+/// the sample strokes kept give each picture to its own brush (a copy its original's).
+#[test]
+fn drops_and_new_sets_any_way_leave_the_brush_in_use_and_every_choice_on_their_brushes() {
+    use crate::{BrushDropOver as Over, BrushPlace};
+    let s = CanvasSession::new(64, 64);
+    name_every_brush_apart(&s);
+    let mut model = library_names(&s);
+    let sets = model.len() as u32;
+    assert!(sets >= 6);
+    // the brush in use, and each set's choice, by name
+    let mut state = 0x6dau32;
+    let mut next = |n: u32| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) % n.max(1)
+    };
+    let mut choices: Vec<(String, String)> = Vec::new();
+    let choose = |s: &CanvasSession, choices: &mut Vec<(String, String)>, set: u32, index: u32| {
+        let before = s.current_brush();
+        let library = s.brush_library();
+        let set_name = |i: u32| library[i as usize].name.clone();
+        let before_set = set_name(before.set);
+        choices.retain(|(set, _)| *set != before_set);
+        choices.push((before_set, before.name));
+        assert!(s.select_brush(set, index));
+        let now = set_name(set);
+        choices.retain(|(set, _)| *set != now);
+        choices.push((now, library[set as usize].brushes[index as usize].name.clone()));
+    };
+    for set in [1, 3, 2] {
+        choose(&s, &mut choices, set, 1);
+    }
+    let mut made = 0;
+    for round in 0..1500 {
+        let sets = model.len() as u32;
+        match next(10) {
+            // a new set, at the top
+            0 => {
+                assert_eq!(s.new_brush_set(), 0);
+                made += 1;
+                let name = format!("new {made}");
+                assert!(s.rename_brush_set(0, name.clone()));
+                model.insert(0, (name, Vec::new()));
+            }
+            // a set opened (tapped, or a dragged brush resting on it): its choice the brush in use
+            1 => {
+                let set = next(sets);
+                if let Some(b) = s.brush_set_choice(set) {
+                    choose(&s, &mut choices, b.set, b.index);
+                }
+            }
+            // one or two brushes of a set dropped somewhere
+            _ => {
+                let from = next(sets);
+                let held = model[from as usize].1.len() as u32;
+                if held == 0 {
+                    continue;
+                }
+                let mut indices = vec![next(held)];
+                if held > 2 && next(3) == 0 {
+                    indices.push(next(held));
+                }
+                let to = next(sets);
+                let count = model[to as usize].1.len() as u32;
+                let over = match next(3) {
+                    0 => Over::OnSet { set: to },
+                    1 if count > 0 => Over::OnBrush { set: to, index: next(count), lower: next(2) == 1 },
+                    _ => Over::InList { set: to, count },
+                };
+                let Some(place) = crate::brush_drop_place(from, indices.clone(), over) else {
+                    assert!(!s.drop_brushes_over(from, indices, over), "round {round}");
+                    continue;
+                };
+                // every place kept, as an app holding every sample stroke
+                let kept: Vec<BrushPlace> = model
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(set, (_, b))| {
+                        (0..b.len()).map(move |index| BrushPlace { set: set as u32, index: index as u32 })
+                    })
+                    .collect();
+                let before = model.clone();
+                let changes = s.drop_brushes_over_keeping(from, indices.clone(), over, kept.clone()).unwrap();
+                let mut going: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
+                going.sort_unstable();
+                going.dedup();
+                let names: Vec<String> = going.iter().map(|&i| model[from as usize].1[i].clone()).collect();
+                if place.copies {
+                    for (k, n) in names.iter().enumerate() {
+                        model[place.set as usize].1.insert(place.index as usize + k, n.clone());
+                    }
+                } else {
+                    for &i in going.iter().rev() {
+                        model[from as usize].1.remove(i);
+                    }
+                    for (k, n) in names.iter().enumerate() {
+                        model[place.set as usize].1.insert(place.index as usize + k, n.clone());
+                    }
+                }
+                assert_eq!(library_names(&s), model, "round {round}: the library as the drop says");
+                // each picture to its brush: every kept place once, and a copy's from its original
+                let named =
+                    |m: &Vec<(String, Vec<String>)>, p: BrushPlace| m[p.set as usize].1[p.index as usize].clone();
+                assert_eq!(changes.len(), kept.len() + if place.copies { going.len() } else { 0 });
+                for c in &changes {
+                    assert_eq!(named(&before, c.was), named(&model, c.now), "round {round}: {c:?}");
+                }
+                // copies named apart, so that names still tell brushes apart
+                if place.copies {
+                    for k in 0..going.len() {
+                        made += 1;
+                        let at = place.index as usize + k;
+                        let name = format!("copy {made}");
+                        assert!(s.rename_brush(place.set, at as u32, name.clone()));
+                        model[place.set as usize].1[at] = name;
+                    }
+                }
+            }
+        }
+        assert_eq!(library_names(&s), model, "round {round}");
+        // the brush in use is the one last chosen (a set opened chooses its own)
+        let now = s.current_brush();
+        assert_eq!(model[now.set as usize].1[now.index as usize], now.name);
+        assert_eq!(
+            Some(&now.name),
+            choices.last().map(|(_, b)| b),
+            "round {round}: the brush in use moved off its brush"
+        );
+        // each set's choice is where it was
+        for (set_name, brush) in &choices {
+            let set = model.iter().position(|(n, _)| n == set_name).unwrap() as u32;
+            assert_eq!(
+                s.brush_set_choice(set).map(|b| b.name).as_ref(),
+                Some(brush),
+                "round {round}: {set_name}'s choice"
+            );
+        }
+    }
+    assert!(made > 50);
+}
+
+/// A drop tells an app where each sample stroke it holds now belongs: along a set, each with its
+/// brush; a copy, its original's too; a place with no brush (a stroke held from before) nowhere,
+/// so it can't land on another brush's row.
+#[test]
+fn a_drop_tells_where_each_sample_stroke_held_now_belongs() {
+    use crate::{BrushDropOver as Over, BrushPlace as At, BrushPlaceChange as Change};
+    let s = CanvasSession::new(64, 64);
+    let library = s.brush_library();
+    let stock = library.iter().position(|l| l.brushes.len() >= 4).unwrap() as u32;
+    let other = library.iter().enumerate().position(|(i, l)| i as u32 != stock && l.brushes.len() >= 2).unwrap() as u32;
+    let at = |set, index| At { set, index };
+    let held = library[stock as usize].brushes.len() as u32;
+    // brush 0 below brush 2 of its set; held: 0 to 3, and one past the set's end
+    let kept = vec![at(stock, 0), at(stock, 1), at(stock, 2), at(stock, 3), at(stock, held)];
+    let moved =
+        s.drop_brushes_over_keeping(stock, vec![0], Over::OnBrush { set: stock, index: 2, lower: true }, kept).unwrap();
+    let change = |was, now| Change { was, now };
+    assert_eq!(
+        moved,
+        [
+            change(at(stock, 0), at(stock, 2)),
+            change(at(stock, 1), at(stock, 0)),
+            change(at(stock, 2), at(stock, 1)),
+            change(at(stock, 3), at(stock, 3)),
+        ]
+    );
+    // brush 1 copied onto the other set's row: its top; the other set's own a place down
+    let kept = vec![at(stock, 1), at(other, 0), at(other, 1)];
+    let copied = s.drop_brushes_over_keeping(stock, vec![1], Over::OnSet { set: other }, kept).unwrap();
+    assert_eq!(
+        copied,
+        [
+            change(at(stock, 1), at(stock, 1)),
+            change(at(other, 0), at(other, 1)),
+            change(at(other, 1), at(other, 2)),
+            change(at(stock, 1), at(other, 0)),
+        ]
+    );
+    // nothing moved: none
+    assert_eq!(s.drop_brushes_over_keeping(stock, vec![0], Over::OnSet { set: stock }, vec![at(stock, 0)]), None);
+}
+
 /// Brush `index` of `set` as a brush file, as Share makes it.
 fn brushfile_of(s: &CanvasSession, set: u32, index: u32) -> Vec<u8> {
     s.brush_as_file(set, index).expect("a brush file")

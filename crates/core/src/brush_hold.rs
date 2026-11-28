@@ -1,22 +1,19 @@
-//! A brush held in the library, as the original does it (measured from screen recordings at about
-//! 31 frames a second): held still [`BRUSH_MENU_HOLD`], its menu shows while the finger is still
-//! down (let go before, it was a tap, which chooses the brush). The finger moving on within
-//! [`BRUSH_DRAG_WINDOW`] of the menu showing lifts the brush to follow it, the menu going; moving on
-//! later, the hold is over and the list under the menu has the touch (it scrolls), the menu staying.
-//! Let go without moving on, the menu stays and nothing is chosen. The apps follow the touch; what
-//! a move does is [`brush_hold_move`]'s to say, and how long the hold still has to go when an app
-//! first sees the touch, [`brush_menu_wait`]'s.
+//! A brush held in the library, as the original does it: held still [`BRUSH_MENU_HOLD`] (moving
+//! no further than [`BRUSH_HOLD_SLOP`]), its menu shows while the finger is still down (let go
+//! before, it was a tap, which chooses the brush). From then on the brush is lifted for as long as
+//! the finger stays down: moved on past the slop, at any time, the menu goes and the brush follows
+//! the finger. Let go without moving on, the menu stays and nothing is chosen. The apps follow the
+//! touch; what a move does is [`brush_hold_move`]'s to say, and how long the hold still has to go
+//! when an app first sees the touch, [`brush_menu_wait`]'s.
 
 /// How long a brush is held still before its menu shows, seconds from the touch coming down: the
 /// menu started showing 0.32 to 0.35 s into each hold measured.
 pub const BRUSH_MENU_HOLD: f64 = 0.33;
 
-/// How long after its menu shows a held brush still lifts to follow the finger moving on, seconds:
-/// presses of 0.4 and 0.55 s then moved on lifted the brush, their moves taking hold 0.51 and
-/// 0.67 s after the touch came down (0.18 and 0.34 s after the menu showed); presses of 0.7 s and
-/// 1 s scrolled the list under the menu instead. So the window ends 0.65 to 0.75 s after the touch
-/// came down: here in the middle of that.
-pub const BRUSH_DRAG_WINDOW: f64 = 0.37;
+/// How far (points) a finger holding a brush may move from where it came down and still be
+/// holding it: further before the menu shows, it was no hold (the list or the row has it); further
+/// once it shows, the brush lifts and follows the finger.
+pub const BRUSH_HOLD_SLOP: f32 = 10.0;
 
 /// How far back the touch's own clock may put its coming down when an app first sees it, seconds,
 /// for the hold to count from then: further back (or ahead), that clock isn't one to go by (a
@@ -32,9 +29,10 @@ pub enum BrushHoldMove {
     Stays,
     /// The brush lifts and follows the finger; its menu goes.
     Drags,
-    /// The hold is over without lifting the brush: the list under the menu has the touch (it
-    /// scrolls up and down), and the menu stays. Nothing else has it: moved sideways, the brush's
-    /// row doesn't slide open to its buttons (see [`brush_row_slides`]).
+    /// The hold is over without lifting the brush, one that stays where it is (the Recent set's):
+    /// the list under the menu has the touch (it scrolls up and down), and the menu stays. Nothing
+    /// else has it: moved sideways, the brush's row doesn't slide open to its buttons (see
+    /// [`brush_row_slides`]).
     Leaves,
 }
 
@@ -42,6 +40,13 @@ pub enum BrushHoldMove {
 #[uniffi::export]
 pub fn brush_menu_hold_seconds() -> f64 {
     BRUSH_MENU_HOLD
+}
+
+/// [`BRUSH_HOLD_SLOP`], for the apps (points: an app working in pixels takes it times its
+/// density).
+#[uniffi::export]
+pub fn brush_hold_slop() -> f32 {
+    BRUSH_HOLD_SLOP
 }
 
 /// How much longer a brush held still waits before its menu shows, seconds, when the app first
@@ -59,26 +64,23 @@ pub fn brush_menu_wait(since_down: f64) -> f64 {
 
 /// Whether a press on a brush's row may slide the row sideways to show its buttons: not once the
 /// brush's menu has shown under it (`menu_shown`). From then on the press is the hold's until let go:
-/// moved on in time it lifts the brush, later the list under the menu has it, which only scrolls up
-/// and down, the menu staying (as the original: a sideways move late in a hold opens no buttons).
+/// moved on it lifts the brush (one of the Recent set's leaves it to the list under the menu, which
+/// only scrolls up and down, the menu staying).
 #[uniffi::export]
 pub fn brush_row_slides(menu_shown: bool) -> bool {
     !menu_shown
 }
 
-/// What the finger holding a brush does, moved `moved` from where it came down (the app's points
-/// or pixels, as `slop` is), `since_menu` seconds after the brush's menu showed: within the slop,
-/// nothing; past it within [`BRUSH_DRAG_WINDOW`] the brush lifts to be dragged, if it can be
-/// (`movable`: the Recent set's brushes stay where they are); past it later, or for a brush that
-/// stays, the hold is over and the list has the touch. A distance or a time that isn't a number is
-/// taken as no move and as late.
+/// What the finger holding a brush whose menu has shown does, moved `moved` from where it came down
+/// (the app's points or pixels, as `slop` is: [`BRUSH_HOLD_SLOP`] in the app's units): within the
+/// slop, nothing; past it the brush lifts to be dragged, however long it was held, if it can be
+/// (`movable`: the Recent set's brushes stay where they are, and the list has the touch). A
+/// distance that isn't a number is taken as no move.
 #[uniffi::export]
-pub fn brush_hold_move(moved: f32, slop: f32, since_menu: f64, movable: bool) -> BrushHoldMove {
+pub fn brush_hold_move(moved: f32, slop: f32, movable: bool) -> BrushHoldMove {
     if moved.is_nan() || moved <= slop.max(0.0) {
-        return BrushHoldMove::Stays;
-    }
-    // (a clock a moment behind the touch's own counts as the menu just showing)
-    if movable && since_menu.is_finite() && since_menu.max(0.0) <= BRUSH_DRAG_WINDOW {
+        BrushHoldMove::Stays
+    } else if movable {
         BrushHoldMove::Drags
     } else {
         BrushHoldMove::Leaves
@@ -89,45 +91,35 @@ pub fn brush_hold_move(moved: f32, slop: f32, since_menu: f64, movable: bool) ->
 mod tests {
     use super::*;
 
-    /// The presses measured on the original, and when their moves took hold (from the touch coming
-    /// down: where the menu began to fade as the brush lifted), and what each move then did: the
-    /// drag window has to keep each where it was seen.
+    /// The holds seen on the original, each then moved on: presses of 0.4 and 0.55 s, and holds of
+    /// about 1.2 s with the menu full for most of a second first, all lifted the brush. A hold has
+    /// no time after which a move stops lifting it: any time after the menu, a move past the slop
+    /// drags (a report: a brush held a little long couldn't be moved at all).
     #[test]
-    fn the_measured_presses_move_on_as_the_original_did() {
-        // still holds: the menu showed 0.32 to 0.35 s in, and a hold of 0.3 s let go was a tap
+    fn a_held_brush_moved_on_lifts_however_long_it_was_held() {
         let hold = brush_menu_hold_seconds();
         assert!((0.32..=0.35).contains(&hold) && hold > 0.3, "{hold}");
-        // a 0.4 s press (its move taking hold at 0.508 s) and a 0.55 s one (0.668 s) lifted the
-        // brush; a 0.7 s press, its move no sooner than 0.75 s, and a 1 s one scrolled the list
-        for (press, moved_at, lifts) in [(0.4, 0.508, true), (0.55, 0.668, true), (0.7, 0.75, false), (1.0, 1.0, false)]
-        {
-            let moved = brush_hold_move(30.0, 8.0, moved_at - BRUSH_MENU_HOLD, true);
-            let want = if lifts { BrushHoldMove::Drags } else { BrushHoldMove::Leaves };
-            assert_eq!(moved, want, "a press of {press} s, moved on at {moved_at} s");
+        // the moves are the same however long the hold was: there is no clock in the rule
+        for moved in [10.5, 30.0, 36.0, 400.0] {
+            assert_eq!(brush_hold_move(moved, BRUSH_HOLD_SLOP, true), BrushHoldMove::Drags, "{moved}");
         }
     }
 
     #[test]
-    fn a_finger_never_quite_still_keeps_the_hold() {
-        for moved in [0.0, 1.0, 3.5, 7.9, 8.0] {
-            assert_eq!(brush_hold_move(moved, 8.0, 0.0, true), BrushHoldMove::Stays);
-            assert_eq!(brush_hold_move(moved, 8.0, 5.0, true), BrushHoldMove::Stays);
+    fn the_hold_lets_the_finger_wander_ten_points() {
+        assert_eq!(brush_hold_slop(), 10.0);
+        for moved in [0.0, 1.0, 3.5, 7.9, 9.99, 10.0] {
+            assert_eq!(brush_hold_move(moved, BRUSH_HOLD_SLOP, true), BrushHoldMove::Stays, "{moved}");
+            assert_eq!(brush_hold_move(moved, BRUSH_HOLD_SLOP, false), BrushHoldMove::Stays, "{moved}");
         }
-        // a move that isn't a number is no move
-        assert_eq!(brush_hold_move(f32::NAN, 8.0, 0.1, true), BrushHoldMove::Stays);
-    }
-
-    #[test]
-    fn moved_on_in_time_the_brush_lifts_and_later_the_list_has_it() {
-        assert_eq!(brush_hold_move(8.5, 8.0, 0.0, true), BrushHoldMove::Drags);
-        assert_eq!(brush_hold_move(40.0, 8.0, BRUSH_DRAG_WINDOW, true), BrushHoldMove::Drags);
-        assert_eq!(brush_hold_move(40.0, 8.0, BRUSH_DRAG_WINDOW + 0.01, true), BrushHoldMove::Leaves);
-        assert_eq!(brush_hold_move(40.0, 8.0, 3.0, true), BrushHoldMove::Leaves);
-        // a clock a moment behind: the menu just showed
-        assert_eq!(brush_hold_move(40.0, 8.0, -0.004, true), BrushHoldMove::Drags);
-        // a time that isn't a number is late
-        assert_eq!(brush_hold_move(40.0, 8.0, f64::NAN, true), BrushHoldMove::Leaves);
-        assert_eq!(brush_hold_move(40.0, 8.0, f64::INFINITY, true), BrushHoldMove::Leaves);
+        assert_eq!(brush_hold_move(10.01, BRUSH_HOLD_SLOP, true), BrushHoldMove::Drags);
+        // in pixels at three times the density: 30
+        assert_eq!(brush_hold_move(29.0, BRUSH_HOLD_SLOP * 3.0, true), BrushHoldMove::Stays);
+        assert_eq!(brush_hold_move(31.0, BRUSH_HOLD_SLOP * 3.0, true), BrushHoldMove::Drags);
+        // a move that isn't a number is no move; a slop below nothing is none
+        assert_eq!(brush_hold_move(f32::NAN, BRUSH_HOLD_SLOP, true), BrushHoldMove::Stays);
+        assert_eq!(brush_hold_move(0.5, -4.0, true), BrushHoldMove::Drags);
+        assert_eq!(brush_hold_move(f32::INFINITY, BRUSH_HOLD_SLOP, true), BrushHoldMove::Drags);
     }
 
     /// The menu shows the hold after the finger landed: an app seeing the touch late waits only the
@@ -154,28 +146,20 @@ mod tests {
         }
     }
 
-    /// Moved sideways late in a hold (after the drag window), the list has the press, and only to
-    /// scroll: the brush's row doesn't slide open to its buttons, as it does for a press whose menu
-    /// hasn't shown.
+    /// Moved sideways once the menu has shown, a brush lifts (it doesn't slide its row open to its
+    /// buttons), and a brush of the Recent set leaves the press to the list, which only scrolls.
     #[test]
-    fn a_late_sideways_move_opens_no_buttons() {
-        // 30 sideways, 2 down, with an 8 slop: 0.5 s and 1 s after the menu showed (past the 0.37 s
-        // window), the hold leaves to the list, and the row stays shut
-        for since_menu in [0.5, 1.0] {
-            assert_eq!(brush_hold_move(30.0, 8.0, since_menu, true), BrushHoldMove::Leaves);
-            assert!(!brush_row_slides(true));
-        }
-        // in time, the same move lifts the brush instead (no buttons either)
-        assert_eq!(brush_hold_move(30.0, 8.0, 0.2, true), BrushHoldMove::Drags);
-        // a Recent brush held, moved sideways at once: the list's, no buttons
-        assert_eq!(brush_hold_move(30.0, 8.0, 0.0, false), BrushHoldMove::Leaves);
+    fn a_sideways_move_after_the_menu_opens_no_buttons() {
+        assert!(!brush_row_slides(true));
+        assert_eq!(brush_hold_move(30.0, BRUSH_HOLD_SLOP, true), BrushHoldMove::Drags);
+        assert_eq!(brush_hold_move(30.0, BRUSH_HOLD_SLOP, false), BrushHoldMove::Leaves);
         // a press whose menu hasn't shown (moved before 0.33 s) slides its row
         assert!(brush_row_slides(false));
     }
 
     #[test]
     fn the_recent_sets_brushes_never_lift() {
-        assert_eq!(brush_hold_move(40.0, 8.0, 0.05, false), BrushHoldMove::Leaves);
-        assert_eq!(brush_hold_move(4.0, 8.0, 0.05, false), BrushHoldMove::Stays);
+        assert_eq!(brush_hold_move(40.0, BRUSH_HOLD_SLOP, false), BrushHoldMove::Leaves);
+        assert_eq!(brush_hold_move(4.0, BRUSH_HOLD_SLOP, false), BrushHoldMove::Stays);
     }
 }

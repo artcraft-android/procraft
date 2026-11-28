@@ -81,9 +81,9 @@ class BrushHoldTest {
     }
 
     /**
-     * A row whose brush was held to its menu doesn't slide open: a sideways move late in the hold is
-     * the list's (the core's hold rule), so let go it is as it was, its buttons shut and nothing
-     * picked; a press that never showed the menu slides it as ever.
+     * A row whose brush was held to its menu doesn't slide open: a sideways move then lifts the brush
+     * (or, a Recent brush's, is the list's: the core's hold rule), so let go it is as it was, its
+     * buttons shut and nothing picked; a press that never showed the menu slides it as ever.
      */
     @Test
     fun aRowHeldToItsMenuLetGoSlidSidewaysStaysAsItWas() {

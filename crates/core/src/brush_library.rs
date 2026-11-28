@@ -491,6 +491,90 @@ struct LastLibrary {
     library: Vec<LibrarySet>,
 }
 
+impl CanvasSession {
+    /// [`Self::move_brushes`]: the places moved (in order) and the place they went to, if they did.
+    fn moved_brushes(&self, set: u32, indices: Vec<u32>, to_set: u32, to_index: u32) -> Option<(Vec<usize>, usize)> {
+        let mut st = self.shared.lock();
+        let (s, ts) = (set as usize, to_set as usize);
+        let mut moving: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
+        moving.sort_unstable();
+        moving.dedup();
+        let held = st.library.get(s).map_or(0, |e| e.brushes.len());
+        if moving.is_empty() || ts >= st.library.len() || moving.iter().any(|&i| i >= held) {
+            return None;
+        }
+        let entry = st.library.get_mut(s)?;
+        // out of their set from the last up, so the places of the rest hold
+        let mut taken = Vec::with_capacity(moving.len());
+        for &i in moving.iter().rev() {
+            let brush = entry.brushes.remove(i);
+            let origin = if i < entry.origins.len() { entry.origins.remove(i) } else { None };
+            taken.push((brush, origin));
+        }
+        taken.reverse();
+        let target = st.library.get_mut(ts)?;
+        let ti = (to_index as usize).min(target.brushes.len());
+        for (k, (brush, origin)) in taken.into_iter().enumerate() {
+            target.brushes.insert(ti + k, brush);
+            if ti + k <= target.origins.len() {
+                target.origins.insert(ti + k, origin);
+            } else {
+                target.origins.push(origin);
+            }
+        }
+        st.move_brush_refs(|place| Some(place_after_move(place, s, &moving, ts, ti)));
+        Some((moving, ti))
+    }
+
+    /// [`Self::copy_brushes`]: the places copied (in order) and the place the copies went to, if
+    /// they were.
+    fn copied_brushes(&self, set: u32, indices: Vec<u32>, to_set: u32, to_index: u32) -> Option<(Vec<usize>, usize)> {
+        let mut st = self.shared.lock();
+        let (s, ts) = (set as usize, to_set as usize);
+        let mut copying: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
+        copying.sort_unstable();
+        copying.dedup();
+        let entry = st.library.get(s)?;
+        if copying.is_empty() || ts >= st.library.len() || copying.iter().any(|&i| i >= entry.brushes.len()) {
+            return None;
+        }
+        let copies: Vec<(Brush, Option<(usize, usize)>)> = copying
+            .iter()
+            .filter_map(|&i| Some((entry.brushes.get(i)?.clone(), entry.origins.get(i).copied().flatten())))
+            .collect();
+        let count = copies.len();
+        let target = st.library.get_mut(ts)?;
+        let ti = (to_index as usize).min(target.brushes.len());
+        for (k, (brush, origin)) in copies.into_iter().enumerate() {
+            target.brushes.insert(ti + k, brush);
+            if ti + k <= target.origins.len() {
+                target.origins.insert(ti + k, origin);
+            } else {
+                target.origins.push(origin);
+            }
+        }
+        // the brushes after them in their new set move down past them
+        st.move_brush_refs(|place| Some(place_after_insert(place, ts, ti, count)));
+        Some((copying, ti))
+    }
+
+    /// [`Self::drop_brushes`]: whether they were copied, the places dropped (in order) and the place
+    /// they went to, if anything moved or was copied.
+    fn dropped_brushes(
+        &self,
+        set: u32,
+        indices: Vec<u32>,
+        to_set: u32,
+        to_index: u32,
+    ) -> Option<(bool, Vec<usize>, usize)> {
+        if brush_drop_copies(set, to_set) {
+            self.copied_brushes(set, indices, to_set, to_index).map(|(places, at)| (true, places, at))
+        } else {
+            self.moved_brushes(set, indices, to_set, to_index).map(|(places, at)| (false, places, at))
+        }
+    }
+}
+
 /// Whether brushes dragged from set `from` and let go on set `to` are copied there, those dragged
 /// staying where they were (a green plus on them says so while they are dragged over it): onto
 /// another set they are; along their own set they move.
@@ -554,6 +638,95 @@ pub fn brush_drop_place(from: u32, indices: Vec<u32>, over: BrushDropOver) -> Op
     // one after another from that place already: they stay as they are
     let stays = moving.iter().zip(index..).all(|(&m, place)| m == place);
     (!stays).then_some(BrushDrop { set, index, copies: false })
+}
+
+/// A brush's place in the library: its set, and its place in that set (its top at 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct BrushPlace {
+    pub set: u32,
+    pub index: u32,
+}
+
+/// What brushes dropped in the library did to a brush's place: the brush that was at `was` is at
+/// `now`; or, for a copy, the copy at `now` is of the brush at `was` (the same brush, so the same
+/// sample stroke). The apps keep each sample stroke drawn with its brush by these, rather than
+/// drawing every one again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct BrushPlaceChange {
+    pub was: BrushPlace,
+    pub now: BrushPlace,
+}
+
+/// Where the brush at `place` is after brushes `moving` of set `from` (their places, in order, none
+/// twice) moved together to place `to_index` of set `to_set` (counted without them there).
+pub(crate) fn place_after_move(
+    place: (usize, usize),
+    from: usize,
+    moving: &[usize],
+    to_set: usize,
+    to_index: usize,
+) -> (usize, usize) {
+    let (set, index) = place;
+    if set == from
+        && let Ok(k) = moving.binary_search(&index)
+    {
+        return (to_set, to_index + k);
+    }
+    // out of their old places, then into the new ones
+    let index = if set == from { index - moving.partition_point(|&m| m < index) } else { index };
+    (set, if set == to_set && index >= to_index { index + moving.len() } else { index })
+}
+
+/// Where the brush at `place` is after `count` brushes are put in at place `at` of set `set`: those
+/// from there on move down past them.
+pub(crate) fn place_after_insert(place: (usize, usize), set: usize, at: usize, count: usize) -> (usize, usize) {
+    (place.0, if place.0 == set && place.1 >= at { place.1 + count } else { place.1 })
+}
+
+/// How far a list scrolls each 60th of a second as something dragged first reaches past its edge
+/// (points), and the share the speed grows by at the first 60th: a share that itself shrinks by
+/// itself squared each 60th, so the list goes faster and faster the longer it is held there.
+const EDGE_SCROLL_START: f64 = 2.0;
+const EDGE_SCROLL_GROWTH: f64 = 0.1;
+
+/// The most 60ths of a second [`drag_edge_scrolled`] counts (a minute): past that it stays.
+const EDGE_SCROLL_MOST: f64 = 3600.0;
+
+/// Which way a list scrolls under a row dragged along it (a brush in the library): the row's top
+/// and bottom (`top`, `bottom`) against the top and bottom of the list as it shows (`from`, `to`),
+/// down the screen in any one unit. Up (-1) once the row reaches past the list's top, down (1) past
+/// its bottom; else, or reaching past both, none (0).
+#[uniffi::export]
+pub fn drag_edge_way(top: f32, bottom: f32, from: f32, to: f32) -> i32 {
+    if ![top, bottom, from, to].iter().all(|v| v.is_finite()) {
+        return 0;
+    }
+    match (top < from, bottom > to) {
+        (true, false) => -1,
+        (false, true) => 1,
+        _ => 0,
+    }
+}
+
+/// How far (points) a list has scrolled under a row dragged past its edge ([`drag_edge_way`]),
+/// `seconds` after it got there: [`EDGE_SCROLL_START`] points the first 60th of a second, the speed
+/// growing each 60th after by a share that starts at [`EDGE_SCROLL_GROWTH`] and shrinks by itself
+/// squared, so it scrolls slowly at first to place a brush and faster the longer it is held (a
+/// second in, about 13 points a 60th). An app scrolls by the difference between two calls.
+#[uniffi::export]
+pub fn drag_edge_scrolled(seconds: f64) -> f64 {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return 0.0;
+    }
+    let ticks = (seconds * 60.0).min(EDGE_SCROLL_MOST);
+    let (mut gone, mut speed, mut growth) = (0.0, EDGE_SCROLL_START, EDGE_SCROLL_GROWTH);
+    let whole = ticks.floor();
+    for _ in 0..whole as u32 {
+        gone += speed;
+        speed += speed * growth;
+        growth *= 1.0 - growth;
+    }
+    gone + speed * (ticks - whole)
 }
 
 /// Reads the library in use kept in folder `dir` ahead of the first artwork (while the gallery
@@ -1329,46 +1502,7 @@ impl CanvasSession {
     /// their own. A tool that used one keeps it, wherever it goes. False, moving none, if any isn't
     /// a brush there or there is no such set.
     pub fn move_brushes(&self, set: u32, indices: Vec<u32>, to_set: u32, to_index: u32) -> bool {
-        let mut st = self.shared.lock();
-        let (s, ts) = (set as usize, to_set as usize);
-        let mut moving: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
-        moving.sort_unstable();
-        moving.dedup();
-        let held = st.library.get(s).map_or(0, |e| e.brushes.len());
-        if moving.is_empty() || ts >= st.library.len() || moving.iter().any(|&i| i >= held) {
-            return false;
-        }
-        let Some(entry) = st.library.get_mut(s) else { return false };
-        // out of their set from the last up, so the places of the rest hold
-        let mut taken = Vec::with_capacity(moving.len());
-        for &i in moving.iter().rev() {
-            let brush = entry.brushes.remove(i);
-            let origin = if i < entry.origins.len() { entry.origins.remove(i) } else { None };
-            taken.push((brush, origin));
-        }
-        taken.reverse();
-        let Some(target) = st.library.get_mut(ts) else { return false };
-        let ti = (to_index as usize).min(target.brushes.len());
-        for (k, (brush, origin)) in taken.into_iter().enumerate() {
-            target.brushes.insert(ti + k, brush);
-            if ti + k <= target.origins.len() {
-                target.origins.insert(ti + k, origin);
-            } else {
-                target.origins.push(origin);
-            }
-        }
-        let count = moving.len();
-        st.move_brush_refs(|(rs, ri)| {
-            if rs == s
-                && let Ok(k) = moving.binary_search(&ri)
-            {
-                return Some((ts, ti + k));
-            }
-            // out of their old places, then into the new ones
-            let ri = if rs == s { ri - moving.partition_point(|&m| m < ri) } else { ri };
-            Some((rs, if rs == ts && ri >= ti { ri + count } else { ri }))
-        });
-        true
+        self.moved_brushes(set, indices, to_set, to_index).is_some()
     }
 
     /// Copies brushes `indices` of `set` together, in their order, to place `to_index` of set
@@ -1376,33 +1510,7 @@ impl CanvasSession {
     /// stay where they were, and a tool keeps the brush it had. False, copying none, if any isn't a
     /// brush there or there is no such set.
     pub fn copy_brushes(&self, set: u32, indices: Vec<u32>, to_set: u32, to_index: u32) -> bool {
-        let mut st = self.shared.lock();
-        let (s, ts) = (set as usize, to_set as usize);
-        let mut copying: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
-        copying.sort_unstable();
-        copying.dedup();
-        let Some(entry) = st.library.get(s) else { return false };
-        if copying.is_empty() || ts >= st.library.len() || copying.iter().any(|&i| i >= entry.brushes.len()) {
-            return false;
-        }
-        let copies: Vec<(Brush, Option<(usize, usize)>)> = copying
-            .iter()
-            .filter_map(|&i| Some((entry.brushes.get(i)?.clone(), entry.origins.get(i).copied().flatten())))
-            .collect();
-        let count = copies.len();
-        let Some(target) = st.library.get_mut(ts) else { return false };
-        let ti = (to_index as usize).min(target.brushes.len());
-        for (k, (brush, origin)) in copies.into_iter().enumerate() {
-            target.brushes.insert(ti + k, brush);
-            if ti + k <= target.origins.len() {
-                target.origins.insert(ti + k, origin);
-            } else {
-                target.origins.push(origin);
-            }
-        }
-        // the brushes after them in their new set move down past them
-        st.move_brush_refs(|(rs, ri)| Some((rs, if rs == ts && ri >= ti { ri + count } else { ri })));
-        true
+        self.copied_brushes(set, indices, to_set, to_index).is_some()
     }
 
     /// Brushes `indices` of `set` dragged and let go at place `to_index` of set `to_set` (counted
@@ -1410,17 +1518,57 @@ impl CanvasSession {
     /// there, those dragged staying where they were (see [`brush_drop_copies`]). Whether any moved
     /// or were copied.
     pub fn drop_brushes(&self, set: u32, indices: Vec<u32>, to_set: u32, to_index: u32) -> bool {
-        if brush_drop_copies(set, to_set) {
-            self.copy_brushes(set, indices, to_set, to_index)
-        } else {
-            self.move_brushes(set, indices, to_set, to_index)
-        }
+        self.dropped_brushes(set, indices, to_set, to_index).is_some()
     }
 
     /// Brushes `indices` of `set` dragged together and let go `over` that: moved or copied where
     /// [`brush_drop_place`] puts them. Whether any moved or were copied.
     pub fn drop_brushes_over(&self, set: u32, indices: Vec<u32>, over: BrushDropOver) -> bool {
         brush_drop_place(set, indices.clone(), over).is_some_and(|to| self.drop_brushes(set, indices, to.set, to.index))
+    }
+
+    /// As [`Self::drop_brushes_over`], and where the brushes at `kept` (those whose sample strokes an
+    /// app holds, by place) are now: every one of them that is a brush, and each copy made of one
+    /// (see [`BrushPlaceChange`]), so that the app moves its pictures with their brushes and draws
+    /// none again. None if nothing moved or was copied.
+    pub fn drop_brushes_over_keeping(
+        &self,
+        set: u32,
+        indices: Vec<u32>,
+        over: BrushDropOver,
+        kept: Vec<BrushPlace>,
+    ) -> Option<Vec<BrushPlaceChange>> {
+        let place = |p: BrushPlace| (p.set as usize, p.index as usize);
+        // a place with no brush has no picture to move, nor one to land on another's
+        let kept: Vec<BrushPlace> = {
+            let st = self.shared.lock();
+            kept.into_iter().filter(|&p| st.holds(place(p))).collect()
+        };
+        let to = brush_drop_place(set, indices.clone(), over)?;
+        let (copies, places, at) = self.dropped_brushes(set, indices, to.set, to.index)?;
+        let (from, to_set) = (set as usize, to.set as usize);
+        let back = |(set, index): (usize, usize)| BrushPlace { set: set as u32, index: index as u32 };
+        let mut changes: Vec<BrushPlaceChange> = kept
+            .iter()
+            .map(|&was| {
+                let now = if copies {
+                    place_after_insert(place(was), to_set, at, places.len())
+                } else {
+                    place_after_move(place(was), from, &places, to_set, at)
+                };
+                BrushPlaceChange { was, now: back(now) }
+            })
+            .collect();
+        if copies {
+            // each copy looks as the brush it copies (which stayed where it was)
+            for (k, &i) in places.iter().enumerate() {
+                let was = back((from, i));
+                if kept.contains(&was) {
+                    changes.push(BrushPlaceChange { was, now: back((to_set, at + k)) });
+                }
+            }
+        }
+        Some(changes)
     }
 
     /// Names brush `index` of `set` (from its menu in the library), as a set is named: trimmed, at
@@ -3167,5 +3315,58 @@ mod stock {
         assert!(t.load_brush_library(s.saved_brush_library()));
         let st = t.shared.lock();
         assert!(st.library[set].brushes[i].shape.source.is_none());
+    }
+}
+
+#[cfg(test)]
+mod edge_scroll {
+    use super::{drag_edge_scrolled, drag_edge_way};
+
+    /// A brush dragged until it reaches past the top or the bottom of its list scrolls the list
+    /// that way (#422); within it, or a row taller than the list, not at all.
+    #[test]
+    fn a_row_dragged_past_an_end_of_its_list_scrolls_it_that_way() {
+        // the list shows from 100 to 600; a brush row 80 tall
+        assert_eq!(drag_edge_way(300.0, 380.0, 100.0, 600.0), 0);
+        assert_eq!(drag_edge_way(100.0, 180.0, 100.0, 600.0), 0, "touching the top: not yet");
+        assert_eq!(drag_edge_way(99.0, 179.0, 100.0, 600.0), -1);
+        assert_eq!(drag_edge_way(521.0, 601.0, 100.0, 600.0), 1);
+        assert_eq!(drag_edge_way(700.0, 780.0, 100.0, 600.0), 1, "dragged out below it: still down");
+        assert_eq!(drag_edge_way(50.0, 650.0, 100.0, 600.0), 0, "taller than the list");
+        assert_eq!(drag_edge_way(f32::NAN, 180.0, 100.0, 600.0), 0);
+    }
+
+    /// Held there, the list starts slowly (2 points a 60th of a second) and goes faster the longer
+    /// it is held, smoothly whatever the frame rate.
+    #[test]
+    fn a_list_scrolls_slowly_at_first_and_faster_the_longer_a_row_is_held_at_its_edge() {
+        assert_eq!(drag_edge_scrolled(0.0), 0.0);
+        assert_eq!(drag_edge_scrolled(-1.0), 0.0);
+        assert_eq!(drag_edge_scrolled(f64::NAN), 0.0);
+        assert!((drag_edge_scrolled(1.0 / 60.0) - 2.0).abs() < 1e-9);
+        assert!((drag_edge_scrolled(2.0 / 60.0) - 4.2).abs() < 1e-9);
+        // each 60th further than the one before
+        let per: Vec<f64> = (0..120)
+            .map(|k| drag_edge_scrolled(f64::from(k + 1) / 60.0) - drag_edge_scrolled(f64::from(k) / 60.0))
+            .collect();
+        assert!(per.windows(2).all(|w| w[1] > w[0]), "{per:?}");
+        // a second in, several times as fast as at first; two seconds in, faster still
+        let (first, one, two) = (per[0], per[59], per[119]);
+        assert!(one > 5.0 * first && one < 10.0 * first, "{one}");
+        assert!(two > one * 1.5, "{two} after {one}");
+        // the same way at 120 frames a second as at 60, and between frames, smoothly
+        let at_120: f64 = (1..=240)
+            .map(|k| drag_edge_scrolled(f64::from(k) / 120.0) - drag_edge_scrolled(f64::from(k - 1) / 120.0))
+            .sum();
+        assert!((at_120 - drag_edge_scrolled(2.0)).abs() < 1e-6);
+        let half = drag_edge_scrolled(1.5 / 60.0);
+        assert!(half > 2.0 && half < 4.2, "{half}");
+        // and it never runs away: a minute in, it holds
+        assert_eq!(drag_edge_scrolled(120.0), drag_edge_scrolled(60.0));
+        eprintln!(
+            "edge scroll: {first:.1} points a 60th at first, {one:.1} a second in, {two:.1} two seconds in; {:.0} points in a second, {:.0} in two",
+            drag_edge_scrolled(1.0),
+            drag_edge_scrolled(2.0)
+        );
     }
 }

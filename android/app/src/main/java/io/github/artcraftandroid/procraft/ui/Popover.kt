@@ -1,6 +1,8 @@
 package io.github.artcraftandroid.procraft.ui
 
 import android.graphics.BlurMaskFilter
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -29,6 +31,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
@@ -331,8 +334,18 @@ private fun PopoverBody(
             ArrowSide.RIGHT -> Modifier.padding(end = Pc.ArrowHeight)
             ArrowSide.NONE -> Modifier
         }
-        Column(inset.clip(RoundedCornerShape(corner)), content = content)
+        Column(inset.clip(RoundedCornerShape(corner)).takingItsPresses(), content = content)
     }
+}
+
+/**
+ * A panel's body keeps every press on it, as the original's do: one its rows and buttons leave (its
+ * title bar's empty middle, say) does nothing, where it fell through to the canvas under the panel,
+ * which closed it. Only the press is taken, after what lies on the body has seen it, so its rows'
+ * taps, drags and scrolls go on as before (a second finger's press too, for a pinch).
+ */
+internal fun Modifier.takingItsPresses(): Modifier = pointerInput(Unit) {
+    awaitEachGesture { awaitFirstDown(requireUnconsumed = false).consume() }
 }
 
 /** Where a popover [width] wide goes on a screen [screenWidth] wide: its left edge and arrow tip. */

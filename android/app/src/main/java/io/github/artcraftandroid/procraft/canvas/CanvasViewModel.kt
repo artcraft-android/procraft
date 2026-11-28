@@ -115,6 +115,17 @@ internal fun placeAfterSetMove(set: Int, from: Int, to: Int): Int = when (set) {
 }
 
 /**
+ * The sample strokes held by place ("set-index", [order]: the oldest kept first) as brushes dropped
+ * in the library moved them, by the core's [changes] (from a place to a place; a copy from its
+ * original's place to its own): which stroke goes to which place, in the order they were kept (each
+ * copy just after its original). A stroke no change names isn't held; nothing is drawn again.
+ */
+internal fun previewsAfterDrop(order: List<String>, changes: List<Pair<String, String>>): List<Pair<String, String>> {
+    val rank = order.withIndex().associate { it.value to it.index }
+    return changes.filter { it.first in rank }.sortedBy { rank.getValue(it.first) }
+}
+
+/**
  * Whether a touch at [at] leaves a slider's panel up: on the side bar ([bar]) or the panel beside
  * it ([panel]), which reaches past the bar. Anywhere else the panel goes, and the touch goes on to
  * do what it does there (a stroke on the canvas is drawn).
@@ -6448,9 +6459,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The studio is open on a brush just made: cancelling throws it away. */
     private var studioNew = false
 
-    /** After a change to the library: read it again, keep it, and draw previews again (they go by place). */
-    private fun libraryChanged() {
+    /**
+     * After a change to the library: read it again, keep it, and draw previews again (they go by place); or, with the
+     * core's [moved] places of a drop, keep each sample stroke with its brush (a copy its original's), drawing none again.
+     */
+    private fun libraryChanged(moved: List<io.github.artcraftandroid.procraft.core.BrushPlaceChange>? = null) {
         val s = session ?: return
+        // the strokes going with their brushes, taken before they are let go
+        val key = { p: io.github.artcraftandroid.procraft.core.BrushPlace -> "${p.set}-${p.index}" }
+        val kept = moved?.let { changes ->
+            previewsAfterDrop(previewOrder.toList(), changes.map { key(it.was) to key(it.now) }).mapNotNull { (was, now) ->
+                previews[was]?.let { Triple(now, it, shadedNames[was] == true) }
+            }
+        }
         // picks go by place, which may hold another brush now, and so do sample strokes being drawn
         pickedBrushes.clear()
         previewRound++
@@ -6461,6 +6482,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         recentBrushes = s.recentBrushes()
         readSliders()
         letGoOfPreviews()
+        kept?.forEach { (now, bitmap, shaded) -> keepPreview(now, bitmap, shaded) }
         keepBrushLibrary(s)
     }
 
@@ -6533,9 +6555,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * `brushDropPlace` says where).
      */
     fun dropBrushesOver(brushes: List<BrushInfo>, over: io.github.artcraftandroid.procraft.core.BrushDropOver) {
+        val s = session ?: return
         val first = brushes.firstOrNull() ?: return
         val indices = brushes.filter { it.set == first.set }.map { it.index }
-        if (session?.dropBrushesOver(first.set, indices, over) == true) libraryChanged()
+        // the sample strokes held go with their brushes, none drawn again (the rows would show blank meanwhile)
+        val kept = previews.keys.mapNotNull(::pickedPlace).map { (set, index) -> io.github.artcraftandroid.procraft.core.BrushPlace(set, index) }
+        libraryChanged(s.dropBrushesOverKeeping(first.set, indices, over, kept) ?: return)
     }
 
     /** A new brush at the top of the shown set, opened in the studio. */

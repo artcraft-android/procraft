@@ -13,6 +13,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -104,6 +105,7 @@ import io.github.artcraftandroid.procraft.canvas.RECENT_SET
 import io.github.artcraftandroid.procraft.core.BrushHoldMove
 import io.github.artcraftandroid.procraft.core.BrushInfo
 import io.github.artcraftandroid.procraft.core.brushHoldMove
+import io.github.artcraftandroid.procraft.core.brushHoldSlop
 import io.github.artcraftandroid.procraft.core.brushMenuWait
 import io.github.artcraftandroid.procraft.core.brushRowSlides
 import io.github.artcraftandroid.procraft.core.ToolKind
@@ -747,6 +749,32 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                     vm.foundBrush = null
                     listed.indexOfFirst { (b, _) -> "${b.set}-${b.index}" == found }.takeIf { it >= 0 }?.let { listState.scrollToItem(it) }
                 }
+                // a dragged brush reaching past the top or bottom of the list scrolls it that way,
+                // slowly at first and faster the longer it is held there (the core's rule); where
+                // it lands is read afresh from the rows as they move under it
+                LaunchedEffect(dragged != null) {
+                    if (dragged == null) return@LaunchedEffect
+                    var way = 0
+                    var since = 0L
+                    var gone = 0.0
+                    while (dragged != null) {
+                        val now = androidx.compose.runtime.withFrameNanos { it }
+                        val box = brushListBounds
+                        val top = dragAt.y - grab.y
+                        val tall = dragSize.height.takeIf { it > 0f } ?: with(density) { BrushHeight.toPx() }
+                        val towards = io.github.artcraftandroid.procraft.core.dragEdgeWay(top, top + tall, box.top, box.bottom)
+                        if (towards != way) {
+                            way = towards
+                            since = now
+                            gone = 0.0
+                        }
+                        if (way == 0) continue
+                        val scrolled = io.github.artcraftandroid.procraft.core.dragEdgeScrolled((now - since) / 1e9)
+                        val points = (scrolled - gone).toFloat()
+                        gone = scrolled
+                        listState.scrollBy(way * points * density.density)
+                    }
+                }
                 LazyColumn(
                     Modifier.weight(1f).fillMaxHeight().background(Pc.BrushColumn).onGloballyPositioned { brushListBounds = it.boundsInWindow() },
                     state = listState,
@@ -805,11 +833,10 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                                         .pointerInput(key, recent) {
                                             // held still the core's menu time (as measured), its menu shows with the
                                             // finger still down, and stays when it lifts (let go before, it was a
-                                            // tap); moved on within the core's drag window after that, the menu goes
-                                            // and the brush follows the finger (the Recent set's brushes stay where
-                                            // they are); moved on later, the list has the press and scrolls, the menu
-                                            // staying. One hold for both: a tap's own hold would keep the rest of the
-                                            // press from the drag
+                                            // tap); moved on after that, however long it was held, the menu goes and
+                                            // the brush follows the finger (a brush of the Recent set stays where it
+                                            // is: the list has the press and scrolls, the menu staying). One hold for
+                                            // both: a tap's own hold would keep the rest of the press from the drag
                                             awaitEachGesture {
                                                 val down = awaitFirstDown(requireUnconsumed = false)
                                                 // the menu shows the hold after the finger landed (the
@@ -832,9 +859,10 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                                                 brushMenu = key
                                                 // the rest of the press is the hold's until it is decided: let go it is
                                                 // no tap (taken before the tap under it sees it); dragged, the lists' box
-                                                // follows it from there (this row may go, as another set opens); too
-                                                // late to drag, the list scrolls with it (not taken while it waits, or
-                                                // the list would give it up)
+                                                // follows it from there (this row may go, as another set opens); a
+                                                // Recent brush's move is the list's, which scrolls with it (not taken
+                                                // while it waits, or the list would give it up)
+                                                val slop = brushHoldSlop().dp.toPx()
                                                 while (true) {
                                                     val change = awaitPointerEvent(PointerEventPass.Initial).changes.firstOrNull { it.id == long.id }
                                                     if (change == null || change.isConsumed) break
@@ -842,10 +870,13 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier,
                                                         change.consume()
                                                         break
                                                     }
-                                                    val moved = (change.position - long.position).getDistance()
-                                                    val since = (change.uptimeMillis - menuAt) / 1000.0
-                                                    val what = brushHoldMove(moved, viewConfiguration.touchSlop, since, !recent)
+                                                    val moved = (change.position - down.position).getDistance()
+                                                    val what = brushHoldMove(moved, slop, !recent)
                                                     if (what == BrushHoldMove.LEAVES) break
+                                                    // a brush that may lift keeps the finger's first few points
+                                                    // from the list (whose own slop is shorter), so it doesn't
+                                                    // start scrolling under the brush about to lift
+                                                    if (what == BrushHoldMove.STAYS && !recent) change.consume()
                                                     if (what == BrushHoldMove.DRAGS) {
                                                         change.consume()
                                                         brushMenu = null
@@ -1621,11 +1652,13 @@ internal const val MENU_AHEAD_MS = 80L
 
 /**
  * The press [down] on a brush held still for [wait] milliseconds more: not lifted, not taken (the
- * list scrolling), not moved past the touch slop. Its last change then (where it took hold), else
- * null. Still held [ahead] milliseconds before then, [onAhead] is called.
+ * list scrolling, the row sliding), not moved past the hold's slop (the core's, 10 points from
+ * where it came down). Its last change then (where it took hold), else null. Still held [ahead]
+ * milliseconds before then, [onAhead] is called.
  */
 private suspend fun AwaitPointerEventScope.awaitBrushHold(down: PointerInputChange, wait: Long, ahead: Long, onAhead: () -> Unit): PointerInputChange? {
     var last = down
+    val slop = brushHoldSlop().dp.toPx()
     val early = (wait - ahead).coerceAtLeast(0L)
     for (phase in 0..1) {
         val part = if (phase == 0) early else wait - early
@@ -1636,7 +1669,7 @@ private suspend fun AwaitPointerEventScope.awaitBrushHold(down: PointerInputChan
             while (still) {
                 val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
                 still = change != null && change.pressed && !change.isConsumed &&
-                    (change.position - down.position).getDistance() <= viewConfiguration.touchSlop
+                    (change.position - down.position).getDistance() <= slop
                 if (change != null && still) last = change
             }
             true

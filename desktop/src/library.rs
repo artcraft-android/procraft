@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, pos2, vec2};
 use procraft_core::{
-    BRUSH_MENU_HOLD, BrushDrop, BrushDropOver, BrushFileReading, BrushHoldMove, BrushInfo, BrushSetInfo, CanvasSession,
-    LibraryScroll, ReadBrushes, brush_hold_move, read_brushes_from,
+    BRUSH_HOLD_SLOP, BRUSH_MENU_HOLD, BrushDrop, BrushDropOver, BrushFileReading, BrushHoldMove, BrushInfo, BrushPlace,
+    BrushPlaceChange, BrushSetInfo, CanvasSession, LibraryScroll, ReadBrushes, brush_hold_move, read_brushes_from,
 };
 
 use crate::alert::{Alert, Answer};
@@ -116,6 +116,7 @@ const PINCH_QUIET: Duration = Duration::from_millis(200);
 
 /// A brush's sample stroke, whether it runs under the name (which then sits on a dark pill), and
 /// the frame it was last in sight in.
+#[derive(Clone)]
 struct Preview {
     texture: TextureHandle,
     shaded: bool,
@@ -231,9 +232,8 @@ fn way_moved(d: Vec2) -> Option<Way> {
 }
 
 /// A press on a brush, followed until let go: which (set and place), where and when it went down,
-/// what it became (and when its menu showed, held), how far the brush was slid, where on it the
-/// press took hold, how far the pointer has moved since the last frame, and how far the list was
-/// scrolled.
+/// what it became, how far the brush was slid, where on it the press took hold, how far the
+/// pointer has moved since the last frame, and how far the list was scrolled.
 #[derive(Clone, Copy)]
 struct Press {
     list: f32,
@@ -241,7 +241,6 @@ struct Press {
     origin: Pos2,
     since: Instant,
     way: Way,
-    menu_at: Option<Instant>,
     start: f32,
     grab: Vec2,
     last: Pos2,
@@ -362,6 +361,9 @@ pub struct Library {
     /// (none).
     lists_spot: Option<LibraryScroll>,
     opening: Option<Option<LibraryScroll>>,
+    /// A dragged brush reaching past the top or bottom of the list scrolls it: which way (-1 up,
+    /// 1 down), since when (the interface's time, seconds) and how far it has gone since (points).
+    edge_scroll: Option<(i32, f64, f64)>,
     /// Where the sets and the shown set's brushes were last drawn, for a dragged brush to land; and
     /// the shown set's list (its place, how many brushes it holds, where it shows), not the Recent
     /// set's.
@@ -605,6 +607,33 @@ impl Library {
         }
     }
 
+    /// A brush dragged until it reaches past the top or the bottom of the shown `list` scrolls it
+    /// that way, slowly at first and faster the longer it is held there (the core's rule): where
+    /// the list is held then, if it is.
+    fn edge_scroll(&mut self, ctx: &egui::Context, list: Rect) -> Option<f32> {
+        let size = self.dragged_size;
+        let Some(p) = self.press.as_mut().filter(|p| p.way == Way::Drag) else {
+            self.edge_scroll = None;
+            return None;
+        };
+        let row = Rect::from_min_size(p.last - p.grab, size);
+        let way = procraft_core::drag_edge_way(row.top(), row.bottom(), list.top(), list.bottom());
+        if way == 0 {
+            self.edge_scroll = None;
+            return None;
+        }
+        let now = ctx.input(|i| i.time);
+        let (since, gone) = match self.edge_scroll {
+            Some((w, since, gone)) if w == way => (since, gone),
+            _ => (now, 0.0),
+        };
+        let scrolled = procraft_core::drag_edge_scrolled(now - since);
+        p.list = (p.list + way as f32 * (scrolled - gone) as f32).max(0.0);
+        self.edge_scroll = Some((way, since, scrolled));
+        ctx.request_repaint();
+        Some(p.list)
+    }
+
     /// Where the brushes dragged by `p` land let go at `at` (none: nowhere; see [`drop_over`]).
     fn drop_place(&self, p: Press, at: Pos2) -> Option<BrushDrop> {
         let over = drop_over(at, &self.set_rects, self.brush_list, &self.brush_rects)?;
@@ -635,6 +664,27 @@ impl Library {
         self.picked.clear();
         self.brush_menu.close();
         self.changed = true;
+    }
+
+    /// The library changed by brushes dropped in it, which moved its brushes' places as `changes`
+    /// say (the core's): as [`Self::library_changed`], but each sample stroke drawn goes with its
+    /// brush (a copy takes its original's) rather than every row going blank while all are drawn
+    /// again.
+    fn library_changed_keeping(&mut self, changes: &[BrushPlaceChange]) {
+        let previews = &self.previews;
+        let moved: HashMap<(u32, u32), Option<Preview>> = changes
+            .iter()
+            .filter_map(|c| {
+                let p = previews.get(&(c.was.set, c.was.index))?.as_ref()?;
+                Some(((c.now.set, c.now.index), Some(p.clone())))
+            })
+            .collect();
+        self.library_changed();
+        self.stale = false;
+        self.previews = moved;
+        // strokes still being drawn, or asked for, were by the places as they were
+        self.drawing = None;
+        self.wanted.clear();
     }
 
     /// Shows the library hanging from `button`; returns where it is (points).
@@ -922,6 +972,8 @@ impl Library {
                         } else {
                             egui::scroll_area::ScrollSource::ALL
                         });
+                    // a dragged brush past the list's top or bottom scrolls it, held where it goes
+                    let held_at = self.edge_scroll(ui.ctx(), brushes).or(held_at);
                     let list = match (held_at, restore) {
                         (Some(at), _) => list.vertical_scroll_offset(at),
                         (None, Some(spot)) => list.vertical_scroll_offset(spot.brushes_offset),
@@ -975,6 +1027,10 @@ impl Library {
                     })
                 });
                 self.list_at = brushes_out.inner.state.clamped_offset().y;
+                // (scrolled no further than the list goes)
+                if let Some(p) = self.press.as_mut().filter(|p| p.way == Way::Drag) {
+                    p.list = self.list_at;
+                }
                 self.lists_spot = Some(LibraryScroll {
                     shown_set: if recent { -1 } else { i32::try_from(shown).unwrap_or(i32::MAX) },
                     sets_first: 0,
@@ -1481,9 +1537,9 @@ impl Library {
 
     /// Follows the press on a brush: moved sideways it slides the brush (let go past a third of
     /// the way, it stays open); moved up or down, the list scrolls; held still, its menu shows, and
-    /// moved straight on from there the brush is dragged and, let go, goes to the top of the set it
-    /// is over, or to the place of the brush it is over (moved on later, the list scrolls under the
-    /// menu, which stays).
+    /// moved on from there, however long it was held, the brush is dragged and, let go, goes to the
+    /// top of the set it is over, or to the place of the brush it is over (a Recent brush stays: the
+    /// list scrolls under the menu, which stays).
     fn follow_press(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let Some(mut p) = self.press else { return };
         let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
@@ -1495,24 +1551,22 @@ impl Library {
                 Way::Undecided => {
                     if let Some(way) = way_moved(d) {
                         p.way = way;
-                    } else if d.length() > SLOP {
+                    } else if d.length() > BRUSH_HOLD_SLOP {
                         // going somewhere, not yet plain which way: it is no hold
                     } else if p.since.elapsed() >= brush_hold() {
                         // held still: its menu shows
                         p.way = Way::Held;
-                        p.menu_at = Some(Instant::now());
                         self.swiped = None;
                         self.open_brush_menu(session, p.key);
                     } else {
                         ctx.request_repaint_after(brush_hold().saturating_sub(p.since.elapsed()));
                     }
                 }
-                // moved straight on from there, the menu goes and the brush is dragged (the Recent
-                // set's brushes stay where they are); moved on later, the list has the press and
-                // scrolls, the menu staying
+                // moved on from there, however long it was held, the menu goes and the brush is
+                // dragged (the Recent set's brushes stay where they are: the list has the press and
+                // scrolls, the menu staying)
                 Way::Held => {
-                    let since_menu = p.menu_at.map_or(0.0, |shown| shown.elapsed().as_secs_f64());
-                    let what = brush_hold_move(d.length(), SLOP, since_menu, !self.recent);
+                    let what = brush_hold_move(d.length(), BRUSH_HOLD_SLOP, !self.recent);
                     if what == BrushHoldMove::Leaves {
                         p.way = Way::Scroll;
                     } else if what == BrushHoldMove::Drags {
@@ -1569,8 +1623,17 @@ impl Library {
                 let over = drop_over(at, &self.set_rects, self.brush_list, &self.brush_rects);
                 let indices = self.dragged_indices(p);
                 self.dragged_with.clear();
-                if over.is_some_and(|over| session.drop_brushes_over(p.key.0, indices, over)) {
-                    self.library_changed();
+                // the sample strokes drawn go with their brushes, none drawn again
+                let kept: Vec<BrushPlace> = self
+                    .previews
+                    .iter()
+                    .filter(|(_, drawn)| drawn.is_some())
+                    .map(|(k, _)| BrushPlace { set: k.0, index: k.1 })
+                    .collect();
+                if let Some(changes) =
+                    over.and_then(|over| session.drop_brushes_over_keeping(p.key.0, indices, over, kept))
+                {
+                    self.library_changed_keeping(&changes);
                 }
             }
             Way::Undecided | Way::Held | Way::Scroll => {}
@@ -1820,7 +1883,6 @@ impl Library {
                 origin,
                 since,
                 way: Way::Undecided,
-                menu_at: None,
                 start: slide,
                 grab: origin - cell.min,
                 last: origin,
@@ -2678,38 +2740,149 @@ mod tests {
         assert!(!f.library.brush_menu.is_open());
     }
 
-    /// A brush held past its menu showing and moved on only after the core's drag window isn't
-    /// lifted (as measured: presses of 0.7 s and 1 s moved on scrolled the list): the list has the
-    /// press and scrolls under the menu, which stays open; let go, nothing is chosen or moved.
+    /// A brush dragged past the bottom of a long set's list scrolls the list down under it, slowly
+    /// at first and faster the longer it is held there (#422), and let go there it lands among the
+    /// brushes scrolled to; dragged back inside the list, it stops.
     #[test]
-    fn a_brush_held_and_moved_on_too_late_scrolls_the_list_under_its_menu() {
+    fn a_brush_dragged_past_the_bottom_of_the_list_scrolls_it_faster_the_longer_it_is_held() {
         let mut f = Finger::new();
-        let names = |f: &Finger| -> Vec<Vec<String>> {
-            f.session.brush_library().iter().map(|s| s.brushes.iter().map(|b| b.name.clone()).collect()).collect()
-        };
-        let (before, chosen) = (names(&f), f.session.current_brush());
         let from = f.on_a_brush();
+        let (key, _) = f.library.brush_rects.iter().find(|(_, r)| r.contains(from)).copied().unwrap();
+        let list = f.library.brush_list.map(|(_, _, r)| r).unwrap();
+        let count = f.session.brush_library()[key.0 as usize].brushes.len();
+        assert!(count > 12, "a long set: {count}");
+        let held_name = f.session.brush_library()[key.0 as usize].brushes[key.1 as usize].name.clone();
+        f.down(from);
+        std::thread::sleep(HOLD + Duration::from_millis(50));
+        f.frame(Vec::new());
+        // dragged down until the brush reaches past the list's bottom
+        let below = pos2(from.x, list.bottom() - 10.0);
+        for i in 1..=6 {
+            f.to(from + (below - from) * (i as f32 / 6.0));
+        }
+        assert!(f.library.press.is_some_and(|p| p.way == Way::Drag), "not dragged");
+        // (the list, drawn before the press follows the pointer, sees it there the frame after)
+        f.to(below);
+        assert!(f.library.edge_scroll.is_some_and(|(way, ..)| way == 1), "{:?}", f.library.edge_scroll);
+        let start = f.top();
+        // held there: a 60th, then a second
+        f.to(below);
+        let first = start - f.top();
+        for _ in 0..59 {
+            f.to(below);
+        }
+        let second = start - f.top();
+        assert!(first > 0.5 && first < 5.0, "the first 60th: {first}");
+        assert!(second > 300.0, "a second: {second}");
+        // the last 60th of that second went faster than the first
+        let before = f.top();
+        f.to(below);
+        let last = before - f.top();
+        assert!(last > 4.0 * first || f.library.list_at > 0.0 && last == 0.0, "{first} then {last}");
+        // back inside the list: it stays
+        let inside = pos2(from.x, list.center().y);
+        f.to(inside);
+        let held = f.top();
+        for _ in 0..30 {
+            f.to(inside);
+        }
+        assert!((f.top() - held).abs() < 0.01, "moved on from {held} to {}", f.top());
+        f.up(inside);
+        f.frame(Vec::new());
+        // let go there: further down the set than the list showed before it scrolled
+        let library = f.session.brush_library();
+        let brushes = &library[key.0 as usize].brushes;
+        assert_eq!(brushes.len(), count);
+        let landed = brushes.iter().position(|b| b.name == held_name).unwrap();
+        assert!(landed > key.1 as usize + 3, "landed at {landed} from {}", key.1);
+        eprintln!(
+            "edge scroll in the library: {first:.1} points the first 60th, {second:.0} in a second, {last:.1} its last 60th"
+        );
+    }
+
+    /// A brush held well past its menu showing (a second more, where only the first 0.37 s after it
+    /// used to lift it) and moved on is still lifted and dragged, as on the original (holds of about
+    /// 1.2 s lifted their brushes); let go on another set's row it is copied to that set's top, a
+    /// green plus on it over the row, its own set keeping it and the brush in use staying the one it
+    /// was; and the sample strokes drawn stay with their brushes, none of the rows going blank to
+    /// be drawn again (a copy shows its original's at once).
+    #[test]
+    fn a_brush_held_long_then_moved_onto_another_set_is_dragged_and_copied_to_its_top() {
+        let mut f = Finger::new();
+        let names = |f: &Finger, set: usize| -> Vec<String> {
+            f.session.brush_library()[set].brushes.iter().map(|b| b.name.clone()).collect()
+        };
+        let chosen = f.session.current_brush();
+        let from = f.on_a_brush();
+        let key = f.library.brush_rects.iter().find(|(_, r)| r.contains(from)).map(|(k, _)| *k).unwrap();
+        let shown = key.0 as usize;
+        let theirs = names(&f, shown);
+        // another set, on the screen
+        let (to, over) = f
+            .library
+            .set_rects
+            .iter()
+            .find(|(s, r)| *s != shown && (0.0..700.0).contains(&r.center().y))
+            .map(|(s, r)| (*s, r.center()))
+            .unwrap();
+        let others = names(&f, to);
+        // the shown set's brushes in sight with their sample strokes drawn, each a picture of its own
+        let in_sight: Vec<(u32, u32)> = f
+            .library
+            .brush_rects
+            .iter()
+            .filter(|(_, r)| (0.0..700.0).contains(&r.center().y))
+            .map(|(k, _)| *k)
+            .collect();
+        assert!(in_sight.contains(&key) && in_sight.len() < PREVIEWS_KEPT);
+        // (strokes asked for as it opened come back drawn as none here, with no GPU: not over these)
+        f.library.drawing = None;
+        f.library.wanted.clear();
+        let seen = f.library.frames;
+        let pictures: Vec<((u32, u32), egui::TextureId)> = in_sight
+            .iter()
+            .map(|&k| {
+                let image = egui::ColorImage::from_rgba_premultiplied([1, 1], &[255, 255, 255, 255]);
+                let texture = f.ctx.load_texture(format!("test {k:?}"), image, TextureOptions::LINEAR);
+                let id = texture.id();
+                f.library.previews.insert(k, Some(Preview { texture, shaded: false, seen }));
+                (k, id)
+            })
+            .collect();
         f.down(from);
         std::thread::sleep(brush_hold() + Duration::from_millis(50));
         f.frame(Vec::new());
         assert!(f.library.brush_menu.is_open());
-        let top = f.top();
-        std::thread::sleep(Duration::from_secs_f64(procraft_core::BRUSH_DRAG_WINDOW) + Duration::from_millis(100));
-        let mut at = from;
-        for _ in 0..10 {
-            at.y -= 8.0;
-            f.to(at);
-        }
-        assert!(f.library.press.is_some_and(|p| p.way == Way::Scroll), "not left to the list");
-        assert!(f.library.dragged_with.is_empty(), "lifted");
-        assert!(f.library.brush_menu.is_open(), "the menu went");
-        assert!(f.top() < top - 20.0, "the list stayed: {top} to {}", f.top());
-        f.up(at);
+        // held on, the menu up, a second more
+        std::thread::sleep(Duration::from_secs(1));
         f.frame(Vec::new());
-        assert!(f.library.brush_menu.is_open());
-        assert_eq!(names(&f), before);
-        let now = f.session.current_brush();
-        assert_eq!((now.set, now.index), (chosen.set, chosen.index));
+        assert!(f.library.press.is_some_and(|p| p.way == Way::Held));
+        for i in 1..=6 {
+            f.to(from + (over - from) * (i as f32 / 6.0));
+        }
+        let press = f.library.press.unwrap();
+        assert!(press.way == Way::Drag, "not lifted");
+        assert!(!f.library.brush_menu.is_open(), "the menu stayed");
+        // over another set's row, before it would open: the green plus says it would be copied
+        assert!(f.library.drop_copies(press));
+        assert_eq!(f.library.shown_set.unwrap_or(shown), shown);
+        f.up(over);
+        f.frame(Vec::new());
+        let now = names(&f, to);
+        assert_eq!(now.len(), others.len() + 1);
+        assert_eq!(now[0], theirs[key.1 as usize]);
+        assert_eq!(now[1..], others[..]);
+        assert_eq!(names(&f, shown), theirs);
+        let c = f.session.current_brush();
+        assert_eq!((c.set, c.index, c.name), (chosen.set, chosen.index, chosen.name));
+        // each picture still its brush's, and the copy's its original's: none to be drawn again
+        let held =
+            |f: &Finger, k: (u32, u32)| f.library.previews.get(&k).and_then(|p| p.as_ref()).map(|p| p.texture.id());
+        for (k, id) in &pictures {
+            assert_eq!(held(&f, *k), Some(*id), "{k:?}");
+        }
+        let original = pictures.iter().find(|(k, _)| *k == key).map(|(_, id)| *id);
+        assert_eq!(held(&f, (to as u32, 0)), original);
     }
 
     /// What a dragged brush is over: a set's row; in the shown set's list, the brush nearest up or

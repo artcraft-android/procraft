@@ -628,8 +628,17 @@ final class CanvasModel {
     }
 
     /// After a change to the library: read it again, keep it, and draw previews again (they go by
-    /// place).
-    func libraryChanged() {
+    /// place); or, with the core's `moved` places of a drop, keep each sample stroke with its brush
+    /// (a copy its original's), drawing none again.
+    func libraryChanged(moved: [BrushPlaceChange]? = nil) {
+        // the strokes going with their brushes, in the order they were kept (each copy after its
+        // original), taken before they are let go
+        let key = { (p: BrushPlace) in "\(p.set)-\(p.index)" }
+        let rank = Dictionary(previewOrder.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
+        let kept: [(String, UIImage, Bool)] = (moved ?? []).enumerated()
+            .compactMap { i, c in rank[key(c.was)].map { ($0, i, c) } }
+            .sorted { ($0.0, $0.1) < ($1.0, $1.1) }
+            .compactMap { _, _, c in previews[key(c.was)].map { (key(c.now), $0, shadedNames[key(c.was)] ?? false) } }
         // picks go by place, which may hold another brush now
         pickedBrushes = []
         brushSets = session.brushLibrary()
@@ -646,6 +655,9 @@ final class CanvasModel {
         shadedNames = [:]
         previewsAsked = []
         previewOrder = []
+        for (now, image, shaded) in kept {
+            keepPreview(now, image, shaded: shaded)
+        }
         keepBrushLibrary()
     }
 
@@ -715,8 +727,14 @@ final class CanvasModel {
     func dropBrushesOver(_ brushes: [BrushInfo], over: BrushDropOver) {
         guard let first = brushes.first else { return }
         let indices = brushes.filter { $0.set == first.set }.map(\.index)
-        if session.dropBrushesOver(set: first.set, indices: indices, over: over) {
-            libraryChanged()
+        // the sample strokes held go with their brushes, none drawn again (the rows would show
+        // blank meanwhile)
+        let kept: [BrushPlace] = previews.keys.compactMap { key in
+            let parts = key.split(separator: "-").compactMap { UInt32($0) }
+            return parts.count == 2 ? BrushPlace(set: parts[0], index: parts[1]) : nil
+        }
+        if let moved = session.dropBrushesOverKeeping(set: first.set, indices: indices, over: over, kept: kept) {
+            libraryChanged(moved: moved)
         }
     }
 
