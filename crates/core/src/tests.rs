@@ -5279,6 +5279,122 @@ fn artworks_save_and_open() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `dir`'s artwork opened as the app opens it, its canvas made; how many layers it names, those
+/// of them whose file isn't there, and those that couldn't be read.
+fn named_and_missing(dir: &std::path::Path) -> (std::sync::Arc<CanvasSession>, usize, Vec<u64>, Vec<u64>) {
+    let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    let ids: Vec<_> = opened.shared.lock().doc.pixel_layer_ids().collect();
+    let missing = ids.iter().filter(|id| !dir.join("layers").join(format!("{}.png", id.0)).is_file()).map(|id| id.0);
+    let missing = missing.collect();
+    {
+        let mut st = opened.shared.lock();
+        let side = st.doc.width();
+        st.window_size = (side, side);
+        st.view = Some(View::fit((side, side), (side, side)));
+        st.gpu = Some(Gpu::headless().unwrap());
+    }
+    opened.shared.make_canvas();
+    let unread = opened.shared.lock().unreadable.iter().map(|id| id.0).collect();
+    (opened, ids.len(), missing, unread)
+}
+
+/// #414's missing layer file: an artwork painted on a new layer and saved, the app ended at each
+/// step of that save in turn (a file written beside its place, one put in place), then opened
+/// again: its document names no layer whose file isn't there, nothing fails to be read, and the
+/// new layer is in it once the document saying so is in place (the earlier save until then).
+#[test]
+fn an_artwork_ended_at_any_step_of_a_save_names_no_layer_file_it_lacks() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let dir = std::env::temp_dir().join(format!("procraft-ended-save-{}", std::process::id()));
+    let path = dir.to_string_lossy().into_owned();
+    let mut steps = 0;
+    let mut layers_seen = Vec::new();
+    for step in 0.. {
+        let _ = std::fs::remove_dir_all(&dir);
+        // a stroke on the first layer, saved whole; then a new layer painted
+        let Some(s) = session(64, 64) else { return };
+        s.set_color(0.0, 0.0, 0.0);
+        s.set_brush_size(0.3);
+        s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 20.0, 0.0)]);
+        s.stroke_end(vec![]);
+        s.save(path.clone()).unwrap();
+        s.add_layer();
+        s.stroke_begin(PointerKind::Finger, vec![sample(44.0, 44.0, 0.0)]);
+        s.stroke_end(vec![]);
+        crate::project::cut_short::after(Some(step));
+        let ended = catch_unwind(AssertUnwindSafe(|| s.save(path.clone()))).is_err();
+        crate::project::cut_short::after(None);
+        let (_, named, missing, unread) = named_and_missing(&dir);
+        assert!(missing.is_empty() && unread.is_empty(), "step {step}: missing {missing:?}, unread {unread:?}");
+        layers_seen.push(named);
+        if !ended {
+            steps = step;
+            break;
+        }
+    }
+    println!("a save of a new layer, ended after each of its {steps} steps: layers named {layers_seen:?}");
+    assert!(steps >= 4, "{steps}");
+    // the earlier save's one layer until the document is in place, the new one after
+    assert_eq!(layers_seen.first(), Some(&1));
+    assert_eq!(layers_seen.last(), Some(&2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #414: an artwork changed before its canvas is made (as on a slow GPU still making its
+/// pipelines, the layers panel already there), then saved: no paint is lost (a merge or a copy
+/// made then has its layers' paint), its document names no layer whose file isn't there, and
+/// opened again every layer reads.
+#[test]
+fn an_artwork_changed_before_its_canvas_is_made_loses_no_paint_nor_names_a_layer_file_it_lacks() {
+    let Some(s) = session(64, 64) else { return };
+    s.set_color(0.0, 0.0, 0.0);
+    s.set_brush_size(0.3);
+    let dot = |s: &CanvasSession, x: f32, y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    dot(&s, 20.0, 20.0);
+    s.add_layer();
+    dot(&s, 44.0, 44.0);
+    let dir = std::env::temp_dir().join(format!("procraft-before-canvas-{}", std::process::id()));
+    let path = dir.to_string_lossy().into_owned();
+    let inked = |s: &CanvasSession| [pixel(s, 20, 20)[0] < 128, pixel(s, 44, 44)[0] < 128];
+    let mut failed = Vec::new();
+    for change in ["add", "duplicate", "merge", "mask"] {
+        let _ = std::fs::remove_dir_all(&dir);
+        s.save(path.clone()).unwrap();
+        let opened = CanvasSession::open(path.clone()).unwrap();
+        // the top layer (the one with a layer to merge into), and the other
+        let layers = opened.layers();
+        let top = layers.iter().find(|l| l.can_merge).map(|l| l.id).unwrap();
+        let bottom = layers.iter().find(|l| l.id != top).map(|l| l.id).unwrap();
+        match change {
+            "add" => {
+                opened.add_layer();
+            }
+            "duplicate" => {
+                opened.duplicate_layer(top);
+            }
+            "merge" => {
+                // (it waits for the canvas: made without the paint, the top layer's would be lost)
+                assert!(!opened.merge_down(top), "merged before the canvas was made");
+            }
+            _ => {
+                opened.add_mask(bottom);
+            }
+        }
+        opened.save(path.clone()).unwrap();
+        let (again, named, missing, unread) = named_and_missing(&dir);
+        let ink = inked(&again);
+        println!("{change}: {named} layers named, missing {missing:?}, unread {unread:?}, ink {ink:?}");
+        if ink != [true, true] || !missing.is_empty() || !unread.is_empty() {
+            failed.push(format!("{change}: ink {ink:?}, missing {missing:?}, unread {unread:?}"));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(failed.is_empty(), "paint lost or layer files missing: {failed:?}");
+}
+
 #[test]
 fn a_layer_whose_file_cannot_be_read_is_never_saved_over_and_is_kept_aside_once_painted_on_or_deleted() {
     let Some(s) = session(100, 100) else { return };

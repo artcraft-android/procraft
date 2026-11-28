@@ -735,6 +735,10 @@ impl CanvasSession {
         let white = vec![255u8; st.doc.width() as usize * st.doc.height() as usize * 4];
         if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
             let _ = canvas.upload_layer(gpu, mask, &white);
+        } else if st.pixels_waiting() {
+            // an artwork opened, its canvas not made yet: the mask waits for it, white, with the
+            // layers' pixels as opened
+            st.pending_pixels.push((mask, crate::project::Opened::Pixels(white)));
         }
         self.shared.frame(st);
         Some(mask.0)
@@ -757,6 +761,9 @@ impl CanvasSession {
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
+        if st.pixels_waiting() {
+            return None;
+        }
         let before = st.doc.clone();
         let layer = st.doc.flatten(LayerId(id))?;
         if let Some(canvas) = st.canvas.as_mut() {
@@ -981,6 +988,9 @@ impl CanvasSession {
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
+        if st.pixels_waiting() {
+            return false;
+        }
         let id = LayerId(id);
         // a group's takes its top layer into the one under that, in the group or not
         let pair = if st.doc.layer(id).is_some_and(|l| l.kind == LayerKind::Group) {
@@ -1392,6 +1402,15 @@ impl CanvasSession {
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.name_next_step(name);
             canvas.duplicate_layers(pairs, before);
+        } else {
+            // its canvas not made yet: each copy waits for it with its layer's pixels as opened
+            let copies: Vec<_> = pairs
+                .iter()
+                .filter_map(|(from, to)| {
+                    st.pending_pixels.iter().find(|(at, _)| at == from).map(|(_, p)| (*to, p.clone()))
+                })
+                .collect();
+            st.pending_pixels.extend(copies);
         }
         st.revision += 1;
         self.shared.frame(st);
@@ -1404,6 +1423,9 @@ impl CanvasSession {
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
+        if st.pixels_waiting() {
+            return false;
+        }
         // a mask pinched into its own layer is merged into it
         if let Some((a, b)) = between {
             let mask_of = |m: LayerId, l: LayerId| {
@@ -1676,6 +1698,14 @@ impl CanvasSession {
 }
 
 impl crate::State {
+    /// Whether layers' pixels as opened are still waiting for the canvas (an artwork opened and
+    /// not shown yet, its canvas still being made, or one that couldn't be made): a change that
+    /// needs them (a merge, a group flattened) waits for it, as made without them it would take
+    /// away layers whose paint was never on it, lost at the next save.
+    pub(crate) fn pixels_waiting(&self) -> bool {
+        self.canvas.is_none() && !self.pending_pixels.is_empty()
+    }
+
     /// Takes the time-lapse frame asked for (see [`CanvasSession::record_time_lapse`]), if there
     /// is one: in a frame (`at_once` false) once the frames have laid what they lay a share at a
     /// time, an open shape's stroke among it (not the stroke the pen is drawing), and the caches are

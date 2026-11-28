@@ -639,6 +639,17 @@ impl crate::State {
                     Opened::Pixels(rgba) => layers.extend(changed(*id, rgba.clone())),
                 }
             }
+            // a layer the document has that wasn't opened (one added before the canvas was made,
+            // empty; a mask, white) and has no file there: written so, so that the document names
+            // no layer file the folder lacks
+            let each = self.doc.width() as usize * self.doc.height() as usize * 4;
+            for id in self.doc.pixel_layer_ids() {
+                if self.pending_pixels.iter().any(|(at, _)| *at == id) || layer_path(dir, id).exists() {
+                    continue;
+                }
+                let mask = self.doc.layer(id).is_some_and(|l| l.kind == LayerKind::Mask);
+                layers.extend(changed(id, vec![if mask { 255 } else { 0 }; each]));
+            }
             for (id, bytes) in &self.pending_stores {
                 if fs::read(crate::layer_store::store_path(dir, *id)).ok().as_ref() != Some(bytes) {
                     store_files.push((*id, bytes.clone()));
