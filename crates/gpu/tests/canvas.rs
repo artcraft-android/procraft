@@ -4984,6 +4984,192 @@ fn images_given_just_before_the_render_lay_as_images_put_up_by_a_render_before()
     assert!(off.is_empty(), "laid otherwise with the images given just before the render: {off:?}");
 }
 
+/// A wet stroke read through a brush image comes out the same each time it is laid, the edges of
+/// the stamp laid last included: its own image or one in the brush images' spare layer, one stamp
+/// or two over each other, a stamp a dispatch (as an Adreno's OpenGL ES lays wet paint) and in
+/// runs. A checkerboard, as an image clear at the quad's edges (or white to them) hides what this
+/// looks for: an Adreno 750's OpenGL ES copied a window back without some of its last dispatch's
+/// writes (see `smudge.rs`), and the columns at that stamp's edge came out otherwise from one time
+/// to the next. Printed: the pixels each way lays.
+#[test]
+fn a_wet_stroke_through_a_brush_image_comes_out_the_same_each_time_it_is_laid() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let n = TEXTURE_SIZE;
+    let side = n * 4;
+    let checker: Vec<u8> =
+        (0..n * n).map(|i| if (i % n / 8 + i / n / 8).is_multiple_of(2) { 255 } else { 40 }).collect();
+    let big: Vec<u8> = (0..side * side).map(|i| checker[(i / side / 4) * n + i % side / 4]).collect();
+    let brush =
+        Brush { shape: Shape { source: Source::new(checker.clone()), ..Shape::default() }, ..Brush::round_pen() };
+    // its own image (else the spare layer's), two stamps (else one), a stamp a dispatch
+    let row = |own: bool, two: bool, one_by_one: bool| {
+        let mut doc = Document::new(256, 256);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.lay_stamp_by_stamp(one_by_one);
+        let mut style = StrokeStyle { wet_pull: Some(0.5), shape_lod_cap: 4.0, ..style(StrokeTool::Paint, 1.0) };
+        canvas.use_sources(&gpu, &mut style, &brush);
+        if own {
+            canvas.use_full_shape(&gpu, &mut style, 7, side as u32, &big);
+        }
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(128.0, 128.0), 100.0, 1.0)]);
+        if two {
+            canvas.add_stamps(&[Stamp::round(Vec2::new(150.0, 120.0), 40.0, 1.0)]);
+        }
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let ways = [
+        ("its own image, two stamps, a stamp a dispatch", true, true, true),
+        ("its own image, one stamp", true, false, true),
+        ("its own image, two stamps in a run", true, true, false),
+        ("the spare layer's image, two stamps, a stamp a dispatch", false, true, true),
+    ];
+    for (name, own, two, one_by_one) in ways {
+        let first = row(own, two, one_by_one);
+        let laid = first.chunks(4).filter(|p| p[3] > 0).count();
+        println!("{name}: {laid} pixels laid");
+        assert!(laid > 30_000, "{name}: {laid} pixels laid");
+        for time in 1..5 {
+            let again = row(own, two, one_by_one);
+            let apart: Vec<usize> =
+                (0..256 * 256).filter(|&i| first.get(i * 4..i * 4 + 4) != again.get(i * 4..i * 4 + 4)).collect();
+            let places: Vec<(usize, usize)> = apart.iter().take(8).map(|&i| (i % 256, i / 256)).collect();
+            assert!(apart.is_empty(), "{name}, time {time}: {} pixels came out otherwise, at {places:?}", apart.len());
+        }
+    }
+}
+
+/// A stroke laid by its rule (the gradual and capped renderings: a compute pass a part of the
+/// canvas, its buffer then copied into the stroke) through a brush image comes out the same each time,
+/// as the wet one above: an Adreno's OpenGL ES copied a smudge window's buffer back without some
+/// of its last dispatch's writes, and these passes copy theirs the same way. Ignored: for a GPU
+/// that might (run it there); printed, the pixels that came out otherwise.
+#[test]
+#[ignore]
+fn a_stroke_laid_by_its_rule_through_a_brush_image_comes_out_the_same_each_time() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let info = gpu.adapter.get_info();
+    println!("on {:?} {}", info.backend, info.name);
+    let n = TEXTURE_SIZE;
+    let side = n * 4;
+    let checker: Vec<u8> =
+        (0..n * n).map(|i| if (i % n / 8 + i / n / 8).is_multiple_of(2) { 255 } else { 40 }).collect();
+    let big: Vec<u8> = (0..side * side).map(|i| checker[(i / side / 4) * n + i % side / 4]).collect();
+    let brush =
+        Brush { shape: Shape { source: Source::new(checker.clone()), ..Shape::default() }, ..Brush::round_pen() };
+    let stamps: Vec<Stamp> = (0..60)
+        .map(|i| {
+            let a = i as f32 * 0.1;
+            Stamp::round(Vec2::new(256.0 + 150.0 * a.cos(), 256.0 + 150.0 * a.sin()), 40.0, 0.6)
+        })
+        .collect();
+    let lay = |rendering: Rendering| {
+        let mut doc = Document::new(512, 512);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut style = StrokeStyle { rendering, shape_lod_cap: 4.0, ..style(StrokeTool::Paint, 1.0) };
+        canvas.use_sources(&gpu, &mut style, &brush);
+        canvas.use_full_shape(&gpu, &mut style, 7, side as u32, &big);
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&stamps);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let mut otherwise = Vec::new();
+    for rendering in [Rendering::Gradual, Rendering::Capped] {
+        let first = lay(rendering);
+        let laid = first.chunks(4).filter(|p| p[3] > 0).count();
+        let mut found = Vec::new();
+        for _ in 1..5 {
+            let again = lay(rendering);
+            let apart: Vec<usize> =
+                (0..512 * 512).filter(|&i| first.get(i * 4..i * 4 + 4) != again.get(i * 4..i * 4 + 4)).collect();
+            if let Some(&i) = apart.first() {
+                let places: Vec<(usize, usize)> = apart.iter().take(8).map(|&i| (i % 512, i / 512)).collect();
+                println!("  {rendering:?}: {} pixels apart, first at {places:?}", apart.len());
+                otherwise.push((rendering, i));
+            }
+            found.push(apart.len());
+        }
+        println!("{rendering:?}: {laid} pixels laid; again {found:?} pixels apart");
+        assert!(laid > 10_000, "{rendering:?}: {laid} pixels laid");
+    }
+    assert!(otherwise.is_empty(), "came out otherwise: {otherwise:?}");
+}
+
+/// What the dispatch over no pixels that ends each window costs (see `smudge.rs`): a heavy wet
+/// stroke through a brush image laid with it and without, a stamp a dispatch, the same either way
+/// on a GPU whose copies need no help. Printed: each way's time, the windows and so the dispatches
+/// it adds. Within half as much again (and 10 ms), though a dispatch of one workgroup is far less:
+/// alone the two came out within a millisecond (11-14 ms on the PC), beside other tests' GPU work
+/// up to 15 ms apart, either way round.
+#[test]
+fn a_dispatch_over_no_pixels_after_a_wet_windows_last_costs_little() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let n = TEXTURE_SIZE;
+    let checker: Vec<u8> =
+        (0..n * n).map(|i| if (i % n / 8 + i / n / 8).is_multiple_of(2) { 255 } else { 40 }).collect();
+    let brush = Brush { shape: Shape { source: Source::new(checker), ..Shape::default() }, ..Brush::round_pen() };
+    let stamps: Vec<Stamp> = (0..400)
+        .map(|i| {
+            let a = i as f32 * 0.05;
+            Stamp::round(Vec2::new(512.0 + 300.0 * a.cos(), 512.0 + 300.0 * a.sin()), 24.0, 1.0)
+        })
+        .collect();
+    let lay = |settle: bool| {
+        let mut doc = Document::new(1024, 1024);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.lay_stamp_by_stamp(true);
+        canvas.set_wet_settle(settle);
+        let mut style = StrokeStyle { wet_pull: Some(0.5), ..style(StrokeTool::Paint, 1.0) };
+        canvas.use_sources(&gpu, &mut style, &brush);
+        canvas.render(&gpu, &mut doc, None);
+        gpu.flush();
+        let windows = canvas.smudge_windows();
+        let started = std::time::Instant::now();
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&stamps);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        gpu.flush();
+        let took = started.elapsed();
+        (took, canvas.smudge_windows() - windows, canvas.read_layer(&gpu, doc.current()).unwrap())
+    };
+    // (each way's quickest of five, the two in turns, which goes first changing each time)
+    let mut times = [std::time::Duration::MAX; 2];
+    let mut windows = 0;
+    let mut pictures: [Vec<u8>; 2] = [Vec::new(), Vec::new()];
+    for round in 0..5 {
+        for settle in if round % 2 == 0 { [false, true] } else { [true, false] } {
+            let k = usize::from(settle);
+            let (took, laid, picture) = lay(settle);
+            times[k] = times[k].min(took);
+            windows = laid;
+            pictures[k] = picture;
+        }
+    }
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    println!(
+        "a heavy wet stroke a stamp a dispatch, {windows} windows: {:.1} ms as it was, {:.1} ms with a dispatch over \
+         no pixels ending each",
+        ms(times[0]),
+        ms(times[1])
+    );
+    assert!(windows > 0, "no windows laid");
+    assert!(pictures[0] == pictures[1], "laid otherwise with the dispatch after each window");
+    assert!(
+        times[1] <= times[0] * 3 / 2 + std::time::Duration::from_millis(10),
+        "{:?} against {:?}",
+        times[1],
+        times[0]
+    );
+}
+
 /// The history reads as it will be once the queued work is laid: what undo and redo can do and
 /// the names of the steps they would take, with strokes, undos and redos still queued; and whether
 /// the step either would take is a stroke still queued (an undo of it can wait behind it while
