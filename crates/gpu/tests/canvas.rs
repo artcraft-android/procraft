@@ -2543,6 +2543,61 @@ fn a_dual_brush_s_burnt_edges_burn_where_its_second_took_paint_away() {
     assert!(b.iter().zip(p).all(|(b, p)| b.abs_diff(p) <= 1), "{b:?} {p:?}");
 }
 
+/// A dual brush whose paint mixes as it goes (Intense Blending), both parts cut at an alpha
+/// threshold of nothing: an outline brush. On the clear layer the stroke is cut hard and its second
+/// rings it in its own colour; over paint the layer already holds, the first's soft edge blends into
+/// that paint and the second's rim doesn't show, so the stroke joins what it crosses. It comes out as
+/// it showed while drawn.
+#[test]
+fn an_outline_brush_rings_only_the_clear_layer_and_blends_into_paint_already_there() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // a grey band down the middle, x 26 to 38
+    canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.5; 3], 1.0));
+    canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(32.0, y as f32), 6.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    // white across it at y 32, soft, and a black second reaching further
+    let white = StrokeStyle {
+        hardness: 0.3,
+        mixes: true,
+        alpha_threshold: 0.0,
+        ..StrokeStyle::new(StrokeTool::Paint, [1.0; 3], 1.0)
+    };
+    let black = StrokeStyle { alpha_threshold: 0.0, ..StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0) };
+    assert!(white.cut_as_mixed() && !black.cut_as_mixed());
+    canvas.begin_dual_stroke(
+        doc.current(),
+        white,
+        procraft_gpu::SecondStroke { style: black, mode: 0, threshold: 0.0, classic: false },
+    );
+    canvas.add_stamps(&(4..=60).map(|x| dot(Vec2::new(x as f32, 32.0), 7.0)).collect::<Vec<_>>());
+    canvas.add_second_stamps(&(4..=60).map(|x| dot(Vec2::new(x as f32, 32.0), 12.0)).collect::<Vec<_>>());
+    canvas.render(&gpu, &mut doc, None);
+    let shown = canvas.read_composite(&gpu).unwrap();
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    // the rim on the clear layer, all black; over the band, the band as it was
+    assert_eq!(pixel(&layer, 64, 10, 42), [0, 0, 0, 255]);
+    let band = pixel(&layer, 64, 32, 42);
+    assert!(band[3] == 255 && band[..3].iter().all(|&c| c.abs_diff(128) <= 2), "the rim over the band: {band:?}");
+    // the first's soft edge: cut hard on the clear layer, white through to where the rim begins;
+    // over the band, blended into the grey
+    for y in 32..=44 {
+        let p = pixel(&layer, 64, 10, y);
+        assert!(p == [255; 4] || p == [0, 0, 0, 255], "on the clear layer at 10,{y}: {p:?}");
+    }
+    let blended = (33..=40).map(|y| pixel(&layer, 64, 32, y)).filter(|p| p[0] > 140 && p[0] < 240).count();
+    assert!(blended >= 2, "the edge over the band blends over {blended} pixels");
+    // as it showed while drawn
+    canvas.render(&gpu, &mut doc, None);
+    let done = canvas.read_composite(&gpu).unwrap();
+    let most = shown.iter().zip(&done).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(most <= 2, "drawn and committed differ by {most}");
+}
+
 #[test]
 fn wet_paint_mixes_with_what_is_under_it() {
     let Some(gpu) = gpu() else { return };

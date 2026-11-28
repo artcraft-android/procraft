@@ -103,6 +103,8 @@ mod scroll;
 pub(crate) type PickerProgram = (String, Arc<str>, Option<Arc<[String]>>, Arc<procraft_gpu::PictureProgram>);
 #[cfg(test)]
 mod heavy_tests;
+#[cfg(test)]
+mod outline_tests;
 mod paper_picture;
 mod plugin_artwork;
 mod plugin_brushes;

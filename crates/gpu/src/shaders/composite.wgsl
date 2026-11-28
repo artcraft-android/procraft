@@ -65,6 +65,9 @@ struct LayerUniform {
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
 const STROKE_LUMINANCE: u32 = 256u;
+// in stroke_blend: the stroke's paint mixes into what the layer holds as it goes and is cut at its
+// alpha threshold, as mixed in (see `mixed_cut`)
+const STROKE_MIXES: u32 = 512u;
 
 // in clipped: not clipped; multiplied by the alpha of the base it is clipped to (clip_tex), drawn
 // without it; blended onto its base (the backdrop) in their clipping group; the group's base,
@@ -110,12 +113,65 @@ struct StrokePixel {
     burn: f32,
 }
 
-// the stroke at a pixel: its build-up, its edges, the paper grain fixed to the canvas, its
-// threshold and its opacity
-fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
+// a stroke cut as its paint mixes into the layer (see `mixed_cut`): what it lays over the layer,
+// and how much of it (with its second's) shows before the cut
+struct Cut {
+    s: vec4<f32>,
+    shown: f32,
+}
+
+// A stroke whose paint mixes into what the layer holds as it goes (Uniform and Intense Blending),
+// cut at its alpha threshold: cut as its paint mixes into the layer's. `first` is the stroke as its
+// stamps laid it, `a` how much of it shows (its edges, grain and paper taken in), `under` the
+// layer. Over the layer's own paint the paint as mixed always passes the threshold, so the
+// stroke's edge there blends into that paint as its stamps mixed it, never cut hard; on a clear
+// layer it is cut hard. Wherever the stroke shows past the threshold, the paint as mixed shows
+// whole. A Normal second's own colour shows only where neither the first nor the layer holds
+// paint past the threshold: its rim rings what the stroke lays on a clear layer and never crosses
+// paint the layer already holds, so strokes drawn one over another join.
+fn mixed_cut(first: vec4<f32>, a: f32, p: vec2<i32>, under: vec4<f32>) -> Cut {
+    let mixed = first + under * (1.0 - first.a);
+    let through = mixed.a > lu.threshold;
+    var colour = select(vec4<f32>(0.0), vec4<f32>(unpremultiply(mixed), 1.0), through);
+    // how much of the colour is the stroke's, the rest the layer's
+    var amount = select(first.a, 1.0, through);
+    var shown = a;
+    if (lu.dual != 0u) {
+        let t = textureLoad(second_tex, p, 0);
+        var b = t.a;
+        let cut = lu.dual_threshold >= 0.0;
+        if (cut) {
+            b = select(0.0, 1.0, b > lu.dual_threshold);
+        }
+        let mode = dual_mode(lu.dual);
+        shown = dual_rise(dual_combine(a, b, mode), first.a, mode);
+        if (mode == 0u) {
+            // the second's share of the colour: cut as well, all of it wherever the paint as
+            // mixed isn't through; otherwise as far as the first leaves room
+            let w = select((1.0 - amount) * b, select(0.0, b, !through), cut);
+            colour = mix(colour, vec4<f32>(t.rgb / max(t.a, 1e-6), 1.0), w);
+            amount = mix(amount, 1.0, w);
+        }
+    }
+    // the paint as mixed, taken back out of the layer: what goes over it
+    var out = colour;
+    if (amount > 0.0) {
+        out = clamp((colour - under) / amount + under, vec4<f32>(0.0), vec4<f32>(1.0));
+    }
+    let on = select(0.0, 1.0, shown > lu.threshold);
+    return Cut(vec4<f32>(min(out.rgb, vec3<f32>(out.a)), out.a) * on, shown);
+}
+
+// the stroke at a pixel over the layer's pixel `under` (read only by a stroke cut as its paint
+// mixes in): its build-up, its edges, the paper grain fixed to the canvas, its threshold and its
+// opacity
+fn stroke_pixel(p: vec2<i32>, under: vec4<f32>) -> StrokePixel {
     var s = textureLoad(stroke_tex, p, 0);
     // what the stamps laid, before the edges, grain and second change it
+    let first = s;
     let laid = s.a;
+    // cut as its paint mixes into the layer (the classic combine's second as it was)
+    let mixes = (lu.stroke_blend & STROKE_MIXES) != 0u && lu.threshold >= 0.0 && (lu.dual & DUAL_CLASSIC) == 0u;
     if (lu.wet < 0.0 && s.a > 0.0) {
         // a preview: how much of an edge the pixel is (its coverage above its neighbours' a few
         // pixels away), the edges a little stronger and the inside as it is (as measured: at
@@ -170,7 +226,7 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
     }
     // a dual brush's second: its coverage (cut at its threshold) combined with the first's by
     // the dual mode, or by Normal showing where the first doesn't
-    if (lu.dual != 0u) {
+    if (lu.dual != 0u && !mixes) {
         let t = textureLoad(second_tex, p, 0);
         var b = t.a;
         if (lu.dual_threshold >= 0.0) {
@@ -192,21 +248,28 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         }
         s = vec4<f32>(colour * a, a);
     }
+    var shown = s.a;
+    if (mixes) {
+        let cut = mixed_cut(first, s.a, p, under);
+        s = cut.s;
+        shown = cut.shown;
+    }
     // burnt edges show where the stroke is thin: where its paper grain or its second took paint
     // away, or without either wherever it is less than full
     var burn = 0.0;
     if (lu.burnt > 0.0 && built > 0.0) {
-        burn = lu.burnt * select(1.0 - s.a, abs(built - s.a), lu.grain >= 0 || lu.dual != 0u);
+        burn = lu.burnt * select(1.0 - shown, abs(built - shown), lu.grain >= 0 || lu.dual != 0u);
     }
-    if (lu.threshold >= 0.0 && s.a > 0.0) {
+    if (!mixes && lu.threshold >= 0.0 && s.a > 0.0) {
         let on = select(0.0, 1.0, s.a > lu.threshold);
         s = s * (on / s.a);
     }
     return StrokePixel(s * lu.stroke_opacity, burn);
 }
 
+// (never a stroke cut as its paint mixes in, which is committed reading the layer)
 fn stroke_at(p: vec2<i32>) -> vec4<f32> {
-    return stroke_pixel(p).s;
+    return stroke_pixel(p, vec4<f32>(0.0)).s;
 }
 
 // burnt edges: the stroke's result `r` blended once more with the paint that was under it, by
@@ -241,7 +304,7 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
         return select(over, locked, lu.stroke_mode == 7u);
     }
     if (lu.stroke_mode != 0u) {
-        let px = stroke_pixel(p);
+        let px = stroke_pixel(p, c0);
         let s = px.s;
         // where the stroke left nothing (no paint, no burnt edge) the layer is as it was
         if (s.a <= 0.0 && px.burn <= 0.0) {
