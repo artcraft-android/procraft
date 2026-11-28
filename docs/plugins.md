@@ -37,7 +37,8 @@ once was: `colour-tools`, `interface-look`, `view-tools`, `brush-extras`, `layer
   hook; and Coloured brush previews tints the brush library's strokes on the `brush_preview_colour`
   hook.
 - `view-tools`: Rotation reset has an action and two switches in the Canvas tab, Value check a switch
-  there with a key of its own, and Reference windows a single slider.
+  there with a key of its own, Reference windows a single slider, and Smooth when zoomed is its
+  switch alone, on the `view_smooth` hook.
 - `brush-extras`: Finger pressure gives a finger a pressure on the `pressure` hook, Touch position
   offset moves samples on the `position` hook, Brush sounds plays sounds with files picked for it and
   a row in the brush studio, and Randomise and QuickShape curves answer a hook each.
@@ -116,7 +117,8 @@ picture, actions in the Layers panel, `set_control` and the `colour_panel` hook 
 the `paper` hook's grain 15, [features](#features), a row in the brush studio kept as a plugin it
 takes the place of kept it, and the marks of one it takes the place of 16, a feature taken from a
 plugin that stays and a set of brushes under a switch 19, the `panel_layout` hook 20, and
-[`folder` controls](#folders) and the `artwork_saved`, `video_exported` and `gallery_opened` hooks 22.
+[`folder` controls](#folders) and the `artwork_saved`, `video_exported` and `gallery_opened` hooks 22,
+and the `view_smooth` hook 23.
 
 ### Brushes it comes with
 
@@ -689,6 +691,25 @@ hook, the most any says.
 Infinite Plugins' Trace view, which the app comes with, has a Layer view of Normal (none dimmed), Solo (all the way)
 and Trace (as far as its slider says, 70% as it starts), chosen in the Canvas tab or from its row in
 the Layers panel, whose panel holds both; Alt+S and Alt+T toggle Solo and Trace.
+
+### `view_smooth`
+
+Whether the canvas shows smoothed between its pixels however far it is zoomed in, on the screen
+alone (interface 23):
+
+```
+procraft_view_smooth() -> i32
+```
+
+The app shows each canvas pixel as a square of its own colour once it covers a point or more (from
+100%), and smoothed between them short of that. While a plugin answers not 0, every zoom shows it
+smoothed: the window, a second display showing the canvas, the eyedropper's loupe (which shows the
+window as it is shown), a layer's view dimmed by `view_dim_others`, and other layers' pixels round
+plugins' layers drawn sharp. Nothing read, saved, exported, recorded or picked from the canvas
+changes: the eyedropper still picks the canvas pixel under it. The app asks as the plugins change,
+not as it draws. With several plugins on this hook, one that says so is enough.
+
+View tools' Smooth when zoomed, which the app comes with, answers 1 while its switch is on.
 
 ### `paper`
 
@@ -2420,7 +2441,7 @@ layers' editors, interface 19 a feature taken from a plugin that stays (`takes`)
 brushes under a switch and given as a plugin's it takes the place of (`brushes`), and an artwork's
 values kept for one it takes the place of, interface 20 the `panel_layout` hook, and interface 22
 `folder` controls (one the whole plugin's, in a plugin of features) and the `artwork_saved`,
-`video_exported` and `gallery_opened` hooks. What comes under a switch at the top of the list (a menu and
+`video_exported` and `gallery_opened` hooks, and interface 23 the `view_smooth` hook. What comes under a switch at the top of the list (a menu and
 a row in the brush studio too), taking the place of other plugins, a menu of its own, and controls in
 the Canvas tab, on a key or kept with each artwork need no newer interface: an older app shows every
 control, leaves the others where they are, shows no menu and keeps every control with the plugin. What a

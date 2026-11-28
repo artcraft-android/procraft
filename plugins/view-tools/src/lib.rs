@@ -1,9 +1,10 @@
-//! View tools: how the canvas shows on the screen, three features each with a switch of its own and
+//! View tools: how the canvas shows on the screen, four features each with a switch of its own and
 //! its controls under it. Value check: Values only shows the canvas in greys ([`values`]).
 //! Reference windows: more than one Reference window open at once ([`references`]). Rotation reset:
 //! Reset rotation turns the canvas upright, and pinching can keep its turn and its fit
-//! ([`rotation`]). What is saved, exported and picked stays as it is. It's a plugin made of those features, not part of
-//! the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
+//! ([`rotation`]). Smooth when zoomed: the canvas smoothed between its pixels however far it is
+//! zoomed in ([`smooth`]). What is saved, exported and picked stays as it is. It's a plugin made of
+//! those features, not part of the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
 //! The app runs each feature that is on in a copy of this code of its own, and tells that copy the
 //! other features' switches as off; so each hook answers for its own feature alone, and as the app
@@ -12,11 +13,12 @@
 
 mod references;
 mod rotation;
+mod smooth;
 mod values;
 
 /// The controls by their place in the manifest, as they start: each feature's switch off.
-const STARTS: [f32; 9] = [0.0, 0.0, 1.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0];
-static CONTROLS: kit::Controls<9> = kit::Controls::new(STARTS);
+const STARTS: [f32; 10] = [0.0, 0.0, 1.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+static CONTROLS: kit::Controls<10> = kit::Controls::new(STARTS);
 kit::controls!(CONTROLS);
 
 /// Value check's switch, then its own: Values only, and its contrast.
@@ -32,6 +34,8 @@ pub const ROTATION_RESET: usize = 5;
 pub const TO: usize = 6;
 pub const LOCK: usize = 7;
 pub const NO_FIT: usize = 8;
+/// Smooth when zoomed's switch, with nothing of its own under it.
+pub const SMOOTH_ZOOM: usize = 9;
 
 /// The actions by their place in the manifest: Reset rotation.
 const RESET: usize = 0;
@@ -44,7 +48,7 @@ kit::actions!(|index| {
 
 /// Each feature's switch, in order: what comes after one, up to the next, is its own.
 #[cfg(test)]
-const FEATURES: [usize; 3] = [VALUE_CHECK, REFERENCE_WINDOWS, ROTATION_RESET];
+const FEATURES: [usize; 4] = [VALUE_CHECK, REFERENCE_WINDOWS, ROTATION_RESET, SMOOTH_ZOOM];
 
 /// The tests one at a time, as they share the controls.
 #[cfg(test)]

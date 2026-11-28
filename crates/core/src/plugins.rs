@@ -5112,6 +5112,92 @@ mod tests {
     }
 
     #[test]
+    fn smooth_when_zoomed_comes_off_shows_the_canvas_smoothed_while_on_and_its_switch_is_kept() {
+        const SMOOTH: &str = VIEW_TOOLS;
+        let dir = store("bundled-smooth");
+        let plugins = app_at(&dir);
+        let key = format!("{SMOOTH}.smooth_zoom");
+        let s = viewed();
+        let crisp_from = |s: &crate::CanvasSession| s.shared.lock().crisp_from(2.0);
+        s.use_plugins(Arc::clone(&plugins));
+        // it comes off, its switch too: each canvas pixel a square from 100%, as the app has it
+        assert!(!card(&plugins, SMOOTH).on && !switch_of(&plugins, &key));
+        assert!(!plugins.hooks().view_smooth());
+        assert_eq!(crisp_from(&s), 2.0);
+        // its switch on, the plugin not yet: still as the app has it
+        assert!(plugins.set_switch(key.clone(), true));
+        assert!(!plugins.hooks().view_smooth());
+        // both: smoothed however far it is zoomed in, and nothing else of View tools changes
+        assert!(plugins.set_on(SMOOTH.to_owned(), true));
+        assert!(plugins.hooks().view_smooth());
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(crisp_from(&s), f32::INFINITY);
+        assert_eq!(plugins.hooks().view_look(), None);
+        assert_eq!(plugins.reference_windows(), 1);
+        assert!(!plugins.hooks().gesture_lock(crate::hooks::GESTURE_TURN));
+        // asked as the plugins change: quick
+        let hooks = plugins.hooks();
+        let t = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert!(hooks.view_smooth());
+        }
+        let asked = t.elapsed() / 1000;
+        println!("smooth when zoomed asked in {asked:?}");
+        assert!(asked < std::time::Duration::from_micros(200), "{asked:?}");
+        // kept: read back on the next start, it is on again
+        let lines = plugins.kept_lines();
+        assert!(lines.contains(&format!("{key} true")) && lines.contains(&format!("{SMOOTH}.on true")), "{lines:?}");
+        let next = app_at(&dir);
+        read_lines(&next, &lines);
+        assert!(card(&next, SMOOTH).on && switch_of(&next, &key));
+        assert!(next.hooks().view_smooth());
+        // its switch off: as the app has it again
+        assert!(plugins.set_switch(key.clone(), false));
+        assert!(!plugins.hooks().view_smooth());
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(crisp_from(&s), 2.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn smooth_when_zoomed_comes_off_to_those_who_had_view_tools_before_with_the_rest_as_it_was() {
+        // View tools as it came before Smooth when zoomed: without it, written to interface 16
+        let (_, bytes) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "view-tools").unwrap();
+        let package = plugin_file::read_package(bytes).unwrap();
+        let mut manifest: Value = serde_json::from_slice(package.manifest_text()).unwrap();
+        let now_version = package.manifest.version.clone();
+        manifest["version"] = json!("1.1.0");
+        manifest["compat"]["procraft"]["interface"] = json!(16);
+        manifest["hooks"].as_array_mut().unwrap().retain(|hook| hook != "view_smooth");
+        manifest["controls"].as_array_mut().unwrap().retain(|control| control["key"] != "smooth_zoom");
+        let module = package.file(crate::plugin_run::MODULE).unwrap();
+        let before = pack(&manifest, &[(crate::plugin_run::MODULE, module)]);
+        let dir = store("bundled-smooth-newer");
+        let mut first = all_bundled();
+        first.retain(|(name, _)| *name != "view-tools");
+        first.push(("view-tools", before));
+        // its Values only on
+        let earlier = app_with(&dir, &first);
+        assert_eq!(card(&earlier, VIEW_TOOLS).version, "1.1.0");
+        assert!(earlier.control(&format!("{VIEW_TOOLS}.smooth_zoom")).is_none());
+        assert!(earlier.set_on(VIEW_TOOLS.to_owned(), true));
+        assert!(earlier.set_switch(format!("{VIEW_TOOLS}.value_check"), true));
+        assert!(earlier.set_switch(format!("{VIEW_TOOLS}.values"), true));
+        let lines = earlier.kept_lines();
+        // the app that comes with it: Values only as it was, Smooth when zoomed off
+        let now = app_with(&dir, &all_bundled());
+        read_lines(&now, &lines);
+        let card_now = card(&now, VIEW_TOOLS);
+        assert_eq!((card_now.version.as_str(), card_now.on), (now_version.as_str(), true));
+        assert_ne!(now_version, "1.1.0");
+        assert!(switch_of(&now, &format!("{VIEW_TOOLS}.values")));
+        assert_eq!(now.hooks().view_look(), Some(procraft_gpu::GREY_LOOK));
+        assert!(!switch_of(&now, &format!("{VIEW_TOOLS}.smooth_zoom")));
+        assert!(!now.hooks().view_smooth());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn coloured_previews_tint_the_library_s_strokes_in_the_colour_or_its_own() {
         const PREVIEWS: &str = INTERFACE_LOOK;
         let dir = store("bundled-coloured-previews");

@@ -24,7 +24,7 @@ const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
 /// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
-const INTERFACE: u32 = 22;
+const INTERFACE: u32 = 23;
 /// The first interface with features (several plugins' worth in one, each a switch of its own).
 const FEATURES_FROM: u32 = 16;
 /// The interface filter layers came in.
@@ -3218,7 +3218,7 @@ pub(crate) mod tests {
             );
         }
         // a hook this app has, written to a later interface than it reads: for a newer app
-        assert_eq!(folders(23, folder, hooks).err(), Some(Refusal::Newer));
+        assert_eq!(folders(INTERFACE + 1, folder, hooks).err(), Some(Refusal::Newer));
     }
 
     #[test]
@@ -3270,6 +3270,13 @@ pub(crate) mod tests {
         let dims = r#"(module (func (export "procraft_view_dim_others") (result f32) (f32.const 0.7)))"#;
         assert_eq!(dim(&wat::parse_str(dims).unwrap()).unwrap().manifest.hooks, [Hook::ViewDimOthers]);
         assert!(dim(&module).is_err(), "a module without the dimming hook's function");
+        let smooth = |module: &[u8]| {
+            let manifest = with(coded("org.example.smooth", module), "/hooks", json!(["view_smooth"]));
+            read_package(&a_coded_file(&with(manifest, "/compat/procraft/interface", json!(23)), module))
+        };
+        let smooths = r#"(module (func (export "procraft_view_smooth") (result i32) (i32.const 1)))"#;
+        assert_eq!(smooth(&wat::parse_str(smooths).unwrap()).unwrap().manifest.hooks, [Hook::ViewSmooth]);
+        assert!(smooth(&module).is_err(), "a module without the smoothing hook's function");
     }
 
     #[test]

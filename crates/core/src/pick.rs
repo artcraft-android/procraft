@@ -41,6 +41,9 @@ impl CanvasSession {
             // own render, timed as a frame's, lays a share (a slow machine's, one lot of a stroke),
             // and the colour was the paper's where the stroke was still to come
             let frames = st.frames_drawn();
+            // smoothed or crisp as the window shows it; the colour picked is the canvas's pixel all
+            // the same
+            let crisp_from = st.crisp_from(st.display_scale);
             let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
             if !frames {
                 canvas.render(gpu, &mut st.doc, None);
@@ -73,7 +76,7 @@ impl CanvasSession {
                     backdrop: None,
                     convert: None,
                     lut: None,
-                    crisp_from: st.display_scale,
+                    crisp_from,
                     look: None,
                     traced: false,
                 }),

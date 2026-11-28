@@ -74,6 +74,9 @@
 //!   green and blue, each three weights and what is added.
 //! - `procraft_view_dim_others() -> f32`: for the hook `view_dim_others` (interface 13), how much
 //!   the layers but the current one are dimmed on the screen alone, 0 (not at all) to 1.
+//! - `procraft_view_smooth() -> i32`: for the hook `view_smooth` (interface 23), whether the canvas
+//!   shows smoothed between its pixels however far it is zoomed in (not 0), on the screen alone,
+//!   rather than each pixel a square from 100%.
 //! - For the hook `paper` (interface 8): `procraft_paper(side: i32) -> i32` answers where the
 //!   paper's tile is in its memory, `side` x `side` bytes, each how high the paper stands (0 for
 //!   none now); `procraft_paper_look(what: i32) -> f32` how strongly its hollows take paint away
@@ -290,6 +293,7 @@ const FLOATING_PANEL: &str = "procraft_floating_panel";
 const GESTURE_LOCK: &str = "procraft_gesture_lock";
 const VIEW_LOOK: &str = "procraft_view_look";
 const VIEW_DIM_OTHERS: &str = "procraft_view_dim_others";
+const VIEW_SMOOTH: &str = "procraft_view_smooth";
 const PAPER: &str = "procraft_paper";
 const PAPER_LOOK: &str = "procraft_paper_look";
 const PAPER_COLOUR: &str = "procraft_paper_colour";
@@ -499,6 +503,9 @@ pub(crate) enum Hook {
     VideoExported,
     /// The folder whose packages come into the gallery as it opens (interface 22).
     GalleryOpened,
+    /// The canvas shown smoothed between its pixels however far it is zoomed in, on the screen
+    /// alone (interface 23).
+    ViewSmooth,
 }
 
 impl Hook {
@@ -545,6 +552,7 @@ impl Hook {
             "artwork_saved" => Some(Hook::ArtworkSaved),
             "video_exported" => Some(Hook::VideoExported),
             "gallery_opened" => Some(Hook::GalleryOpened),
+            "view_smooth" => Some(Hook::ViewSmooth),
             _ => None,
         }
     }
@@ -595,6 +603,7 @@ impl Hook {
             Hook::ArtworkSaved => "This plugin can keep a copy of each artwork you save in a folder you pick.",
             Hook::VideoExported => "This plugin can put the time-lapse videos you export in a folder you pick.",
             Hook::GalleryOpened => "This plugin can bring artworks from a folder you pick into your gallery.",
+            Hook::ViewSmooth => "This plugin can show the canvas smoothed when zoomed in, on the screen alone.",
         }
     }
 
@@ -644,6 +653,7 @@ impl Hook {
             Hook::ArtworkSaved => exports(module, ARTWORK_SAVED, &[], &[ValType::I32]),
             Hook::VideoExported => exports(module, VIDEO_EXPORTED, &[], &[ValType::I32]),
             Hook::GalleryOpened => exports(module, GALLERY_OPENED, &[], &[ValType::I32]),
+            Hook::ViewSmooth => exports(module, VIEW_SMOOTH, &[], &[ValType::I32]),
             Hook::OpacityTogether => exports(module, OPACITY_TOGETHER, &[], &[ValType::I32]),
             Hook::RandomiseBrush => exports(module, RANDOMISE, &[ValType::I32, ValType::I32], &[ValType::F32]),
             Hook::ColourTriangle => exports(module, COLOUR_TRIANGLE, &[], &[ValType::I32]),
@@ -1147,6 +1157,7 @@ pub(crate) struct Running {
     stroke_fill: Option<TypedFunc<(i32, i32), i32>>,
     colour_panel: Option<TypedFunc<i32, i32>>,
     view_dim_others: Option<TypedFunc<(), f32>>,
+    view_smooth: Option<TypedFunc<(), i32>>,
     panel_layout: Option<TypedFunc<i32, f32>>,
     /// The folders it names when an artwork is saved, a time-lapse video exported and the gallery
     /// opened, in that order (interface 22).
@@ -1314,6 +1325,7 @@ impl Running {
             let stroke_fill = instance.get_typed_func(&store, STROKE_FILL).ok();
             let colour_panel = instance.get_typed_func(&store, COLOUR_PANEL).ok();
             let view_dim_others = instance.get_typed_func(&store, VIEW_DIM_OTHERS).ok();
+            let view_smooth = instance.get_typed_func(&store, VIEW_SMOOTH).ok();
             let panel_layout = instance.get_typed_func(&store, PANEL_LAYOUT).ok();
             let folders =
                 [ARTWORK_SAVED, VIDEO_EXPORTED, GALLERY_OPENED].map(|name| instance.get_typed_func(&store, name).ok());
@@ -1431,6 +1443,7 @@ impl Running {
                 stroke_fill,
                 colour_panel,
                 view_dim_others,
+                view_smooth,
                 panel_layout,
                 folders,
                 curve,
@@ -2681,6 +2694,18 @@ impl Running {
             view_dim_others.call(&mut *store, ()).map_err(|e| stop_of(&e))
         })?;
         if (0.0..=1.0).contains(&said) { Ok(said) } else { Err(Stop::Nonsense) }
+    }
+
+    /// Whether it says the canvas shows smoothed between its pixels however far it is zoomed in
+    /// (not 0 for yes), on the screen alone.
+    pub(crate) fn view_smooth(&mut self) -> Result<bool, Stop> {
+        let Running { store, view_smooth, .. } = self;
+        let Some(view_smooth) = view_smooth else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            view_smooth.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
     }
 
     /// Whether it says the colour panel does `part` of what it may (not 0 for yes).

@@ -819,6 +819,13 @@ impl Hooks {
         self.through(Hook::ViewDimOthers, 0.0_f32, |running, most| Ok(most.max(running.view_dim_others()?)))
     }
 
+    /// The smoothing hook (interface 23): whether the canvas shows smoothed between its pixels
+    /// however far it is zoomed in, on the screen alone, as any plugin on it says.
+    pub(crate) fn view_smooth(&self) -> bool {
+        self.has(Hook::ViewSmooth)
+            && self.through(Hook::ViewSmooth, false, |running, said| Ok(said || running.view_smooth()?))
+    }
+
     /// The colour panel's hook (interface 12): whether a plugin on it says the panel does `part` of
     /// what it may ([`COLOUR_STEPS`], [`COLOUR_BEFORE`]).
     pub(crate) fn colour_panel(&self, part: i32) -> bool {
@@ -1262,6 +1269,7 @@ impl CanvasSession {
         // rather than as it is drawn
         let look = hooks.view_look();
         let dim = hooks.view_dim_others();
+        let smooth = hooks.view_smooth();
         let sets = plugins.brush_sets();
         // the colour round the canvas and the picture there, read again only as it changes
         let surround =
@@ -1304,6 +1312,10 @@ impl CanvasSession {
         }
         if st.plugin_dim != dim {
             st.plugin_dim = dim;
+            changed = true;
+        }
+        if st.plugin_smooth != smooth {
+            st.plugin_smooth = smooth;
             changed = true;
         }
         if st.plugin_surround != surround {
@@ -2041,6 +2053,39 @@ pub(crate) mod tests {
             assert!(!hooks.listens(Hook::ViewDimOthers), "{odd}");
             assert_eq!(hooks.take_stopped().len(), 1, "{odd}");
         }
+    }
+
+    /// A plugin on the smoothing hook answering `body` (WAT).
+    fn smoothing(body: &str) -> Running {
+        let text = format!(r#"(module (func (export "procraft_view_smooth") (result i32) {body}))"#);
+        Running::start(&wat::parse_str(text).unwrap(), &[]).unwrap()
+    }
+
+    #[test]
+    fn the_canvas_shows_smoothed_while_any_plugin_on_the_smoothing_hook_says_and_a_trap_stops_one() {
+        let hooks = Hooks::default();
+        assert!(!hooks.view_smooth(), "none on");
+        hooks.put_on("a".to_owned(), smoothing("(i32.const 0)"), &[Hook::ViewSmooth]);
+        assert!(!hooks.view_smooth(), "one that says no");
+        hooks.put_on("b".to_owned(), smoothing("(i32.const 7)"), &[Hook::ViewSmooth]);
+        assert!(hooks.view_smooth(), "any not 0 is yes");
+        hooks.take_off("b");
+        assert!(!hooks.view_smooth());
+        // asked as the plugins change: quick
+        hooks.put_on("b".to_owned(), smoothing("(i32.const 1)"), &[Hook::ViewSmooth]);
+        let t = Instant::now();
+        for _ in 0..10_000 {
+            assert!(std::hint::black_box(hooks.view_smooth()));
+        }
+        let each = t.elapsed() / 10_000;
+        println!("the smoothing hook asked in {each:?}");
+        assert!(each < std::time::Duration::from_micros(200), "{each:?}");
+        // a trap: it stops, and goes off its hook
+        let hooks = Hooks::default();
+        hooks.put_on("odd".to_owned(), smoothing("unreachable"), &[Hook::ViewSmooth]);
+        assert!(!hooks.view_smooth());
+        assert!(!hooks.listens(Hook::ViewSmooth));
+        assert_eq!(hooks.take_stopped().len(), 1);
     }
 
     #[test]

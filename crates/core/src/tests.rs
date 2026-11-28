@@ -24239,6 +24239,95 @@ fn the_window_shows_canvas_pixels_as_squares_from_100_percent_and_smoothed_short
     assert_eq!(greys(1.0, 4600.0), 0, "46x: squares");
 }
 
+#[test]
+fn smooth_when_zoomed_shows_the_canvas_smoothed_at_400_percent_and_what_is_exported_and_picked_as_it_was() {
+    // a canvas striped black and white a pixel wide, at 400% on a screen of two pixels a point:
+    // each canvas pixel a square of 8 x 8 window pixels, the window inside the canvas
+    let Some(s) = session(16, 64) else { return };
+    let stripes: Vec<u8> = (0..16 * 16).flat_map(|i| if i % 2 == 0 { [0, 0, 0, 255] } else { [255; 4] }).collect();
+    {
+        let mut st = s.shared.lock();
+        let layer = st.doc.current();
+        st.canvas.as_mut().unwrap().put_layer(layer, stripes);
+    }
+    let side = 64;
+    let (texture, gpu) = frame_target(&s, side);
+    s.set_display_scale(2.0);
+    s.shared.lock().view = View::centred(procraft_engine::geom::Vec2::new(8.0, 8.0), 8.0, 0.0, (side, side));
+    // View tools as the app comes with it, Smooth when zoomed its one feature on
+    let dir = std::env::temp_dir().join(format!("procraft-smooth-zoom-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let plugins = crate::Plugins::with_bundled(dir.to_string_lossy().into_owned());
+    const VIEW_TOOLS: &str = "io.github.artcraftandroid.view-tools";
+    assert!(plugins.set_on(VIEW_TOOLS.to_owned(), true));
+    let smooth = |on: bool| {
+        assert!(plugins.set_switch(format!("{VIEW_TOOLS}.smooth_zoom"), on));
+        s.use_plugins(std::sync::Arc::clone(&plugins));
+    };
+    // what is shown, exported and picked
+    let png = dir.join("exported.png");
+    let seen = |on: bool| {
+        smooth(on);
+        let shown = framed(&s, &texture, &gpu, side);
+        let composite = {
+            let st = s.shared.lock();
+            st.canvas.as_ref().unwrap().read_composite(&gpu).unwrap()
+        };
+        s.export_png(png.to_string_lossy().into_owned()).unwrap();
+        let exported = std::fs::read(&png).unwrap();
+        // the eyedropper on a black pixel, a white one and near the edge between them
+        let picks: Vec<_> =
+            [(36.0, 30.0), (44.0, 30.0), (39.5, 30.0)].into_iter().map(|(x, y)| s.pick(x, y, 16).unwrap()).collect();
+        (shown, composite, exported, picks)
+    };
+    // how many of the canvas pixels' squares aren't one colour, and how many window pixels are a
+    // grey between the stripes
+    let mixed = |shown: &[u8]| mixed_blocks(shown, side, 8);
+    let greys = |shown: &[u8]| shown.as_chunks::<4>().0.iter().filter(|p| !matches!(p[0], 0 | 255)).count();
+    // off, as the app has it: each canvas pixel a square of its own colour
+    let (crisp, composite, exported, picks) = seen(false);
+    assert_eq!((mixed(&crisp), greys(&crisp)), (0, 0), "squares");
+    assert_eq!(crisp[(32 * side as usize + 36) * 4], 0);
+    assert_eq!(crisp[(32 * side as usize + 44) * 4], 255);
+    // on: smoothed, neighbouring window pixels inside one canvas pixel differing
+    let (smoothed, composite_on, exported_on, picks_on) = seen(true);
+    eprintln!(
+        "smooth when zoomed at 400%: {} of 64 squares mixed, {} of 4096 greys",
+        mixed(&smoothed),
+        greys(&smoothed)
+    );
+    assert_eq!(mixed(&smoothed), 64, "every square smoothed");
+    assert!(greys(&smoothed) > 3000, "{}", greys(&smoothed));
+    // across one canvas pixel (a black one, between white ones): lighter toward either side, the
+    // two in its middle alike
+    let row: Vec<u8> = (32..40).map(|x| smoothed[(32 * side as usize + x) * 4]).collect();
+    let mut distinct = row.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert!(distinct.len() >= 4, "across one canvas pixel: {row:?}");
+    assert!(row[0] > row[3] && row[7] > row[4], "across one canvas pixel: {row:?}");
+    // the canvas, what is exported and the colours picked as they were; the loupe shows the
+    // window as the screen does, its pixels the frame's there
+    assert_eq!(composite_on, composite);
+    assert_eq!(exported_on, exported);
+    let rgbs = |picks: &[crate::Pick]| picks.iter().map(|p| p.rgb).collect::<Vec<_>>();
+    assert_eq!(rgbs(&picks_on), rgbs(&picks));
+    assert_eq!(rgbs(&picks), [Some(0x000000), Some(0xFFFFFF), Some(0x000000)]);
+    let loupe_of = |shown: &[u8], (x, y): (usize, usize)| -> Vec<u8> {
+        (y - 8..y + 8)
+            .flat_map(|row| shown[(row * side as usize + x - 8) * 4..(row * side as usize + x + 8) * 4].to_vec())
+            .collect()
+    };
+    assert_eq!(most_apart(&picks[0].pixels, &loupe_of(&crisp, (36, 30))), 0, "the loupe off");
+    assert_eq!(most_apart(&picks_on[0].pixels, &loupe_of(&smoothed, (36, 30))), 0, "the loupe on");
+    assert_ne!(picks_on[0].pixels, picks[0].pixels);
+    // off again: squares again
+    smooth(false);
+    assert_eq!(framed(&s, &texture, &gpu, side), crisp);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Whether the canvas shows its plugins' layers drawn sharp now.
 fn shows_sharp(s: &CanvasSession) -> bool {
     s.shared.lock().canvas.as_deref().is_some_and(procraft_gpu::Canvas::shows_sharp)

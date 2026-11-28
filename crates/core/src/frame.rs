@@ -22,6 +22,15 @@ impl State {
         self.wide_colour_allowed && (self.doc.profile.is_p3() || self.doc.icc.is_some())
     }
 
+    /// How far a screen `density` pixels a point is zoomed in (window pixels to a canvas pixel)
+    /// before each canvas pixel shows as a square of its own colour (see [`Target::crisp_from`]):
+    /// from 100% at that density, or never while a plugin on the smoothing hook shows the canvas
+    /// smoothed however far it is zoomed in. Only what the screens show goes by it: the canvas,
+    /// and all that is read, saved, exported or picked from it, stays as it is.
+    pub(crate) fn crisp_from(&self, density: f32) -> f32 {
+        if self.plugin_smooth { f32::INFINITY } else { density }
+    }
+
     /// Draws the whole canvas fitted and centred on black into `view` (`format`, `size` pixels,
     /// its colours shown in `screen`): Project canvas, on a second display.
     pub(crate) fn draw_fitted(
@@ -31,6 +40,8 @@ impl State {
         size: (u32, u32),
         screen: Profile,
     ) {
+        // the second display's own density isn't known: crisp once a pixel covers more
+        let crisp_from = self.crisp_from(1.0);
         let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return };
         let to_screen = procraft_engine::view::View::fit((self.doc.width(), self.doc.height()), size).to_screen();
         let convert = colours_to(self.doc.profile, screen);
@@ -55,8 +66,7 @@ impl State {
                 backdrop: None,
                 convert,
                 lut,
-                // the second display's own density isn't known: crisp once a pixel covers more
-                crisp_from: 1.0,
+                crisp_from,
                 look: None,
                 traced: false,
             }),
@@ -151,6 +161,7 @@ impl State {
         };
         // (a model or the drawing pad as a sphere shows the canvas as its layers are)
         let flat = !self.scene_shown() && self.sphere.is_none();
+        let crisp_from = self.crisp_from(self.display_scale);
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.set_fill_preview(fill_preview.filter(|_| flat));
             // the line where the selection fades out, while its feathering is dragged
@@ -229,7 +240,7 @@ impl State {
                     backdrop,
                     convert,
                     lut,
-                    crisp_from: self.display_scale,
+                    crisp_from,
                     look: shown_look,
                     traced: true,
                 }),

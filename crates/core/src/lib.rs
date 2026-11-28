@@ -865,6 +865,9 @@ pub(crate) struct State {
     /// How much the plugins on the dimming hook dim the layers but the current one (the window's
     /// view only, 0 to 1), as they said then.
     pub(crate) plugin_dim: f32,
+    /// Whether a plugin on the smoothing hook shows the canvas smoothed between its pixels however
+    /// far it is zoomed in (the screens' view only), as they said then: see [`State::crisp_from`].
+    pub(crate) plugin_smooth: bool,
     /// The paper a plugin on the paper's hook gives, as it said then.
     pub(crate) plugin_paper: Option<procraft_gpu::CanvasPaper>,
     /// The set of brushes each plugin on holds, by its id, as the session last took them up (none
@@ -2669,6 +2672,7 @@ impl CanvasSession {
             grey_view: false,
             plugin_look: None,
             plugin_dim: 0.0,
+            plugin_smooth: false,
             plugin_paper: None,
             plugin_sets: None,
             brushes_dir: None,
