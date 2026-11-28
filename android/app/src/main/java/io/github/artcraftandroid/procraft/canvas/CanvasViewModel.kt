@@ -3542,15 +3542,31 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** The open artwork as a layered package in the cache, to share, named with [extension] (ours or the other app's). */
-    suspend fun exportPackageFile(extension: String = OWN_EXTENSION): File? = withExportCard("The artwork couldn't be exported.") { s ->
-        withContext(Dispatchers.IO) {
-            runCatching {
+    /**
+     * The open artwork as a layered package in the cache, to share, named with [extension] (ours or
+     * the other app's). Its time-lapse's frames not yet in videos are made into them first, which
+     * can take minutes for a long one: the card's pie fills half with that (else none of it), and
+     * Cancel stops it as it does the package.
+     */
+    suspend fun exportPackageFile(extension: String = OWN_EXTENSION): File? {
+        val s = session ?: return null
+        val t = timeLapse
+        val videos = VideosMade()
+        return withExportCard(
+            "The artwork couldn't be exported.",
+            what = "package",
+            progress = { videos.share(s.exportProgress()) },
+            stage = { videos.stage ?: s.exportStage() },
+        ) {
+            withContext(Dispatchers.IO) {
                 val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), true)
                 val out = File(File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }, "$base.$extension")
-                s.exportPackage(out.path, System.nanoTime().toULong(), timeLapse?.forPackage())
-                out
-            }.onFailure { AppLog.e("ProCraft", "exporting a package", it) }.getOrNull()
+                val lapse = t?.let { lapse -> videos.made(lapse) { !exportCancelled } ?: return@withContext null }
+                runCatching {
+                    s.exportPackage(out.path, System.nanoTime().toULong(), lapse)
+                    out
+                }.onFailure { if (!exportCancelled) AppLog.e("ProCraft", "exporting a package", it) }.getOrNull()
+            }
         }
     }
 
@@ -3695,30 +3711,68 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return io.github.artcraftandroid.procraft.core.androidRunEnd(ended.reason)
     }
 
-    /** How many of the gallery's artworks being shared are written, as a share of them. */
+    /** How many of the gallery's artworks being shared are written. */
     @Volatile
-    private var galleryShared = 0f
+    private var galleryShared = 0
+
+    /** The gallery's artwork being written, opened just for it (its stage and progress are the export's). */
+    @Volatile
+    private var galleryOpen: CanvasSession? = null
+
+    /** Its time-lapse's videos being made (a package's). */
+    @Volatile
+    private var galleryVideos = VideosMade()
+
+    /** How far the gallery's share of [count] artworks has come (0..1), within the one being written too. */
+    private fun galleryProgress(count: Int): Float {
+        val within = galleryOpen?.let { s -> runCatching { s.exportProgress() }.getOrNull() }?.let(galleryVideos::share) ?: 0f
+        return ((galleryShared + within) / count.coerceAtLeast(1)).coerceIn(0f, 1f)
+    }
+
+    /** Where the gallery's share is, for the log: which artwork, and its own stage. */
+    private fun galleryStage(): String {
+        val within = galleryVideos.stage ?: galleryOpen?.let { s -> runCatching { s.exportStage() }.getOrNull() }.orEmpty()
+        return listOf(exportStage, within).filter { it.isNotEmpty() }.joinToString(": ")
+    }
 
     /**
      * Artworks from the gallery written as [format] (as [shareableFiles]) with the export card, its
-     * pie filling an artwork at a time; its Cancel stops after the artwork being written. Null if
-     * cancelled or none could be written (that is told).
+     * pie filling as each artwork is written; its Cancel stops the one being written. Null if
+     * cancelled or none could be written (that is told); some left out are told too.
      */
     suspend fun shareFromGallery(list: List<Artwork>, format: String, pdfQuality: Int = 100, group: String = GROUP_NAME): Pair<List<File>, String>? {
-        galleryShared = 0f
-        return withCard("The artwork couldn't be exported.", { galleryShared }) {
-            shareableFiles(list, format, pdfQuality, group) { written -> galleryShared = written / list.size.coerceAtLeast(1).toFloat() }
+        galleryShared = 0
+        val missed = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val made = withCard(
+            "The artwork couldn't be exported.",
+            { galleryProgress(list.size) },
+            what = "$format of ${list.size} from the gallery",
+            stage = ::galleryStage,
+            discard = { (files, _) -> files.forEach { it.delete() } },
+        ) {
+            shareableFiles(list, format, pdfQuality, group, missed) { written -> galleryShared = written }
                 .takeIf { it.first.isNotEmpty() }
         }
+        // some written, some not: those left out said, not shared as if all were
+        if (made != null && missed.isNotEmpty()) showNotice(galleryMissedNote(missed.size, list.size), warning = true)
+        return made
     }
 
     /**
      * Artworks from the gallery written as [format] (one of [SHARE_FORMATS] but the animated ones)
      * into the cache, to share; with the type they are. Several as a PDF are one file named
-     * [group], a page each in their order. [written] hears how many are done after each; a
-     * cancelled export stops before the next.
+     * [group], a page each in their order. [written] hears how many are done after each; [missed]
+     * hears the name of each that couldn't be written. A cancelled export stops the one being
+     * written.
      */
-    suspend fun shareableFiles(list: List<Artwork>, format: String, pdfQuality: Int = 100, group: String = GROUP_NAME, written: (Int) -> Unit = {}): Pair<List<File>, String> = withContext(Dispatchers.IO) {
+    suspend fun shareableFiles(
+        list: List<Artwork>,
+        format: String,
+        pdfQuality: Int = 100,
+        group: String = GROUP_NAME,
+        missed: MutableList<String>? = null,
+        written: (Int) -> Unit = {},
+    ): Pair<List<File>, String> = withContext(Dispatchers.IO) {
         val (extension, mime) = when (format) {
             "PSD" -> "psd" to "image/vnd.adobe.photoshop"
             "PDF" -> "pdf" to "application/pdf"
@@ -3729,19 +3783,43 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             else -> OWN_EXTENSION to "application/octet-stream"
         }
         val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-        if (format == "PDF" && list.size >= 2) return@withContext groupPdf(list, File(dir, "${io.github.artcraftandroid.procraft.core.exportFileName(group, false)}.$extension"), pdfQuality, written) to mime
+        if (format == "PDF" && list.size >= 2) return@withContext groupPdf(list, File(dir, "${io.github.artcraftandroid.procraft.core.exportFileName(group, false)}.$extension"), pdfQuality, missed, written) to mime
         val used = mutableSetOf<String>()
         val files = mutableListOf<File>()
         for ((i, a) in list.withIndex()) {
             if (exportCancelled) break
+            exportStage = "artwork ${i + 1} of ${list.size}"
             val base = io.github.artcraftandroid.procraft.core.exportFileName(a.name, false)
             var name = base
             var n = 2
             while (!used.add(name)) name = "$base ${n++}"
-            File(dir, "$name.$extension").takeIf { io.github.artcraftandroid.procraft.gallery.exportArtwork(a.dir, format, it, pdfQuality) }?.let(files::add)
+            val file = File(dir, "$name.$extension")
+            galleryVideos = VideosMade()
+            val why = io.github.artcraftandroid.procraft.gallery.exportArtwork(
+                a.dir, format, file, pdfQuality,
+                opened = ::openedToExport,
+                going = { !exportCancelled },
+                videos = galleryVideos,
+            )
+            if (why == null) {
+                files.add(file)
+            } else if (!exportCancelled) {
+                missed?.add(a.name)
+                AppLog.w(TAG, "artwork ${i + 1} of ${list.size} wasn't exported as $format: $why")
+            }
             written(i + 1)
         }
         files to mime
+    }
+
+    /**
+     * An artwork just opened to be exported from the gallery ([s]; null once it is closed): the
+     * card's Cancel reaches it, even one that came as it opened.
+     */
+    private fun openedToExport(s: CanvasSession?) {
+        galleryOpen = s
+        exportStops = if (s != null) ({ s.cancelExport() }) else null
+        if (s != null && exportCancelled) s.cancelExport()
     }
 
     /**
@@ -3749,17 +3827,32 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * size, kept at [quality]); one that can't be read is left out. Nothing if cancelled or none
      * could be written. [written] hears how many are done after each.
      */
-    private fun groupPdf(list: List<Artwork>, out: File, quality: Int, written: (Int) -> Unit): List<File> =
+    private fun groupPdf(list: List<Artwork>, out: File, quality: Int, missed: MutableList<String>?, written: (Int) -> Unit): List<File> =
         runCatching {
             io.github.artcraftandroid.procraft.core.PdfBook.create(out.path, quality.coerceIn(1, 100).toUByte()).use { book ->
                 for ((i, a) in list.withIndex()) {
                     // left unfinished, the book leaves nothing
                     if (exportCancelled) return@runCatching emptyList<File>()
-                    runCatching { CanvasSession.open(a.dir.path).use { s -> if (s.prepareOffscreen()) book.add(s) } }
-                        .onFailure { AppLog.e("ProCraft", "a page of a PDF", it) }
+                    exportStage = "page ${i + 1} of ${list.size}"
+                    val added = runCatching {
+                        CanvasSession.open(a.dir.path).use { s ->
+                            s.resetExportProgress()
+                            openedToExport(s)
+                            try {
+                                if (!s.prepareOffscreen()) error("its canvas couldn't be made (the lines above say why)")
+                                book.add(s)
+                            } finally {
+                                openedToExport(null)
+                            }
+                        }
+                    }
+                    added.exceptionOrNull()?.takeIf { !exportCancelled }?.let {
+                        missed?.add(a.name)
+                        AppLog.e("ProCraft", "page ${i + 1} of ${list.size} of a PDF", it)
+                    }
                     written(i + 1)
                 }
-                if (book.pages() == 0u) return@runCatching emptyList<File>()
+                if (exportCancelled || book.pages() == 0u) return@runCatching emptyList<File>()
                 book.finish()
                 listOf(out)
             }
@@ -3774,8 +3867,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             exportingFromGallery = true
             val s = session ?: return@openArtwork
             viewModelScope.launch {
-                while (session === s && !s.canvasMade()) kotlinx.coroutines.delay(16)
-                if (session === s) animatedExport = kind
+                val started = android.os.SystemClock.uptimeMillis()
+                while (session === s && !s.canvasMade()) {
+                    // one never made (its device lost, or no memory for it) is told, and the
+                    // gallery comes back, rather than the artwork shown with no export for good
+                    val waited = android.os.SystemClock.uptimeMillis() - started
+                    if (waited > CANVAS_WAIT_MS) {
+                        AppLog.w(TAG, "the animated export ($kind) given up on: the artwork's canvas wasn't made in $waited ms")
+                        showNotice("This artwork can't be exported.", warning = true)
+                        endAnimatedExport()
+                        return@launch
+                    }
+                    kotlinx.coroutines.delay(16)
+                }
+                if (session === s) {
+                    AppLog.i(TAG, "the animated export ($kind) shows: the artwork's canvas made in ${android.os.SystemClock.uptimeMillis() - started} ms")
+                    animatedExport = kind
+                }
             }
         }
     }
@@ -5445,10 +5553,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile
     private var exportCancelled = false
 
-    /** The export card's Cancel: the export stops, and nothing is shared. */
+    /** The exports, one at a time, each apart from its card (see [ExportRunner]). */
+    private val exports = ExportRunner(viewModelScope, { AppLog.i(TAG, it) })
+
+    /** The stage an export made here (not by the core) is at, for the log. */
+    @Volatile
+    private var exportStage = ""
+
+    /** The export card's Cancel: the card goes at once, the export stops, and nothing is shared. */
     fun cancelExport() {
         exportCancelled = true
-        exportStops?.invoke()
+        exports.cancel()
     }
 
     /**
@@ -5464,30 +5579,50 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             AppLog.i(TAG, "a time-lapse export asked while another export runs: not begun")
             return null
         }
+        if (exports.busy) {
+            AppLog.i(TAG, "a time-lapse export asked while the one before still ends: not begun")
+            showNotice(EXPORT_STILL_ENDING, warning = true)
+            return null
+        }
         timeLapseExporting = true
         exportCancelled = false
+        exportStage = ""
         exportShown = ExportShown(0f)
         try {
-            val made = withContext(Dispatchers.IO) {
-                val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-                val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
-                val out = File(dir, "$base.mp4")
-                out.delete()
-                var shownAt = -1
-                val ok = runCatching {
-                    t.export(out, seconds) { done ->
-                        // a step a hundredth, so the card isn't redrawn for every frame
-                        val step = (done * 100).toInt()
-                        if (step != shownAt) {
-                            shownAt = step
-                            exportShown = ExportShown(done)
+            // (how far it has come, a step a hundredth, read by the card as the runner asks)
+            var done = 0f
+            val ended = exports.run(
+                "time-lapse",
+                progress = { done },
+                stage = { exportStage },
+                shown = { exportShown = ExportShown(it) },
+                stop = { exportCancelled = true },
+                discard = { it.delete() },
+            ) {
+                withContext(Dispatchers.IO) {
+                    val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+                    val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
+                    val out = File(dir, "$base.mp4")
+                    out.delete()
+                    val ok = runCatching {
+                        t.export(out, seconds) { now ->
+                            done = (now * 100).toInt() / 100f
+                            exportStage = "making the video (${(now * 100).toInt()}%)"
+                            !exportCancelled
                         }
-                        !exportCancelled
-                    }
-                }.onFailure { AppLog.e(TAG, "exporting the time-lapse", it) }.getOrDefault(false)
-                out.takeIf { ok }
+                    }.onFailure { AppLog.e(TAG, "exporting the time-lapse", it) }.getOrDefault(false)
+                    // (a video cut short by Cancel, or none: never left behind)
+                    if (!ok || exportCancelled) out.delete()
+                    out.takeIf { ok && !exportCancelled }
+                }
+            } ?: return null
+            when (ended) {
+                is ExportRunner.Ended.Cancelled -> return null.also { AppLog.i(TAG, "the time-lapse export was cancelled at ${ended.stage.ifEmpty { "its start" }} after ${ended.ms} ms: its card went at once") }
+                is ExportRunner.Ended.Stuck -> return null.also { showNotice(EXPORT_STUCK, warning = true) }
+                else -> {}
             }
-            if (exportCancelled) return null.also { AppLog.i(TAG, "the time-lapse export was cancelled") }
+            if (exportCancelled) return null.also { (ended as? ExportRunner.Ended.Made)?.value?.delete() }
+            val made = (ended as? ExportRunner.Ended.Made)?.value
             if (made == null) {
                 // which of the three: they are different faults, in a report too
                 val why = withContext(Dispatchers.IO) {
@@ -6727,7 +6862,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         val set = shownSet.toUInt()
         val writing = io.github.artcraftandroid.procraft.core.BrushFileWriting()
-        return withCard("This brush set couldn't be shared.", writing::progress, writing::cancel) {
+        return withCard("This brush set couldn't be shared.", writing::progress, writing::cancel, what = "brush set", discard = { it.delete() }) {
             withContext(Dispatchers.IO) {
                 runCatching { s.writeBrushSetFile(set, file.path, writing) }
                     .onFailure { if (!exportCancelled) AppLog.e(TAG, "sharing a brush set", it) }
@@ -6745,7 +6880,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val safe = libraryName.replace(Regex("[^A-Za-z0-9 _-]"), "_").ifBlank { "Brushes" }
         val file = File(exportFolder(), "$safe.$BRUSH_LIBRARY_EXTENSION")
         val writing = io.github.artcraftandroid.procraft.core.BrushFileWriting()
-        return withCard("This library couldn't be shared.", writing::progress, writing::cancel) {
+        return withCard("This library couldn't be shared.", writing::progress, writing::cancel, what = "brush library", discard = { it.delete() }) {
             withContext(Dispatchers.IO) {
                 runCatching { s.writeBrushLibraryFile(file.path, writing) }
                     .onFailure { if (!exportCancelled) AppLog.e(TAG, "sharing a brush library", it) }
@@ -7816,11 +7951,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * Cancel leaves the files unshared (none returned). A failure is told.
      */
     suspend fun export(kind: Export, pdfQuality: Int = 100): List<File> =
-        withExportCard("The artwork couldn't be exported.") { s -> exportFiles(s, kind, pdfQuality).takeIf { it.isNotEmpty() } }.orEmpty()
+        withExportCard("The artwork couldn't be exported.", what = kind.name) { s -> exportFiles(s, kind, pdfQuality).takeIf { it.isNotEmpty() } }.orEmpty()
 
     /** The file a plugin makes of the artwork's layers of a kind it adds ([e]), written into the cache to share. */
     suspend fun exportPlugin(e: io.github.artcraftandroid.procraft.core.PluginExport): File? =
-        withExportCard("The artwork couldn't be exported.") { s ->
+        withExportCard("The artwork couldn't be exported.", what = "a plugin's ${e.extension}") { s ->
             withContext(Dispatchers.IO) {
                 val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
                 val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
@@ -7837,44 +7972,88 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Runs [work], an export by the core, with the export card showing how far it has come (as the
-     * core tells it) and a check once made: what it made, or null if it was cancelled (its result
-     * left unshared) or made nothing ([failed] is then told). One export at a time.
+     * core tells it, or [progress]) and a check once made: what it made, or null if it was cancelled
+     * (its result left unshared) or made nothing ([failed] is then told). Cancel stops the core's
+     * export. One export at a time.
      */
-    private suspend fun <T : Any> withExportCard(failed: String, work: suspend (CanvasSession) -> T?): T? {
+    private suspend fun <T : Any> withExportCard(
+        failed: String,
+        what: String = "a file",
+        progress: (() -> Float)? = null,
+        stage: (() -> String)? = null,
+        work: suspend (CanvasSession) -> T?,
+    ): T? {
         val s = session ?: return null
         if (exportShown != null || timeLapseExporting) return null
         s.resetExportProgress()
-        return withCard(failed, s::exportProgress) { work(s) }
+        return withCard(
+            failed,
+            progress ?: s::exportProgress,
+            { s.cancelExport() },
+            what = what,
+            stage = stage ?: s::exportStage,
+            discard = { made -> deleteExported(made) },
+        ) { work(s) }
     }
 
     /**
-     * As [withExportCard], how far it has come told by [progress] (0..1); the card's Cancel calls
-     * [cancel] too, if given, to stop the work.
+     * As [withExportCard], how far it has come told by [progress] (0..1) and where it is by [stage];
+     * the card's Cancel calls [cancel] too, if given, to stop the work. The card waits on the work
+     * apart from it (see [ExportRunner]): Cancel takes it away at once, and what the work still
+     * makes goes to [discard]; one that makes no progress for two minutes is given up on, told.
      */
-    private suspend fun <T : Any> withCard(failed: String, progress: () -> Float, cancel: (() -> Unit)? = null, work: suspend () -> T?): T? {
+    private suspend fun <T : Any> withCard(
+        failed: String,
+        progress: () -> Float,
+        cancel: (() -> Unit)? = null,
+        what: String = "a file",
+        stage: () -> String = { exportStage },
+        discard: (T) -> Unit = {},
+        work: suspend () -> T?,
+    ): T? {
         if (exportShown != null || timeLapseExporting) return null
+        if (exports.busy) {
+            AppLog.i(TAG, "an export ($what) asked while the one before still ends: not begun")
+            showNotice(EXPORT_STILL_ENDING, warning = true)
+            return null
+        }
         exportCancelled = false
         exportStops = cancel
+        exportStage = ""
         exportShown = ExportShown(0f)
-        val following = viewModelScope.launch {
-            while (true) {
-                exportShown = ExportShown(progress())
-                kotlinx.coroutines.delay(EXPORT_POLL_MS)
-            }
-        }
         try {
-            val made = work()
-            following.cancel()
-            if (exportCancelled) return null
-            if (made == null) {
-                showNotice(failed, warning = true)
-                return null
+            val ended = exports.run(
+                what,
+                progress,
+                stage,
+                shown = { exportShown = ExportShown(it) },
+                stop = {
+                    exportCancelled = true
+                    exportStops?.invoke()
+                },
+                discard = discard,
+                work = work,
+            ) ?: return null
+            when (ended) {
+                is ExportRunner.Ended.Made -> {
+                    // (a Cancel as it ended: nothing shared, as asked)
+                    if (exportCancelled) return null.also { discard(ended.value) }
+                    AppLog.i(TAG, "the export ($what) ready to share in ${ended.ms} ms")
+                    exportShown = ExportShown(1f, done = true)
+                    kotlinx.coroutines.delay(EXPORT_DONE_MS)
+                    return ended.value
+                }
+                is ExportRunner.Ended.Failed -> {
+                    if (exportCancelled) return null
+                    AppLog.w(TAG, "the export ($what) made nothing in ${ended.ms} ms", ended.error)
+                    showNotice(failed, warning = true)
+                }
+                is ExportRunner.Ended.Cancelled ->
+                    AppLog.i(TAG, "the export ($what) was cancelled at ${ended.stage.ifEmpty { "its start" }} after ${ended.ms} ms: its card went at once")
+                is ExportRunner.Ended.Stuck -> showNotice(EXPORT_STUCK, warning = true)
             }
-            exportShown = ExportShown(1f, done = true)
-            kotlinx.coroutines.delay(EXPORT_DONE_MS)
-            return made
+            return null
         } finally {
-            following.cancel()
             exportStops = null
             exportShown = null
         }
@@ -7883,6 +8062,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** What stops the export under way, if it can be stopped (see [withCard]). */
     @Volatile
     private var exportStops: (() -> Unit)? = null
+
+    /** What an export made that won't be shared (cancelled, or given up on), gone from the cache. */
+    private fun deleteExported(made: Any) {
+        when (made) {
+            is File -> made.delete()
+            is List<*> -> made.forEach { (it as? File)?.delete() }
+        }
+    }
 
     private suspend fun exportFiles(s: CanvasSession, kind: Export, pdfQuality: Int): List<File> =
         withContext(Dispatchers.IO) {
@@ -7913,7 +8100,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 listOf(file)
             } catch (e: MobileException) {
-                AppLog.e(TAG, "exporting", e)
+                if (!exportCancelled) AppLog.e(TAG, "exporting", e)
                 emptyList()
             }
         }
@@ -7946,7 +8133,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return null
         s.resetExportProgress()
         videoDone = 0f
-        return withCard("The animation could not be exported.", { if (format.video) videoDone else s.exportProgress() }) {
+        return withCard(
+            "The animation could not be exported.",
+            { if (format.video) videoDone else s.exportProgress() },
+            { s.cancelExport() },
+            what = "turntable ${format.name}",
+            stage = { if (format.video) "making the video (${(videoDone * 100).toInt()}%)" else s.exportStage() },
+            discard = { it.delete() },
+        ) {
             exportModelAnimation(format) { exportCancelled }
         }
     }
@@ -8088,7 +8282,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 file
             } catch (e: MobileException) {
-                AppLog.e(TAG, "exporting an animation", e)
+                if (!exportCancelled) AppLog.e(TAG, "exporting an animation", e)
                 null
             }
         } }
@@ -8099,13 +8293,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return null
         s.resetExportProgress()
         videoDone = 0f
-        return withCard("The animation could not be exported.", { if (format.video) videoDone else s.exportProgress() }) {
+        return withCard(
+            "The animation could not be exported.",
+            { if (format.video) videoDone else s.exportProgress() },
+            { s.cancelExport() },
+            what = "animated ${format.name}",
+            stage = { if (format.video) "making the video (${(videoDone * 100).toInt()}%)" else s.exportStage() },
+            discard = { it.delete() },
+        ) {
             exportAnimation(format, webReady, dither, perFramePalette, transparent, fps) { exportCancelled }
         }
     }
 
     /** The flattened picture as a JPEG or PNG in the cache, to share, with the export card. */
-    suspend fun exportImage(jpeg: Boolean): File? = withExportCard("The picture couldn't be exported.") { s ->
+    suspend fun exportImage(jpeg: Boolean): File? = withExportCard("The picture couldn't be exported.", what = if (jpeg) "JPEG" else "PNG") { s ->
         withContext(Dispatchers.IO) {
             val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
             val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
@@ -8113,7 +8314,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 if (jpeg) s.exportJpeg(file.path) else s.exportPng(file.path)
             } catch (e: MobileException) {
-                AppLog.e(TAG, "exporting", e)
+                if (!exportCancelled) AppLog.e(TAG, "exporting", e)
                 return@withContext null
             }
             file
@@ -10226,19 +10427,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Whether the chosen layers include a locked one (Delete then removes nothing). */
     fun chosenLocked(): Boolean = session?.chosenLocked() == true
 
-    /** The current and picked layers each as a PNG in the cache, to share. */
-    suspend fun chosenLayerFiles(): List<File> {
-        val s = session ?: return emptyList()
-        return withContext(Dispatchers.IO) {
-            runCatching {
-                val folder = File(File(getApplication<Application>().cacheDir, "exports"), "layers").apply {
-                    deleteRecursively()
-                    mkdirs()
-                }
-                s.exportChosenPngs(folder.path).map { File(it) }
-            }.onFailure { AppLog.e(TAG, "exporting layers", it) }.getOrDefault(emptyList())
-        }
-    }
+    /**
+     * The current and picked layers each as a PNG in the cache, to share, with the export card (as
+     * every export has: a failure was only in the log, the share never coming).
+     */
+    suspend fun chosenLayerFiles(): List<File> =
+        withExportCard("The layers couldn't be exported.", what = "chosen layers as PNGs") { s ->
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val folder = File(File(getApplication<Application>().cacheDir, "exports"), "layers").apply {
+                        deleteRecursively()
+                        mkdirs()
+                    }
+                    s.exportChosenPngs(folder.path).map { File(it) }
+                }.onFailure { if (!exportCancelled) AppLog.e(TAG, "exporting layers", it) }.getOrNull()?.takeIf { it.isNotEmpty() }
+            }
+        }.orEmpty()
 
     fun clearCurrentLayer() {
         refresh()
@@ -10403,6 +10607,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
         /** How often the export card asks the core how far an export has come (ms). */
         private const val EXPORT_POLL_MS = 50L
+
+        /** What is said when an export is asked while a cancelled one is still ending. */
+        private const val EXPORT_STILL_ENDING = "The last export is still stopping. Try again in a moment."
+
+        /** What is said when an export made no progress for two minutes and was given up on. */
+        private const val EXPORT_STUCK = "The export stopped responding and was cancelled. Try again, or restart the app."
+
+        /** How long an animated export opened from the gallery waits for its artwork's canvas (ms). */
+        private const val CANVAS_WAIT_MS = 60_000L
 
         /**
          * The import card's pie: the copy in fills this share of it; while the file is read it

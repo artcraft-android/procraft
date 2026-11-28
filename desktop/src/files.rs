@@ -424,6 +424,16 @@ pub fn write_whole(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> 
     })
 }
 
+/// The file `from` copied to `to` whole or not at all: beside it first, then renamed over it, so
+/// a copy cut short (the disk full) leaves nothing (or what was there) rather than a file that
+/// looks made.
+pub fn copy_whole(from: &Path, to: &Path) -> std::io::Result<()> {
+    let part = PathBuf::from(format!("{}.part", to.to_string_lossy()));
+    std::fs::copy(from, &part).and_then(|_| std::fs::rename(&part, to)).inspect_err(|_| {
+        let _ = std::fs::remove_file(&part);
+    })
+}
+
 /// A new artwork as `preset` says: its size, DPI, background and colour profile.
 pub fn new_from_preset(preset: &CanvasPreset) -> Arc<CanvasSession> {
     let rgb = [16, 8, 0].map(|shift| ((preset.background >> shift) & 0xFF) as f32 / 255.0).to_vec();
@@ -860,14 +870,16 @@ pub fn export(
     };
     let path = with_extension(path, format.extension());
     let artwork = dir.map(str::to_owned);
-    let time_lapse = dir.map(crate::timelapse::for_package);
     writing(session, card, "Can't export", move |session| {
         // written beside it first, so a cancelled export leaves what was there as it was
         let part = PathBuf::from(format!("{}.part", path.to_string_lossy()));
         let at = part.to_string_lossy().into_owned();
         match format {
             Format::ModelArtwork => session.export_model_artwork(artwork.unwrap_or_default(), at),
-            Format::Procraft | Format::Package => session.export_package(at, seed(), time_lapse),
+            Format::Procraft | Format::Package => {
+                let time_lapse = artwork.as_deref().map(crate::timelapse::for_package);
+                session.export_package(at, seed(), time_lapse)
+            }
             Format::Psd => session.export_psd(at),
             Format::Pdf => session.export_pdf(at, false, pdf_quality),
             Format::LayersPdf => session.export_pdf(at, true, pdf_quality),
@@ -924,7 +936,8 @@ fn writing(
 ) {
     session.reset_export_progress();
     let following = Arc::clone(session);
-    let exporting = card.start(move || following.export_progress());
+    let stopping = Arc::clone(session);
+    let exporting = card.start_stopping(move || following.export_progress(), move || stopping.cancel_export());
     let session = Arc::clone(session);
     write_meanwhile(true, move || {
         // a panic on the way (the GPU's driver, or wgpu on a device lost) is said as any failure,
@@ -1012,7 +1025,12 @@ pub fn share_artworks(
     // window drawing on meanwhile; each beside where it goes until all are made
     let done = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let following = Arc::clone(&done);
-    let exporting = card.start(move || f32::from_bits(following.load(std::sync::atomic::Ordering::Relaxed)));
+    let open = OpenToExport::default();
+    let stopping = open.clone();
+    let exporting = card.start_stopping(
+        move || f32::from_bits(following.load(std::sync::atomic::Ordering::Relaxed)),
+        move || stopping.cancel(),
+    );
     let count = targets.len().max(1);
     write_meanwhile(false, move || {
         let mut written = Vec::new();
@@ -1021,11 +1039,19 @@ pub fn share_artworks(
                 break;
             }
             let part = PathBuf::from(format!("{}.part", path.to_string_lossy()));
-            if let Err(e) = write_artwork(&a, format, &part.to_string_lossy(), pdf_quality) {
-                // those made before it are kept, as before
-                let _ = place_written(&written, false);
+            if let Err(e) = write_artwork_open(&a, format, &part.to_string_lossy(), pdf_quality, &open) {
+                // those made before it are kept, as before (unless it was Cancel that stopped it)
+                let cancelled = exporting.cancelled();
+                if let Err(placed) = place_written(&written, cancelled) {
+                    log::warn!(
+                        "sharing from the gallery: what was made before {} couldn't be put in place: {placed}",
+                        a.name
+                    );
+                }
                 exporting.ended(false);
-                tell_later("Can't share", &format!("{}: {e}", a.name));
+                if !cancelled {
+                    tell_later("Can't share", &format!("{}: {e}", a.name));
+                }
                 return;
             }
             written.push(part);
@@ -1073,7 +1099,12 @@ pub fn share_pdf(
     // a page at a time beside where it goes until all are in
     let done = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let following = Arc::clone(&done);
-    let exporting = card.start(move || f32::from_bits(following.load(std::sync::atomic::Ordering::Relaxed)));
+    let open = OpenToExport::default();
+    let stopping = open.clone();
+    let exporting = card.start_stopping(
+        move || f32::from_bits(following.load(std::sync::atomic::Ordering::Relaxed)),
+        move || stopping.cancel(),
+    );
     write_meanwhile(false, move || {
         let count = list.len() as f32;
         let written = (|| -> Result<bool, String> {
@@ -1084,10 +1115,14 @@ pub fn share_pdf(
                     return Ok(false);
                 }
                 let s = CanvasSession::open(a.dir.clone()).map_err(|e| format!("{}: {e}", a.name))?;
-                if !s.prepare_offscreen() {
-                    return Err(format!("{}: There's no GPU device to draw it with.", a.name));
-                }
-                book.add(s).map_err(|e| format!("{}: {e}", a.name))?;
+                open.opened(Some(&s));
+                let added = if s.prepare_offscreen() {
+                    book.add(Arc::clone(&s)).map_err(|e| format!("{}: {e}", a.name))
+                } else {
+                    Err(format!("{}: There's no GPU device to draw it with.", a.name))
+                };
+                open.opened(None);
+                added?;
                 let progress = (i + 1) as f32 / count;
                 done.store(progress.to_bits(), std::sync::atomic::Ordering::Relaxed);
             }
@@ -1098,10 +1133,40 @@ pub fn share_pdf(
             Ok(made) => exporting.ended(made),
             Err(e) => {
                 exporting.ended(false);
-                tell_later("Can't share", &e);
+                if !exporting.cancelled() {
+                    tell_later("Can't share", &e);
+                }
             }
         }
     });
+}
+
+/// The gallery's artwork being written for a share, opened just for it, so the card's Cancel
+/// reaches it (it stopped only between artworks, the one being written going on to its end).
+#[derive(Clone, Default)]
+struct OpenToExport(Arc<std::sync::Mutex<(Option<Arc<CanvasSession>>, bool)>>);
+
+impl OpenToExport {
+    /// The artwork being written now (none: it is closed); one opened after a Cancel stops at once.
+    fn opened(&self, s: Option<&Arc<CanvasSession>>) {
+        let mut open = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        open.0 = s.cloned();
+        if let Some(s) = s {
+            // (made ready first: a Cancel from here stops it as it begins)
+            s.reset_export_progress();
+            if open.1 {
+                s.cancel_export();
+            }
+        }
+    }
+
+    fn cancel(&self) {
+        let mut open = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        open.1 = true;
+        if let Some(s) = &open.0 {
+            s.cancel_export();
+        }
+    }
 }
 
 /// The artwork `a` from the gallery written as `format` at `path` (a PDF's pictures at
@@ -1112,22 +1177,38 @@ pub fn write_artwork(
     path: &str,
     pdf_quality: u8,
 ) -> Result<(), String> {
+    write_artwork_open(a, format, path, pdf_quality, &OpenToExport::default())
+}
+
+/// [`write_artwork`], the artwork told to `open` while it is written (for Cancel).
+fn write_artwork_open(
+    a: &procraft_core::GalleryArtwork,
+    format: Format,
+    path: &str,
+    pdf_quality: u8,
+    open: &OpenToExport,
+) -> Result<(), String> {
     let path = path.to_owned();
     let s = CanvasSession::open(a.dir.clone()).map_err(|e| e.to_string())?;
-    if !s.prepare_offscreen() {
-        return Err("There's no GPU device to draw it with.".to_owned());
-    }
-    match format {
-        Format::Procraft | Format::Package => {
-            s.export_package(path, seed(), Some(crate::timelapse::for_package(&a.dir)))
+    open.opened(Some(&s));
+    let written = (|| {
+        if !s.prepare_offscreen() {
+            return Err("There's no GPU device to draw it with.".to_owned());
         }
-        Format::Psd => s.export_psd(path),
-        Format::Pdf | Format::LayersPdf => s.export_pdf(path, false, pdf_quality),
-        Format::Tiff => s.export_tiff(path),
-        Format::Jpeg => s.export_jpeg(path),
-        _ => s.export_png(path),
-    }
-    .map_err(|e| e.to_string())
+        match format {
+            Format::Procraft | Format::Package => {
+                s.export_package(path, seed(), Some(crate::timelapse::for_package(&a.dir)))
+            }
+            Format::Psd => s.export_psd(path),
+            Format::Pdf | Format::LayersPdf => s.export_pdf(path, false, pdf_quality),
+            Format::Tiff => s.export_tiff(path),
+            Format::Jpeg => s.export_jpeg(path),
+            _ => s.export_png(path),
+        }
+        .map_err(|e| e.to_string())
+    })();
+    open.opened(None);
+    written
 }
 
 /// What an artwork dragged out of the gallery becomes, by Drag and Drop export's preferred file
@@ -1175,6 +1256,27 @@ fn seed() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file made copied where the person picks is there whole, or not at all: a copy that can't
+    /// be put in place leaves nothing begun beside it (it wrote straight over the place before,
+    /// and one cut short looked made).
+    #[test]
+    fn a_copy_is_whole_or_leaves_nothing() {
+        let dir = folder("copy-whole");
+        let from = dir.join("made.mp4");
+        std::fs::write(&from, [1u8, 2, 3]).unwrap();
+        let to = dir.join("picked.mp4");
+        copy_whole(&from, &to).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), [1, 2, 3]);
+        // a place that can't take it (a folder there): nothing left beside it
+        let taken = dir.join("a folder.mp4");
+        std::fs::create_dir_all(taken.join("inside")).unwrap();
+        assert!(copy_whole(&from, &taken).is_err());
+        let left: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!left.iter().any(|n| n.ends_with(".part")), "{left:?}");
+    }
 
     #[test]
     fn a_new_artwork_records_its_time_lapse_as_its_preset_says() {

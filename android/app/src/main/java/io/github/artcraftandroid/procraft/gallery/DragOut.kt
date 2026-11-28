@@ -45,7 +45,8 @@ class DragProvider : ContentProvider() {
         val out = made(ctx, uri) ?: return null
         // made again only if the artwork changed since
         if (out.lastModified() < File(dir, "artwork.json").lastModified() || !out.exists()) {
-            if (!exportArtwork(dir, segments[0], out)) return null
+            // (why not said in the log)
+            if (exportArtwork(dir, segments[0], out) != null) return null
         }
         return ParcelFileDescriptor.open(out, ParcelFileDescriptor.MODE_READ_ONLY)
     }
@@ -86,25 +87,67 @@ class DragProvider : ContentProvider() {
 
 /**
  * Writes the artwork saved in [dir] to [out] as [format] (one of [CanvasViewModel.DRAG_FORMATS], or
- * of the gallery's still [CanvasViewModel.SHARE_FORMATS]).
+ * of the gallery's still [CanvasViewModel.SHARE_FORMATS]): null once written, else why not. Each
+ * way it ends is said in the log, with the step it got to and how long it took (an artwork that
+ * couldn't be written was left out of a share without a word). [opened] hears the artwork as it is
+ * opened just for this, so a Cancel reaches it, and null as it is closed; [going] stops it by
+ * saying false; [videos] follows its time-lapse's videos being made (a package's).
  */
-fun exportArtwork(dir: File, format: String, out: File, pdfQuality: Int = 100): Boolean = runCatching {
-    CanvasSession.open(dir.path).use { s ->
-        if (!s.prepareOffscreen()) return@runCatching false
-        when (format) {
-            // ours and the other app's are the same package
-            CanvasViewModel.OWN_LABEL, CanvasViewModel.PACKAGE_LABEL ->
-                s.exportPackage(out.path, System.nanoTime().toULong(), io.github.artcraftandroid.procraft.canvas.TimeLapse(dir).forPackage())
-            "PDF" -> s.exportPdf(out.path, false, pdfQuality.toUByte())
-            "PSD" -> s.exportPsd(out.path)
-            "TIFF" -> s.exportTiff(out.path)
-            "PNG" -> s.exportPng(out.path)
-            "JPEG" -> s.exportJpeg(out.path)
-            else -> return@runCatching false
+fun exportArtwork(
+    dir: File,
+    format: String,
+    out: File,
+    pdfQuality: Int = 100,
+    opened: (CanvasSession?) -> Unit = {},
+    going: () -> Boolean = { true },
+    videos: io.github.artcraftandroid.procraft.canvas.VideosMade = io.github.artcraftandroid.procraft.canvas.VideosMade(),
+): String? {
+    val started = android.os.SystemClock.uptimeMillis()
+    var step = "opening it"
+    val why: String? = try {
+        CanvasSession.open(dir.path).use { s ->
+            // (made ready first: a Cancel from here stops it)
+            s.resetExportProgress()
+            opened(s)
+            try {
+                step = "making its canvas"
+                if (!going()) return@use STOPPED
+                if (!s.prepareOffscreen()) return@use "its canvas couldn't be made (the line before says why)"
+                step = "writing it"
+                when (format) {
+                    // ours and the other app's are the same package
+                    CanvasViewModel.OWN_LABEL, CanvasViewModel.PACKAGE_LABEL -> {
+                        step = "making its time-lapse's videos"
+                        val lapse = videos.made(io.github.artcraftandroid.procraft.canvas.TimeLapse(dir), going) ?: return@use STOPPED
+                        step = "writing it"
+                        s.exportPackage(out.path, System.nanoTime().toULong(), lapse)
+                    }
+                    "PDF" -> s.exportPdf(out.path, false, pdfQuality.toUByte())
+                    "PSD" -> s.exportPsd(out.path)
+                    "TIFF" -> s.exportTiff(out.path)
+                    "PNG" -> s.exportPng(out.path)
+                    "JPEG" -> s.exportJpeg(out.path)
+                    else -> return@use "$format isn't a format an artwork is written in"
+                }
+                null
+            } finally {
+                opened(null)
+            }
         }
+    } catch (e: Exception) {
+        e.message ?: e.toString()
     }
-    true
-}.getOrDefault(false)
+    val ms = android.os.SystemClock.uptimeMillis() - started
+    when (why) {
+        null -> io.github.artcraftandroid.procraft.AppLog.i("ProCraft", "an artwork written as $format from the gallery in $ms ms (${out.length()} bytes)")
+        STOPPED -> io.github.artcraftandroid.procraft.AppLog.i("ProCraft", "an artwork being written as $format from the gallery stopped by Cancel after $ms ms, $step")
+        else -> io.github.artcraftandroid.procraft.AppLog.w("ProCraft", "an artwork couldn't be written as $format from the gallery (after $ms ms, $step): $why")
+    }
+    return why
+}
+
+/** What [exportArtwork] says when Cancel stopped it. */
+private const val STOPPED = "stopped by Cancel"
 
 /** What the gallery's own drags carry, so it can tell them from another app's. */
 class GalleryDrag(val entry: GalleryEntry)

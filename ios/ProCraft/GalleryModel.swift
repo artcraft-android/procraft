@@ -876,9 +876,55 @@ final class GalleryModel {
 
     // MARK: sharing
 
-    /// The export card's Cancel: nothing is shared, and the next artwork isn't begun.
+    /// The export card's Cancel: the card goes at once, the artwork being written stops, and nothing
+    /// is shared.
     func cancelExport() {
         cancelled = true
+        shareRuns += 1
+        openToExport.cancel()
+        AppLog.info("ProCraft", "a share from the gallery was cancelled: its card went at once")
+        exportShown = nil
+    }
+
+    /// Each share from the gallery's number: one cancelled (or begun after it) stops.
+    @ObservationIgnored private var shareRuns = 0
+    /// The artwork being written for a share, so Cancel reaches it.
+    @ObservationIgnored private let openToExport = OpenToExport()
+
+    /// The artwork being written for a share from the gallery, opened just for it, so the card's
+    /// Cancel reaches it (it stopped only between artworks).
+    final class OpenToExport: @unchecked Sendable {
+        private let lock = NSLock()
+        private var session: CanvasSession?
+        private var stopped = false
+
+        /// The artwork being written now (nil: closed); one opened after a Cancel stops at once.
+        func opened(_ s: CanvasSession?) {
+            lock.lock()
+            defer { lock.unlock() }
+            session = s
+            if let s {
+                // (made ready first: a Cancel from here stops it as it begins)
+                s.resetExportProgress()
+                if stopped {
+                    s.cancelExport()
+                }
+            }
+        }
+
+        func cancel() {
+            lock.lock()
+            defer { lock.unlock() }
+            stopped = true
+            session?.cancelExport()
+        }
+
+        /// A new share begins: Cancel is for it from here.
+        func begin() {
+            lock.lock()
+            defer { lock.unlock() }
+            stopped = false
+        }
     }
 
     private static func fileExtension(_ format: String) -> String {
@@ -893,8 +939,23 @@ final class GalleryModel {
         }
     }
 
-    private static func write(_ a: GalleryArtwork, format: String, to url: URL, quality: UInt8) -> Bool {
-        guard let session = try? CanvasSession.open(dir: a.dir), session.prepareOffscreen() else { return false }
+    private static func write(
+        _ a: GalleryArtwork, format: String, to url: URL, quality: UInt8, open: OpenToExport = OpenToExport()
+    ) -> Bool {
+        let began = Date()
+        let session: CanvasSession
+        do {
+            session = try CanvasSession.open(dir: a.dir)
+        } catch {
+            AppLog.warn("ProCraft", "an artwork couldn't be opened to be written as \(format): \(error)")
+            return false
+        }
+        open.opened(session)
+        defer { open.opened(nil) }
+        guard session.prepareOffscreen() else {
+            AppLog.warn("ProCraft", "an artwork's canvas couldn't be made to write it as \(format) (the line before says why)")
+            return false
+        }
         do {
             switch format {
             case "PDF": try session.exportPdf(path: url.path, layers: false, quality: quality)
@@ -904,8 +965,10 @@ final class GalleryModel {
             case "JPEG": try session.exportJpeg(path: url.path)
             default: try session.exportPackage(path: url.path, seed: UInt64.random(in: 0 ... UInt64.max), timeLapse: ArtworkTimeLapse(dir: a.dir).forPackage())
             }
+            AppLog.info("ProCraft", "an artwork written as \(format) from the gallery in \(Int(Date().timeIntervalSince(began) * 1000)) ms")
             return true
         } catch {
+            AppLog.warn("ProCraft", "an artwork couldn't be written as \(format): \(error)")
             return false
         }
     }
@@ -922,15 +985,22 @@ final class GalleryModel {
     /// `list` as one PDF at `url`, a page each in their order (each its picture at its own size,
     /// kept at `quality`); one that can't be read is left out. False if cancelled or none could be
     /// written. Slow: off the main thread.
-    private func book(_ list: [GalleryArtwork], to url: URL, quality: UInt8) -> Bool {
+    private func book(_ list: [GalleryArtwork], to url: URL, quality: UInt8, run: Int) -> Bool {
         guard let book = try? PdfBook.create(path: url.path, quality: max(quality, 1)) else { return false }
         for (i, a) in list.enumerated() {
             // left unfinished, the book leaves nothing
-            if cancelled {
+            if cancelled || run != shareRuns {
                 return false
             }
-            if let session = try? CanvasSession.open(dir: a.dir), session.prepareOffscreen() {
-                try? book.add(session: session)
+            if let session = try? CanvasSession.open(dir: a.dir) {
+                openToExport.opened(session)
+                do {
+                    guard session.prepareOffscreen() else { throw CocoaError(.fileReadUnknown) }
+                    try book.add(session: session)
+                } catch {
+                    AppLog.warn("ProCraft", "page \(i + 1) of \(list.count) of a PDF left out: \(error)")
+                }
+                openToExport.opened(nil)
             }
             let progress = Float(i + 1) / Float(list.count)
             DispatchQueue.main.async { [weak self] in self?.exportShown = ProgressShown(progress: progress) }
@@ -946,22 +1016,27 @@ final class GalleryModel {
     ) {
         guard exportShown == nil, importShown == nil else { return }
         cancelled = false
+        shareRuns += 1
+        let run = shareRuns
+        let open = openToExport
+        open.begin()
         exportShown = ProgressShown(progress: 0)
         let dir = Sharing.exportsDir
         let suffix = Self.fileExtension(format)
         work.async { [weak self] in
             var used = Set<String>()
             var files: [URL] = []
+            var missed = 0
             if format == "PDF", list.count >= 2 {
                 let url = dir.appendingPathComponent(exportFileName(name: group, package: false) + suffix)
-                if onBigStack({ self?.book(list, to: url, quality: quality) }) == true {
+                if onBigStack({ self?.book(list, to: url, quality: quality, run: run) }) == true {
                     files.append(url)
                 }
-                DispatchQueue.main.async { self?.exported(files, from: from) }
+                DispatchQueue.main.async { self?.exported(files, from: from, run: run, missed: 0, of: list.count) }
                 return
             }
             for (i, a) in list.enumerated() {
-                guard let self, !self.cancelled else { break }
+                guard let self, !self.cancelled, run == self.shareRuns else { break }
                 let base = exportFileName(name: a.name, package: false)
                 var name = base
                 var n = 2
@@ -970,25 +1045,42 @@ final class GalleryModel {
                     n += 1
                 }
                 let url = dir.appendingPathComponent(name + suffix)
-                if onBigStack({ Self.write(a, format: format, to: url, quality: quality) }) {
+                if onBigStack({ Self.write(a, format: format, to: url, quality: quality, open: open) }) {
                     files.append(url)
+                } else if !self.cancelled {
+                    missed += 1
                 }
                 let progress = Float(i + 1) / Float(max(list.count, 1))
-                DispatchQueue.main.async { self.exportShown = ProgressShown(progress: progress) }
+                DispatchQueue.main.async {
+                    guard run == self.shareRuns, !self.cancelled else { return }
+                    self.exportShown = ProgressShown(progress: progress)
+                }
             }
-            DispatchQueue.main.async { self?.exported(files, from: from) }
+            DispatchQueue.main.async { self?.exported(files, from: from, run: run, missed: missed, of: list.count) }
         }
     }
 
-    private func exported(_ files: [URL], from: CGRect?) {
-        if cancelled {
-            exportShown = nil
+    private func exported(_ files: [URL], from: CGRect?, run: Int, missed: Int, of count: Int) {
+        if cancelled || run != shareRuns {
+            // (the card went with the Cancel; what it made goes too)
+            for file in files {
+                try? FileManager.default.removeItem(at: file)
+            }
+            if run == shareRuns {
+                exportShown = nil
+            }
             return
         }
         guard !files.isEmpty else {
             exportShown = nil
             message = "The artwork couldn't be exported."
             return
+        }
+        // some written, some not: those left out said, not shared as if all were
+        if missed > 0 {
+            message = missed == 1
+                ? "1 of \(count) artworks couldn't be exported and was left out."
+                : "\(missed) of \(count) artworks couldn't be exported and were left out."
         }
         exportShown = ProgressShown(progress: 1, done: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + doneShown) { [weak self] in

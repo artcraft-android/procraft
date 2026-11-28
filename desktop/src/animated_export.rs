@@ -733,8 +733,8 @@ fn save_as(made: &std::path::Path, format: Animated) -> bool {
     else {
         return false;
     };
-    match std::fs::copy(made, &to) {
-        Ok(_) => true,
+    match crate::files::copy_whole(made, &to) {
+        Ok(()) => true,
         Err(e) => {
             crate::files::tell("Can't export", &e.to_string());
             false

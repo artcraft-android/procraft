@@ -679,7 +679,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     } else {
                         // with the export card; a failure is told, a cancel shares nothing
                         vm.viewModelScope.launch {
-                            vm.shareFromGallery(share.artworks, format)?.let { (files, mime) -> runCatching { shareFiles(context, files, mime) } }
+                            vm.shareFromGallery(share.artworks, format)?.let { (files, mime) -> offerToShare(vm, context, files, mime) }
                         }
                     }
                 }
@@ -689,7 +689,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
             val share = pdfFor ?: return@PdfQualityAlert
             pdfFor = null
             vm.viewModelScope.launch {
-                vm.shareFromGallery(share.artworks, "PDF", quality.jpeg, share.group)?.let { (files, mime) -> runCatching { shareFiles(context, files, mime) } }
+                vm.shareFromGallery(share.artworks, "PDF", quality.jpeg, share.group)?.let { (files, mime) -> offerToShare(vm, context, files, mime) }
             }
         }
         opening?.let { o ->

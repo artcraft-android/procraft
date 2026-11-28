@@ -57,28 +57,67 @@ struct PickedMovie: Transferable {
 
 /// The Actions panel's work on the open artwork: what it shares, and what it brings in.
 extension CanvasModel {
+    /// The export card's Cancel: the card goes at once (it waited for the work before, however long
+    /// that took), the core's export stops at its next layer or frame, and nothing is shared.
+    func cancelExport() {
+        guard exportShown != nil, !exportCancelled else { return }
+        exportCancelled = true
+        session.cancelExport()
+        AppLog.info("ProCraft", "the export was cancelled at \(Self.said(session.exportStage())): its card went at once")
+        exportShown = nil
+    }
+
+    /// An export may begin: none is under way, nor one cancelled still ending (that is told).
+    func exportMayBegin() -> Bool {
+        guard exportShown == nil else { return false }
+        guard !exportBusy else {
+            AppLog.info("ProCraft", "an export asked while the one before still ends: not begun")
+            showNotice("The last export is still stopping. Try again in a moment.", warning: true)
+            return false
+        }
+        return true
+    }
+
+    /// A cancelled export's end: what it made goes, said in the log.
+    func cancelledExportEnded(_ files: [URL], since: Date) {
+        for file in files {
+            try? FileManager.default.removeItem(at: file)
+        }
+        AppLog.info("ProCraft", "the cancelled export ended \(Int(Date().timeIntervalSince(since) * 1000)) ms after it began")
+    }
+
+    /// A stage as the log says it.
+    static func said(_ stage: String) -> String {
+        stage.isEmpty ? "its start" : stage
+    }
+
     /// Runs `work`, an export by the core, off the main thread with the export card showing how far
-    /// it has come and a check once made; what it made goes to the share sheet. Cancelled, nothing
-    /// is shared; made nothing, `failed` is told.
+    /// it has come and a check once made; what it made goes to the share sheet. Cancelled, the card
+    /// goes at once and nothing is shared; made nothing, `failed` is told.
     private func exporting(
         failed: @escaping @autoclosure () -> String, progress: (() -> Float)? = nil,
         _ work: @escaping (CanvasSession) -> [URL]
     ) {
-        guard exportShown == nil else { return }
+        guard exportMayBegin() else { return }
         let session = session
         session.resetExportProgress()
         exportCancelled = false
+        exportBusy = true
         exportShown = ProgressShown(progress: 0)
+        let began = Date()
         let poll = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            self?.exportShown = ProgressShown(progress: progress?() ?? session.exportProgress())
+            guard let self, !self.exportCancelled else { return }
+            self.exportShown = ProgressShown(progress: progress?() ?? session.exportProgress())
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let files = work(session)
             DispatchQueue.main.async {
                 poll.invalidate()
                 guard let self else { return }
+                self.exportBusy = false
                 if self.exportCancelled {
                     self.exportShown = nil
+                    self.cancelledExportEnded(files, since: began)
                 } else if files.isEmpty {
                     self.exportShown = nil
                     self.showNotice(failed(), warning: true)
@@ -133,8 +172,13 @@ extension CanvasModel {
         exporting(failed: "The artwork couldn't be exported.") { session in
             let base = exportFileName(name: session.name(), package: true)
             let out = Sharing.exportsDir.appendingPathComponent(base + suffix)
-            let made = (try? session.exportPackage(path: out.path, seed: UInt64.random(in: 0 ... UInt64.max), timeLapse: lapse.forPackage())) != nil
-            return made ? [out] : []
+            do {
+                try session.exportPackage(path: out.path, seed: UInt64.random(in: 0 ... UInt64.max), timeLapse: lapse.forPackage())
+                return [out]
+            } catch {
+                AppLog.warn("ProCraft", "exporting a package: \(error)")
+                return []
+            }
         }
     }
 
@@ -175,6 +219,8 @@ extension CanvasModel {
                     return try session.exportLayerPngs(dir: folder.path).map { URL(fileURLWithPath: $0) }
                 }
             } catch {
+                // (the core's own line says the stage it got to)
+                AppLog.warn("ProCraft", "exporting \(kind): \(error)")
                 return []
             }
         }
@@ -279,24 +325,29 @@ extension CanvasModel {
 
     /// The model's turntable made and shared, with the export card showing how far it has come.
     func shareTurntable(_ format: AnimatedFormat, done: @escaping () -> Void) {
-        guard exportShown == nil else { return }
+        guard exportMayBegin() else { return }
         let session = session
         let t = scene.turntable
         let size = scene.turntablePixels
         session.resetExportProgress()
         exportCancelled = false
+        exportBusy = true
         exportShown = ProgressShown(progress: 0)
+        let began = Date()
         let meter = ExportMeter()
         let poll = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            self?.exportShown = ProgressShown(progress: format.video ? meter.share : session.exportProgress())
+            guard let self, !self.exportCancelled else { return }
+            self.exportShown = ProgressShown(progress: format.video ? meter.share : session.exportProgress())
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let url = Self.exportTurntable(session, format, t, size: size, meter: meter) { self?.exportCancelled == true }
             DispatchQueue.main.async {
                 poll.invalidate()
                 guard let self else { return }
+                self.exportBusy = false
                 if self.exportCancelled {
                     self.exportShown = nil
+                    self.cancelledExportEnded(url.map { [$0] } ?? [], since: began)
                 } else if let url {
                     self.exportShown = ProgressShown(progress: 1, done: true)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {

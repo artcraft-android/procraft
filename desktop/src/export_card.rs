@@ -78,6 +78,8 @@ struct Run {
     progress: Box<dyn Fn() -> f32>,
     detail: Option<Detail>,
     exporting: Exporting,
+    /// What Cancel calls besides, to stop the work itself (the core's export at its next layer).
+    stop: Option<Box<dyn Fn()>>,
     since: Instant,
     made: Option<Instant>,
     closing: Option<(Instant, Ended)>,
@@ -93,6 +95,16 @@ impl ExportCard {
     /// the [`Exporting`] to read Cancel from and to end it by.
     pub fn start(&mut self, progress: impl Fn() -> f32 + 'static) -> Exporting {
         self.start_as("Exporting", &crate::icons::TAB_SHARE, progress, None)
+    }
+
+    /// As [`Self::start`], its Cancel calling `stop` too, so the work stops rather than run on
+    /// unseen (the card went, but the window waited on the export's thread meanwhile).
+    pub fn start_stopping(&mut self, progress: impl Fn() -> f32 + 'static, stop: impl Fn() + 'static) -> Exporting {
+        let exporting = self.start(progress);
+        if let Some(run) = self.run.as_mut() {
+            run.stop = Some(Box::new(stop));
+        }
+        exporting
     }
 
     /// Shows the card for files being brought in ("Importing", as the Android app's import card),
@@ -115,6 +127,7 @@ impl ExportCard {
             progress: Box::new(progress),
             detail,
             exporting: exporting.clone(),
+            stop: None,
             since: Instant::now(),
             made: None,
             closing: None,
@@ -224,6 +237,9 @@ impl ExportCard {
         });
         if cancel {
             run.exporting.cancel.store(true, Ordering::Relaxed);
+            if let Some(stop) = &run.stop {
+                stop();
+            }
             run.closing = Some((Instant::now(), Ended::NotMade));
         }
         None

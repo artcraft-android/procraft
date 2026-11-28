@@ -39,6 +39,9 @@ mod crop_edit;
 mod cursor_turn;
 mod device;
 mod drawn_previews;
+mod export_run;
+#[cfg(test)]
+mod export_run_tests;
 mod filter_layers;
 mod floating;
 mod folders;
@@ -1829,6 +1832,8 @@ pub(crate) struct Shared {
     pub(crate) edits_saved: std::sync::atomic::AtomicU64,
     /// How far the export under way has come (0..1, an f32's bits), read without waiting on it.
     pub(crate) export_progress: std::sync::atomic::AtomicU32,
+    /// The exports' ids for Cancel, and the stage the one under way is at (see `export_run.rs`).
+    pub(crate) exports: export_run::Exports,
     /// Why the autosave failed, not yet asked for, and whether it is failing (told once until a
     /// save works again); a lock of its own, never held through a save.
     pub(crate) save_failure: Mutex<(Option<String>, bool)>,
@@ -1928,6 +1933,22 @@ impl Shared {
         let guard = self.state.try_lock().unwrap_or_else(|| self.wait_for(at));
         self.holder.took(at);
         guard
+    }
+
+    /// The lock, if it is free now or comes free within `wait`; taken as at `at`.
+    pub(crate) fn try_lock_for_at(
+        &self,
+        wait: std::time::Duration,
+        at: &'static std::panic::Location<'static>,
+    ) -> Option<parking_lot::MutexGuard<'_, State>> {
+        let guard = self.state.try_lock_for(wait)?;
+        self.holder.took(at);
+        Some(guard)
+    }
+
+    /// Who holds the lock and for how long, for the log.
+    pub(crate) fn holder_said(&self) -> String {
+        self.holder.said()
     }
 
     /// The lock, if it is free now.
@@ -2101,21 +2122,32 @@ impl Shared {
     /// Lets the canvas finish remaking its caches a render at a time, the lock let go between,
     /// so a save or export after reads the picture as it is without holding everything up.
     fn finish_caches(&self) {
+        let lock = || Ok::<_, std::convert::Infallible>(self.lock());
+        let Ok(()) = self.finish_caches_with(lock);
+    }
+
+    /// [`Shared::finish_caches`], the lock taken by `lock` each time (which may fail: then so
+    /// does this).
+    pub(crate) fn finish_caches_with<'s, E>(
+        &'s self,
+        lock: impl Fn() -> Result<parking_lot::MutexGuard<'s, State>, E>,
+    ) -> Result<(), E> {
         // each render remakes at least one item, so this ends well before the bound
         for _ in 0..100_000 {
             {
-                let mut guard = self.lock();
+                let mut guard = lock()?;
                 let st = &mut *guard;
-                let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return };
+                let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Ok(()) };
                 canvas.render(gpu, &mut st.doc, None);
                 if !canvas.busy() {
-                    return;
+                    return Ok(());
                 }
                 // whoever waits on the lock (a touch, the render thread) has it next
                 parking_lot::MutexGuard::unlock_fair(guard);
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+        Ok(())
     }
 
     /// Waits, the state let go meanwhile, while the frames being drawn lay work a share at a time
@@ -2699,6 +2731,7 @@ impl CanvasSession {
                 saving: Mutex::new(project::Saved::default()),
                 edits_saved: std::sync::atomic::AtomicU64::new(project::NOT_SAVED),
                 export_progress: std::sync::atomic::AtomicU32::new(0),
+                exports: export_run::Exports::default(),
                 save_failure: Mutex::new((None, false)),
                 found_full: std::sync::atomic::AtomicBool::new(false),
                 touches: Mutex::new(touch::Touches::default()),

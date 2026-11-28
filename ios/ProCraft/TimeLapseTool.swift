@@ -61,8 +61,13 @@ enum VideoWriter {
         let layout = CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         var whole = true
         for n in 0 ..< count {
-            while !input.isReadyForMoreMediaData, writer.status == .writing {
+            // an encoder that stops taking frames is given up on, not waited for for good
+            let waitFrom = Date()
+            while !input.isReadyForMoreMediaData, writer.status == .writing, Date().timeIntervalSince(waitFrom) < encoderPatience {
                 Thread.sleep(forTimeInterval: 0.002)
+            }
+            if !input.isReadyForMoreMediaData {
+                AppLog.warn("ProCraft", "a \(width)x\(height) video's encoder took no frame for \(Int(encoderPatience)) s at frame \(n) of \(count): given up on")
             }
             var made: CVPixelBuffer?
             guard writer.status == .writing, let pool = adaptor.pixelBufferPool,
@@ -92,9 +97,20 @@ enum VideoWriter {
         }
         let finished = DispatchSemaphore(value: 0)
         writer.finishWriting { finished.signal() }
-        finished.wait()
-        return writer.status == .completed
+        if finished.wait(timeout: .now() + encoderPatience) == .timedOut {
+            AppLog.warn("ProCraft", "a \(width)x\(height) video didn't finish in \(Int(encoderPatience)) s: given up on")
+            writer.cancelWriting()
+        }
+        // (one not made whole leaves nothing)
+        guard writer.status == .completed else {
+            try? FileManager.default.removeItem(at: url)
+            return false
+        }
+        return true
     }
+
+    /// How long an encoder may go without taking a frame, or finishing, before it is given up on (s).
+    static let encoderPatience: TimeInterval = 30
 
     /// `parts` one after another as one video at `out`, nothing made again. False if they can't be.
     static func join(_ parts: [URL], to out: URL) -> Bool {
@@ -114,8 +130,17 @@ enum VideoWriter {
         export.outputFileType = .mp4
         let finished = DispatchSemaphore(value: 0)
         export.exportAsynchronously { finished.signal() }
-        finished.wait()
-        return export.status == .completed
+        // its copy goes at the disk's pace: a minute with nothing to show for it is given up on
+        if finished.wait(timeout: .now() + 120) == .timedOut {
+            AppLog.warn("ProCraft", "joining \(parts.count) time-lapse videos didn't finish in 120 s: given up on")
+            export.cancelExport()
+            finished.wait()
+        }
+        guard export.status == .completed else {
+            try? FileManager.default.removeItem(at: out)
+            return false
+        }
+        return true
     }
 }
 

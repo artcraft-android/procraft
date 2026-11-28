@@ -328,8 +328,9 @@ struct CanvasScreen: View {
                     }
                 }
                 ColorDropDot(drop: model.drop)
+                // its Cancel: the card goes at once, and the export stops
                 ProgressCard(shown: model.exportShown, title: "Exporting", glyph: PcIcons.tabShare) {
-                    model.exportCancelled = true
+                    model.cancelExport()
                 }
                 // its Cancel: the card goes at once, and the brushes read are left out
                 ProgressCard(shown: model.importShown, title: "Importing", glyph: PcIcons.tabImport) {

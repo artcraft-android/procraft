@@ -141,7 +141,34 @@ impl CanvasSession {
         per_frame_palette: bool,
         transparent: bool,
     ) -> Result<(), MobileError> {
+        let run = self.begin_export("animated GIF");
+        let made = self.write_gif(&run, &path, max_side, fps, dither, per_frame_palette, transparent);
+        run.end(made, |_| crate::project::file_said(&path))
+    }
+
+    /// The animation as a looping animated PNG at `path`, `fps` frames a second, scaled to fit
+    /// `max_side` (0: full size), `transparent` leaving the background out.
+    pub fn export_apng(&self, path: String, max_side: u32, fps: f32, transparent: bool) -> Result<(), MobileError> {
+        let run = self.begin_export("animated PNG");
+        let made = self.write_apng(&run, &path, max_side, fps, transparent);
+        run.end(made, |_| crate::project::file_said(&path))
+    }
+}
+
+impl CanvasSession {
+    #[allow(clippy::too_many_arguments)]
+    fn write_gif(
+        &self,
+        run: &crate::export_run::ExportRun<'_>,
+        path: &str,
+        max_side: u32,
+        fps: f32,
+        dither: bool,
+        per_frame_palette: bool,
+        transparent: bool,
+    ) -> Result<(), MobileError> {
         let units = sequence(&self.shared.lock().doc);
+        run.say(&format!("{} frames, {} at most", units.len(), max_side));
         let delay = (100.0 / fps.clamp(0.1, 100.0)).round() as u16;
         // the frames made take it to 0.95 (sharing a palette, its look at them to 0.45 first), the
         // file written to 1
@@ -149,13 +176,14 @@ impl CanvasSession {
         let (mut gif, start): (Option<GifWriter>, f32) = if per_frame_palette {
             (None, 0.0)
         } else {
-            (self.shared_palette_gif(&units, transparent, max_side)?, 0.45)
+            (self.shared_palette_gif(run, &units, transparent, max_side)?, 0.45)
         };
         // drawn a few at a time (a frame to a core, as many as fit in GIF_BATCH_BYTES), each few
         // made into the GIF's frames side by side, then added in order
         let mut next = 0;
         let mut few = 1;
         while next < units.len() {
+            run.stage("drawing and encoding frames", format!("{} of {}", next + 1, units.len()))?;
             let frames = units
                 .iter()
                 .skip(next)
@@ -179,16 +207,24 @@ impl CanvasSession {
             }
             self.exported(start + (0.95 - start) * next as f32 / units.len() as f32);
         }
+        run.stage("finishing the file", "")?;
         let bytes = gif.ok_or_else(|| file_error("saving", "there are no frames"))?.finish();
-        write_atomically(Path::new(&path), |f| crate::storage::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
+        run.stage("writing", "")?;
+        write_atomically(Path::new(path), |f| crate::storage::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
         self.exported(1.0);
         Ok(())
     }
 
-    /// The animation as a looping animated PNG at `path`, `fps` frames a second, scaled to fit
-    /// `max_side` (0: full size), `transparent` leaving the background out.
-    pub fn export_apng(&self, path: String, max_side: u32, fps: f32, transparent: bool) -> Result<(), MobileError> {
+    fn write_apng(
+        &self,
+        run: &crate::export_run::ExportRun<'_>,
+        path: &str,
+        max_side: u32,
+        fps: f32,
+        transparent: bool,
+    ) -> Result<(), MobileError> {
         let units = sequence(&self.shared.lock().doc);
+        run.say(&format!("{} frames, {} at most", units.len(), max_side));
         let count = u32::try_from(units.len()).unwrap_or(u32::MAX);
         let Some((&first, rest)) = units.split_first() else {
             return Err(file_error("saving", "there are no frames"));
@@ -196,10 +232,11 @@ impl CanvasSession {
         // as the GIF's: the frames to 0.95, the file to 1
         self.exported(0.0);
         let made = |k: usize| self.exported(0.95 * k as f32 / count.max(1) as f32);
+        run.stage("drawing and writing frames", format!("1 of {count}"))?;
         let (w, h, rgba) = self.render_frame(first, transparent, max_side)?;
         // a frame lasts 1/fps seconds, in thousandths
         let delay = (1000.0 / fps.clamp(0.1, 1000.0)).round().clamp(1.0, 65535.0) as u16;
-        write_atomically(Path::new(&path), |f| {
+        write_atomically(Path::new(path), |f| {
             let out = fs::File::create(f).map_err(|e| file_error("saving", e))?;
             let mut encoder = png::Encoder::new(BufWriter::new(out), w, h);
             encoder.set_color(png::ColorType::Rgba);
@@ -211,6 +248,7 @@ impl CanvasSession {
             writer.write_image_data(&rgba).map_err(|e| file_error("saving", e))?;
             made(1);
             for (k, &unit) in rest.iter().enumerate() {
+                run.stage("drawing and writing frames", format!("{} of {count}", k + 2))?;
                 let (fw, fh, frame) = self.render_frame(unit, transparent, max_side)?;
                 if (fw, fh) != (w, h) {
                     return Err(file_error("saving", "the frames differ in size"));
@@ -230,6 +268,7 @@ impl CanvasSession {
     /// (each drawn once for it); none when there are no frames.
     fn shared_palette_gif(
         &self,
+        run: &crate::export_run::ExportRun<'_>,
         units: &[LayerId],
         transparent: bool,
         max_side: u32,
@@ -242,6 +281,7 @@ impl CanvasSession {
         let mut samples: Vec<[u8; 4]> = Vec::new();
         let mut size = None;
         for (k, &unit) in units.iter().enumerate() {
+            run.stage("making the palette", format!("{} of {}", k + 1, units.len()))?;
             let (w, h, rgba) = self.render_frame(unit, transparent, max_side)?;
             size.get_or_insert((w, h));
             let pixels = rgba.as_chunks::<4>().0;

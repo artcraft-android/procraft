@@ -79,17 +79,38 @@ static WAIT_FAILED_TOLD: AtomicBool = AtomicBool::new(false);
 /// poll panics where the device is lost or out of memory (errors it can't return), which here is
 /// [`GpuError::Lost`], and any other failure [`GpuError::Failed`], the first of them logged. A wait
 /// that runs out of time fails too, as nothing wrong: not logged. A wait without end goes in slices
-/// (see [`WAIT_SLICE`]).
+/// (see [`WAIT_SLICE`]), and gives up after [`WAIT_MOST`]: a GPU that hasn't finished by then never
+/// will (a hung driver), and what waits on it (an export, a save) fails, saying so, rather than
+/// wait for good.
 pub fn poll(device: &wgpu::Device, how: wgpu::PollType) -> Result<wgpu::PollStatus, GpuError> {
     let submission_index = match how {
         wgpu::PollType::Wait { submission_index, timeout: None } => submission_index,
         how => return polled(|| device.poll(how)),
     };
-    loop {
+    waited_in_slices(WAIT_MOST, || {
         let slice = wgpu::PollType::Wait { submission_index: submission_index.clone(), timeout: Some(WAIT_SLICE) };
-        let polled_now = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| device.poll(slice)));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| device.poll(slice)))
+    })
+}
+
+/// A wait made of `slice`s (each a poll that may run out of time) until one ends otherwise, for at
+/// most `most` in all: then [`GpuError::Failed`], said in the log once.
+fn waited_in_slices(
+    most: std::time::Duration,
+    mut slice: impl FnMut() -> std::thread::Result<Result<wgpu::PollStatus, wgpu::PollError>>,
+) -> Result<wgpu::PollStatus, GpuError> {
+    let started = std::time::Instant::now();
+    loop {
+        let polled_now = slice();
         if !matches!(polled_now, Ok(Err(wgpu::PollError::Timeout))) {
             return told(polled_now);
+        }
+        if started.elapsed() >= most {
+            let why = format!("the GPU didn't finish its work in {} s", most.as_secs());
+            if !WAIT_GAVE_UP_TOLD.swap(true, Ordering::Relaxed) {
+                log::error!("{why}: given up on (later ones aren't logged)");
+            }
+            return Err(GpuError::Failed(why));
         }
         // the context let go a moment, for a thread waiting on it to take it
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -100,6 +121,13 @@ pub fn poll(device: &wgpu::Device, how: wgpu::PollType) -> Result<wgpu::PollStat
 /// time, and wgpu panics in any other thread kept from it for a second (the window's frame, as an
 /// export waited for a big canvas to be read back). Between slices the context is let go.
 const WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The longest a wait on the GPU goes on (see [`poll`]): far past any work a frame, an export or
+/// a save gives it (the slowest tablets read a 16k layer back in a second or two).
+pub const WAIT_MOST: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a wait given up on has been told in the log: only the first is.
+static WAIT_GAVE_UP_TOLD: AtomicBool = AtomicBool::new(false);
 
 /// [`poll`] with the poll given, as wgpu's might go.
 fn polled(poll: impl FnOnce() -> Result<wgpu::PollStatus, wgpu::PollError>) -> Result<wgpu::PollStatus, GpuError> {
@@ -1018,6 +1046,37 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    /// A wait on a GPU that never finishes (a hung driver: every slice runs out of time) gives up
+    /// after its most, saying why, rather than wait for good (an export's card stayed up, its
+    /// Cancel doing nothing); within a slice of the most. One that finishes after a few slices is
+    /// waited for as before.
+    #[test]
+    fn a_wait_on_a_gpu_that_never_finishes_gives_up() {
+        let most = std::time::Duration::from_millis(120);
+        let slice = std::time::Duration::from_millis(10);
+        let started = std::time::Instant::now();
+        let given_up = super::waited_in_slices(most, || {
+            std::thread::sleep(slice);
+            Ok(Err(wgpu::PollError::Timeout))
+        });
+        let waited = started.elapsed();
+        println!("given up after {} ms (most {} ms)", waited.as_millis(), most.as_millis());
+        match given_up {
+            Err(super::GpuError::Failed(why)) => assert!(why.contains("didn't finish"), "{why}"),
+            other => panic!("not given up on: {other:?}"),
+        }
+        assert!(waited >= most, "{waited:?}");
+        assert!(waited < most + std::time::Duration::from_millis(500), "{waited:?}");
+        // a wait that ends on its third slice
+        let mut slices = 0;
+        let ended = super::waited_in_slices(most, || {
+            slices += 1;
+            if slices < 3 { Ok(Err(wgpu::PollError::Timeout)) } else { Ok(Ok(wgpu::PollStatus::QueueEmpty)) }
+        });
+        assert!(matches!(ended, Ok(wgpu::PollStatus::QueueEmpty)), "{ended:?}");
+        assert_eq!(slices, 3);
+    }
+
     /// A GPU or driver too old for the rest still draws: without OpenGL behind them the app can't
     /// open at all. (First, on Android, for a GPU whose Vulkan driver is known to crash.)
     #[test]

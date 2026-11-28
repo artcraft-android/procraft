@@ -235,7 +235,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier, 
                     LayersTitleMenu(titleMenu, vm, onDismiss = { titleMenu = false }, onShare = {
                         scope.launch {
                             val files = vm.chosenLayerFiles()
-                            if (files.isNotEmpty()) shareFiles(context, files, "image/png")
+                            if (files.isNotEmpty()) offerToShare(vm, context, files, "image/png")
                         }
                     }, onDelete = { deletingChosen = true })
                 },

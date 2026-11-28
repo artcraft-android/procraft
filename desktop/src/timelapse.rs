@@ -554,7 +554,7 @@ fn save_as(made: &std::path::Path) {
     else {
         return;
     };
-    if let Err(e) = std::fs::copy(made, &to) {
+    if let Err(e) = crate::files::copy_whole(made, &to) {
         crate::files::tell("Can't export", &e.to_string());
     }
 }

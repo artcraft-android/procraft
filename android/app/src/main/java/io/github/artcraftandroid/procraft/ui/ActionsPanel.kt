@@ -153,10 +153,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         // made outside the panel, which may be closed meanwhile: the share comes all the same
         // (cancelled or failed, there is nothing to share; a failure is told)
         vm.viewModelScope.launch {
-            vm.exportTimeLapse(seconds)?.let { video ->
-                runCatching { shareFile(context, video, "video/mp4") }
-                    .onFailure { io.github.artcraftandroid.procraft.AppLog.e("ProCraft", "sharing the time-lapse video (${video.length()} bytes)", it) }
-            }
+            vm.exportTimeLapse(seconds)?.let { video -> offerToShare(vm, context, listOf(video), "video/mp4") }
         }
     }
     var page by remember { mutableStateOf(ActionsPage.TABS) }
@@ -178,24 +175,24 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     fun share(kind: CanvasViewModel.Export, pdfQuality: Int = 100) {
         vm.viewModelScope.launch {
             val files = vm.export(kind, pdfQuality)
-            if (files.isNotEmpty()) runCatching { shareFiles(context, files, kind.mime) }
+            if (files.isNotEmpty()) offerToShare(vm, context, files, kind.mime)
         }
     }
     // the layered package, named with ours or the other app's extension
     fun sharePackage(extension: String) {
         vm.viewModelScope.launch {
-            vm.exportPackageFile(extension)?.let { runCatching { shareFile(context, it, "application/octet-stream") } }
+            vm.exportPackageFile(extension)?.let { offerToShare(vm, context, listOf(it), "application/octet-stream") }
         }
     }
     fun share(jpeg: Boolean) {
         vm.viewModelScope.launch {
-            vm.exportImage(jpeg)?.let { runCatching { shareFile(context, it, if (jpeg) "image/jpeg" else "image/png") } }
+            vm.exportImage(jpeg)?.let { offerToShare(vm, context, listOf(it), if (jpeg) "image/jpeg" else "image/png") }
         }
     }
     // a file a plugin makes of the artwork's layers of a kind it adds
     fun share(e: io.github.artcraftandroid.procraft.core.PluginExport) {
         vm.viewModelScope.launch {
-            vm.exportPlugin(e)?.let { runCatching { shareFile(context, it, e.mime) } }
+            vm.exportPlugin(e)?.let { offerToShare(vm, context, listOf(it), e.mime) }
         }
     }
     // whether the picture being picked or taken goes on a private layer
@@ -1437,6 +1434,21 @@ private fun licences(context: Context): String {
         "The undo and redo icons are Google's Material Symbols (fonts.google.com/icons), under the Apache License 2.0.\n\n" +
         asset("icons/LICENSE-material-symbols.txt")
 }
+
+/**
+ * [shareFiles] for an export just made: a share sheet that can't be shown (the system refusing so
+ * many files, say) is said in the log and told, never dropped without a word (the export seemed to
+ * end in nothing).
+ */
+internal fun offerToShare(vm: CanvasViewModel, context: Context, files: List<File>, mime: String) {
+    runCatching { shareFiles(context, files, mime) }.onFailure {
+        io.github.artcraftandroid.procraft.AppLog.e("ProCraft", "offering ${files.size} exported files ($mime, ${files.sumOf { f -> f.length() }} bytes) to share", it)
+        vm.showNotice(SHARE_NOT_OFFERED, warning = true)
+    }
+}
+
+/** What is said when an export was made but the share sheet couldn't be shown. */
+internal const val SHARE_NOT_OFFERED = "The file was exported, but it couldn't be offered to other apps."
 
 /** Offers [files] to other apps through the share sheet. */
 internal fun shareFiles(context: Context, files: List<File>, mime: String) {

@@ -61,15 +61,15 @@ struct AnimatedChoices: Equatable {
 }
 
 extension CanvasModel {
-    /// The animation as `format` in the exports folder, `choices.fps` frames a second: Web Ready fits
-    /// 480 pixels, else the canvas's size. `meter` hears how far a video has come; it stops when
-    /// `cancelled` says so. Slow: off the main thread.
+    /// The animation as `format` in the exports folder (or `dir`), `choices.fps` frames a second: Web
+    /// Ready fits 480 pixels, else the canvas's size. `meter` hears how far a video has come; it stops
+    /// when `cancelled` says so. Slow: off the main thread.
     static func exportAnimation(
         _ session: CanvasSession, _ format: AnimatedFormat, _ choices: AnimatedChoices,
-        meter: ExportMeter? = nil, cancelled: @escaping () -> Bool = { false }
+        meter: ExportMeter? = nil, in dir: URL = Sharing.exportsDir, cancelled: @escaping () -> Bool = { false }
     ) -> URL? {
         let base = exportFileName(name: session.name(), package: false)
-        let url = Sharing.exportsDir.appendingPathComponent(base + "." + format.fileExtension)
+        let url = dir.appendingPathComponent(base + "." + format.fileExtension)
         let side = UInt32(choices.webReady ? webReadySide : 0)
         do {
             switch format {
@@ -107,8 +107,17 @@ extension CanvasModel {
             }
             return url
         } catch {
+            AppLog.warn("ProCraft", "exporting an animation (\(format)): \(error)")
             return nil
         }
+    }
+
+    /// Where the export screen makes the file it only measures: apart from the one Done shares, which
+    /// a measure begun after Done wrote over (or took away) as it was being shared.
+    static var measuredExports: URL {
+        let dir = Sharing.exportsDir.appendingPathComponent("measured")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
     }
 
     /// Share's animated export opens over everything, the panel fading away.
@@ -124,22 +133,27 @@ extension CanvasModel {
 
     /// The animation made and shared, with the export card showing how far it has come.
     func shareAnimation(_ format: AnimatedFormat, _ choices: AnimatedChoices, done: @escaping () -> Void) {
-        guard exportShown == nil else { return }
+        guard exportMayBegin() else { return }
         let session = session
         session.resetExportProgress()
         exportCancelled = false
+        exportBusy = true
         exportShown = ProgressShown(progress: 0)
+        let began = Date()
         let meter = ExportMeter()
         let poll = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            self?.exportShown = ProgressShown(progress: format.video ? meter.share : session.exportProgress())
+            guard let self, !self.exportCancelled else { return }
+            self.exportShown = ProgressShown(progress: format.video ? meter.share : session.exportProgress())
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let url = Self.exportAnimation(session, format, choices, meter: meter) { self?.exportCancelled == true }
             DispatchQueue.main.async {
                 poll.invalidate()
                 guard let self else { return }
+                self.exportBusy = false
                 if self.exportCancelled {
                     self.exportShown = nil
+                    self.cancelledExportEnded(url.map { [$0] } ?? [], since: began)
                 } else if let url {
                     self.exportShown = ProgressShown(progress: 1, done: true)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
@@ -352,9 +366,15 @@ struct AnimatedExport: View {
             bytes = nil
             let session = model.session
             let asked = choices
-            let made = await Task.detached(priority: .utility) { CanvasModel.exportAnimation(session, format, asked) }.value
+            let made = await Task.detached(priority: .utility) {
+                CanvasModel.exportAnimation(session, format, asked, in: CanvasModel.measuredExports)
+            }.value
             if !Task.isCancelled, let made {
                 bytes = (try? made.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? nil
+            }
+            // only measured: it goes
+            if let made {
+                try? FileManager.default.removeItem(at: made)
             }
         }
     }

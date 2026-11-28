@@ -225,6 +225,8 @@ final class CanvasModel {
     var importShown: ProgressShown?
     @ObservationIgnored var importCancelled = false
     @ObservationIgnored var exportCancelled = false
+    /// An export is under way, or one cancelled is still ending: the next waits for it.
+    @ObservationIgnored var exportBusy = false
     /// How a picture is being brought in; what waits for a PDF's quality; what a small alert says.
     var insertAsk: InsertAsk?
     var insertPrivate = false

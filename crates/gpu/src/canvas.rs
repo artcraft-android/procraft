@@ -16690,7 +16690,11 @@ impl Readback {
         };
         // a device lost or out of memory meanwhile is an error, not a panic as in wgpu's own wait
         crate::poll(&device, wgpu::PollType::wait_indefinitely())?;
-        mapped.recv().map_err(|e| GpuError::Readback(e.to_string()))?.map_err(|e| GpuError::Readback(e.to_string()))?;
+        // (the GPU done, the mapping has answered: a moment's grace, never a wait for good)
+        mapped
+            .recv_timeout(MAPPED_GRACE)
+            .map_err(|e| GpuError::Readback(format!("the pixels never came back: {e}")))?
+            .map_err(|e| GpuError::Readback(e.to_string()))?;
         let view = buffer.slice(..size).get_mapped_range().map_err(|e| GpuError::Readback(e.to_string()))?;
         let mut out = Vec::with_capacity(row * (view.len() / padded.max(1)));
         for chunk in view.chunks(padded.max(1)) {
@@ -16713,6 +16717,9 @@ pub fn most_resident(budget: u64, width: u32, height: u32) -> usize {
     let per = u64::from(width) * u64::from(height) * 4;
     if budget == 0 { usize::MAX } else { usize::try_from(budget / per.max(1)).unwrap_or(usize::MAX).max(1) }
 }
+
+/// How long a readback's mapping may take to answer once the GPU has done its copy.
+const MAPPED_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Starts reading a texture of 4-byte pixels back from the GPU: its copy is queued now.
 pub fn start_reading(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32) -> Readback {

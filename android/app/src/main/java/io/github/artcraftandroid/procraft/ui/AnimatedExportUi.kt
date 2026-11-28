@@ -109,7 +109,7 @@ fun AnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
                 exporting = false
                 if (file != null) {
                     vm.endAnimatedExport()
-                    shareFile(context, file, format.mime)
+                    offerToShare(vm, context, listOf(file), format.mime)
                 }
             }
         },
@@ -248,7 +248,7 @@ fun ModelAnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
                 exporting = false
                 if (file != null) {
                     vm.modelAnimatedExport = null
-                    shareFile(context, file, format.mime)
+                    offerToShare(vm, context, listOf(file), format.mime)
                 }
             }
         },

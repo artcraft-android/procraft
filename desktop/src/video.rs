@@ -592,6 +592,25 @@ pub fn write_mp4(
     count: usize,
     frame: impl Fn(usize, u32, u32) -> Option<Vec<u8>>,
 ) -> Result<(u32, u32), String> {
+    let made = write_mp4_whole(out, width, height, max_side, fps, hevc, bits_per_pixel, count, frame);
+    if made.is_err() {
+        let _ = std::fs::remove_file(out);
+    }
+    made
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_mp4_whole(
+    out: &Path,
+    width: u32,
+    height: u32,
+    max_side: u32,
+    fps: f32,
+    hevc: bool,
+    bits_per_pixel: u32,
+    count: usize,
+    frame: impl Fn(usize, u32, u32) -> Option<Vec<u8>>,
+) -> Result<(u32, u32), String> {
     let rate = procraft_core::frame_rate(fps);
     #[cfg(any(windows, target_os = "macos"))]
     {
@@ -719,6 +738,7 @@ mod ffmpeg {
         let (device, codec, filter) = encoder(hevc, width, height);
         log::info!("making a {width} x {height} video with {codec}");
         let mut child = run("ffmpeg")
+            .args(["-hide_banner", "-nostats", "-loglevel", "error"])
             .args(device)
             .args(["-y", "-f", "rawvideo", "-pix_fmt", "rgba"])
             .args(["-s", &format!("{width}x{height}"), "-r", &format!("{}/{}", rate.frames, rate.seconds), "-i", "-"])
@@ -741,7 +761,11 @@ mod ffmpeg {
         })();
         // its input closed (dropped above), it finishes the file
         let done = child.wait_with_output().map_err(|e| e.to_string())?;
-        fed?;
+        // (a frame that couldn't be drawn: the short video ffmpeg ended goes)
+        if let Err(e) = fed {
+            let _ = std::fs::remove_file(out);
+            return Err(e);
+        }
         if !done.status.success() {
             let _ = std::fs::remove_file(out);
             return Err(format!("ffmpeg: {}", String::from_utf8_lossy(&done.stderr).trim()));
@@ -877,6 +901,26 @@ mod ffmpeg {
 
 #[cfg(test)]
 mod tests {
+    /// A video one of whose frames can't be drawn leaves nothing where it was going (the encoder had
+    /// ended a short video there, which looked made).
+    #[test]
+    fn a_video_that_fails_part_way_leaves_nothing() {
+        let dir = std::env::temp_dir().join(format!("procraft-failed-video-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("failed.mp4");
+        let (w, h) = (64u32, 64u32);
+        let made = super::write_mp4(&out, w, h, w, 30.0, false, 4, 6, |i, w, h| {
+            (i < 3).then(|| (0..w * h).flat_map(|_| [128u8, 128, 128, 255]).collect())
+        });
+        let left = out.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        match made {
+            Err(e) if e == super::NO_FFMPEG => eprintln!("skipped: no ffmpeg"),
+            Err(_) => assert!(!left, "a video cut short was left"),
+            Ok(size) => panic!("made with a frame missing: {size:?}"),
+        }
+    }
+
     /// A video whose width the encoder pads (850: even, not a multiple of 16) comes back as it was
     /// made, each row in its place: an edge down the middle stays straight, not slanted.
     #[test]

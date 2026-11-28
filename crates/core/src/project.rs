@@ -1568,6 +1568,7 @@ impl CanvasSession {
     /// whichever comes first, as a driver that takes the app down on another may), else one of its
     /// own; false if there is none.
     pub fn prepare_offscreen(&self) -> bool {
+        let started = std::time::Instant::now();
         // (a lost one can't draw: made again, else one of its own)
         if crate::device::kept().as_ref().is_some_and(procraft_gpu::Gpu::is_lost) {
             crate::device::warm_gpu();
@@ -1583,8 +1584,39 @@ impl CanvasSession {
                 }
             }
         }
+        let gpu_ms = started.elapsed().as_millis();
         st.ensure_canvas();
+        // how long each part took, and why there is no canvas if there isn't (an export's first stages)
+        let (w, h, layers) = (st.doc.width(), st.doc.height(), st.doc.layers().len());
+        let ms = started.elapsed().as_millis();
+        if st.canvas.is_some() {
+            log::info!(
+                "an artwork made ready to export offscreen in {ms} ms ({w}×{h}, {layers} layers; the GPU {gpu_ms} ms, its layers {} ms)",
+                ms.saturating_sub(gpu_ms)
+            );
+        } else {
+            let why = st.error.clone().unwrap_or_else(|| {
+                if st.closed { "it was closed".to_owned() } else { "its canvas wasn't made".to_owned() }
+            });
+            log::warn!(
+                "an artwork ({w}×{h}, {layers} layers) couldn't be made ready to export offscreen in {ms} ms: {why}"
+            );
+        }
         st.canvas.is_some()
+    }
+
+    /// Stops the export under way, and one the app has made ready to begin
+    /// ([`CanvasSession::reset_export_progress`]) but that hasn't begun yet: it fails at its next
+    /// layer or frame, or as soon as it has the canvas, its file left unwritten. The next export
+    /// goes on as asked.
+    pub fn cancel_export(&self) {
+        self.shared.exports.cancel();
+    }
+
+    /// The stage the export under way is at ("reading layers (3 of 12)"; empty with none), for the
+    /// app's log when it is cancelled or seems stuck.
+    pub fn export_stage(&self) -> String {
+        self.shared.exports.stage()
     }
 
     /// How far the export under way has come, 0 to 1 (read while it runs, without waiting on it):
@@ -1593,9 +1625,11 @@ impl CanvasSession {
         f32::from_bits(self.shared.export_progress.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    /// Starts the count again before an export (those that don't tell their progress stay at 0).
+    /// Starts the count again before an export (those that don't tell their progress stay at 0),
+    /// and makes it ready to begin: a [`CanvasSession::cancel_export`] from now stops it.
     pub fn reset_export_progress(&self) {
         self.exported(0.0);
+        self.shared.exports.arm();
     }
 
     pub(crate) fn exported(&self, done: f32) {
@@ -1604,25 +1638,38 @@ impl CanvasSession {
 
     /// Writes the flattened picture, full size and with straight alpha, to `path` as a PNG.
     pub fn export_png(&self, path: String) -> Result<(), MobileError> {
-        let (w, h, straight, icc) = self.finished_picture()?;
-        self.exported(0.7);
-        write_atomically(Path::new(&path), |p| write_png(p, w, h, &straight, &icc))?;
-        self.exported(1.0);
-        Ok(())
+        let run = self.begin_export("PNG");
+        let made = (|| {
+            let (w, h, straight, icc) = self.finished_picture(&run)?;
+            self.exported(0.7);
+            run.stage("encoding and writing", "")?;
+            write_atomically(Path::new(&path), |p| write_png(p, w, h, &straight, &icc))?;
+            self.exported(1.0);
+            Ok(())
+        })();
+        run.end(made, |_| file_said(&path))
     }
 
     /// Writes the flattened picture, full size and onto white, to `path` as a JPEG, with the
     /// canvas's colour profile.
     pub fn export_jpeg(&self, path: String) -> Result<(), MobileError> {
-        let (w, h, straight, icc) = self.finished_picture()?;
-        self.exported(0.7);
-        let rgb = onto_white(&straight)?;
-        drop(straight);
-        let bytes = procraft_engine::jpeg::encode_tagged(&rgb, w, h, JPEG_QUALITY, &icc);
-        self.exported(0.95);
-        write_atomically(Path::new(&path), |p| crate::storage::write(p, &bytes).map_err(|e| file_error("saving", e)))?;
-        self.exported(1.0);
-        Ok(())
+        let run = self.begin_export("JPEG");
+        let made = (|| {
+            let (w, h, straight, icc) = self.finished_picture(&run)?;
+            self.exported(0.7);
+            run.stage("encoding", "")?;
+            let rgb = onto_white(&straight)?;
+            drop(straight);
+            let bytes = procraft_engine::jpeg::encode_tagged(&rgb, w, h, JPEG_QUALITY, &icc);
+            self.exported(0.95);
+            run.stage("writing", "")?;
+            write_atomically(Path::new(&path), |p| {
+                crate::storage::write(p, &bytes).map_err(|e| file_error("saving", e))
+            })?;
+            self.exported(1.0);
+            Ok(())
+        })();
+        run.end(made, |_| file_said(&path))
     }
 
     /// Opens a layered artwork package (as the Share menu's first row writes) from `path`.
@@ -1657,6 +1704,18 @@ impl CanvasSession {
     }
 }
 
+/// What an export made, for its line in the log: the file's bytes.
+pub(crate) fn file_said(path: &str) -> String {
+    fs::metadata(path).map_or_else(|_| "no file".to_owned(), |m| format!("{} bytes", m.len()))
+}
+
+impl CanvasSession {
+    /// An export of `what` begun on this session (see `export_run.rs`).
+    pub(crate) fn begin_export(&self, what: &str) -> crate::export_run::ExportRun<'_> {
+        crate::export_run::ExportRun::begin(&self.shared.exports, what)
+    }
+}
+
 impl CanvasSession {
     /// [`CanvasSession::export_package`]; with `idle_only`, only while nothing is under way that it
     /// would end (false then, nothing written), and quietly: the progress of an export someone
@@ -1668,6 +1727,25 @@ impl CanvasSession {
         time_lapse: Option<PackageTimeLapse>,
         idle_only: bool,
     ) -> Result<bool, MobileError> {
+        // (made for a plugin's folder: no one's card waits on it, and Cancel isn't for it)
+        let run = if idle_only {
+            crate::export_run::ExportRun::begin_quiet(&self.shared.exports, "package for a folder")
+        } else {
+            self.begin_export("package")
+        };
+        let made = self.write_package(&run, &path, seed, time_lapse, idle_only);
+        run.end(made, |&written| if written { file_said(&path) } else { "nothing: the canvas was busy".to_owned() })
+    }
+
+    fn write_package(
+        &self,
+        run: &crate::export_run::ExportRun<'_>,
+        path: &str,
+        seed: u64,
+        time_lapse: Option<PackageTimeLapse>,
+        idle_only: bool,
+    ) -> Result<bool, MobileError> {
+        run.stage("reading the time-lapse", "")?;
         let time_lapse = match time_lapse {
             Some(t) => {
                 let mut segments = Vec::with_capacity(t.segments.len());
@@ -1691,19 +1769,22 @@ impl CanvasSession {
         if !idle_only {
             self.exported(0.0);
         }
+        run.stage("waiting for the canvas", "")?;
         let (doc, composite, name, info, reference, reference_picture, turns, edits) = {
-            let mut guard = self.shared.lock_finished();
+            let mut guard = self.shared.lock_finished_for_export(run)?;
             let st = &mut *guard;
             if idle_only && !st.idle() {
                 return Ok(false);
             }
             st.finish_stroke();
             st.settle();
+            run.say(&format!("{}×{}, {} layers", st.doc.width(), st.doc.height(), st.doc.layers().len()));
             let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else {
                 return Err(file_error("reading the picture", "the canvas is not shown yet"));
             };
             // the file's preview leaves private layers out
             let private = st.doc.private_layers();
+            run.stage("reading the picture", "")?;
             let composite = canvas
                 .read_composite_without(gpu, &mut st.doc, &private)
                 .map_err(|e| file_error("reading the picture", e))?;
@@ -1714,6 +1795,7 @@ impl CanvasSession {
             (st.doc.clone(), composite, st.name.clone(), st.info.clone(), reference.0, reference.1, turns, edits)
         };
         let (w, h) = (doc.width(), doc.height());
+        run.stage("making the preview", "")?;
         // the preview turned as the package says the canvas shows
         let (tw, th, thumb) = {
             let mut straight = composite.clone();
@@ -1727,7 +1809,7 @@ impl CanvasSession {
         let preview = png_bytes(tw, th, &thumb, &doc.picture_icc())?;
         // every layer and mask read as it is written, a layer at a time
         let count = doc.layers().iter().filter(|l| l.kind != LayerKind::Group).count();
-        let mut pixels = ExportLayers::new(self, edits, count, (0.1, 0.9));
+        let mut pixels = ExportLayers::new(self, run, edits, count, (0.1, 0.9));
         pixels.tells = !idle_only;
         let export = procraft_engine::native::Export {
             document: &doc,
@@ -1744,7 +1826,8 @@ impl CanvasSession {
             reference_picture: reference_picture.as_deref().map(Vec::as_slice),
             turns: u32::from(turns),
         };
-        write_file_atomically(Path::new(&path), |out| procraft_engine::native::write_to(&export, out).map(|_| ()))?;
+        run.stage("writing the file", "")?;
+        write_file_atomically(Path::new(path), |out| procraft_engine::native::write_to(&export, out).map(|_| ()))?;
         if !idle_only {
             self.exported(1.0);
         }
@@ -1757,12 +1840,49 @@ impl CanvasSession {
     /// The artwork as a layered PSD (groups, masks, clipping, blend modes kept) at `path`, its
     /// layers read and written one at a time.
     pub fn export_psd(&self, path: String) -> Result<(), MobileError> {
-        let (p, edits) = self.picture()?;
+        let run = self.begin_export("PSD");
+        let made = self.write_psd(&run, &path);
+        run.end(made, |_| file_said(&path))
+    }
+
+    /// The flattened picture as a TIFF at `path`.
+    pub fn export_tiff(&self, path: String) -> Result<(), MobileError> {
+        let run = self.begin_export("TIFF");
+        let made = (|| {
+            let (p, _) = self.picture(&run)?;
+            run.stage("encoding", "")?;
+            let bytes = match file_colours(&p.doc) {
+                (icc, Some(inks)) => formats::tiff_cmyk(p.width, p.height, p.doc.dpi, &icc, &p.composite, &inks),
+                (icc, None) => formats::tiff(p.width, p.height, p.doc.dpi, &icc, &p.composite),
+            };
+            self.exported(0.95);
+            run.stage("writing", "")?;
+            write_atomically(Path::new(&path), |f| {
+                crate::storage::write(f, &bytes).map_err(|e| file_error("saving", e))
+            })?;
+            self.exported(1.0);
+            Ok(())
+        })();
+        run.end(made, |_| file_said(&path))
+    }
+
+    /// The flattened picture, or each layer (`layers`), as a page of a PDF at `path`: exact at
+    /// `quality` 100, JPEG below it. Each layer is read and written in turn.
+    pub fn export_pdf(&self, path: String, layers: bool, quality: u8) -> Result<(), MobileError> {
+        let run = self.begin_export(if layers { "PDF of the layers" } else { "PDF" });
+        let made = self.write_pdf(&run, &path, layers, quality);
+        run.end(made, |_| file_said(&path))
+    }
+}
+
+impl CanvasSession {
+    fn write_psd(&self, run: &crate::export_run::ExportRun<'_>, path: &str) -> Result<(), MobileError> {
+        let (p, edits) = self.picture(run)?;
         let (w, h) = (p.width, p.height);
         let (layers, from) = psd_layers(&p.doc);
         let (icc, inks) = file_colours(&p.doc);
         let count = from.iter().map(|f| f.reads()).sum();
-        let reader = ExportLayers::new(self, edits, count, (0.1, 0.9));
+        let reader = ExportLayers::new(self, run, edits, count, (0.1, 0.9));
         let [r, g, b] = p.doc.background.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
         let mut read = |i: usize| -> std::io::Result<formats::PsdPixels> {
             let pixels = match from.get(i) {
@@ -1776,36 +1896,30 @@ impl CanvasSession {
             };
             Ok(pixels)
         };
-        write_file_atomically(Path::new(&path), |out| {
+        run.stage("writing the file", "")?;
+        write_file_atomically(Path::new(path), |out| {
             formats::write_psd(out, w, h, p.doc.dpi, &icc, &layers, &mut read, &p.composite, inks.as_ref())
         })?;
         self.exported(1.0);
         Ok(())
     }
 
-    /// The flattened picture as a TIFF at `path`.
-    pub fn export_tiff(&self, path: String) -> Result<(), MobileError> {
-        let (p, _) = self.picture()?;
-        let bytes = match file_colours(&p.doc) {
-            (icc, Some(inks)) => formats::tiff_cmyk(p.width, p.height, p.doc.dpi, &icc, &p.composite, &inks),
-            (icc, None) => formats::tiff(p.width, p.height, p.doc.dpi, &icc, &p.composite),
-        };
-        self.exported(0.95);
-        write_atomically(Path::new(&path), |f| crate::storage::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
-        self.exported(1.0);
-        Ok(())
-    }
-
-    /// The flattened picture, or each layer (`layers`), as a page of a PDF at `path`: exact at
-    /// `quality` 100, JPEG below it. Each layer is read and written in turn.
-    pub fn export_pdf(&self, path: String, layers: bool, quality: u8) -> Result<(), MobileError> {
-        let (p, edits) = self.picture()?;
+    fn write_pdf(
+        &self,
+        run: &crate::export_run::ExportRun<'_>,
+        path: &str,
+        layers: bool,
+        quality: u8,
+    ) -> Result<(), MobileError> {
+        let (p, edits) = self.picture(run)?;
         let (icc, inks) = file_colours(&p.doc);
         let (w, h, quality) = (p.width, p.height, quality.min(100));
         if !layers {
+            run.stage("encoding", "")?;
             let bytes = formats::pdf(w, h, p.doc.dpi, &icc, &[p.composite.as_slice()], quality, inks.as_ref());
             self.exported(0.95);
-            write_atomically(Path::new(&path), |f| {
+            run.stage("writing", "")?;
+            write_atomically(Path::new(path), |f| {
                 crate::storage::write(f, &bytes).map_err(|e| file_error("saving", e))
             })?;
             self.exported(1.0);
@@ -1814,8 +1928,9 @@ impl CanvasSession {
         drop(p.composite);
         // a page for each paint layer, bottom first
         let pages: Vec<LayerId> = p.doc.layers().iter().filter(|l| l.kind == LayerKind::Paint).map(|l| l.id).collect();
-        let reader = ExportLayers::new(self, edits, pages.len(), (0.1, 0.95));
-        write_file_atomically(Path::new(&path), |out| {
+        let reader = ExportLayers::new(self, run, edits, pages.len(), (0.1, 0.95));
+        run.stage("writing the file", "")?;
+        write_file_atomically(Path::new(path), |out| {
             let mut pdf = formats::PdfWriter::new(out)?;
             for id in &pages {
                 let rgba = reader.straight(*id)?;
@@ -1828,17 +1943,25 @@ impl CanvasSession {
         self.exported(1.0);
         Ok(())
     }
+}
 
+#[uniffi::export]
+impl CanvasSession {
     /// Each layer as a PNG in `dir` (made if missing), bottom first, named after it; returns
     /// their paths.
     pub fn export_layer_pngs(&self, dir: String) -> Result<Vec<String>, MobileError> {
-        self.write_layer_pngs(dir, |_, _| true)
+        let run = self.begin_export("layers as PNGs");
+        let made = self.write_layer_pngs(&run, dir, |_, _| true);
+        run.end(made, |paths| format!("{} files", paths.len()))
     }
 
     /// The current and picked layers (a group: the layers in it) each as a PNG in folder `dir`;
     /// returns the files' paths.
     pub fn export_chosen_pngs(&self, dir: String) -> Result<Vec<String>, MobileError> {
-        self.write_layer_pngs(dir, |doc, id| doc.chosen().iter().any(|c| *c == id || doc.is_inside(id, *c)))
+        let run = self.begin_export("chosen layers as PNGs");
+        let made =
+            self.write_layer_pngs(&run, dir, |doc, id| doc.chosen().iter().any(|c| *c == id || doc.is_inside(id, *c)));
+        run.end(made, |paths| format!("{} files", paths.len()))
     }
 
     pub fn name(&self) -> String {
@@ -1918,18 +2041,24 @@ impl PdfBook {
     /// The flattened picture of the artwork open in `session` (made ready to draw offscreen) as
     /// the next page.
     pub fn add(&self, session: Arc<CanvasSession>) -> Result<(), MobileError> {
-        let (p, _) = session.picture()?;
-        let (icc, inks) = file_colours(&p.doc);
-        let picture = formats::PdfPicture::new(p.width, p.height, &p.composite, self.quality, inks.as_ref());
-        let dpi = p.doc.dpi;
-        drop(p);
-        let mut writing = self.writing.lock();
-        let Some((_, writer)) = writing.as_mut() else {
-            return Err(file_error("saving", "the PDF is finished"));
-        };
-        writer.page(&picture, dpi, &icc).map_err(|e| file_error("saving", e))?;
-        session.exported(1.0);
-        Ok(())
+        let run = session.begin_export("a page of a PDF");
+        let added = (|| {
+            let (p, _) = session.picture(&run)?;
+            let (icc, inks) = file_colours(&p.doc);
+            run.stage("encoding", "")?;
+            let picture = formats::PdfPicture::new(p.width, p.height, &p.composite, self.quality, inks.as_ref());
+            let dpi = p.doc.dpi;
+            drop(p);
+            run.stage("writing", "")?;
+            let mut writing = self.writing.lock();
+            let Some((_, writer)) = writing.as_mut() else {
+                return Err(file_error("saving", "the PDF is finished"));
+            };
+            writer.page(&picture, dpi, &icc).map_err(|e| file_error("saving", e))?;
+            session.exported(1.0);
+            Ok(())
+        })();
+        run.end(added, |()| String::new())
     }
 
     /// How many pages it has.
@@ -2031,10 +2160,11 @@ impl CanvasSession {
     /// The layers `wanted` picks out each as a PNG in folder `dir`; returns the files' paths.
     fn write_layer_pngs(
         &self,
+        run: &crate::export_run::ExportRun<'_>,
         dir: String,
         wanted: impl Fn(&Document, LayerId) -> bool,
     ) -> Result<Vec<String>, MobileError> {
-        let (p, edits) = self.picture()?;
+        let (p, edits) = self.picture(run)?;
         drop(p.composite);
         let icc = p.doc.picture_icc();
         let proof = proof_table(&p.doc);
@@ -2045,7 +2175,7 @@ impl CanvasSession {
         // each read and written in turn
         let chosen: Vec<&procraft_engine::document::Layer> =
             p.doc.layers().iter().filter(|l| l.kind == LayerKind::Paint && wanted(&p.doc, l.id)).collect();
-        let reader = ExportLayers::new(self, edits, chosen.len(), (0.1, 1.0));
+        let reader = ExportLayers::new(self, run, edits, chosen.len(), (0.1, 1.0));
         for l in chosen {
             let rgba = &reader.straight(l.id)?;
             let base: String =
@@ -2072,20 +2202,23 @@ impl CanvasSession {
 
     /// The flattened picture an export writes (straight alpha), with the document as it is and
     /// its edits then (see [`ExportLayers`]).
-    fn picture(&self) -> Result<(Pictures, u64), MobileError> {
+    fn picture(&self, run: &crate::export_run::ExportRun<'_>) -> Result<(Pictures, u64), MobileError> {
         self.exported(0.0);
-        let mut guard = self.shared.lock_finished();
+        run.stage("waiting for the canvas", "")?;
+        let mut guard = self.shared.lock_finished_for_export(run)?;
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
+        let (w, h) = (st.doc.width(), st.doc.height());
+        run.say(&format!("{w}×{h}, {} layers", st.doc.layers().len()));
         let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else {
             return Err(file_error("reading the picture", "the canvas is not shown yet"));
         };
+        run.stage("reading the picture", "")?;
         canvas.render_finished(gpu, &mut st.doc);
         let mut composite = canvas.read_composite(gpu).map_err(|e| file_error("reading the picture", e))?;
         straighten(&mut composite);
         self.exported(0.1);
-        let (w, h) = (st.doc.width(), st.doc.height());
         Ok((Pictures { width: w, height: h, doc: st.doc.clone(), composite }, st.edits()))
     }
 }
@@ -2180,6 +2313,8 @@ fn psd_layers(doc: &Document) -> (Vec<PsdLayer<'_>>, Vec<PsdFrom>) {
 /// the export (its file would show the artwork partly as it was and partly as it is).
 struct ExportLayers<'a> {
     session: &'a CanvasSession,
+    /// The export it reads for: its stage is each layer read, and Cancel stops it before the next.
+    run: &'a crate::export_run::ExportRun<'a>,
     /// The artwork's edits when the export began.
     edits: u64,
     /// How many layers it reads, how many it has, and the share of the export's progress their
@@ -2192,14 +2327,21 @@ struct ExportLayers<'a> {
 }
 
 impl<'a> ExportLayers<'a> {
-    fn new(session: &'a CanvasSession, edits: u64, count: usize, progress: (f32, f32)) -> ExportLayers<'a> {
-        ExportLayers { session, edits, count, done: std::cell::Cell::new(0), progress, tells: true }
+    fn new(
+        session: &'a CanvasSession,
+        run: &'a crate::export_run::ExportRun<'a>,
+        edits: u64,
+        count: usize,
+        progress: (f32, f32),
+    ) -> ExportLayers<'a> {
+        ExportLayers { session, run, edits, count, done: std::cell::Cell::new(0), progress, tells: true }
     }
 
     /// Layer `id`'s pixels as the canvas has them (premultiplied RGBA8, the canvas's size).
     fn premultiplied(&self, id: LayerId) -> Result<Vec<u8>, MobileError> {
+        self.run.stage("reading layers", format!("{} of {}", self.done.get() + 1, self.count))?;
         let pixels = {
-            let mut guard = self.session.shared.lock();
+            let mut guard = self.session.shared.lock_for_export(self.run)?;
             let st = &mut *guard;
             if st.edits() != self.edits {
                 return Err(file_error("reading a layer", "the artwork changed while it was exported"));
@@ -2215,6 +2357,8 @@ impl<'a> ExportLayers<'a> {
         if self.tells {
             self.session.exported(from + (to - from) * done.min(self.count) as f32 / self.count.max(1) as f32);
         }
+        // what comes after each layer is the file's writing, until the next layer is read
+        self.run.stage("writing the file", "")?;
         Ok(pixels)
     }
 
@@ -2745,23 +2889,30 @@ fn decode_png_into(
 impl CanvasSession {
     /// The flattened picture as it is exported, full size: its width, height, pixels (straight
     /// RGBA8; a CMYK canvas's as its press prints them) and the colour profile they are in.
-    fn finished_picture(&self) -> Result<(u32, u32, Vec<u8>, Vec<u8>), MobileError> {
+    fn finished_picture(
+        &self,
+        run: &crate::export_run::ExportRun<'_>,
+    ) -> Result<(u32, u32, Vec<u8>, Vec<u8>), MobileError> {
         self.exported(0.0);
+        run.stage("waiting for the canvas", "")?;
         let (w, h, rgba, icc) = {
-            let mut guard = self.shared.lock_finished();
+            let mut guard = self.shared.lock_finished_for_export(run)?;
             let st = &mut *guard;
             st.finish_stroke();
             st.settle();
             let (w, h) = (st.doc.width(), st.doc.height());
+            run.say(&format!("{w}×{h}, {} layers", st.doc.layers().len()));
             let icc = st.doc.picture_icc();
             let proof = proof_table(&st.doc);
             let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else {
                 return Err(file_error("reading the picture", "the canvas is not shown yet"));
             };
+            run.stage("reading the picture", "")?;
             canvas.render_finished(gpu, &mut st.doc);
             let rgba = canvas.read_composite(gpu).map_err(|e| file_error("reading the picture", e))?;
             (w, h, rgba, (icc, proof))
         };
+        run.stage("making it ready to write", "")?;
         let (icc, proof) = icc;
         let mut straight = rgba;
         straighten(&mut straight);

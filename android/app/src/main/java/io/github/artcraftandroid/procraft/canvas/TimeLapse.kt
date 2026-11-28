@@ -31,6 +31,39 @@ data class TimeLapseSettings(val resolution: Int = 0, val quality: Int = 1, val 
 }
 
 /**
+ * A package export's time-lapse videos as they are made ([made]), for its card: their share of the
+ * pie (half, when there were any to make) and their stage.
+ */
+class VideosMade {
+    /** How far the videos being made have come (0..1); null while none has been. */
+    @Volatile
+    private var done: Float? = null
+
+    @Volatile
+    private var making = false
+
+    /** The stage while videos are made (null otherwise). */
+    val stage: String?
+        get() = done?.takeIf { making }?.let { "making the time-lapse's videos (${(it * 100).toInt()}%)" }
+
+    /** The export's whole progress, the package's own ([core], 0..1) after the videos. */
+    fun share(core: Float): Float {
+        val videos = done ?: return core
+        return if (making) videos * 0.5f else 0.5f + core * 0.5f
+    }
+
+    /** [t]'s videos made for a package (see [TimeLapse.forPackage]); null if [going] stopped them. */
+    fun made(t: TimeLapse, going: () -> Boolean): PackageTimeLapse? {
+        making = true
+        try {
+            return t.forPackage({ done = it }, going)
+        } finally {
+            making = false
+        }
+    }
+}
+
+/**
  * An artwork's time-lapse: a picture of the whole canvas after each change, kept as numbered JPEG
  * frames in the artwork's folder, replayed or made into a video at [FPS] frames a second. The
  * shared core keeps the frames, the settings and a package's videos (crates/core timelapse.rs);
@@ -394,14 +427,42 @@ class TimeLapse(artwork: File) {
      * ones made before kept, so a share makes only what is new; the pictures they hold then gone,
      * as the artwork file keeps a time-lapse: only as video). Leaving the artwork does this too.
      */
-    fun forPackage(): PackageTimeLapse {
+    fun forPackage(): PackageTimeLapse = forPackage({}) { true } ?: core.forPackage()
+
+    /**
+     * As [forPackage], an export waiting on it (a long time-lapse's frames take minutes to make
+     * into videos): [progress] hears how far the videos being made have come (0..1, of the frames
+     * not yet in one; never if none is to be made), and [going] stops them by saying false. Null
+     * then: the videos made so far are kept, the one under way goes.
+     */
+    fun forPackage(progress: (Float) -> Unit, going: () -> Boolean): PackageTimeLapse? {
+        val started = android.os.SystemClock.elapsedRealtime()
+        val total = count.coerceAtLeast(1)
         var plan = core.segmentPlan()
+        var made = 0
         while (plan != null) {
+            if (!going()) return null
+            val todo = plan.frames.size
+            val before = (total - todo).coerceAtLeast(0)
+            var stopped = false
             val size = if (plan.width > 0u && plan.height > 0u) plan.width.toInt() to plan.height.toInt() else null
-            val made = encode(File(plan.path), plan.frames.map { it.toInt() }, size, plan.hevc)
-            plan = core.segmentMade(plan, (made?.first ?: 0).toUInt(), (made?.second ?: 0).toUInt(), made != null)
+            val video = encode(File(plan.path), plan.frames.map { it.toInt() }, size, plan.hevc) { done ->
+                progress(((before + done * todo) / total).coerceIn(0f, 1f))
+                going().also { if (!it) stopped = true }
+            }
+            if (stopped) {
+                // not kept: the next export makes it again
+                File(plan.path).delete()
+                AppLog.i("ProCraft", "the time-lapse's videos for a package stopped after ${android.os.SystemClock.elapsedRealtime() - started} ms ($made made)")
+                return null
+            }
+            if (video == null) AppLog.w("ProCraft", "the time-lapse's video of frames ${plan.frames.firstOrNull()} to ${plan.frames.lastOrNull()} for a package wasn't made (${failure ?: "?"})")
+            made += todo
+            plan = core.segmentMade(plan, (video?.first ?: 0).toUInt(), (video?.second ?: 0).toUInt(), video != null)
         }
+        if (!going()) return null
         dropClipFrames()
+        if (made > 0) AppLog.i("ProCraft", "the time-lapse's videos for a package made in ${android.os.SystemClock.elapsedRealtime() - started} ms ($made frames)")
         return core.forPackage()
     }
 
