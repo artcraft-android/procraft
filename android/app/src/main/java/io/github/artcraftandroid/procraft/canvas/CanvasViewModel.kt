@@ -8593,6 +8593,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val could = canUndo
         val name = session?.let { s -> if (recoloring) pourNow { s.undo() } else s.undo() }
         if (could || name != null) session?.stepNotice(true, name)?.let { showNotice(it) }
+        // a freehand selection being drawn: the core took its last stretch or point back
+        if (selecting) freehandChanged()
         followQuickShape()
         // a model's tile chosen before comes back, with its channel's colour
         if (modelOpen) {
@@ -8667,6 +8669,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // recoloring, the core steps the open fill aside and makes it again over what comes back
         val name = session?.let { s -> if (recoloring) pourNow { s.redo() } else s.redo() }
         if (could) session?.stepNotice(false, name)?.let { showNotice(it) }
+        if (selecting) freehandChanged()
         followQuickShape()
         if (modelOpen) followModelChannel()
         refresh()

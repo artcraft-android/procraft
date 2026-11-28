@@ -12181,6 +12181,102 @@ fn a_held_lasso_stays_as_drawn() {
     assert!(!s.has_selection());
 }
 
+/// #310: undo with a freehand selection still being drawn takes back its last step, a stretch
+/// drawn or a point tapped, one at a time, the rest of the path still open and the artwork's own
+/// steps left alone; two fingers tapped undo as the button does. Redo puts the steps back until a
+/// new one lets go of them. Undone past its first step, undo goes on to the stroke before it.
+#[test]
+fn undo_takes_back_an_open_lasso_a_stretch_or_point_at_a_time() {
+    use crate::TouchCommand;
+    let Some(s) = session(300, 300) else { return };
+    // a stroke before the selection, to tell the artwork's own undo by
+    s.set_color(0.0, 0.0, 0.0);
+    s.set_brush_size(0.3);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 280.0, 0.0)]);
+    s.stroke_add((1..=10).map(|i| sample(20.0 + i as f32 * 4.0, 280.0, i as f64 * 16.0)).collect());
+    s.stroke_end(vec![sample(60.0, 280.0, 176.0)]);
+    let ink = |s: &CanvasSession| pixel(s, 40, 280)[0] < 128;
+    assert!(ink(&s), "the stroke painted");
+    s.set_touch_selecting(Some(crate::touch::SelectTouch {
+        kind: crate::touch::SelectKind::Freehand,
+        join: crate::SelectionJoin::Add,
+        threshold: 0.5,
+    }));
+    let pen = |x: f32, y: f32, ms: f64| vec![sample(x, y, ms)];
+    // a stretch dragged with the pen from (x0, y) to (x1, y), lifted, from `ms`
+    let stretch = |x0: f32, x1: f32, y: f32, ms: f64| {
+        let _ = s.touch_down(1, PointerKind::Stylus, pen(x0, y, ms));
+        for i in 1..=20 {
+            let _ = s.touch_move(1, pen(x0 + (x1 - x0) * i as f32 / 20.0, y, ms + i as f64 * 16.0));
+        }
+        let _ = s.touch_up(1, pen(x1, y, ms + 336.0));
+    };
+    // a point tapped at (x, y)
+    let point = |x: f32, y: f32, ms: f64| {
+        let _ = s.touch_down(1, PointerKind::Stylus, pen(x, y, ms));
+        let _ = s.touch_up(1, pen(x, y, ms + 40.0));
+    };
+    // two fingers tapped where nothing is drawn
+    let two_fingers = |ms: f64| -> Vec<TouchCommand> {
+        let mut out = s.touch_down(7, PointerKind::Finger, vec![sample(150.0, 150.0, ms)]);
+        out.extend(s.touch_down(8, PointerKind::Finger, vec![sample(190.0, 150.0, ms + 15.0)]));
+        out.extend(s.touch_up(7, vec![sample(150.0, 150.0, ms + 90.0)]));
+        out.extend(s.touch_up(8, vec![sample(190.0, 150.0, ms + 91.0)]));
+        out
+    };
+    let points = |s: &CanvasSession| s.freehand_path().len() / 2;
+    stretch(50.0, 250.0, 50.0, 1000.0);
+    let first = points(&s);
+    assert!(first >= 10, "{first}");
+    point(250.0, 250.0, 2000.0);
+    assert_eq!(points(&s), first + 1);
+    stretch(250.0, 50.0, 250.0, 3000.0);
+    let drawn = s.freehand_path();
+    assert!(drawn.len() / 2 > first + 10, "{}", drawn.len() / 2);
+    assert!(!s.has_selection());
+    let info = s.info();
+    assert!(info.can_undo && !info.can_redo);
+    // the last stretch goes, then the point, by two fingers as by the button; the stroke stays
+    let out = two_fingers(4000.0);
+    assert_eq!(out.iter().filter(|o| **o == TouchCommand::Undo).count(), 1, "{out:?}");
+    assert_eq!(s.freehand_path(), drawn, "the tap itself changed the path");
+    assert_eq!(s.undo().as_deref(), Some("draw selection"));
+    assert_eq!(points(&s), first + 1, "the last stretch is taken back whole");
+    assert!(ink(&s) && s.info().can_redo, "the stroke under the selection was undone");
+    assert_eq!(s.undo().as_deref(), Some("draw polygon"));
+    assert_eq!(points(&s), first);
+    // redo puts them back, as they were
+    assert_eq!(s.redo().as_deref(), Some("draw polygon"));
+    assert_eq!(s.redo().as_deref(), Some("draw selection"));
+    assert_eq!(s.freehand_path(), drawn);
+    assert!(!s.info().can_redo);
+    // taken back to the first stretch, and a new one drawn: nothing left to redo
+    s.undo();
+    s.undo();
+    stretch(250.0, 150.0, 200.0, 5000.0);
+    assert!(points(&s) > first);
+    assert!(!s.info().can_redo, "a new stretch lets go of the steps taken back");
+    let path = s.freehand_path();
+    s.redo();
+    assert_eq!(s.freehand_path(), path, "redo put back a step let go of");
+    // past its first step the path is gone, and undo goes on to the stroke before it
+    assert_eq!(s.undo().as_deref(), Some("draw selection"));
+    assert_eq!(s.undo().as_deref(), Some("draw selection"));
+    assert_eq!(points(&s), 0);
+    assert!(ink(&s) && !s.has_selection());
+    s.undo();
+    assert!(!ink(&s), "the stroke before the selection is undone once the path is");
+    // a path closed into a selection keeps no steps of its own
+    stretch(50.0, 250.0, 50.0, 6000.0);
+    point(250.0, 250.0, 7000.0);
+    s.close_freehand();
+    assert!(s.has_selection() && points(&s) == 0);
+    assert!(!s.info().can_redo);
+    assert_eq!(s.undo().as_deref(), Some("draw selection"), "the selection made is undone as one step");
+    assert!(!s.has_selection() && points(&s) == 0);
+    s.set_touch_selecting(None);
+}
+
 #[test]
 fn a_brush_paints_with_a_shape_of_the_users_own_and_keeps_it() {
     let Some(s) = session(100, 100) else { return };

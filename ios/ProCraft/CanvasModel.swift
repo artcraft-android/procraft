@@ -1796,6 +1796,10 @@ final class CanvasModel {
                 showNotice(said)
             }
         }
+        // a freehand selection being drawn: the core took its last stretch or point back
+        if selecting {
+            selection.freehandChanged()
+        }
         // a model's tile chosen before comes back, with its channel's colour
         scene.followStep()
         // cloning, the core put the source back where it was before the stroke
@@ -1830,6 +1834,9 @@ final class CanvasModel {
             if let said = session.stepNotice(undo: false, name: name) {
                 showNotice(said)
             }
+        }
+        if selecting {
+            selection.freehandChanged()
         }
         scene.followStep()
         if adjustment != nil {

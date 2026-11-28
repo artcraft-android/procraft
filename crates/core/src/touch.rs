@@ -617,6 +617,14 @@ pub(crate) struct Touches {
     puck_dragging: bool,
     select_threshold: f32,
     freehand: Vec<(f32, f32)>,
+    /// The freehand path's steps while it is open, each a touch that added to it (a stretch drawn,
+    /// or a point tapped): how long the path was before it, and whether it was tapped. Undo takes
+    /// the last back, a step at a time, before anything else; those taken back (the newest last)
+    /// redo puts back, until a new step lets go of them. Whether the selection's touch began its
+    /// step yet.
+    freehand_steps: Vec<(usize, bool)>,
+    freehand_undone: Vec<(Vec<(f32, f32)>, bool)>,
+    freehand_stepped: bool,
     /// A transform is open; what its touch took, and whether it has started dragging it.
     transforming: Option<TransformTouch>,
     transform_handle: crate::TransformHandle,
@@ -755,6 +763,9 @@ impl Default for Touches {
             puck_dragging: false,
             select_threshold: 0.5,
             freehand: Vec::new(),
+            freehand_steps: Vec::new(),
+            freehand_undone: Vec::new(),
+            freehand_stepped: false,
             transforming: None,
             transform_handle: crate::TransformHandle::Move,
             transform_grabbed: false,
@@ -808,6 +819,24 @@ struct Travel {
 }
 
 impl Touches {
+    /// The selection's touch adds to the freehand path (`tapped`: a point tapped): its step begins,
+    /// once a touch, and the steps taken back are let go.
+    fn freehand_step(&mut self, tapped: bool) {
+        if !self.freehand_stepped {
+            self.freehand_stepped = true;
+            self.freehand_steps.push((self.freehand.len(), tapped));
+            self.freehand_undone.clear();
+        }
+    }
+
+    /// The freehand path let go of (closed into a selection, or the tool closed), its steps with
+    /// it; the path it was.
+    fn take_freehand(&mut self) -> Vec<(f32, f32)> {
+        self.freehand_steps.clear();
+        self.freehand_undone.clear();
+        std::mem::take(&mut self.freehand)
+    }
+
     /// The touch waited on to be held still came down at `at`: nothing gone yet, and draw and hold
     /// waits until it has gone far enough.
     fn travel_from(&mut self, at: (f32, f32)) {
@@ -910,6 +939,37 @@ impl CanvasSession {
     /// Whether the selection tool is open (its touches select).
     pub(crate) fn selection_tool_open(&self) -> bool {
         self.touches().selecting.is_some()
+    }
+
+    /// Undo (`undo`) or redo with the selection tool's freehand path open: its last step (a
+    /// stretch drawn or a point tapped) taken back, the rest of the path still open, or the last
+    /// taken back put back. The step's name; none with no step to take back (or put back), when
+    /// undo and redo go on to the artwork's own steps.
+    pub(crate) fn step_freehand(&self, undo: bool) -> Option<String> {
+        let mut t = self.touches();
+        // (only with the selection tool open)
+        t.selecting?;
+        let tapped = if undo {
+            let (len, tapped) = t.freehand_steps.pop()?;
+            let len = len.min(t.freehand.len());
+            let taken = t.freehand.split_off(len);
+            t.freehand_undone.push((taken, tapped));
+            tapped
+        } else {
+            let (points, tapped) = t.freehand_undone.pop()?;
+            let len = t.freehand.len();
+            t.freehand_steps.push((len, tapped));
+            t.freehand.extend(points);
+            tapped
+        };
+        Some(if tapped { "draw polygon" } else { "draw selection" }.to_owned())
+    }
+
+    /// Whether undo, and redo, have a step of the open freehand path to take back or put back.
+    pub(crate) fn freehand_steps_left(&self) -> (bool, bool) {
+        let t = self.touches();
+        let open = t.selecting.is_some();
+        (open && !t.freehand_steps.is_empty(), open && !t.freehand_undone.is_empty())
     }
 
     /// Whether the pen is near enough that a hand's touches are taken for its: on the canvas, held
@@ -1207,7 +1267,7 @@ impl CanvasSession {
     pub fn close_freehand(&self) {
         let (path, join) = {
             let mut t = self.touches();
-            (std::mem::take(&mut t.freehand), t.selecting.map_or(crate::SelectionJoin::Add, |s| s.join))
+            (t.take_freehand(), t.selecting.map_or(crate::SelectionJoin::Add, |s| s.join))
         };
         if path.len() < 3 {
             return;
@@ -1478,7 +1538,7 @@ impl CanvasSession {
         let closing = t.selecting.is_some() && how.is_none();
         t.selecting = how;
         if how.is_none() {
-            t.freehand.clear();
+            t.take_freehand();
         }
         drop(t);
         // the tool closed: the shapes' paths go (a selection it opens with has none)
@@ -2250,6 +2310,7 @@ impl CanvasSession {
         if t.selecting.is_some() && !self.finger_turns_model(kind, t) {
             t.stroke_pointer = id;
             t.select_moved = false;
+            t.freehand_stepped = false;
             t.pour_last = (at.0, now);
             t.select_threshold = t.selecting.map_or(0.5, |s| s.threshold);
             t.mode = Mode::Select;
@@ -2966,6 +3027,7 @@ impl CanvasSession {
                         self.close_freehand();
                         out.push(TouchCommand::SelectionChanged);
                     } else if let Some(p) = to_canvas {
+                        t.freehand_step(true);
                         t.freehand.push(p);
                     }
                     out.push(TouchCommand::FreehandChanged);
@@ -2974,9 +3036,11 @@ impl CanvasSession {
                     if t.freehand.is_empty()
                         && let Some(first) = first_canvas
                     {
+                        t.freehand_step(false);
                         t.freehand.push(first);
                     }
                     if let Some(p) = to_canvas {
+                        t.freehand_step(false);
                         t.freehand.push(p);
                     }
                     out.push(TouchCommand::FreehandChanged);

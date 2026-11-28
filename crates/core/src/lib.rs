@@ -3786,6 +3786,11 @@ impl CanvasSession {
         if self.shared.lock().plugin_stepping > 0 {
             return None;
         }
+        // a freehand selection being drawn: its last stretch or point goes back first, the path
+        // still open
+        if let Some(name) = self.step_freehand(true) {
+            return Some(name);
+        }
         // a plugin's own artwork goes back through what it kept; the canvas's own steps (an action's,
         // say) once it has none
         if self.plugin_undo(true) == Some(true) {
@@ -3845,6 +3850,10 @@ impl CanvasSession {
     pub fn redo(&self) -> Option<String> {
         if self.shared.lock().plugin_stepping > 0 {
             return None;
+        }
+        // a freehand selection being drawn: what of it was taken back comes back first
+        if let Some(name) = self.step_freehand(false) {
+            return Some(name);
         }
         if self.plugin_undo(false) == Some(true) {
             return None;
@@ -3938,6 +3947,8 @@ impl CanvasSession {
     }
 
     pub fn info(&self) -> CanvasInfo {
+        // (the touches' lock before the state's, as the touches take them)
+        let (path_undo, path_redo) = self.freehand_steps_left();
         let st = self.shared.lock();
         let sliders = st.shown_sliders();
         CanvasInfo {
@@ -3950,7 +3961,9 @@ impl CanvasSession {
             brush_diameter: st.brush(st.tool).diameter(sliders.size) * st.brush_scale(),
             // an open shape is kept, then undone; a plugin's artwork goes by its own steps
             // Liquify open: its first step undone closes it
-            can_undo: st.plugin_steps().is_some_and(|(undo, _)| undo)
+            // a freehand selection being drawn: its own stretches and points first
+            can_undo: path_undo
+                || st.plugin_steps().is_some_and(|(undo, _)| undo)
                 || st.liquify_open()
                 || st.canvas.as_deref().is_some_and(Canvas::can_undo)
                 || st.crop_undo.is_some()
@@ -3960,7 +3973,10 @@ impl CanvasSession {
             // an open shape has only its own drags to redo
             // Liquify open: only its own steps (and the step that kept it, once it came back by an
             // undo) to redo
-            can_redo: if st.liquify_open() {
+            // (a freehand selection being drawn: what of it was taken back)
+            can_redo: if path_redo {
+                true
+            } else if st.liquify_open() {
                 st.liquify_can_redo()
             } else {
                 st.shape.as_deref().map_or_else(
