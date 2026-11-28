@@ -229,7 +229,7 @@ fn draw_into(shared: &Arc<Shared>, window: &Window, reopening: bool) -> Ended {
 /// refreshes as the system tells them.
 struct WindowScreen {
     surface: wgpu::Surface<'static>,
-    queue: wgpu::Queue,
+    queue: procraft_gpu::Queue,
     gpu: Gpu,
     caps: Option<wgpu::SurfaceCapabilities>,
     config: Option<wgpu::SurfaceConfiguration>,

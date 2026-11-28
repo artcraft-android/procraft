@@ -302,7 +302,7 @@ impl CanvasSession {
         let Some(id) = origin else { return Some(None) };
         // redone past its last: its work kept again, as the step that kept it, and it closes
         self.close_liquify(false);
-        self.edit(procraft_gpu::Canvas::redo);
+        self.edit(false);
         if let Some(kept) = self.shared.lock().liquify_kept.as_mut() {
             kept.closed = Closed::Kept(id);
             kept.steps.origin = None;
@@ -362,7 +362,7 @@ impl CanvasSession {
         let origin = match kept.closed {
             Closed::Kept(id) => {
                 // its work taken back first
-                self.edit(procraft_gpu::Canvas::undo);
+                self.edit(true);
                 Some(id)
             }
             Closed::Undone { .. } => kept.steps.origin,

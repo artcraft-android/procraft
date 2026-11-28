@@ -147,11 +147,16 @@ pub(crate) fn grain_tile(brush: &Brush, diameter: f32) -> f32 {
 
 /// The big pictures `brush` (and its second) can read at its most size: those to have ready.
 pub(crate) fn reached_by(brush: &Brush) -> Vec<Big> {
+    reached_at(brush, 1.0)
+}
+
+/// The big pictures `brush` (and its second) reads at size `size` (the size slider's, 0..1).
+pub(crate) fn reached_at(brush: &Brush, size: f32) -> Vec<Big> {
     let second = brush.secondary.as_deref().map(|b| b.clone().as_second());
     std::iter::once(brush)
         .chain(second.as_ref())
         .flat_map(|b| {
-            let most = b.diameter(1.0);
+            let most = b.diameter(size);
             let shape = shape_of(b).filter(|_| past_held(most));
             let grain = grain_of(b).filter(|_| past_held(grain_tile(b, most)));
             [shape, grain]
@@ -316,6 +321,38 @@ pub(crate) fn ready(big: &Big) -> Option<Picture> {
     }
     ask(&shared, std::slice::from_ref(big), true);
     None
+}
+
+/// Reads those of `bigs` made and kept in their files, but no longer held in memory (let go for
+/// others, or as the system ran short), into memory now: for a stroke about to begin, before it
+/// holds the canvas (read under it, as [`ready`] reads them, they held the frames up meanwhile:
+/// a 2048 square picture decoded and its smaller levels made). None is made here, but where
+/// pictures are made at once (a test's, see [`at_once`]): those not made yet are made here, as
+/// [`ready`] would make them under the canvas (a test's stroke begun as its brush's picture drew
+/// held the frames up 434 ms so).
+pub(crate) fn read_ahead(bigs: &[Big]) {
+    let shared = shared();
+    for big in bigs {
+        let folder = {
+            let store = shared.lock();
+            if store.held.iter().any(|(id, _)| *id == big.id) {
+                continue;
+            }
+            store.folder.clone()
+        };
+        if let Some(picture) = folder.as_deref().and_then(|f| read(f, big.id)) {
+            hold(&mut shared.lock(), big.id, picture);
+        } else if at_once()
+            && let Some((side, pixels)) = big.drawn()
+        {
+            if let Some(folder) = folder.as_deref() {
+                write(folder, big.id, &pixels);
+            }
+            if let Some(picture) = Picture::of(side, &pixels) {
+                hold(&mut shared.lock(), big.id, picture);
+            }
+        }
+    }
 }
 
 /// A brush chosen: its big pictures (`bigs`) read into memory off this thread, and (`make`) those

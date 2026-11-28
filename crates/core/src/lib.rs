@@ -154,6 +154,8 @@ mod text_runs;
 mod timelapse;
 mod touch;
 #[cfg(test)]
+mod touch_gpu_tests;
+#[cfg(test)]
 mod trail_tests;
 mod transform;
 mod turn;
@@ -1064,6 +1066,15 @@ impl State {
             && self.canvas.as_deref().is_some_and(|c| c.lays_over_frames() || c.catching_up() || c.relaying())
     }
 
+    /// Whether the frames lay work a share at a time ([`State::paced_work_waiting`]) that a
+    /// render on this thread, not theirs, would lay all at once: what waits for that work is
+    /// queued behind it for them to lay (an undo of the stroke they are laying), or waits for them
+    /// (see [`Shared::await_frames_laid`]). Laid at once on the app's thread, a heavy brush's
+    /// stroke held it for seconds, and a phone's Vulkan driver crashed under such work.
+    pub(crate) fn frames_lay_elsewhere(&self) -> bool {
+        self.frame_thread != Some(std::thread::current().id()) && self.paced_work_waiting()
+    }
+
     /// Whether the canvas's composite is the picture as it last showed: it has been made at least
     /// once (a canvas made anew, after its device was lost, holds a blank one until its first
     /// render), so a read that renders nothing may take it as it is.
@@ -1938,7 +1949,15 @@ impl Shared {
     #[track_caller]
     pub(crate) fn lock(&self) -> parking_lot::MutexGuard<'_, State> {
         let at = std::panic::Location::caller();
-        let guard = self.state.try_lock().unwrap_or_else(|| self.wait_for(at));
+        let guard = match self.state.try_lock() {
+            Some(guard) => guard,
+            None => {
+                let began = std::time::Instant::now();
+                let guard = self.wait_for(at);
+                held::waited(at, began.elapsed());
+                guard
+            }
+        };
         self.holder.took(at);
         guard
     }
@@ -2855,11 +2874,14 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         // the brush's pictures still to be drawn (it was chosen just now) drawn before the canvas is
         // held, so that the frames go on meanwhile
-        let pictures = {
+        // (and its big pictures let go of memory read again, as the stroke would under the canvas)
+        let (pictures, bigs) = {
             let st = self.shared.lock();
             let tool = if pointer == PointerKind::StylusEraser { ToolKind::Erase } else { st.tool };
-            crate::brushes::pictures_to_draw(st.brush(tool))
+            let brush = st.brush(tool);
+            (crate::brushes::pictures_to_draw(brush), crate::big_pictures::reached_at(brush, st.sliders(tool).size))
         };
+        crate::big_pictures::read_ahead(&bigs);
         crate::brushes::draw_these(&pictures);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -3851,8 +3873,8 @@ impl CanvasSession {
     fn undo_step(&self) -> Option<String> {
         // cloning, the source goes back to where it was before the stroke
         self.shared.lock().adjust.puck_step(true);
-        self.edit(Canvas::undo);
-        self.shared.lock().canvas.as_deref().and_then(Canvas::redo_name)
+        self.edit(true);
+        self.shared.lock().canvas.as_deref().and_then(Canvas::redo_name_ahead)
     }
 
     /// Redoes the last step undone; returns what it was called, if it was named.
@@ -3905,11 +3927,12 @@ impl CanvasSession {
     /// Redoes the last step undone (cloning, the source going forward too); returns its name.
     fn redo_step(&self) -> Option<String> {
         self.shared.lock().adjust.puck_step(false);
-        self.edit(Canvas::redo);
-        self.shared.lock().canvas.as_deref().and_then(Canvas::undo_name)
+        self.edit(false);
+        self.shared.lock().canvas.as_deref().and_then(Canvas::undo_name_ahead)
     }
 
     pub fn clear_layer(&self) {
+        self.frames_laid_first();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let current = st.doc.current();
@@ -4009,9 +4032,22 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
-    /// Undo or redo, after finishing any open stroke; done at once, so the document is current
-    /// when this returns.
-    fn edit(&self, f: fn(&mut Canvas)) {
+    /// Lets the frames, drawn on a thread of their own, lay what they lay a share at a time (a
+    /// heavy brush's stroke's end) before what comes next runs the canvas's work, which would lay
+    /// it all at once on this thread: that held the app for seconds, and a phone's Vulkan driver
+    /// crashed under such work. Waited for with the canvas let go, for at most
+    /// [`FRAMES_LAY_MOST`] (see [`Shared::await_frames_laid`]); nothing to wait for, at once.
+    pub(crate) fn frames_laid_first(&self) {
+        if self.shared.lock().frames_lay_elsewhere() {
+            self.shared.await_frames_laid();
+        }
+    }
+
+    /// Undo (`undo`) or redo, after finishing any open stroke; done at once, so the document is
+    /// current when this returns, but for the step of a stroke whose end the frames are still
+    /// laying: that waits behind it in the queue, the history read as it will be meanwhile.
+    fn edit(&self, undo: bool) {
+        let f: fn(&mut Canvas) = if undo { Canvas::undo } else { Canvas::redo };
         // text being edited is kept first: it is the step undone
         self.text_end(true);
         let mut guard = self.shared.lock();
@@ -4026,6 +4062,25 @@ impl CanvasSession {
             return;
         }
         st.settle();
+        // the step a stroke whose end the frames are still laying (a share at a time): taken back,
+        // or brought back, by an undo (redo) queued behind it, shown by the frame that lays it. Its
+        // history, as it will be, is what the app reads meanwhile (see `Canvas::can_undo`)
+        if st.frames_lay_elsewhere() && st.canvas.as_ref().is_some_and(|c| c.steps_a_queued_stroke(undo)) {
+            if let Some(canvas) = st.canvas.as_mut() {
+                f(canvas);
+            }
+            st.revision += 1;
+            self.shared.frame(st);
+            return;
+        }
+        // any other step: the frames lay what they lay a share at a time first, the canvas let go
+        // meanwhile (laid at once here, it held the app for seconds)
+        if st.frames_lay_elsewhere() {
+            drop(guard);
+            self.shared.await_frames_laid();
+            guard = self.shared.lock();
+        }
+        let st = &mut *guard;
         st.flush();
         let before = st.canvas.as_ref().map(|c| (c.undo_step(), c.redo_step()));
         if let Some(canvas) = st.canvas.as_mut() {

@@ -60,6 +60,30 @@ std::thread_local! {
     static THREAD: Arc<str> = Arc::from(thread_name());
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// This thread's longest wait on the canvas since it was last taken (see [`take_longest_wait`]).
+    static LONGEST: std::cell::Cell<Option<(Duration, &'static Location<'static>)>> = const { std::cell::Cell::new(None) };
+}
+
+/// This thread waited `long` for the canvas at `at` (kept for the tests' look at what the app's
+/// thread waits on: see [`take_longest_wait`]).
+#[cfg_attr(not(test), allow(unused_variables))]
+pub(crate) fn waited(at: &'static Location<'static>, long: Duration) {
+    #[cfg(test)]
+    LONGEST.with(|most| {
+        if most.get().is_none_or(|(was, _)| long > was) {
+            most.set(Some((long, at)));
+        }
+    });
+}
+
+/// This thread's longest wait on the canvas since this was last asked, and where it waited.
+#[cfg(test)]
+pub(crate) fn take_longest_wait() -> Option<(Duration, &'static Location<'static>)> {
+    LONGEST.with(std::cell::Cell::take)
+}
+
 /// The calling thread's name, as the log says it: the system's name for it where there is one
 /// (the app's own thread, which Rust didn't start, has no name of Rust's).
 pub(crate) fn thread_name() -> String {

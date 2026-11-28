@@ -672,6 +672,7 @@ impl CanvasSession {
     /// The open pour redone from window point (`x`, `y`) instead, from the layer as it was: off
     /// the canvas it pours nothing until it comes back. False if no pour is open.
     pub fn pour_move(&self, x: f32, y: f32) -> bool {
+        self.frames_laid_first();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let seed = seed_at(st, x, y);
@@ -751,6 +752,8 @@ impl CanvasSession {
     fn begin_pour(&self, x: f32, y: f32, colour: [f32; 3], threshold: f32, spread: bool) -> bool {
         self.pour_end(true, None);
         self.await_pour();
+        // (the layer read once the frames have laid a stroke's end: not laid at once for the read)
+        self.frames_laid_first();
         let ahead = self.read_ahead(x, y);
         let mut guard = self.shared.lock();
         let st = &mut *guard;

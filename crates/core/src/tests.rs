@@ -25225,7 +25225,7 @@ struct TestScreen {
     presented: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
 }
 
-const READY: u8 = 0;
+pub(crate) const READY: u8 = 0;
 const NO_IMAGE: u8 = 1;
 const OUTDATED: u8 = 2;
 const SUBOPTIMAL: u8 = 3;
@@ -25268,7 +25268,7 @@ impl crate::frame_loop::Screen for TestScreen {
 
 /// The render loop running on a thread of its own for a session, into a [`TestScreen`]; stopped
 /// when dropped.
-struct LoopRunning {
+pub(crate) struct LoopRunning {
     shared: std::sync::Arc<crate::Shared>,
     thread: Option<std::thread::JoinHandle<()>>,
     mode: std::sync::Arc<std::sync::atomic::AtomicU8>,
@@ -25291,7 +25291,7 @@ impl Drop for LoopRunning {
 }
 
 /// `s`'s render loop started, the window giving images as `mode` says.
-fn run_loop(s: &CanvasSession, mode: u8) -> LoopRunning {
+pub(crate) fn run_loop(s: &CanvasSession, mode: u8) -> LoopRunning {
     run_loop_timed(s, mode, None)
 }
 
@@ -25337,7 +25337,7 @@ fn run_loop_timed(s: &CanvasSession, mode: u8, refreshes: Option<crate::pacing::
 /// still being remade (a render at a time). A single render slower than the quiet spell (a busy
 /// machine's GPU) no longer ends the wait with frames still to come. However long that takes, up
 /// to a minute.
-fn settled(s: &CanvasSession) {
+pub(crate) fn settled(s: &CanvasSession) {
     let started = std::time::Instant::now();
     let mut last = s.activity().frames;
     let mut still_since = std::time::Instant::now();

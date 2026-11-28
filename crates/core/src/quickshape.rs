@@ -474,6 +474,13 @@ fn inside(outline: &[Vec2], p: Vec2) -> bool {
 pub(crate) const SHAPE_SEED: u32 = 0x5eed_1234;
 const SECOND_SHAPE_SEED: u32 = SHAPE_SEED ^ 0x5eed_0002;
 
+/// Whether stroke `number` (see [`Canvas::strokes_ended`]) made the last step: laid, or its end still
+/// queued for the frames to lay (an undo queued now takes it back once they have).
+fn last_step_is(canvas: &Canvas, number: u64) -> bool {
+    canvas.step_of_stroke(number) == Some(canvas.steps_made())
+        || (number == canvas.strokes_ended() && canvas.steps_a_queued_stroke(true))
+}
+
 /// Begins the canvas's stroke for `stroke` again, as it began: a dual brush's with its second.
 fn begin_again(canvas: &mut Canvas, stroke: &DrawnStroke) {
     match &stroke.second {
@@ -537,7 +544,7 @@ impl State {
     /// Whether `kept` is still the last thing done, with nothing undone after it: its step is the last
     /// made (once it has been laid).
     fn still_stands(&self, kept: &KeptShape) -> bool {
-        self.canvas.as_ref().is_some_and(|c| c.step_of_stroke(kept.laid_as) == Some(c.steps_made()) && !c.can_redo())
+        self.canvas.as_ref().is_some_and(|c| last_step_is(c, kept.laid_as) && !c.can_redo())
     }
 
     /// There is a shape for redo to put back in place of the stroke it gave way to.
@@ -547,7 +554,10 @@ impl State {
 
     /// The shape last kept, if it is the last thing done, gives way to the stroke it was made of.
     fn back_to_stroke(&mut self) -> bool {
-        self.flush();
+        // (a shape whose stroke the frames are still laying is undone behind it, as they lay it)
+        if !self.frames_lay_elsewhere() {
+            self.flush();
+        }
         let Some(mut kept) = self.kept_shape.take().filter(|kept| self.still_stands(kept)) else { return false };
         let Some(canvas) = self.canvas.as_mut() else { return false };
         canvas.undo();
@@ -568,7 +578,9 @@ impl State {
     /// The stroke a shape gave way to, if it is the last thing done, is that shape again, as it
     /// first snapped.
     fn back_to_shape(&mut self) -> bool {
-        self.flush();
+        if !self.frames_lay_elsewhere() {
+            self.flush();
+        }
         if !self.shape_to_redo() {
             return false;
         }
@@ -1153,6 +1165,10 @@ impl CanvasSession {
     pub fn quickshape_hold(&self) -> Option<QuickShapeInfo> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // the pen's input that came while a frame held the canvas is the stroke's too: fitted
+        // without it, a heavy brush's loop (whose frames hold the canvas long) snapped to a part
+        // of itself, or to nothing
+        self.shared.take_queued_input(st);
         if st.stroke.is_none() || st.shape.is_some() {
             return None;
         }
@@ -1180,14 +1196,17 @@ impl CanvasSession {
         if st.stroke.is_some() || st.shape.is_some() {
             return None;
         }
-        st.flush();
+        // (a stroke the frames are still laying is undone behind it, as they lay it)
+        if !st.frames_lay_elsewhere() {
+            st.flush();
+        }
         let last = st.last_stroke.take()?;
         if st.plugin_layer_kind(last.layer).is_some() {
             return None;
         }
         let line = st.without_end_hook(last.shape_line(&last.samples, &last.drawn));
         let canvas = st.canvas.as_mut()?;
-        if canvas.step_of_stroke(last.stroke) != Some(canvas.steps_made()) || canvas.can_redo() {
+        if !last_step_is(canvas, last.stroke) || canvas.can_redo() {
             return None;
         }
         let found = st.recognised(&line);

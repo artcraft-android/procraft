@@ -15,6 +15,7 @@ mod kept;
 mod lighting;
 mod placed;
 mod scene;
+mod sent;
 mod sphere;
 mod stale;
 
@@ -43,6 +44,7 @@ pub use lighting::Lighting;
 pub use scene::{
     GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, ShownSelection, SurfaceMap, material_source,
 };
+pub use sent::{Queue, work_sent_here};
 pub use sphere::{SphereLook, SpherePreview, preview_environment};
 pub use stale::{STALE, StaleTextures, draws_copies, starts_stale};
 pub use wgpu;
@@ -354,7 +356,8 @@ pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
+    /// wgpu's queue, what each thread sends on it counted (see [`work_sent_here`]).
+    pub queue: Queue,
     errors: Arc<AtomicU64>,
     /// Whether the device has been lost (its driver reset or stopped).
     lost: Arc<AtomicBool>,
@@ -738,7 +741,7 @@ impl Gpu {
             instance,
             adapter,
             device,
-            queue,
+            queue: Queue::new(queue),
             errors,
             lost,
             lost_at,

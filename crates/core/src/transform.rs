@@ -483,6 +483,7 @@ impl CanvasSession {
     /// Other changes to the artwork keep an open transform first; strokes are ignored while one is
     /// open.
     pub fn transform_begin(&self) -> Option<TransformBox> {
+        self.frames_laid_first();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.finish_stroke();
@@ -700,6 +701,7 @@ impl CanvasSession {
     /// Ends the transform: `commit` keeps it as one undo step, otherwise the layer is put back.
     /// Kept, it ends the selection too, in the same step (undoing it brings the selection back).
     pub fn transform_end(&self, commit: bool) {
+        self.frames_laid_first();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if st.transform.is_some() {

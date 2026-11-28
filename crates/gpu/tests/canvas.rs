@@ -4899,6 +4899,198 @@ fn a_shape_at_its_own_size_stays_sharp_where_the_brush_images_would_be_magnified
     }
 }
 
+/// Work a render holds back (no more of a stroke's stamps than it takes at once) is laid by renders
+/// after it one after another: hundreds of a stroke's lots laid at once by a render that shows
+/// nothing, on a thread of a small stack, come out as laid a render a lot, and the stack holds.
+/// Each was laid within the one before, and the stack overflowed.
+#[test]
+fn hundreds_of_lots_held_back_are_laid_one_render_after_another() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let lots = 400;
+    let laid = |at_once: bool| {
+        let gpu = gpu.clone();
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let mut doc = Document::new(256, 64);
+                let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+                canvas.set_stamps_at_once(1);
+                canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 0.2));
+                for k in 0..lots {
+                    let x = 8.0 + 240.0 * k as f32 / lots as f32;
+                    canvas.add_stamps(&[Stamp::round(Vec2::new(x, 32.0), 6.0, 1.0)]);
+                    if !at_once {
+                        canvas.render(&gpu, &mut doc, None);
+                    }
+                }
+                canvas.end_stroke();
+                canvas.render(&gpu, &mut doc, None);
+                canvas.read_layer(&gpu, doc.current()).unwrap()
+            })
+            .unwrap()
+            .join()
+            .expect("the render overflowed its thread's stack")
+    };
+    let (at_once, a_lot_a_render) = (laid(true), laid(false));
+    assert!(at_once.iter().skip(3).step_by(4).filter(|&&a| a > 0).count() > 1000, "little laid");
+    assert!(at_once == a_lot_a_render, "laid otherwise at once");
+}
+
+/// A stroke's own images given just before the render that lays it (a picture of the user's own
+/// for its shape, a brush file's shape at its own size: put on the GPU by that render) lay it as
+/// images put there by a render before it do: wet paint and dry, in runs and a stamp a dispatch (as
+/// an Adreno's OpenGL lays wet paint), three times each. Printed: how many rows came out otherwise.
+#[test]
+fn images_given_just_before_the_render_lay_as_images_put_up_by_a_render_before() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let n = TEXTURE_SIZE;
+    let small: Vec<u8> = (0..n * n).map(|i| if (i % n / 8 + i / n / 8).is_multiple_of(2) { 255 } else { 40 }).collect();
+    let side = n * 4;
+    let big: Vec<u8> = (0..side * side).map(|i| small[(i / side / 4) * n + i % side / 4]).collect();
+    let brush = Brush { shape: Shape { source: Source::new(small), ..Shape::default() }, ..Brush::round_pen() };
+    let row = |wet_pull: Option<f32>, by_stamp: bool, early: bool| {
+        let mut doc = Document::new(256, 256);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.lay_stamp_by_stamp(by_stamp);
+        let mut style = StrokeStyle { wet_pull, shape_lod_cap: 4.0, ..style(StrokeTool::Paint, 1.0) };
+        canvas.use_sources(&gpu, &mut style, &brush);
+        canvas.use_full_shape(&gpu, &mut style, 7, side as u32, &big);
+        if early {
+            canvas.render(&gpu, &mut doc, None);
+        }
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(128.0, 128.0), 100.0, 1.0)]);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(150.0, 120.0), 40.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let mut off = Vec::new();
+    for wet_pull in [None, Some(0.5)] {
+        for by_stamp in [false, true] {
+            for _ in 0..3 {
+                let (given, put) = (row(wet_pull, by_stamp, false), row(wet_pull, by_stamp, true));
+                assert!(put.iter().skip(3).step_by(4).any(|&a| a > 0), "nothing laid");
+                let most = given.iter().zip(&put).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+                if most > 0 {
+                    off.push((wet_pull, by_stamp, most));
+                }
+            }
+        }
+    }
+    println!("{} of 12 rows laid otherwise with their images given just before: {off:?}", off.len());
+    assert!(off.is_empty(), "laid otherwise with the images given just before the render: {off:?}");
+}
+
+/// The history reads as it will be once the queued work is laid: what undo and redo can do and
+/// the names of the steps they would take, with strokes, undos and redos still queued; and whether
+/// the step either would take is a stroke still queued (an undo of it can wait behind it while
+/// the frames lay it). Laid, it is as it read.
+#[test]
+fn the_history_reads_as_it_will_be_once_the_queued_work_is_laid() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    let stroke = |canvas: &mut Canvas, name: &str, x: f32| {
+        canvas.name_next_step(name);
+        canvas.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
+        canvas.add_stamps(&[Stamp::round(Vec2::new(x, 32.0), 8.0, 1.0)]);
+        canvas.end_stroke();
+    };
+    type Read = (bool, bool, Option<String>, Option<String>, bool, bool);
+    let read = |c: &Canvas| -> Read {
+        (
+            c.can_undo(),
+            c.can_redo(),
+            c.undo_name_ahead(),
+            c.redo_name_ahead(),
+            c.steps_a_queued_stroke(true),
+            c.steps_a_queued_stroke(false),
+        )
+    };
+    let named = |n: &str| Some(n.to_owned());
+    // a stroke queued, then laid
+    stroke(&mut canvas, "one", 16.0);
+    assert_eq!(read(&canvas), (true, false, named("one"), None, true, false));
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(read(&canvas), (true, false, named("one"), None, false, false));
+    // another queued and undone behind it; redone; both undone
+    stroke(&mut canvas, "two", 48.0);
+    canvas.undo();
+    assert_eq!(read(&canvas), (true, true, named("one"), named("two"), false, true));
+    canvas.redo();
+    assert_eq!(read(&canvas), (true, false, named("two"), None, true, false));
+    canvas.undo();
+    canvas.undo();
+    let queued = read(&canvas);
+    assert_eq!(queued, (false, true, None, named("one"), false, false));
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(read(&canvas), queued, "laid otherwise than it read");
+    assert_eq!((canvas.undo_name(), canvas.redo_name()), (None, named("one")));
+    // nothing painted: both undone
+    let pixels = canvas.read_layer(&gpu, layer).unwrap();
+    assert!(pixels.iter().skip(3).step_by(4).all(|&a| a == 0), "a stroke left painted");
+}
+
+/// A stroke's own brush images (a picture of the user's own for its shape and grain, a brush
+/// file's shape at its own size, a big picture's levels) are sent to the GPU by the render that
+/// lays the stroke, not as it begins (which may be on the app's own thread, which is to send the
+/// GPU nothing: a phone's Vulkan driver crashed on such work there); and the stroke is laid as
+/// ever, on a canvas that holds the brush images and one that goes without them until then (its
+/// spare layers counted as the render makes them). Printed: what the stroke's beginning sent.
+#[test]
+fn a_strokes_own_brush_images_are_sent_by_the_render_that_lays_it() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    assert_eq!(procraft_engine::textures::shapes().len(), procraft_engine::textures::SHAPE_COUNT as usize);
+    assert_eq!(procraft_engine::textures::grains().len(), procraft_engine::textures::GRAIN_COUNT as usize);
+    let (stripes, mut brush) = striped_shape();
+    let n = TEXTURE_SIZE;
+    let tooth: Vec<u8> = (0..n * n).map(|i| if (i % n / 3 + i / n / 5).is_multiple_of(2) { 255 } else { 90 }).collect();
+    brush.grain = procraft_engine::brush::Grain { source: Source::new(tooth), ..Brush::round_pen().grain };
+    let levels = procraft_gpu::grey_levels(&stripes, 1024).unwrap();
+    let shared = procraft_gpu::SharedStroke::new(&gpu, 600, 64);
+    let row = |own: bool, made: bool| {
+        let mut doc = Document::new(600, 64);
+        let mut canvas =
+            if made { Canvas::new(&gpu, &doc) } else { Canvas::for_drawn_strokes(&gpu, &doc, &shared) }.unwrap();
+        assert_eq!(canvas.has_brush_images(), made);
+        let mut style = StrokeStyle { grain: Some(0), ..style(StrokeTool::Paint, 1.0) };
+        let before = procraft_gpu::work_sent_here();
+        canvas.use_sources(&gpu, &mut style, &brush);
+        if own {
+            canvas.use_full_shape(&gpu, &mut style, 7, 1024, &stripes);
+            canvas.use_full_grain_levels(&gpu, &mut style, 8, 1024, &levels);
+        }
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(150.0, 32.0), 120.0, 1.0)]);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(450.0, 32.0), 120.0, 1.0)]);
+        canvas.end_stroke();
+        let sent = procraft_gpu::work_sent_here() - before;
+        assert_eq!(canvas.full_images_held(), (0, 0), "held before the render");
+        canvas.render(&gpu, &mut doc, None);
+        assert!(canvas.has_brush_images());
+        assert_eq!(canvas.full_images_held(), if own { (1, 1) } else { (0, 0) });
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (sent, (0..600).map(|x| pixel(&layer, 600, x, 32)[3]).collect::<Vec<u8>>())
+    };
+    for own in [false, true] {
+        let (sent_made, made) = row(own, true);
+        let (sent_later, later) = row(own, false);
+        println!(
+            "{}: the stroke's beginning sent {sent_made} and {sent_later}",
+            if own { "own size" } else { "sources" }
+        );
+        assert_eq!((sent_made, sent_later), (0, 0), "sent as the stroke began");
+        assert!(made.iter().filter(|&&a| a > 0).count() > 200, "nothing laid");
+        assert_eq!(made, later, "laid otherwise without the brush images made first");
+    }
+}
+
 #[test]
 fn a_shape_at_its_own_size_lays_as_the_brush_images_do_where_they_hold_enough() {
     let Some(gpu) = gpu() else { return };

@@ -1110,6 +1110,54 @@ fn an_open_shape_of_wet_paint_shows_as_it_is_kept() {
     assert_eq!(differ, 0, "shown otherwise while open than kept");
 }
 
+/// A loop's pen input that came while a frame held the canvas (waiting for the next frame) is
+/// part of what its hold snaps: the shape is fitted to all of it, as with none waiting. Before, the
+/// hold fitted the line without it, and a heavy brush's loop (whose frames hold the canvas long)
+/// snapped to a part of itself or to nothing.
+#[test]
+fn a_hold_snaps_the_whole_loop_with_its_input_still_waiting_for_a_frame() {
+    let mut hand = Hand::small(1.04);
+    hand.centre = (500.0, 500.0);
+    hand.rx = 220.0;
+    hand.ry = 160.0;
+    let samples = hand.samples(700.0);
+    let snapped = |waiting: bool| {
+        let s = session(1024, 1024)?;
+        s.stroke_begin(PointerKind::Stylus, samples[..1].to_vec());
+        s.stroke_add(samples[1..12].to_vec());
+        if waiting {
+            // the rest comes while a frame holds the canvas
+            let (taken, held) = std::sync::mpsc::channel();
+            let (go, gone) = std::sync::mpsc::channel::<()>();
+            let holder = std::thread::spawn({
+                let s = std::sync::Arc::clone(&s);
+                move || {
+                    let _st = s.shared.lock();
+                    let _ = taken.send(());
+                    let _ = gone.recv();
+                }
+            });
+            let _ = held.recv();
+            s.stroke_add(samples[12..].to_vec());
+            assert!(s.shared.input_waiting(), "the input taken with the canvas held");
+            let _ = go.send(());
+            holder.join().unwrap();
+        } else {
+            s.stroke_add(samples[12..].to_vec());
+        }
+        s.quickshape_hold()
+    };
+    if session(16, 16).is_none() {
+        return;
+    }
+    let all = snapped(false).expect("no shape");
+    let waited = snapped(true).expect("no shape with the input waiting");
+    assert_eq!(all.kind, QuickShapeKind::Ellipse);
+    assert_eq!(waited.kind, all.kind, "snapped otherwise with the input waiting");
+    let most = waited.handles.iter().zip(&all.handles).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(most < 0.01, "its handles {most} points off");
+}
+
 /// What [`drag_from_a_smaller_canvas`] saw: each drag frame's time (ms, its GPU work waited for),
 /// whether every frame showed the latest move from the smaller canvas, the layer as the last drag
 /// frame showed it, the shape's bounds then (canvas pixels), and the layer as kept.
@@ -1295,6 +1343,126 @@ fn heavy_shape_drag_frames() {
     println!("{} drag frames: {median:.1} ms the median, {most:.1} at most", sorted.len());
     assert!(fast.every_move, "a frame showed an older move than the latest");
     assert!(median <= 40.0, "a drag frame took {median:.1} ms");
+}
+
+/// #443: QuickShape with Aberdeen (a pencil whose stroke is wet paint laid in place, with a second
+/// built up by its rule), drawn with a finger as the reporter drew: a line drawn and held till it
+/// snaps, another finger pressed on the screen meanwhile, the shape dragged about by its held end
+/// (shown from a smaller canvas meanwhile), let go, then two strokes drawn after it. At every frame, as a window draws it: no GPU error and the device kept,
+/// the window not black, and no value in the strokes' textures that isn't a number or is infinite;
+/// then the composite whole: every pixel opaque (the background is) and none black (the paint is
+/// blue). (A NaN draws clear on the PC's GPU and may draw black on others.)
+#[test]
+fn a_shape_snapped_with_aberdeen_and_strokes_after_it_show_no_black_or_nan() {
+    use procraft_gpu::wgpu;
+    let side = 1024;
+    let Some(s) = session(side, side) else { return };
+    s.set_display_scale(2.0);
+    let library = s.brush_library();
+    let Some((set, at)) = library
+        .iter()
+        .enumerate()
+        .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == "Aberdeen").map(|j| (i as u32, j as u32)))
+    else {
+        panic!("no Aberdeen in the library")
+    };
+    assert!(s.select_brush(set, at));
+    s.set_color(0.2, 0.4, 0.8);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let window = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("window"),
+        size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = window.create_view(&Default::default());
+    let started = std::time::Instant::now();
+    let black = |px: &[u8]| px.chunks(4).filter(|p| p.iter().take(3).all(|&c| c < 6)).count();
+    // a frame drawn and looked at
+    let frame = |when: &str| {
+        s.draw(&view, wgpu::TextureFormat::Rgba8Unorm, (side, side), procraft_engine::profile::Profile::Srgb, started);
+        assert_eq!(gpu.errors(), 0, "{when}: GPU errors");
+        assert!(!gpu.is_lost(), "{when}: the device lost");
+        let shown = procraft_gpu::read_texture(&gpu, &window, side, side).unwrap();
+        assert!(black(&shown) * 100 < shown.len() / 4, "{when}: {} of the window's pixels black", black(&shown));
+        let floats = {
+            let st = s.shared.lock();
+            st.canvas.as_ref().unwrap().stroke_floats(&gpu).unwrap()
+        };
+        for (k, f) in floats.iter().enumerate() {
+            let bad = f.iter().filter(|v| !v.is_finite()).count();
+            assert_eq!(bad, 0, "{when}: {bad} values not numbers or infinite in stroke texture {k}");
+        }
+    };
+    let touch = |x: f32, y: f32, t: f64| touch_at(x, y, t);
+    let mut t = 0.0;
+    // a line drawn and held till it snaps
+    s.touch_down(1, PointerKind::Finger, touch(150.0, 400.0, t));
+    for k in 1..=60 {
+        t += 8.0;
+        s.touch_move(1, touch(150.0 + k as f32 * 10.0, 400.0 - k as f32 * 3.0, t));
+        if k % 6 == 0 {
+            frame("the line drawn");
+        }
+    }
+    let end = (750.0, 220.0);
+    for _ in 0..10 {
+        t += 8.0;
+        s.touch_move(1, touch(end.0, end.1, t));
+    }
+    t += 700.0;
+    assert!(s.touch_tick(t).contains(&TouchCommand::ShapeSnapped), "the line snapped");
+    frame("snapped");
+    // another finger pressed on the screen meanwhile, as the reporter did
+    t += 20.0;
+    s.touch_down(2, PointerKind::Finger, touch(80.0, 950.0, t));
+    frame("a second finger down");
+    // dragged about by its held end
+    for k in 0..40 {
+        t += 16.0;
+        let a = k as f32 * 0.15;
+        s.touch_move(1, touch(end.0 + 100.0 * a.sin(), end.1 + 60.0 * (1.0 - a.cos()), t));
+        frame("the shape dragged");
+        if k == 20 {
+            s.touch_up(2, touch(80.0, 950.0, t));
+            frame("the second finger up");
+        }
+    }
+    t += 16.0;
+    s.touch_up(1, touch(end.0, end.1, t));
+    frame("the shape let go");
+    // strokes drawn after it
+    for round in 0..2 {
+        t += 400.0;
+        let y = 600.0 + round as f32 * 150.0;
+        s.touch_down(1, PointerKind::Finger, touch(100.0, y, t));
+        for k in 1..=40 {
+            t += 8.0;
+            s.touch_move(1, touch(100.0 + k as f32 * 20.0, y + (k as f32 * 0.4).sin() * 50.0, t));
+            if k % 5 == 0 {
+                frame("a stroke after the shape");
+            }
+        }
+        t += 8.0;
+        s.touch_up(1, touch(900.0, y, t));
+        frame("a stroke after the shape ended");
+    }
+    let composite = {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render_finished(gpu, &mut st.doc);
+        canvas.read_composite(gpu).unwrap()
+    };
+    let clear = composite.chunks(4).filter(|p| p.get(3) != Some(&255)).count();
+    assert_eq!(clear, 0, "{clear} of the composite's pixels not opaque");
+    assert_eq!(black(&composite), 0, "the composite's pixels black");
+    let painted = composite.chunks(4).filter(|p| p.iter().take(3).any(|&c| c < 250)).count();
+    assert!(painted > 1000, "painted {painted} pixels");
 }
 
 /// A heavy brush's shape (wet paint laid in place, a second) dragged out by the pen that drew it on

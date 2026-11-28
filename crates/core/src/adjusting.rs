@@ -590,6 +590,7 @@ impl CanvasSession {
     /// can't be adjusted. The amount starts at none (a gradient map's at all of it), HSB, colour
     /// balance and curves as they were; the other adjustments keep their settings.
     pub fn adjustment_start(&self, adjustment: Adjustment) -> bool {
+        self.frames_laid_first();
         // Liquify leaves an alpha locked layer alone; the others take one layer
         use crate::layers::Blocked;
         if matches!(self.why_not_adjusted(adjustment), Some(Blocked::AlphaLocked | Blocked::Group | Blocked::Several)) {
@@ -652,6 +653,7 @@ impl CanvasSession {
     /// Ends the open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
     /// Returns whether one was open.
     pub fn adjustment_end(&self, commit: bool) -> bool {
+        self.frames_laid_first();
         let open = self.adjusting(|a, _| {
             a.preview = false;
             a.pencil = false;

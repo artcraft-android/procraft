@@ -202,6 +202,7 @@ pub(crate) fn flipped(pixels: &[u8], width: usize, horizontal: bool) -> Vec<u8> 
 impl CanvasSession {
     /// The current layer within the selection, to paste later.
     pub fn copy_layer(&self) -> Option<ThumbnailImage> {
+        self.frames_laid_first();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let rgba = st.selected_pixels()?;
@@ -320,6 +321,7 @@ impl CanvasSession {
     /// one undo step. The drawing guide is mirrored with them, so it stays where it was on the
     /// picture.
     pub fn flip_canvas(&self, horizontal: bool) {
+        self.frames_laid_first();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.finish_stroke();
